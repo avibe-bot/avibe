@@ -1330,6 +1330,81 @@ def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> d
     return metadata
 
 
+def cancel_not_requested() -> Any:
+    """SQL for "still nobody has asked to cancel this run", evaluated by SQLite.
+
+    The SQL twin of the Python read ``bool(row["cancel_requested"])`` that every
+    guarded terminal writer branches on, and normalized to agree with it —
+    ``coalesce`` because a NULL column reads as "not requested" on the Python side and
+    NULL is not false here, ``CAST`` because JSON-free but untyped storage means a
+    text ``'0'`` must not read as truthy. Same relationship, and the same reason, as
+    ``notice_write_expectation`` and ``owed_notice_state_unchanged``.
+
+    WHY IT BELONGS IN THE TERMINAL ``WHERE``. ``cancel_run`` is a separate
+    transaction. It can land between a guarded writer's snapshot SELECT and that
+    writer's UPDATE — pysqlite starts no transaction for the read, so the snapshot is
+    genuinely older than the write — and ``cancel_requested`` is the ONLY signal
+    distinguishing "this run failed" from "the user pressed Stop". A writer that reads
+    it in Python and then does not re-assert it overwrites the Stop with ``failed``
+    and, worse, stamps an owed failure notice: the user is told their task broke
+    because they cancelled it.
+
+    A FILTER on a row already located by primary key, so no query plan depends on its
+    text.
+    """
+
+    return cast(func.coalesce(agent_runs.c.cancel_requested, 0), Integer) == 0
+
+
+def _coalesced_terminal_write(
+    row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
+) -> Optional[tuple[dict[str, Any], list[Any]]]:
+    """The values and the CAS predicates one coalesced run's settlement needs.
+
+    ``None`` means "write nothing": the row was already settled by another actor.
+    Without that skip the UPDATE rewrites a row wholesale — a ``record_run_output``
+    success that landed first becomes ``failed`` — because the write carries no status
+    predicate of its own.
+
+    The two branches guard DIFFERENTLY, and that asymmetry is the point:
+
+    * the ``canceled`` branch is reached because the snapshot ALREADY saw the cancel,
+      so it keeps ``canceled`` in its status list and falls through — a
+      cancel-requested row goes on being normalized to ``canceled`` exactly as before,
+      and a second cancel landing under it changes nothing it would write;
+    * the ``succeeded``/``failed`` branch is reached because the snapshot saw NO
+      cancel, so it re-asserts that (``cancel_not_requested``) and DROPS ``canceled``
+      from its status list. Both halves are needed: the status predicate stops the
+      write landing on a row already flipped to ``canceled`` by ``cancel_run`` (which
+      does that for a queued row), and the ``cancel_requested`` predicate stops it
+      landing on a RUNNING row where ``cancel_run`` set only the flag.
+    """
+
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES and status != "canceled":
+        return None
+    values: dict[str, Any] = {"updated_at": now}
+    nonterminal = _status_query_values("queued") + _status_query_values("running")
+    if bool(row["cancel_requested"]) or status == "canceled":
+        values["status"] = "canceled"
+        values["completed_at"] = now
+        predicates = [agent_runs.c.status.in_(nonterminal + _status_query_values("canceled"))]
+    else:
+        values["status"] = "succeeded" if ok else "failed"
+        values["completed_at"] = now
+        if error is not None:
+            values["error"] = error
+        predicates = [agent_runs.c.status.in_(nonterminal), cancel_not_requested()]
+    _merge_owed_failure_notice(
+        values,
+        run_id=run_id,
+        status=values["status"],
+        row_metadata_json=row["metadata_json"],
+        now=now,
+    )
+    return values, predicates
+
+
 def complete_coalesced_agent_runs_for_workbench_in_connection(
     conn: Any,
     run_ids: list[str],
@@ -1356,46 +1431,34 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
     completed_ids: list[str] = []
     for run_id in normalized_run_ids:
         row = rows.get(run_id)
-        if row is None:
-            continue
-        status = normalize_run_status(row["status"])
-        if status in TERMINAL_RUN_STATUSES and status != "canceled":
-            # Already settled by another actor. Without this skip the UPDATE below
-            # rewrites a row wholesale — a ``record_run_output`` success that landed
-            # first becomes ``failed`` — because it has no status predicate of its
-            # own. ``canceled`` still falls through so a cancel-requested row keeps
-            # being normalized to ``canceled`` as before.
-            continue
-        values: dict[str, Any] = {"updated_at": now}
-        if bool(row["cancel_requested"]) or status == "canceled":
-            values["status"] = "canceled"
-            values["completed_at"] = now
-        else:
-            values["status"] = "succeeded" if ok else "failed"
-            values["completed_at"] = now
-            if error is not None:
-                values["error"] = error
-        _merge_owed_failure_notice(
-            values,
-            run_id=run_id,
-            status=values["status"],
-            row_metadata_json=row["metadata_json"],
-            now=now,
-        )
-        result = conn.execute(
-            update(agent_runs)
-            .where(agent_runs.c.id == run_id)
-            .where(
-                agent_runs.c.status.in_(
-                    _status_query_values("queued")
-                    + _status_query_values("running")
-                    + _status_query_values("canceled")
-                )
+        # ONE re-read on a refused write, never a loop. A refusal means the row moved
+        # under the batch snapshot, so the decision has to be made again from what the
+        # row NOW says — otherwise a run the user cancelled mid-flight is simply left
+        # ``running`` and nothing ever settles it, which trades a wrong status for a
+        # zombie. The retry is bounded at one because its own snapshot already sees the
+        # cancel: a second racing writer would have to land inside the retry itself,
+        # and this runs on the Workbench completion path where an unbounded retry is
+        # its own outage.
+        for final_attempt in (False, True):
+            if row is None:
+                break
+            plan = _coalesced_terminal_write(row, run_id=run_id, ok=ok, error=error, now=now)
+            if plan is None:
+                break
+            values, predicates = plan
+            result = conn.execute(
+                update(agent_runs).where(agent_runs.c.id == run_id).where(*predicates).values(**values)
             )
-            .values(**values)
-        )
-        if result.rowcount:
-            completed_ids.append(run_id)
+            if result.rowcount:
+                completed_ids.append(run_id)
+                break
+            if final_attempt:
+                break
+            row = (
+                conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                .mappings()
+                .first()
+            )
     _defer_run_ids_updated_from_connection(conn, completed_ids)
     return completed_ids
 
@@ -3099,48 +3162,74 @@ class SQLiteBackgroundTaskStore:
                     .where(agent_runs.c.id == run_id)
                     .values(**identity, updated_at=now)
                 )
-            if normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
-                return None
-            result_payload = _json_loads(row["result_payload_json"], {})
-            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
-                # The Activity lifecycle already owns this row's terminal state.
-                return None
-            status = normalize_run_status(terminal_status)
-            if row["cancel_requested"] and status == "failed":
-                status = "canceled"
-            values: dict[str, Any] = {
-                "status": status,
-                "completed_at": now,
-                "updated_at": now,
-            }
-            if error is not None:
-                values["error"] = str(error)
-            if result_text is not None:
-                values["result_text"] = str(result_text)
-            _merge_owed_failure_notice(
-                values,
-                run_id=run_id,
-                status=status,
-                row_metadata_json=row["metadata_json"],
-                extra_metadata=metadata or None,
-                now=now,
-            )
-            transition = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(
+            # ONE re-read on a refused write, never a loop, for the reason
+            # ``cancel_not_requested`` gives: refusing the write is only half the fix,
+            # because a run left ``running`` with nothing to settle it is the zombie
+            # this writer exists to prevent. The second pass re-decides from the row as
+            # it now stands, which is where the cancel is visible, so it writes
+            # ``canceled`` rather than being refused again.
+            for final_attempt in (False, True):
+                if row is None:
+                    break
+                if normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                    return None
+                result_payload = _json_loads(row["result_payload_json"], {})
+                if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                    # The Activity lifecycle already owns this row's terminal state.
+                    return None
+                status = normalize_run_status(terminal_status)
+                cancel_requested = bool(row["cancel_requested"])
+                if cancel_requested and status == "failed":
+                    status = "canceled"
+                values: dict[str, Any] = {
+                    "status": status,
+                    "completed_at": now,
+                    "updated_at": now,
+                }
+                if error is not None:
+                    values["error"] = str(error)
+                if result_text is not None:
+                    values["result_text"] = str(result_text)
+                _merge_owed_failure_notice(
+                    values,
+                    run_id=run_id,
+                    status=status,
+                    row_metadata_json=row["metadata_json"],
+                    extra_metadata=metadata or None,
+                    now=now,
+                )
+                guards = [
                     agent_runs.c.status.in_(
                         _status_query_values("queued") + _status_query_values("running")
                     )
+                ]
+                if not cancel_requested:
+                    # RE-ASSERT what the branch above decided from. The status predicate
+                    # alone catches a cancel of a QUEUED row (``cancel_run`` flips that
+                    # one to ``canceled``) but NOT of a RUNNING one, where it sets only
+                    # the flag — and that is the case that matters, because a running
+                    # turn is what a user actually presses Stop on. Without this the
+                    # write lands ``failed`` over the Stop AND stamps an owed failure
+                    # notice, telling the user their task broke because they cancelled
+                    # it.
+                    guards.append(cancel_not_requested())
+                transition = conn.execute(
+                    update(agent_runs).where(agent_runs.c.id == run_id).where(*guards).values(**values)
                 )
-                .values(**values)
-            )
-            if transition.rowcount:
-                written_status = status
-                row_to_publish = dict(
-                    conn.execute(
-                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
-                    ).mappings().one()
+                if transition.rowcount:
+                    written_status = status
+                    row_to_publish = dict(
+                        conn.execute(
+                            select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                        ).mappings().one()
+                    )
+                    break
+                if final_attempt:
+                    break
+                row = (
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                    .mappings()
+                    .first()
                 )
         _publish_run_rows_updated([row_to_publish])
         return written_status

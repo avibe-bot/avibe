@@ -22,7 +22,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
@@ -136,6 +136,183 @@ def test_complete_coalesced_does_not_clobber_an_already_succeeded_run(tmp_path: 
 
     saved = sqlite.get_run(request.id)
     assert saved["status"] == "succeeded", "a settled success must not be rewritten to failed"
+
+
+def _cancel_mid_write(sqlite_store, run_id: str, *, fire_on: str):
+    """A ``cancel_run`` from a SECOND connection, fired between snapshot and UPDATE.
+
+    Returns a listener to register on ``before_cursor_execute``. It fires once, on the
+    first statement whose SQL contains ``fire_on`` — for a terminal writer that is its
+    own UPDATE, so the cancel is committed after the writer has read the row and
+    decided what to write, and before the write lands. That gap is not hypothetical:
+    pysqlite starts no transaction for a SELECT, so a guarded writer's snapshot really
+    is older than its own UPDATE, and ``cancel_run`` really is a separate transaction.
+
+    The cancel goes through the production ``cancel_run`` on a second store over the
+    same file, not through a hand-written UPDATE, so what the test races against is
+    what the Stop button does.
+    """
+
+    fired: list[int] = []
+
+    def _listener(conn, cursor, statement, parameters, context, executemany):
+        if fired or fire_on not in statement:
+            return
+        fired.append(1)
+        other = SQLiteBackgroundTaskStore(sqlite_store.db_path)
+        try:
+            other.cancel_run(run_id)
+        finally:
+            other.close()
+
+    return _listener, fired
+
+
+def test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-060/061 — Stop must outrank a stale terminal snapshot.
+
+    HFR-061 stopped the coalesced completer clobbering an already-SETTLED row by
+    skipping terminal statuses, but it deliberately let ``canceled`` fall through so a
+    cancel-requested row keeps being normalized. That fall-through is also a hole: the
+    row's ``cancel_requested`` is read from a batch snapshot and never re-asserted, so
+    a ``cancel_run`` landing between the snapshot and the UPDATE is overwritten by a
+    ``failed`` the writer decided on before the user pressed Stop.
+
+    Two consequences, and the second is the one that makes this a P6 scenario rather
+    than a cosmetic status bug:
+
+    * the run reads ``failed`` when the user cancelled it, so the Stop silently did
+      nothing;
+    * a ``failed`` transition STAMPS AN OWED FAILURE NOTICE, so the drain then tells
+      the user their task is broken — because they cancelled it. A notice nobody can
+      act on, in the lane this whole feature exists to make trustworthy.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    request = requests.enqueue_agent_run(
+        session_key="slack::channel::C1",
+        message="hi",
+        agent_name=None,
+    )
+    claimed = requests.claim(request.id)
+    assert claimed is not None
+    assert sqlite.get_run(request.id)["status"] == "running"
+
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    event.listen(sqlite.engine, "before_cursor_execute", listener)
+    try:
+        requests.complete_coalesced(claimed, [request.id], ok=False, error="turn died")
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", listener)
+
+    assert fired, "the interleaved cancel never fired; the race was not exercised"
+
+    saved = sqlite.get_run(request.id)
+    assert saved["status"] == "canceled", (
+        f"the user's Stop was overwritten by a stale terminal snapshot; row is {saved['status']!r}"
+    )
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None, (
+        "a cancelled run owes no failure notice — the drain would tell the user their "
+        "task broke because they stopped it"
+    )
+
+
+def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-060/061 — the same hole in the zombie-settlement writer.
+
+    ``settle_run_terminal`` scopes its UPDATE to ``queued|running``, which catches a
+    cancel of a QUEUED row because ``cancel_run`` flips that one straight to
+    ``canceled``. On a RUNNING row ``cancel_run`` sets only ``cancel_requested``, the
+    status predicate still matches, and the write lands ``failed`` over the Stop with
+    an owed notice attached. A running turn is precisely what a user presses Stop on,
+    so this is the reachable half of the same defect.
+
+    The refusal alone would not be a fix: a run left ``running`` with nothing to settle
+    it is the zombie this writer exists to prevent. So the write is re-decided ONCE
+    from the row as it then stands, and lands ``canceled``.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    request = requests.enqueue_agent_run(
+        session_key="slack::channel::C2",
+        message="hi",
+        agent_name=None,
+    )
+    claimed = requests.claim(request.id)
+    assert claimed is not None
+    assert sqlite.get_run(request.id)["status"] == "running"
+
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    event.listen(sqlite.engine, "before_cursor_execute", listener)
+    try:
+        written = sqlite.settle_run_terminal(
+            request.id, terminal_status="failed", error="no terminal result"
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", listener)
+
+    assert fired, "the interleaved cancel never fired; the race was not exercised"
+
+    saved = sqlite.get_run(request.id)
+    assert saved["status"] == "canceled", (
+        f"the user's Stop was overwritten by a stale snapshot; row is {saved['status']!r}"
+    )
+    assert written == "canceled", (
+        f"the writer must report what it actually wrote, not what it first decided; got {written!r}"
+    )
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None, (
+        "a cancelled run owes no failure notice"
+    )
+
+
+def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
+    """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
+
+    The negative control for the two races above. A ``cancel_requested`` predicate is
+    the kind of guard that quietly refuses writes nobody raced — the failure mode
+    ``owed_notice_state_unchanged`` calls out — and here that would mean a failed turn
+    never settling and never owing its notice, which is a D1 loss dressed as a safety
+    fix. So: no interleaved cancel, and both writers must settle ``failed`` and stamp
+    the notice exactly as before.
+    """
+
+    sqlite, requests = _store(tmp_path)
+
+    coalesced = requests.enqueue_agent_run(
+        session_key="slack::channel::C3", message="hi", agent_name=None
+    )
+    claimed = requests.claim(coalesced.id)
+    assert claimed is not None
+    requests.complete_coalesced(claimed, [coalesced.id], ok=False, error="turn died")
+    saved = sqlite.get_run(coalesced.id)
+    assert saved["status"] == "failed"
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is not None
+
+    settled = requests.enqueue_agent_run(
+        session_key="slack::channel::C4", message="hi", agent_name=None
+    )
+    assert requests.claim(settled.id) is not None
+    assert sqlite.settle_run_terminal(settled.id, terminal_status="failed", error="boom") == "failed"
+    saved = sqlite.get_run(settled.id)
+    assert saved["status"] == "failed"
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is not None
+
+    # ...and a cancel the writer's OWN snapshot saw still normalizes to ``canceled``
+    # through the fall-through branch, which the CAS must not have closed.
+    requested = requests.enqueue_agent_run(
+        session_key="slack::channel::C5", message="hi", agent_name=None
+    )
+    claimed = requests.claim(requested.id)
+    assert claimed is not None
+    sqlite.cancel_run(requested.id)
+    requests.complete_coalesced(claimed, [requested.id], ok=False, error="turn died")
+    saved = sqlite.get_run(requested.id)
+    assert saved["status"] == "canceled"
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
 
 
 # --- group 2: the owed-notice drain ---------------------------------------
