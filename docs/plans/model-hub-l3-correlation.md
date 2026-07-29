@@ -33,12 +33,13 @@ Backend process scopes are:
 | OpenCode | OpenCode server instance | `OpenCodeServerManager` is a singleton shared across all working directories and tracks multiple active sessions |
 
 The OpenCode fact contradicts the requested server-per-session verification.
-The shared-server evidence is
-`modules/agents/opencode/server.py` (`OpenCodeServerManager` singleton and
-`_active_run_sessions`) plus
-`modules/agents/opencode/caller_context.py` (the shared `opencode serve`
-process and its per-session binding file). It has been escalated for a targeted
-v4 ruling. Frozen v3 remains fail-closed: OpenCode provenance is not written.
+The shared-server evidence is `modules/agents/opencode/server.py:62-65`
+(`OpenCodeServerManager` is a singleton shared across working directories) and
+`modules/agents/opencode/caller_context.py:3-6` (the shared `opencode serve`
+process multiplexes per-session context through a binding file). The
+orchestrator confirmed that frozen v3 already represents this truth through
+honest absence, so no targeted v4 is needed: OpenCode provenance is never
+written in v2.
 
 ## Credential And Turn Registry
 
@@ -156,6 +157,9 @@ The acceptance suite contains separate fixtures for:
 - the same two turns run sequentially: both records are present;
 - one tracked Web turn plus one untracked IM/CLI use in the same scope: the
   tracked record is absent;
+- one known OpenCode turn: the shared server writes no record and the read API
+  returns `provenance_unavailable` / `models.provenance.attribution_ambiguous`,
+  never `turn_not_found`;
 - user Stop, dropped connection, and successful control settlements;
 - Direct, ambiguous-known, and unknown provenance route absences;
 - source chain order and model-scoped supply state;

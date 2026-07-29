@@ -865,3 +865,49 @@ def test_provenance_absence_codes_are_distinguishable(
         service.get_turn_provenance("turn_unknown")
     assert unknown.value.code == "turn_not_found"
     assert unknown.value.status == 404
+
+
+def test_known_opencode_turn_is_fail_closed_but_not_unknown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "opencode-provenance.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials(
+        "opencode",
+        "opencode:shared-server",
+        "turn_opencode",
+    )
+
+    assert (
+        registry.begin_gateway_request(
+            backend="opencode",
+            token=token,
+            requested_model_id="openai/shared-model",
+        )
+        is None
+    )
+    registry.settle(
+        "turn_opencode",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+    )
+    assert store.get("turn_opencode") is None
+
+    service = _service(
+        tmp_path,
+        sources=[_source("src_primary01", "Primary")],
+    )
+    service.provenance = store
+    monkeypatch.setattr(
+        service,
+        "_known_turn_backend",
+        lambda turn_id: "opencode" if turn_id == "turn_opencode" else None,
+    )
+
+    with pytest.raises(ModelHubError) as unavailable:
+        service.get_turn_provenance("turn_opencode")
+    assert unavailable.value.code == "provenance_unavailable"
+    assert (
+        unavailable.value.detail
+        == "models.provenance.attribution_ambiguous"
+    )
