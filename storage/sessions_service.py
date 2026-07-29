@@ -1254,7 +1254,9 @@ class SQLiteSessionsService:
                         if dedup_key in seen_anchor_rows:
                             continue
                         imported_variant = str(agent_name) or "default"
-                        imported_backend = _agent_backend_for_import(conn, imported_variant)
+                        imported_backend, imported_agent_id, imported_agent_name = _resolve_imported_agent_identity(
+                            conn, imported_variant
+                        )
                         existing_anchor_row = _find_scope_anchor_row(
                             conn,
                             scope_id=scope_id,
@@ -1265,9 +1267,9 @@ class SQLiteSessionsService:
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
                             existing_is_owned = existing_backend not in {"", "default"}
                             same_variant = existing_variant == imported_variant
-                            if existing_is_owned and not same_variant and existing_backend != imported_backend:
+                            if existing_is_owned and not same_variant:
                                 logger.warning(
-                                    "Skipping legacy session import that would relabel anchor row across backends "
+                                    "Skipping legacy session import that would relabel anchor row to a different owner "
                                     "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
                                     "imported_backend=%s imported_variant=%s",
                                     scope_id,
@@ -1278,15 +1280,21 @@ class SQLiteSessionsService:
                                     imported_variant,
                                 )
                                 continue
-                            if not existing_is_owned and imported_backend != "unknown":
+                            update_values: dict[str, Any] = {"updated_at": now}
+                            if not existing_is_owned:
+                                update_values["agent_variant"] = imported_variant
+                                update_values["agent_backend"] = (
+                                    imported_backend if imported_backend != "unknown" else existing_backend or "default"
+                                )
+                            if imported_agent_id is not None:
+                                update_values["agent_id"] = imported_agent_id
+                            if imported_agent_name is not None:
+                                update_values["agent_name"] = imported_agent_name
+                            if len(update_values) > 1:
                                 conn.execute(
                                     agent_sessions.update()
                                     .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
-                                    .values(
-                                        agent_backend=imported_backend,
-                                        agent_variant=imported_variant,
-                                        updated_at=now,
-                                    )
+                                    .values(**update_values)
                                 )
                         encoded_session_id = encode_session_value(native_session_id)
                         row_key = _session_row_key(
@@ -1304,6 +1312,8 @@ class SQLiteSessionsService:
                         stmt = sqlite_insert(agent_sessions).values(
                             id=row_id,
                             scope_id=scope_id,
+                            agent_id=imported_agent_id,
+                            agent_name=imported_agent_name,
                             agent_backend=imported_backend,
                             agent_variant=imported_variant,
                             model=None,
@@ -1658,21 +1668,26 @@ def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
 
 
-def _agent_backend_for_import(conn: Connection, agent_name: str) -> str:
+def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
     """Resolve a legacy mapping name through built-ins and the Vibe Agent catalog."""
     requested = str(agent_name or "").strip()
     backend = _agent_backend(requested)
     if backend != "unknown":
-        return backend
+        return (backend, None, None)
     normalized = re.sub(r"[^a-z0-9_-]+", "-", requested.lower()).strip("-_")
     if not normalized:
-        return "unknown"
-    catalog_backend = conn.execute(
-        select(agents.c.backend)
+        return ("unknown", None, None)
+    catalog_agent = conn.execute(
+        select(agents.c.id, agents.c.name, agents.c.backend)
         .where(or_(agents.c.name == requested, agents.c.normalized_name == normalized))
         .limit(1)
-    ).scalar_one_or_none()
-    return str(catalog_backend) if catalog_backend in _BACKEND_AGENT_NAMES else "unknown"
+    ).mappings().one_or_none()
+    if catalog_agent is None:
+        return ("unknown", None, None)
+    catalog_backend = str(catalog_agent["backend"] or "").strip()
+    if catalog_backend not in _BACKEND_AGENT_NAMES:
+        return ("unknown", None, None)
+    return (catalog_backend, str(catalog_agent["id"]), str(catalog_agent["name"]))
 
 
 def _agent_session_name_predicate(agent_name: str) -> Any:

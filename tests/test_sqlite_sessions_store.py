@@ -474,10 +474,115 @@ def test_save_state_adopts_registered_custom_agent_into_default_sentinel(tmp_pat
         assert row is not None
         assert row["agent_backend"] == "codex"
         assert row["agent_variant"] == "reviewer"
+        assert row["agent_id"] == "agent-reviewer"
+        assert row["agent_name"] == "reviewer"
         assert row["native_session_id"] == "reviewer-native"
         assert service.load_state().session_mappings["slack::C123"]["reviewer"]["slack_171717.123"] == (
             "reviewer-native"
         )
+    finally:
+        service.close()
+
+
+def test_save_state_preserves_unregistered_custom_variant_on_default_sentinel(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="default",
+                agent_variant="default",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "default"
+        assert row["agent_variant"] == "reviewer"
+        assert row["native_session_id"] == "reviewer-native"
+        assert service.load_state().session_mappings["slack::C123"]["reviewer"]["slack_171717.123"] == (
+            "reviewer-native"
+        )
+    finally:
+        service.close()
+
+
+def test_save_state_sets_registered_custom_agent_identity_on_existing_owned_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            conn.execute(
+                agents.insert().values(
+                    id="agent-reviewer",
+                    name="reviewer",
+                    normalized_name="reviewer",
+                    description=None,
+                    backend="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    system_prompt=None,
+                    enabled=1,
+                    source="user",
+                    source_ref=None,
+                    metadata_json="{}",
+                    created_at="2026-07-28T00:00:00Z",
+                    updated_at="2026-07-28T00:00:00Z",
+                )
+            )
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="reviewer",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_id"] == "agent-reviewer"
+        assert row["agent_name"] == "reviewer"
+        assert row["agent_backend"] == "codex"
+        assert row["agent_variant"] == "reviewer"
+        assert row["native_session_id"] == "reviewer-native"
     finally:
         service.close()
 
@@ -524,6 +629,88 @@ def test_save_state_skips_conflicting_backend_and_imports_later_matching_owner(t
         mappings = service.load_state().session_mappings["slack::C123"]
         assert mappings["claude"]["slack_171717.123"] == "claude-native"
         assert "codex" not in mappings
+    finally:
+        service.close()
+
+
+def test_save_state_skips_conflicting_custom_variant_with_same_backend_and_imports_owner(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            conn.execute(
+                agents.insert(),
+                [
+                    {
+                        "id": "agent-reviewer",
+                        "name": "reviewer",
+                        "normalized_name": "reviewer",
+                        "description": None,
+                        "backend": "codex",
+                        "model": None,
+                        "reasoning_effort": None,
+                        "system_prompt": None,
+                        "enabled": 1,
+                        "source": "user",
+                        "source_ref": None,
+                        "metadata_json": "{}",
+                        "created_at": "2026-07-28T00:00:00Z",
+                        "updated_at": "2026-07-28T00:00:00Z",
+                    },
+                    {
+                        "id": "agent-writer",
+                        "name": "writer",
+                        "normalized_name": "writer",
+                        "description": None,
+                        "backend": "codex",
+                        "model": None,
+                        "reasoning_effort": None,
+                        "system_prompt": None,
+                        "enabled": 1,
+                        "source": "user",
+                        "source_ref": None,
+                        "metadata_json": "{}",
+                        "created_at": "2026-07-28T00:00:00Z",
+                        "updated_at": "2026-07-28T00:00:00Z",
+                    },
+                ],
+            )
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="reviewer",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "writer": {
+                            "slack_171717.123": "writer-native",
+                        },
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
+                        },
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_id"] == "agent-reviewer"
+        assert row["agent_name"] == "reviewer"
+        assert row["agent_backend"] == "codex"
+        assert row["agent_variant"] == "reviewer"
+        assert row["native_session_id"] == "reviewer-native"
     finally:
         service.close()
 
