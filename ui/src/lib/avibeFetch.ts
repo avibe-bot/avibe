@@ -107,7 +107,12 @@ export const primeCloudToken = (): void => {
 // Throws CloudUnavailableError when no token can be obtained; on a 401 it
 // re-mints once and retries.
 export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
-  let token = await ensureToken();
+  let token: CloudToken | null;
+  try {
+    token = await ensureToken();
+  } catch {
+    throw new CloudUnavailableError();
+  }
   if (!token) throw new CloudUnavailableError();
 
   const send = (active: CloudToken): Promise<Response> => {
@@ -121,7 +126,11 @@ export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<
 
   // Token rejected (revoked / clock skew / server restart) — re-mint once.
   current = null;
-  token = await mint();
+  try {
+    token = await mint();
+  } catch {
+    throw new CloudUnavailableError();
+  }
   if (!token) throw new CloudUnavailableError();
   return send(token);
 };

@@ -1,12 +1,20 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Loader2, Mic, Paperclip, Plus, Send, Square, Trash2, X } from 'lucide-react';
+import { Clock, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 
+import { useOptionalToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
-import { avibeFetch, primeCloudToken } from '../../lib/avibeFetch';
+import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn } from '../../lib/utils';
+import {
+  MAX_VOICE_RECORDING_MS,
+  preferredRecorderMimeType,
+  transcribeVoiceBlob,
+  VOICE_AUDIO_BITS_PER_SECOND,
+  VoiceTranscriptionError,
+} from '../../lib/voiceTranscription';
 import { Button } from '../ui/button';
 import {
   MentionEditor,
@@ -58,32 +66,19 @@ const UPLOAD_CONCURRENCY = 4;
 // files staged in the same tick.
 const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-// Transcribe a recorded clip. Prefer a direct upload to avibe.bot (no tunnel
-// relay — the audio doesn't detour through the user's machine); fall back to the
-// local relay endpoint when the cloud token is unavailable (local access / not
-// paired / signed out) or the direct call fails for any reason.
-async function transcribeVoiceBlob(blob: Blob): Promise<string> {
-  try {
-    const form = new FormData();
-    form.set('file', blob, 'voice.webm');
-    const res = await avibeFetch('/api/cloud/audio/transcriptions', { method: 'POST', body: form });
-    if (res.ok) {
-      const json = await res.json().catch(() => null);
-      if (json?.text) return String(json.text);
-    }
-    // Non-OK from the cloud → fall through to the local relay below.
-  } catch {
-    // No cloud token / network error → fall back to the local relay.
-  }
-  const data = await readFileAsBase64(blob);
-  const res = await apiFetch('/api/asr/transcribe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'voice.webm', mime: blob.type || 'audio/webm', data }),
-  });
-  const json = await res.json().catch(() => null);
-  return res.ok && json?.text ? String(json.text) : '';
-}
+const voiceErrorTranslationKey = (error: unknown): string => {
+  if (!(error instanceof VoiceTranscriptionError)) return 'chat.compose.voiceFailed';
+  if (error.code === 'too_large') return 'chat.compose.voiceTooLarge';
+  if (error.code === 'timeout') return 'chat.compose.voiceTimedOut';
+  if (error.code === 'unavailable') return 'chat.compose.voiceUnavailable';
+  if (error.code === 'empty') return 'chat.compose.voiceEmpty';
+  return 'chat.compose.voiceFailed';
+};
+
+const formatRecordingDuration = (seconds: number): string => {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+};
 
 export interface ComposerProps {
   /** Fired with the trimmed text (+ ready attachments) when the user sends.
@@ -160,6 +155,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSearchSessions,
 }, ref) {
   const { t } = useTranslation();
+  const toast = useOptionalToast();
+  const showToast = toast?.showToast ?? (() => undefined);
   const [value, setValue] = useState('');
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
   // keystroke into ``value`` there — a fast third-party IME (e.g. a voice
@@ -180,10 +177,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
+  const [voiceRetryBlob, setVoiceRetryBlob] = useState<Blob | null>(null);
+  const transcribingRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordingLimitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
   // Set just before stopping to mean "discard, don't transcribe" (ESC / unmount).
   const abortedRef = useRef(false);
@@ -191,6 +193,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
+
+  const clearRecordingTimers = useCallback(() => {
+    if (recordingTickerRef.current != null) clearInterval(recordingTickerRef.current);
+    if (recordingLimitRef.current != null) clearTimeout(recordingLimitRef.current);
+    recordingTickerRef.current = null;
+    recordingLimitRef.current = null;
+  }, []);
 
   // Mentions upgrade the plain textarea to a Lexical editor (chat composer only,
   // gated on the caller wiring both search sources). The editor owns the rich
@@ -269,15 +278,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       } catch {
         /* already stopped */
       }
+      clearRecordingTimers();
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
-  }, []);
+  }, [clearRecordingTimers]);
 
   // Clear staged attachments when the session changes so a chip uploaded in one
   // chat can't ride into another — defense in depth on top of ChatPage keying
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
+    setVoiceRetryBlob(null);
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -365,18 +376,53 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     appendText: (text: string) => mentionRef.current?.append(text),
   }));
 
+  const transcribeRecordedVoice = async (blob: Blob) => {
+    if (unmountedRef.current || transcribingRef.current) return;
+    transcribingRef.current = true;
+    setVoiceRetryBlob(null);
+    setTranscribing(true);
+    try {
+      const text = await transcribeVoiceBlob(blob);
+      if (unmountedRef.current) return;
+      // Append the transcript into the box (never auto-send) via the draft
+      // path so it persists if the user switches away before sending.
+      if (useMentions) {
+        mentionRef.current?.append(text);
+      } else {
+        const next = valueRef.current ? `${valueRef.current} ${text}` : text;
+        update(next);
+      }
+    } catch (error) {
+      if (unmountedRef.current) return;
+      const retryable =
+        !(error instanceof VoiceTranscriptionError) || error.code !== 'too_large';
+      setVoiceRetryBlob(retryable ? blob : null);
+      showToast(t(voiceErrorTranslationKey(error)), 'error');
+    } finally {
+      transcribingRef.current = false;
+      if (!unmountedRef.current) setTranscribing(false);
+    }
+  };
+
   const startRecording = async () => {
     try {
+      setVoiceRetryBlob(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
+      const mimeType = preferredRecorderMimeType();
+      const recorder = new MediaRecorder(stream, {
+        ...(mimeType ? { mimeType } : {}),
+        audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
+      });
       chunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size) chunksRef.current.push(e.data);
       };
       recorder.onstop = async () => {
+        clearRecordingTimers();
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
+        recorderRef.current = null;
         const aborted = abortedRef.current;
         abortedRef.current = false;
         if (unmountedRef.current) return;
@@ -384,41 +430,44 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         // ESC (or unmount) aborted the recording → mic released above, discard it.
         if (aborted) return;
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        if (!blob.size) return;
-        setTranscribing(true);
-        try {
-          const text = await transcribeVoiceBlob(blob);
-          if (!unmountedRef.current && text) {
-            // Append the transcript into the box (never auto-send) via the draft
-            // path so it persists if the user switches away before sending.
-            if (useMentions) {
-              mentionRef.current?.append(text);
-            } else {
-              const next = valueRef.current ? `${valueRef.current} ${text}` : text;
-              update(next);
-            }
-          }
-        } finally {
-          if (!unmountedRef.current) setTranscribing(false);
+        chunksRef.current = [];
+        if (!blob.size) {
+          showToast(t('chat.compose.voiceEmpty'), 'error');
+          return;
         }
+        await transcribeRecordedVoice(blob);
       };
       abortedRef.current = false;
       recorderRef.current = recorder;
-      recorder.start();
+      recorder.start(1000);
+      const startedAt = Date.now();
+      setRecordingSeconds(0);
+      recordingTickerRef.current = setInterval(() => {
+        setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      }, 1000);
+      recordingLimitRef.current = setTimeout(() => {
+        if (recorder.state !== 'recording') return;
+        showToast(t('chat.compose.voiceLimitReached'), 'warning');
+        recorder.stop();
+      }, MAX_VOICE_RECORDING_MS);
       setRecording(true);
     } catch {
       // getUserMedia may have handed us a live stream before MediaRecorder
       // construction / start() threw — release it so the mic doesn't stay on.
+      clearRecordingTimers();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
       setRecording(false);
+      showToast(t('chat.compose.voicePermissionFailed'), 'error');
     }
   };
 
-  const stopRecording = () => recorderRef.current?.stop(); // stop → transcribe
+  const stopRecording = () => {
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+  };
   const abortRecording = () => {
     abortedRef.current = true;
-    recorderRef.current?.stop(); // stop → discard (onstop honors the abort flag)
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
   };
   const toggleRecording = () => {
     if (recording) stopRecording();
@@ -582,25 +631,49 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <Plus className="size-4" />
             </Button>
             {asrAvailable && (
-              // While recording this is the Stop control: tap to finish +
-              // transcribe (the discard path is the trash button by Send, or ESC).
-              <Button
-                type="button"
-                variant={recording ? 'secondary' : 'ghost'}
-                size="icon"
-                onClick={toggleRecording}
-                disabled={transcribing || disabled}
-                aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
-                className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
-              >
-                {transcribing ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : recording ? (
-                  <Square className="size-4" />
-                ) : (
-                  <Mic className="size-4" />
+              <>
+                {/* While recording this is the Stop control: tap to finish +
+                    transcribe (the discard path is the trash button by Send, or ESC). */}
+                <Button
+                  type="button"
+                  variant={recording ? 'secondary' : 'ghost'}
+                  size="icon"
+                  onClick={toggleRecording}
+                  disabled={transcribing || disabled}
+                  aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
+                  className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
+                >
+                  {transcribing ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : recording ? (
+                    <Square className="size-4" />
+                  ) : (
+                    <Mic className="size-4" />
+                  )}
+                </Button>
+                {recording && (
+                  <span
+                    className="flex h-9 w-10 items-center justify-center text-xs tabular-nums text-muted"
+                    aria-live="off"
+                  >
+                    {formatRecordingDuration(recordingSeconds)}
+                  </span>
                 )}
-              </Button>
+                {voiceRetryBlob && !recording && !transcribing && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => void transcribeRecordedVoice(voiceRetryBlob)}
+                    disabled={disabled}
+                    aria-label={t('chat.compose.voiceRetry')}
+                    title={t('chat.compose.voiceRetry')}
+                    className="h-9 w-7 shrink-0"
+                  >
+                    <RotateCcw className="size-4" />
+                  </Button>
+                )}
+              </>
             )}
           </div>
         )}
