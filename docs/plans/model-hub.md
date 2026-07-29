@@ -682,12 +682,14 @@ tail appended to one of them:
     This is the only place the user is told to act, so it carries the whole story rather
     than a truncated headline that forces a second question.
   - *structurally empty* — the chain has no candidate at all, so there is no source and no
-    blocker to name. **The copy is owned by the lane that emits it** (L3, §3) and its
-    wording is approved in that lane's design note, not written here (07-29 16:35 ruling).
-    What this spec fixes is its **semantics**, and all three are already contracted: it
-    **names the model** the turn asked for, it states the cause using the **event layer's
-    own reason** (`no_enabled_source | no_eligible_source | model_unsupported`, below), and
-    it **points at 「模型」** like the blocked form. A generic error, or silence, satisfies
+    blocker to name. **The copy is owned by the lane that emits it** (L3, §3), and the
+    exact strings land in that lane's design pass, which carries **its own owner approval
+    step** — they are not written here (07-29 16:35 ruling). What this spec fixes is its
+    **semantics**, and all three are already contracted: it **names the model** the turn
+    asked for, it states the cause using the **event layer's own reason**
+    (`no_enabled_source | no_eligible_source | model_unsupported`, below) **rendered
+    through `vibe/i18n/` like every other backend-emitted string**, and it **points at
+    「模型」** like the blocked form. A generic error, or silence, satisfies
     none of the three.
 
 One asymmetry has to be named, because it is easy to implement wrong: an agent can
