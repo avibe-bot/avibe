@@ -465,9 +465,17 @@ def _backend_request(
         raise CloudManagementError("cloud_management_unavailable", retryable=True)
     last_error: Exception | None = None
     for connect_host in backend.connect_hosts:
-        connection = remote_access._validated_backend_connection(  # noqa: SLF001
-            connect_host, backend, 20.0, proxy_url
-        )
+        connection: http.client.HTTPConnection | None = None
+        try:
+            connection = remote_access._validated_backend_connection(  # noqa: SLF001
+                connect_host, backend, 20.0, proxy_url
+            )
+            connection.connect()
+        except (OSError, http.client.HTTPException) as exc:
+            last_error = exc
+            if connection is not None:
+                connection.close()
+            continue
         try:
             connection.request(method.upper(), target_path, body=body, headers=headers)
             response = connection.getresponse()
@@ -489,7 +497,10 @@ def _backend_request(
         except CloudManagementError:
             raise
         except (OSError, http.client.HTTPException) as exc:
-            last_error = exc
+            raise CloudManagementError(
+                "cloud_management_unavailable",
+                retryable=True,
+            ) from exc
         finally:
             connection.close()
     raise CloudManagementError("cloud_management_unavailable", retryable=True) from last_error

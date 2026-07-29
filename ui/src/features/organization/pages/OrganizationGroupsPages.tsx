@@ -247,6 +247,7 @@ function MemberPickerDialog({
   const [conflict, setConflict] = useState(false);
   const [authoritativeGroup, setAuthoritativeGroup] = useState<OrganizationGroup | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
   const [revision, setRevision] = useState(group.group_revision);
   const draftGroupId = useRef<string | null>(null);
 
@@ -260,12 +261,14 @@ function MemberPickerDialog({
     setMemberIds(group.members?.map((member) => member.id) ?? []);
     setRevision(group.group_revision);
     setConflict(false);
+    setError(undefined);
     setAuthoritativeGroup(null);
   }, [group, open]);
 
   const save = async () => {
     if (!selectedOrganizationId) return;
     setSaving(true);
+    setError(undefined);
     try {
       await request(
         `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups/${encodeURIComponent(group.id)}/members`,
@@ -281,8 +284,10 @@ function MemberPickerDialog({
       if (isRevisionConflict(caught)) {
         setAuthoritativeGroup(await onSaved());
         setConflict(true);
+        setError(undefined);
       } else {
         setConflict(false);
+        setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
     } finally {
       setSaving(false);
@@ -297,6 +302,7 @@ function MemberPickerDialog({
     setMemberIds(authoritativeGroup.members?.map((member) => member.id) ?? []);
     setRevision(authoritativeGroup.group_revision);
     setConflict(false);
+    setError(undefined);
     setAuthoritativeGroup(null);
   };
 
@@ -308,6 +314,7 @@ function MemberPickerDialog({
           <DialogDescription>{t('organization.groups.manageMembersBody', { name: group.name })}</DialogDescription>
         </DialogHeader>
         {conflict ? <ConflictBanner onReload={reloadAuthoritativeGroup} /> : null}
+        {error ? <ErrorBanner code={error} /> : null}
         <div className="max-h-[45vh] space-y-1 overflow-y-auto rounded-lg border border-border p-2">
           {allMembers.filter((member) => member.status === 'active').map((member) => (
             <button

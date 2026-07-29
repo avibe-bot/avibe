@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import time
 from types import SimpleNamespace
 
@@ -392,6 +393,9 @@ def test_backend_transport_rejects_unsafe_responses(
             return content_type if name.lower() == "content-type" else None
 
     class FakeConnection:
+        def connect(self) -> None:
+            return None
+
         def request(self, *args, **kwargs) -> None:
             return None
 
@@ -420,6 +424,110 @@ def test_backend_transport_rejects_unsafe_responses(
     with pytest.raises(cloud_management.CloudManagementError) as captured:
         cloud_management._backend_request(config, "GET", "/api/organizations")  # noqa: SLF001
     assert captured.value.code == expected_code
+
+
+def test_backend_transport_retries_only_during_connection_setup(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    connections: list[str] = []
+    requests: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"ok":true}'
+
+        def getheader(self, name: str) -> str | None:
+            return "application/json" if name.lower() == "content-type" else None
+
+    class FakeConnection:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        def connect(self) -> None:
+            connections.append(self.host)
+            if self.host == "203.0.113.1":
+                raise OSError("first address unavailable")
+
+        def request(self, *args, **kwargs) -> None:
+            requests.append(self.host)
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            return None
+
+    backend = SimpleNamespace(
+        base_url="https://avibe.bot",
+        host_header="avibe.bot",
+        requires_proxy=False,
+        connect_hosts=("203.0.113.1", "203.0.113.2"),
+    )
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
+    monkeypatch.setattr(
+        remote_access,
+        "_validated_backend_connection",
+        lambda host, *args, **kwargs: FakeConnection(host),
+    )
+
+    assert cloud_management._backend_request(  # noqa: SLF001
+        config,
+        "POST",
+        "/api/organizations/org_1/groups",
+        json_body={"name": "Engineering"},
+    ) == (200, {"ok": True})
+    assert connections == ["203.0.113.1", "203.0.113.2"]
+    assert requests == ["203.0.113.2"]
+
+
+def test_backend_transport_never_replays_after_request_transmission(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    connections: list[str] = []
+    requests: list[str] = []
+
+    class FakeConnection:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        def connect(self) -> None:
+            connections.append(self.host)
+
+        def request(self, *args, **kwargs) -> None:
+            requests.append(self.host)
+
+        def getresponse(self):
+            raise http.client.RemoteDisconnected("response lost")
+
+        def close(self) -> None:
+            return None
+
+    backend = SimpleNamespace(
+        base_url="https://avibe.bot",
+        host_header="avibe.bot",
+        requires_proxy=False,
+        connect_hosts=("203.0.113.1", "203.0.113.2"),
+    )
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
+    monkeypatch.setattr(
+        remote_access,
+        "_validated_backend_connection",
+        lambda host, *args, **kwargs: FakeConnection(host),
+    )
+
+    with pytest.raises(cloud_management.CloudManagementError) as captured:
+        cloud_management._backend_request(  # noqa: SLF001
+            config,
+            "POST",
+            "/api/organizations/org_1/groups",
+            json_body={"name": "Engineering"},
+        )
+    assert captured.value.code == "cloud_management_unavailable"
+    assert captured.value.retryable is True
+    assert connections == ["203.0.113.1"]
+    assert requests == ["203.0.113.1"]
 
 
 def test_proxy_upstream_401_clears_grant_and_requires_manual_sign_in(
