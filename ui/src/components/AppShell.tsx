@@ -460,17 +460,20 @@ export const AppShell: React.FC = () => {
               px-4 py-2.5 row height so the logo centerline lines up with the
               chat title bar. No bottom border (it read as out of place under
               the logo). Logo is size-8 to match the header's row height. */}
-          <div className="flex shrink-0 items-center gap-2.5 px-4 py-2.5">
+          <Link
+            to="/"
+            className="group flex shrink-0 items-center gap-2.5 px-4 py-2.5 transition-colors hover:bg-foreground/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
-              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]"
+              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)] transition-shadow group-hover:shadow-[0_0_20px_-3px_rgba(91,255,160,0.65)]"
             />
             <div className="min-w-0 leading-tight">
               <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
               <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
             </div>
-          </div>
+          </Link>
 
           {/* Middle: workspace label + nav list (scrolls). Carries the
               horizontal + top padding the outer container used to own; workbench
@@ -570,14 +573,17 @@ export const AppShell: React.FC = () => {
           behind them). */}
       {!isFullScreenMobile && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
-          <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/"
+            className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
               className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover"
             />
             <span className="truncate text-[13px] font-semibold">{t('appShell.title')}</span>
-          </div>
+          </Link>
           {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
