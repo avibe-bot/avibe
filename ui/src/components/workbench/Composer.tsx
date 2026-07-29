@@ -99,6 +99,7 @@ type VoiceRecordingSession = {
   stoppedAt?: number;
   backlogAtStop?: number;
   finalizedSegmentCount?: number;
+  finalizedFailedSegmentCount?: number;
   retryCount: number;
   reportedAttemptCount?: number;
   reportedInsertionAttemptCount?: number;
@@ -121,6 +122,9 @@ const settleVoiceSession = (session: VoiceRecordingSession) => {
   try {
     session.transcript = voiceTranscriptFromSegments(session.segments);
     session.finalizedSegmentCount = session.segments.length;
+    session.finalizedFailedSegmentCount = session.segments.filter(
+      (segment) => segment.error,
+    ).length;
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
@@ -189,7 +193,10 @@ const reportVoiceFinalization = (
     providerStage: 'finalization',
     attemptCount,
     segmentCount: session.finalizedSegmentCount ?? session.segments.length,
-    failedSegmentCount: session.segments.filter((segment) => segment.error).length,
+    failedSegmentCount: (
+      session.finalizedFailedSegmentCount
+      ?? session.segments.filter((segment) => segment.error).length
+    ),
     backlogAtStop: session.backlogAtStop,
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
@@ -922,6 +929,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               ref={fileInputRef}
               type="file"
               multiple
+              disabled={disabled || recording}
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
@@ -936,8 +944,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               size="icon"
               onClick={() => fileInputRef.current?.click()}
               // A disabled composer cannot send, so staging attachments is a
-              // dead end. The active recording Stop control is handled below.
-              disabled={disabled}
+              // dead end. Opening a native picker can also hide the page, so
+              // keep it unavailable until an active recording has stopped.
+              disabled={disabled || recording}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
             >

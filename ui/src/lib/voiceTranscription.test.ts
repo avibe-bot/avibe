@@ -8,6 +8,7 @@ import {
 import {
   transcribeVoiceBlob,
   VoiceTranscriptionQueue,
+  VoiceTranscriptionError,
   transcribeVoiceSegments,
   VOICE_TRANSCRIPTION_TIMEOUT_MS,
   voiceTranscriptFromSegments,
@@ -519,6 +520,20 @@ describe('voice transcription', () => {
     expect(voiceTranscriptFromSegments(
       parts.map((text) => ({ blob: new Blob(), text })),
     )).toBe(expected);
+  });
+
+  it('skips silent segments unless the whole dictation is silent', () => {
+    const empty = new VoiceTranscriptionError('empty');
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: 'first' },
+      { blob: new Blob(), error: empty },
+      { blob: new Blob(), text: 'second' },
+    ])).toBe('first second');
+
+    expect(() => voiceTranscriptFromSegments([
+      { blob: new Blob(), error: empty },
+      { blob: new Blob(), error: new VoiceTranscriptionError('empty') },
+    ])).toThrowError(empty);
   });
 
   it('retries only failed segments without discarding completed text', async () => {

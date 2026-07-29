@@ -502,12 +502,26 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
 export const voiceTranscriptFromSegments = (
   segments: VoiceTranscriptionSegment[],
 ): string => {
-  const failed = segments.find((segment) => segment.error || !segment.text);
+  const isEmptySegment = (segment: VoiceTranscriptionSegment): boolean => (
+    segment.error instanceof VoiceTranscriptionError
+    && segment.error.code === 'empty'
+    && !segment.text
+  );
+  const failed = segments.find((segment) => (
+    !isEmptySegment(segment)
+    && (segment.error || !segment.text)
+  ));
   if (failed) {
     if (failed.error instanceof Error) throw failed.error;
     throw new VoiceTranscriptionError('failed', { cause: failed.error });
   }
-  const text = segments.reduce((joined, segment) => {
+  const transcribed = segments.filter((segment) => Boolean(segment.text));
+  if (!transcribed.length) {
+    const emptyError = segments.find(isEmptySegment)?.error;
+    if (emptyError instanceof Error) throw emptyError;
+    throw new VoiceTranscriptionError('empty');
+  }
+  const text = transcribed.reduce((joined, segment) => {
     const part = segment.text ?? '';
     return joined ? `${joined}${voiceSegmentSeparator(joined, part)}${part}` : part;
   }, '').trim();
