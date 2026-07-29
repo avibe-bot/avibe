@@ -409,6 +409,7 @@ export const transcribeVoiceSegments = async (
   const worker = async () => {
     let segment = queue.shift();
     while (segment) {
+      if (transcriptionDependencies.signal?.aborted) return;
       await transcribeVoiceSegment(segment, {
         ...transcriptionDependencies,
         transcribe: customTranscribe,

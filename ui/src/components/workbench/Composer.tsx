@@ -142,7 +142,12 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   session.finalization = (async () => {
     await transcribeVoiceSegments(session.segments, {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
+      signal: session.abortController.signal,
     });
+    if (session.abortController.signal.aborted) {
+      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+      return;
+    }
     settleVoiceSession(session);
   })();
   return session.finalization;
@@ -565,7 +570,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const retryVoiceSession = async (session: VoiceRecordingSession) => {
     if (unmountedRef.current || transcribingRef.current) return;
     transcribingRef.current = true;
-    setVoiceRetainedSession(null);
     setTranscribing(true);
     try {
       await retryStoredVoiceSession(session);
@@ -929,7 +933,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 )}
               </>
             )}
-            {voiceRetainedSession && !recording && !transcribing && (
+            {voiceRetainedSession && !recording && (
               <>
                 {voiceRetainedSession.status === 'ready' ? (
                   <Button
@@ -949,7 +953,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     variant="ghost"
                     size="icon"
                     onClick={() => void retryVoiceSession(voiceRetainedSession)}
-                    disabled={disabled}
+                    disabled={disabled || transcribing}
                     aria-label={t('chat.compose.voiceRetry')}
                     title={t('chat.compose.voiceRetry')}
                     className="h-9 w-7 shrink-0"
