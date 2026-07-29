@@ -303,20 +303,39 @@ renders — classified as **safe** (pure read / local UI state / machine-scoped 
 | Harness-row expand, `QueueRow` expand, image lightbox, `FileCard`/`FileViewer` | transcript | safe | local UI state / media reads |
 | Debounced draft save + unmount flush | `onDraftChange` | safe | composer inert ⇒ never armed; and `PUT /draft` already drops an archived save with `{ok: true}` |
 | Inbox mark-read | unread effect | safe | read-cursor write, accepted; archived rows aren't counted anyway |
-| `Composer` Stop (busy branch) | `Composer` | safe | `readOnly && busy` is unreachable — archive resets `agent_status` to idle and the 409 path clears `working` before flipping `readOnly`; and `cancelSession` self-corrects via `not_in_flight` |
+| `Composer` Stop + busy placeholder (busy branch) | `Composer` | **fixed (r4)** | ~~safe — `readOnly && busy` is unreachable~~ **Wrong: it is reachable on a fresh load during the async-cancel window.** See round 4 below. |
 | `SecretRequestCard` (`$<NAME>` in an agent reply) | `Markdown` | safe, judgement call | writes a **machine-scoped vault secret**, not the session; the server accepts it and archive expired the session's provision requests, so it degrades to a plain "store this secret". Left in place: the card is also the transcript record of what was asked. Flagged here rather than silently classified. |
 
 Out of scope of "reachable from an archived chat" as ChatPage renders it: the sidebar / AppShell
 session actions (rename, archive, fork), which are not ChatPage's children. Their archived
 handling is pre-existing and untouched by this PR.
 
-## Validation (pre-push)
+### Round 4
 
-```bash
-ruff check storage/messages_service.py storage/workbench_sessions_service.py \
-  core/services/sessions.py vibe/ui_server.py
-python3 -m pytest tests/test_message_search.py tests/test_core_services_sessions.py \
-  tests/test_session_archive.py -q
-python3 -m pytest tests/test_ui_server_fastapi.py -q
-cd ui && npm run build && npm run test
-```
+#### 4a. The Stop row above was wrong — `readOnly && busy` is reachable
+
+The round-3 "safe" verdict rested on two true-but-insufficient facts (archive resets
+`agent_status` to `idle`; the 409 convergence path clears `working` before flipping `readOnly`).
+Both describe a session that is *already loaded*. Neither covers a **fresh load inside the
+async-cancel window**, which is exactly the path this PR opens up — a search hit on an archived
+session:
+
+- `archive_session`'s own docstring: cancelling an in-flight chat turn "can't live here … so the
+  DELETE endpoint does that (best-effort) after this commits". The status flip is durable
+  immediately; the controller turn keeps running for as long as that internal-socket call takes
+  (or forever, if the controller is unreachable — it is best-effort).
+- `ChatPage` bootstraps the Stop state from `bootstrap.turn_state.foreground === 'running'`, i.e.
+  the **controller's** view, not the row's `agent_status`. The `agent_status` reset is therefore
+  irrelevant to the load path.
+
+So a chat opened in that window renders `readOnly && busy`. `disabled={readOnly}` alone does not
+make that composer inert: the busy branch renders an **enabled** Stop button (it never consulted
+`disabled`) and `placeholderBusy` overrides `placeholderArchived`, so the user is told to "type to
+queue" on a session that can never run another turn.
+
+Fixed at the **shared-component layer**, not the call site: `busy && disabled` is incoherent for
+every `Composer` caller, so `Composer` derives `busyControls = busy && !disabled` and uses it for
+both placeholders and the busy/idle branch. A disabled composer now always falls back to the
+ordinary Send button, which `canSubmit` already renders inert. Patching only ChatPage would have
+left the next caller to rediscover the same trap. Coverage: four cases in
+`ChatArchivedReadOnly.test.tsx` (two of them fail against the pre-fix component).

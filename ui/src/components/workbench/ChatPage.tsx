@@ -2418,10 +2418,13 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, se
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
         // Read-only archived session: reuse the composer's own disabled +
-        // placeholder props rather than swapping in a notice bar. ``busy`` is
-        // always false here (archiving resets agent_status to idle), so the
-        // archived placeholder wins over placeholderBusy. autoFocus is dropped so
-        // opening an archived chat doesn't pop the keyboard on an inert box.
+        // placeholder props rather than swapping in a notice bar. ``busy`` is NOT
+        // reliably false here — archive commits before the controller turn is
+        // cancelled, and this page bootstraps ``working`` from the controller's
+        // turn state — so the composer itself suppresses the busy branch while
+        // ``disabled`` (``busyControls``), which is what keeps Stop off an archived
+        // chat and lets this placeholder win. autoFocus is dropped so opening an
+        // archived chat doesn't pop the keyboard on an inert box.
         disabled={readOnly}
         placeholder={readOnly ? t('chat.compose.placeholderArchived') : undefined}
         autoFocus={!readOnly}

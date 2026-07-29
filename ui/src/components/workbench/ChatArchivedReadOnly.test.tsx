@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ChatHeaderBar, MessageRow } from './ChatPage';
+import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
   isSessionArchivedConflict,
@@ -282,4 +283,63 @@ describe('read-only header withdraws the Show Page controls', () => {
     // re-asserted here so the header render is checked as a whole).
     expect(countButtons(markup)).toBe(1); // just Back
   });
+});
+
+// ── Codex review #4 (Composer.tsx / ChatPage.tsx:2426) ────────────────────────
+// Round 3 classified the Stop button as "safe — readOnly && busy is unreachable".
+// That was wrong. archive_session cannot cancel an in-flight chat turn inside its
+// transaction (the turn lives in the controller process, reachable only over the
+// internal socket), so the DELETE route commits the archive FIRST and cancels
+// best-effort afterwards. ChatPage bootstraps ``busy`` from the controller's
+// ``turn_state.foreground`` — not the row's ``agent_status``, which archive does
+// reset — so an archived chat opened inside that cancellation window loads with
+// readOnly AND busy true. In that state the busy branch rendered an ENABLED Stop
+// button and its "working" placeholder overrode placeholderArchived.
+//
+// ``busy && disabled`` is incoherent for every Composer caller, not just this
+// one, so it is resolved in the shared component (``busyControls``) rather than
+// by pre-clearing ``busy`` at the call site.
+describe('a disabled composer has no live-turn controls', () => {
+  const composer = (props: { busy?: boolean; disabled?: boolean }) =>
+    render(
+      <Composer
+        onSend={() => undefined}
+        onStop={() => undefined}
+        placeholder={en.chat.compose.placeholderArchived}
+        {...props}
+      />,
+    );
+
+  it('keeps Stop and the busy placeholder while busy and writable', () => {
+    const markup = composer({ busy: true });
+    // Unchanged live behaviour: Stop is offered, and "working" wins over the
+    // caller's idle placeholder override.
+    expect(markup).toContain(`aria-label="${en.chat.compose.stop}"`);
+    expect(markup).toContain(en.chat.compose.placeholderBusy);
+    expect(markup).not.toContain(en.chat.compose.placeholderArchived);
+  });
+
+  it('withdraws Stop when the same turn is showing in a read-only chat', () => {
+    const markup = composer({ busy: true, disabled: true });
+    expect(markup).not.toContain(`aria-label="${en.chat.compose.stop}"`);
+    // Not merely hidden-Stop: the row falls back to the ordinary Send button,
+    // which is inert because ``disabled`` already clears ``canSubmit``.
+    expect(markup).toContain(`aria-label="${en.chat.compose.send}"`);
+    expect(countDisabledButtons(markup)).toBe(countButtons(markup));
+  });
+
+  it('lets the archived placeholder win over the busy one, so the reason is readable', () => {
+    const markup = composer({ busy: true, disabled: true });
+    // This is the i18n-visible half of the same defect: placeholderBusy is not the
+    // truth for a session that can never accept a queued message.
+    expect(markup).toContain(en.chat.compose.placeholderArchived);
+    expect(markup).not.toContain(en.chat.compose.placeholderBusy);
+    // And the textarea is inert (the plain path honours ``disabled`` since r2).
+    expect(markup).toContain('<textarea');
+    expect(markup).toContain('disabled=""');
+  });
+
+  // The busy branch's sibling "send to queue" button needs no case of its own: it
+  // is gated on ``canSubmit``, which ``disabled`` already clears, so it never
+  // rendered here even before this fix.
 });
