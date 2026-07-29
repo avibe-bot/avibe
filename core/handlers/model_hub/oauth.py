@@ -173,9 +173,12 @@ class OAuthFlowRegistry:
         experimental_consent: bool = False,
         intent: Literal["create", "reauth"] = "create",
         recovered: bool | None = None,
+        replace_flow_id: str | None = None,
     ) -> None:
         with self._lock:
             flows = self._read()
+            if replace_flow_id is not None:
+                flows.pop(replace_flow_id, None)
             flows.pop(flow_id, None)
             flows[flow_id] = OAuthFlowBinding(
                 channel=channel,

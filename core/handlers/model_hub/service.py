@@ -612,6 +612,29 @@ class ModelHubService:
         if replacement_ref != old_credential_ref:
             await self._rollback_credential(source_id, replacement_ref)
 
+    def _mark_same_handle_reauth_unavailable(self, source_id: str) -> None:
+        # The engine may replace OAuth material behind the same opaque ref.
+        # Without an old snapshot, fail closed instead of restoring stale supply.
+        config = self._clone_config(self.store.load())
+        source = self._source(config, source_id)
+        source.models = [
+            model for model in source.models if model.provenance == "manual"
+        ]
+        source.state = ModelHubSourceStateConfig(
+            status="error",
+            detail_key="models.source.error.unclassified",
+        )
+        self.store.save(config)
+
+    async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
+        if flow.credential_ref:
+            await self._rollback_credential(flow.source_id, flow.credential_ref)
+            return
+        try:
+            await self.adapter.cancel_oauth(flow.flow_id)
+        except Exception:
+            pass
+
     def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
@@ -938,19 +961,23 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404)
         replacement_ref = flow.credential_ref
         async with self._mutation_lock:
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            source = self._source(config, binding.source_id)
-            if not self._source_matches_binding(source, binding):
-                raise ModelHubError("flow_not_found", status=404)
-            old_credential_ref = source.credential_ref
-            manual = [
-                model for model in source.models if model.provenance == "manual"
-            ]
-            source.credential_ref = replacement_ref
+            source: ModelHubSourceConfig | None = None
+            old_credential_ref: str | None = None
             committed = False
             old_revocation_recorded = False
             try:
+                previous = self.store.load()
+                config = self._clone_config(previous)
+                source = self._source(config, binding.source_id)
+                old_credential_ref = source.credential_ref
+                if not self._source_matches_binding(source, binding):
+                    raise ModelHubError("flow_not_found", status=404)
+                manual = [
+                    model
+                    for model in source.models
+                    if model.provenance == "manual"
+                ]
+                source.credential_ref = replacement_ref
                 discovered = await self._discover(source)
                 self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
@@ -970,16 +997,26 @@ class ModelHubService:
                 )
             except Exception:
                 if not committed:
-                    await self._rollback_replacement(
-                        source.id,
-                        replacement_ref,
-                        old_credential_ref,
-                        old_revocation_recorded=old_revocation_recorded,
-                    )
                     try:
-                        self.oauth_flows.forget(flow_id)
-                    except OSError:
-                        pass
+                        if source is None:
+                            await self._rollback_credential(
+                                binding.source_id,
+                                replacement_ref,
+                            )
+                        elif replacement_ref == old_credential_ref:
+                            self._mark_same_handle_reauth_unavailable(source.id)
+                        else:
+                            await self._rollback_replacement(
+                                source.id,
+                                replacement_ref,
+                                old_credential_ref,
+                                old_revocation_recorded=old_revocation_recorded,
+                            )
+                    finally:
+                        try:
+                            self.oauth_flows.forget(flow_id)
+                        except OSError:
+                            pass
                 raise
 
             if old_credential_ref and old_credential_ref != replacement_ref:
@@ -989,7 +1026,10 @@ class ModelHubService:
                     pass
                 else:
                     try:
-                        self.revocations.remove(source.id, old_credential_ref)
+                        self.revocations.remove(
+                            binding.source_id,
+                            old_credential_ref,
+                        )
                     except OSError:
                         pass
 
@@ -1829,6 +1869,7 @@ class ModelHubService:
             ):
                 raise ModelHubError("reauth_confirmation_required", status=409)
 
+            replace_pending_flow_id: str | None = None
             pending = self.oauth_flows.pending_reauth(source.id)
             if pending is not None:
                 pending_flow_id, pending_binding = pending
@@ -1839,7 +1880,14 @@ class ModelHubService:
                     )
                     self._raise_if_flow_expired(pending_flow_id, pending_flow)
                 except ModelHubError as error:
-                    if error.code not in {"flow_expired", "flow_not_found"}:
+                    # Hub OAuth flow state is process-local. After a controller
+                    # restart, its unknown-flow error reaches L2 as engine_down.
+                    if (
+                        error.code == "engine_down"
+                        and pending_binding.channel == "hub"
+                    ):
+                        replace_pending_flow_id = pending_flow_id
+                    elif error.code not in {"flow_expired", "flow_not_found"}:
                         raise
                 else:
                     if pending_flow.state not in {"failed", "cancelled"}:
@@ -1881,6 +1929,8 @@ class ModelHubService:
                 )
             )
             if flow.source_id != source.id or flow.vendor != source.vendor:
+                if channel == "hub":
+                    await self._discard_unbound_hub_flow(flow)
                 raise ModelHubError("flow_not_found", status=502)
             try:
                 self.oauth_flows.remember(
@@ -1891,8 +1941,11 @@ class ModelHubService:
                     experimental_consent=source.experimental_consent_at is not None,
                     intent="reauth",
                     recovered=recovered,
+                    replace_flow_id=replace_pending_flow_id,
                 )
             except OSError:
+                if channel == "hub":
+                    await self._discard_unbound_hub_flow(flow)
                 raise ModelHubError("engine_down", status=503) from None
             return {
                 "flow": _oauth_payload(

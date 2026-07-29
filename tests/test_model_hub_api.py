@@ -1264,6 +1264,58 @@ def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_hub_reauth_replaces_pending_flow_unknown_to_restarted_adapter(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    first = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+
+    async def restarted_adapter_does_not_know_flow(_flow_id):
+        raise RuntimeError("OAuth flow is unknown after restart")
+
+    restarted_adapter = FakeAdapter()
+    restarted_adapter.oauth_status = restarted_adapter_does_not_know_flow
+    restarted = ModelHubService(
+        store=store,
+        adapter=restarted_adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        native_oauth_adapter=restarted_adapter,
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+    second = asyncio.run(restarted.reauth_source(source.id, {}))["flow"]
+
+    assert first["flow_id"] in adapter.flows
+    assert second["flow_id"] in restarted_adapter.flows
+    replacement_binding = restarted.oauth_flows.binding(second["flow_id"])
+    assert replacement_binding is not None
+    assert replacement_binding.source_id == source.id
+    assert adapter.oauth_start_calls == [(source.id, "anthropic")]
+    assert restarted_adapter.oauth_start_calls == [(source.id, "anthropic")]
+
+
 def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     tmp_path,
 ):
@@ -1313,8 +1365,10 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     assert service.revocations.list() == []
 
 
-def test_failed_same_handle_hub_reauth_does_not_revoke_active_credential(
+@pytest.mark.parametrize("failure", ["discovery", "sync"])
+def test_failed_same_handle_hub_reauth_marks_source_unavailable(
     tmp_path,
+    failure,
 ):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -1338,12 +1392,6 @@ def test_failed_same_handle_hub_reauth_does_not_revoke_active_credential(
     store.config.sources.append(source)
     store.config.subscription_hub_experimental = True
     store.config.refresh_follow_orders()
-    before = json.dumps(
-        store.config.to_payload(),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
     flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
@@ -1356,18 +1404,23 @@ def test_failed_same_handle_hub_reauth_does_not_revoke_active_credential(
     async def fail_discovery(vendor, protocol, base_url, credential_ref):
         raise ModelDiscoveryError("safe discovery failure")
 
-    adapter.discover_models = fail_discovery
+    if failure == "discovery":
+        adapter.discover_models = fail_discovery
+    else:
+        adapter.fail_sync = True
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.oauth_status(flow["flow_id"]))
 
-    assert exc_info.value.code == "discovery_failed"
-    assert json.dumps(
-        store.config.to_payload(),
-        sort_keys=True,
-        separators=(",", ":"),
-    ) == before
+    assert exc_info.value.code == (
+        "discovery_failed" if failure == "discovery" else "engine_down"
+    )
+    persisted = store.config.sources[0]
+    assert persisted.credential_ref == "cred_hub_reused"
+    assert persisted.models == []
+    assert persisted.state.status == "error"
     assert adapter.revoked == []
     assert service.revocations.list() == []
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
 def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
@@ -1424,6 +1477,53 @@ def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
     ) == before
     assert adapter.revoked == ["cred_hub_new"]
     assert service.oauth_flows.binding(flow["flow_id"]) is None
+
+
+def test_completed_hub_reauth_revokes_replacement_after_source_disappears(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    asyncio.run(service.delete_source(source.id, force=True))
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_orphan",
+        }
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "source_not_found"
+    assert adapter.revoked == ["cred_hub_old", "cred_hub_orphan"]
+    assert service.revocations.list() == []
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
+    with pytest.raises(ModelHubError) as repeated:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+    assert repeated.value.code == "flow_not_found"
 
 
 def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
