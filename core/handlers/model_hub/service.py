@@ -86,6 +86,8 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 
 CONTRACT_VERSION = 3
+AGENT_CHAIN_CONTRACT_VERSION = 4
+PROBE_RESULT_CONTRACT_VERSION = 4
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -1478,14 +1480,19 @@ class ModelHubService:
     def _chain_supply_state(chain: list[dict]) -> Literal["ok", "waiting", "interrupted"]:
         if any(item["runnable"] for item in chain):
             return "ok"
-        if chain and all(item["health"] == "cooldown" for item in chain):
+        if chain and all(
+            item["health"] == "cooldown" and item["reason"] is None
+            for item in chain
+        ):
             return "waiting"
         return "interrupted"
 
-    def agent_chain(self, backend: str, model_id: object) -> dict:
-        if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
-            raise ModelHubError("mapping_target_unavailable", status=409)
-        config = self.store.load()
+    def _agent_chain(
+        self,
+        config: ModelHubConfig,
+        backend: str,
+        model_id: str,
+    ) -> dict:
         agent = self._agent(config, backend)
         if agent.mode == "direct":
             raise self._direct_mode_error()
@@ -1522,10 +1529,16 @@ class ModelHubService:
             chain.append(
                 {
                     "source_id": source.id,
+                    "channel": source.supply_channel,
                     "via_mapping": resolution.mapping_applied,
                     "resolved_model_id": resolved_model,
                     "health": health,
                     "runnable": runnable,
+                    "reason": (
+                        "native_cli_unavailable"
+                        if source.id in unavailable
+                        else None
+                    ),
                     "retry_at": (
                         source.state.retry_at
                         if health == "cooldown"
@@ -1534,12 +1547,17 @@ class ModelHubService:
                 }
             )
         return {
-            "contract_version": CONTRACT_VERSION,
+            "contract_version": AGENT_CHAIN_CONTRACT_VERSION,
             "backend": backend,
             "model_id": resolution.requested_model or model_id,
             "chain": chain,
             "supply_state": self._chain_supply_state(chain),
         }
+
+    def agent_chain(self, backend: str, model_id: object) -> dict:
+        if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        return self._agent_chain(self.store.load(), backend, model_id)
 
     @staticmethod
     def _probe_request(source: ModelHubSourceConfig, model_id: str) -> ModelHubRequest:
@@ -1645,7 +1663,7 @@ class ModelHubService:
             if isinstance(model_id, str) and model_id.strip()
             else self._requested_model(agent)
         )
-        chain_payload = self.agent_chain(backend, requested_model)
+        chain_payload = self._agent_chain(config, backend, requested_model)
         candidate_payload = next(
             (item for item in chain_payload["chain"] if item["runnable"]),
             None,
@@ -1676,18 +1694,26 @@ class ModelHubService:
             candidate_payload["resolved_model_id"]
             or chain_payload["model_id"]
         )
-        if source.supply_channel != "hub":
-            raise ModelHubError(
-                "probe_no_candidate",
-                status=409,
-                detail="models.probe.no_candidate.interrupted",
-                payload={
-                    "supply": {
-                        "supply_state": "interrupted",
-                        "retry_at": None,
-                    }
-                },
+        if source.supply_channel == "native_cli":
+            ready = self.native_source_ready(
+                cast(BackendName, backend),
+                source_after_cooldown_recovery(source, self.now()),
             )
+            return {
+                "contract_version": PROBE_RESULT_CONTRACT_VERSION,
+                "backend": backend,
+                "channel": "native_cli",
+                "reachable": ready,
+                "source_id": source.id,
+                "model_id": resolved_model,
+                "latency_ms": None,
+                "via_mapping": bool(candidate_payload["via_mapping"]),
+                "error": (
+                    None
+                    if ready
+                    else "models.probe.native_cli_unavailable"
+                ),
+            }
 
         await self._ensure_engine_synced()
         started_at = time.monotonic()
@@ -1749,8 +1775,9 @@ class ModelHubService:
                     reason=event_reason,
                 )
         return {
-            "contract_version": CONTRACT_VERSION,
+            "contract_version": PROBE_RESULT_CONTRACT_VERSION,
             "backend": backend,
+            "channel": "hub",
             "reachable": reachable,
             "source_id": source.id,
             "model_id": resolved_model,

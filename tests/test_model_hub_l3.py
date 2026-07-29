@@ -556,9 +556,12 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         "src_primary01",
     ]
     assert chain["supply_state"] == "ok"
+    assert all(item["channel"] == "hub" for item in chain["chain"])
+    assert all(item["reason"] is None for item in chain["chain"])
     _assert_valid("agent-chain.schema.json", chain)
 
     probe = asyncio.run(service.probe_agent("claude", "shared-model"))
+    assert probe["channel"] == "hub"
     assert probe["reachable"] is True
     assert probe["source_id"] == "src_primary01"
     assert isinstance(probe["latency_ms"], int)
@@ -619,6 +622,88 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         == "error"
     )
     _assert_valid("probe-result.schema.json", unclassified)
+
+
+def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
+    native = _source(
+        "src_nativecli1",
+        "Native CLI",
+        channel="native_cli",
+    )
+    service = _service(tmp_path, sources=[native])
+
+    chain = service.agent_chain("codex", "shared-model")
+    assert chain["chain"] == [
+        {
+            "source_id": native.id,
+            "channel": "native_cli",
+            "via_mapping": False,
+            "resolved_model_id": None,
+            "health": "healthy",
+            "runnable": True,
+            "reason": None,
+            "retry_at": None,
+        }
+    ]
+    assert chain["supply_state"] == "ok"
+    _assert_valid("agent-chain.schema.json", chain)
+
+    probe = asyncio.run(service.probe_agent("codex", "shared-model"))
+    assert probe == {
+        "contract_version": 4,
+        "backend": "codex",
+        "channel": "native_cli",
+        "reachable": True,
+        "source_id": native.id,
+        "model_id": "shared-model",
+        "latency_ms": None,
+        "via_mapping": False,
+        "error": None,
+    }
+    assert service.adapter.invocations == []
+    _assert_valid("probe-result.schema.json", probe)
+
+
+def test_native_unavailability_is_orthogonal_to_health(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_nativecli1",
+        "Native CLI",
+        channel="native_cli",
+        status="cooldown",
+        retry_at=(NOW + timedelta(minutes=5)).isoformat(),
+    )
+    service = _service(tmp_path, sources=[native])
+    service.native_source_ready = lambda _backend, _source: False
+
+    chain = service.agent_chain("codex", "shared-model")
+    assert chain["chain"][0]["health"] == "cooldown"
+    assert chain["chain"][0]["reason"] == "native_cli_unavailable"
+    assert chain["chain"][0]["runnable"] is False
+    assert chain["supply_state"] == "interrupted"
+    _assert_valid("agent-chain.schema.json", chain)
+
+
+def test_native_probe_rechecks_readiness_after_selection(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_nativecli1",
+        "Native CLI",
+        channel="native_cli",
+    )
+    service = _service(tmp_path, sources=[native])
+    readiness = iter((True, False))
+    service.native_source_ready = lambda _backend, _source: next(readiness)
+
+    probe = asyncio.run(service.probe_agent("codex", "shared-model"))
+    assert probe["channel"] == "native_cli"
+    assert probe["reachable"] is False
+    assert probe["latency_ms"] is None
+    assert probe["error"] == "models.probe.native_cli_unavailable"
+    assert service.adapter.invocations == []
+    _assert_valid("probe-result.schema.json", probe)
 
 
 def test_probe_no_candidate_and_direct_mode_are_typed(tmp_path: Path) -> None:
