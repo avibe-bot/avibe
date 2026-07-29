@@ -62,6 +62,16 @@ _NEXT_ATTEMPT_EXPR = (
     "CASE WHEN (json_valid(metadata_json) = 1) "
     "THEN coalesce(json_extract(metadata_json, '$.owed_failure_notice.next_attempt_at'), '') END"
 )
+# Exported so the head-schema repair path in ``storage/migrations.py`` executes THIS
+# statement rather than a second copy of it. Nowhere is that more load-bearing than
+# here: the planner matches an index EXPRESSION against a query expression by text, so a
+# retyped copy would build an index the owed-notice tick silently declines to use, which
+# is the exact failure 0040 and 0041 were each written to correct.
+DROP_INDEX_SQL = f"drop index if exists {_INDEX}"
+CREATE_INDEX_SQL = (
+    f"create index {_INDEX} on agent_runs "
+    f"({_STATE_EXPR}, {_NEXT_ATTEMPT_EXPR}, created_at, id)"
+)
 
 
 def _tables(bind) -> set[str]:
@@ -75,16 +85,13 @@ def upgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
-    bind.exec_driver_sql(
-        f"create index {_INDEX} on agent_runs "
-        f"({_STATE_EXPR}, {_NEXT_ATTEMPT_EXPR}, created_at, id)"
-    )
+    bind.exec_driver_sql(DROP_INDEX_SQL)
+    bind.exec_driver_sql(CREATE_INDEX_SQL)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
+    bind.exec_driver_sql(DROP_INDEX_SQL)
     bind.exec_driver_sql(f"create index {_INDEX} on agent_runs ({_STATE_EXPR}, created_at, id)")

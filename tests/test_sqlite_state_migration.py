@@ -1095,8 +1095,259 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
     assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
 
 
+#: The three ``agent_runs`` index migrations a head-shaped database must end up with,
+#: whichever route it took there. Named by module so the DDL is only ever read from the
+#: migration that owns it — the owed-notice index is an EXPRESSION index and SQLite only
+#: matches an index expression against a byte-identical query expression, so a retyped
+#: copy is an index that is built and silently ignored.
+AGENT_RUNS_INDEX_MIGRATION_MODULES = (
+    "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index",
+    "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
+    "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
+)
+#: The superseded 0040 shape of ``ix_agent_runs_owed_notice``: same NAME, one fewer
+#: indexed expression. Read from its own module for the same no-retyping reason.
+SUPERSEDED_OWED_NOTICE_MIGRATION_MODULE = (
+    "storage.alembic.versions.20260728_0040_agent_runs_owed_notice_index"
+)
+_LIVE_QUERY_NOW = "2026-07-27T12:00:00+00:00"
+_LIVE_QUERY_DEFINITION = "task-repair"
+#: The middle failure of the seeded streak: bracketed by a success on both sides, so
+#: both of ``failure_streak``'s boundary seeks have something to find.
+_LIVE_QUERY_RUN = "run-0002"
+
+
+def _agent_runs_index_names() -> tuple[str, str, str]:
+    """``(settled, owed_notice, streak)`` index names, from the migrations themselves."""
+
+    settled, owed_notice, streak = (
+        import_module(module)._INDEX for module in AGENT_RUNS_INDEX_MIGRATION_MODULES
+    )
+    return settled, owed_notice, streak
+
+
+def _assert_agent_runs_indexes_present(db_path: Path, *, route: str) -> None:
+    names = _agent_runs_index_names()
+    with sqlite3.connect(db_path) as conn:
+        present = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index' and name in (?, ?, ?)",
+                names,
+            )
+        }
+    assert present == set(names), (
+        f"{route} left the agent_runs expression indexes missing: {sorted(set(names) - present)}"
+    )
+
+
+def _seed_settled_history(db_path: Path) -> None:
+    """A realistic settled history for the three live two-second-tick reads.
+
+    A failure streak closed by a success on either side, the earlier failure owing a
+    pending notice, so the eligibility lookup, the health window and the streak read
+    all have something to seek for. Written through the store rather than by hand so
+    every column the real writers populate is populated here too.
+    """
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": _LIVE_QUERY_DEFINITION,
+                "name": _LIVE_QUERY_DEFINITION,
+                "prompt": "go",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": True,
+                "created_at": "2026-07-27T00:00:00+00:00",
+                "updated_at": "2026-07-27T00:00:00+00:00",
+            }
+        )
+        history = (
+            ("run-0001", "succeeded"),
+            (_LIVE_QUERY_RUN, "failed"),
+            ("run-0003", "failed"),
+            ("run-0004", "succeeded"),
+        )
+        for position, (run_id, status) in enumerate(history):
+            instant = f"2026-07-27T{position + 1:02d}:00:00+00:00"
+            store.enqueue_run(
+                {
+                    "id": run_id,
+                    "request_type": "scheduled",
+                    "status": status,
+                    "definition_id": _LIVE_QUERY_DEFINITION,
+                    "error": "boom" if status == "failed" else None,
+                    "created_at": instant,
+                    "completed_at": instant,
+                    "metadata": (
+                        {"owed_failure_notice": {"state": "pending", "attempts": 0}}
+                        if run_id == _LIVE_QUERY_RUN
+                        else {}
+                    ),
+                }
+            )
+    finally:
+        store.close()
+
+
+def _agent_runs_query_plan(store, db_path: Path, call) -> str:
+    """Every ``agent_runs`` SELECT one call issues, with its plan, as one text."""
+
+    from sqlalchemy import event
+
+    captured: list[tuple[str, object]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement and statement.strip().upper().startswith("SELECT"):
+            captured.append((statement, parameters))
+
+    event.listen(store.engine, "before_cursor_execute", _capture)
+    try:
+        call()
+    finally:
+        event.remove(store.engine, "before_cursor_execute", _capture)
+    assert captured, "the read issued no agent_runs SELECT"
+
+    raw = sqlite3.connect(str(db_path))
+    try:
+        return "\n".join(
+            str(row[-1])
+            for statement, parameters in captured
+            for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters)
+        )
+    finally:
+        raw.close()
+
+
+def _assert_live_reads_seek_agent_runs_indexes(db_path: Path, *, route: str) -> None:
+    """The three live reads must SEEK these indexes on THIS database.
+
+    Index existence is not the property that matters — the property is that the
+    owed-notice drain, the health window and the streak read stop scanning run
+    history. So this asserts the CONSTRAINED TERMS of the plan, not just the index
+    name: a plan can name an index while the term stays a per-row filter (which is
+    exactly what 0040 shipped and 0041 fixed).
+    """
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    settled_index, owed_notice_index, streak_index = _agent_runs_index_names()
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        owed_plan = _agent_runs_query_plan(
+            store,
+            db_path,
+            lambda: store.list_owed_failure_notices(limit=10, now=_LIVE_QUERY_NOW),
+        )
+        health_plan = _agent_runs_query_plan(
+            store,
+            db_path,
+            lambda: store._health_rows([_LIVE_QUERY_DEFINITION], now=_LIVE_QUERY_NOW),
+        )
+        streak_plan = _agent_runs_query_plan(
+            store,
+            db_path,
+            lambda: store.failure_streak(_LIVE_QUERY_DEFINITION, _LIVE_QUERY_RUN),
+        )
+    finally:
+        store.close()
+
+    # The owed-notice eligibility seek: both expression terms constrained, and the
+    # (created_at, id) order taken from the index so the LIMIT can short-circuit.
+    assert f"USING INDEX {owed_notice_index} (<expr>=? AND <expr><?)" in owed_plan, (
+        f"{route}: the owed-notice tick must seek {owed_notice_index} on both expression "
+        f"terms; plan was:\n{owed_plan}"
+    )
+    assert "SCAN agent_runs" not in owed_plan, (
+        f"{route}: the owed-notice tick must not scan run history; plan was:\n{owed_plan}"
+    )
+    assert "TEMP B-TREE" not in owed_plan, (
+        f"{route}: the owed-notice order must come from the index; plan was:\n{owed_plan}"
+    )
+
+    # The health window: the per-definition seek is bounded by (definition_id, settled).
+    assert f"USING INDEX {settled_index} (definition_id=? AND <expr>>?)" in health_plan, (
+        f"{route}: the health window must seek {settled_index} on both terms; plan was:"
+        f"\n{health_plan}"
+    )
+    assert "SCAN agent_runs" not in health_plan, (
+        f"{route}: the health window must not scan run history; plan was:\n{health_plan}"
+    )
+    assert "TEMP B-TREE" not in health_plan, (
+        f"{route}: the health window's newest-first order must come from the index; plan "
+        f"was:\n{health_plan}"
+    )
+
+    # The streak's boundary seeks: the (created_at, id) row value has to be a real
+    # index constraint, which only the streak index's third key can make it.
+    compact_streak = streak_plan.replace(" ", "")
+    assert streak_index in streak_plan, (
+        f"{route}: the streak read must seek {streak_index}; plan was:\n{streak_plan}"
+    )
+    assert f"{streak_index}(definition_id=?AND(created_at,id)<(?,?))" in compact_streak, (
+        f"{route}: the preceding success must be an indexed row-value seek; plan was:"
+        f"\n{streak_plan}"
+    )
+    assert f"{streak_index}(definition_id=?AND(created_at,id)>(?,?))" in compact_streak, (
+        f"{route}: the following success must be an indexed row-value seek; plan was:"
+        f"\n{streak_plan}"
+    )
+    assert "SCAN agent_runs" not in streak_plan, (
+        f"{route}: the streak read must not scan a definition's history; plan was:"
+        f"\n{streak_plan}"
+    )
+    assert "TEMP B-TREE" not in streak_plan, (
+        f"{route}: the streak's (created_at, id) order must come from the index; plan was:"
+        f"\n{streak_plan}"
+    )
+
+
+def _head_shaped_unversioned_db(tmp_path: Path, name: str = "vibe.sqlite") -> Path:
+    """A models-born database: head tables and columns, no ``alembic_version``.
+
+    This is the shape ``metadata.create_all`` produces, which is what every
+    ``background_tables_ready`` consumer accepts as ready — and it lacks all three
+    ``agent_runs`` expression indexes, because ``storage/models.py`` cannot express
+    them.
+    """
+
+    db_path = tmp_path / name
+    engine = create_sqlite_engine(db_path)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    with sqlite3.connect(db_path) as conn:
+        for index_name in _agent_runs_index_names():
+            conn.execute(f"drop index if exists {index_name}")
+        conn.commit()
+        assert conn.execute("select name from sqlite_master where name = 'alembic_version'").fetchone() is None
+        assert not {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index' and name in (?, ?, ?)",
+                _agent_runs_index_names(),
+            )
+        }
+    return db_path
+
+
+def _reference_agent_runs_index_sql(tmp_path: Path) -> dict[str, str]:
+    """The three indexes as a full 0001-to-head replay writes them, byte for byte."""
+
+    reference_db = tmp_path / "reference.sqlite"
+    run_migrations(reference_db)
+    with sqlite3.connect(reference_db) as conn:
+        return {name: _index_sql(conn, name) for name in _agent_runs_index_names()}
+
+
 def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path) -> None:
-    """Head-shaped unversioned databases still receive the 0039-0042 agent_runs indexes.
+    """The migration ENTRYPOINT leaves a head-shaped database with the 0039-0042 indexes.
 
     This test is GREEN FROM BIRTH — it is a refutation pin, not a fix; red-first does
     not apply. The refuted premise was that ``_stamp_existing_initial_schema`` stamps a
@@ -1105,51 +1356,28 @@ def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path)
     two-second owed-notice tick scanning run history. ``LATEST_SCHEMA_REVISION`` is
     ``20260622_0023``, which is the stamp FLOOR, not head: after that stamp
     ``_run_migrations_locked`` runs ``command.upgrade(cfg, "head")``, so 0024 through
-    0042 — including all four index migrations — replay on exactly this path. The
-    assertions below compare byte-for-byte against the full 0001-to-head replay and
-    against the migrations' own exported expression SQL, so mirroring that DDL into
-    ``_ensure_new_background_indexes`` would be a third copy for zero behavior.
+    0042 — including all four index migrations — replay on exactly this path.
+
+    That refutation is about the MECHANISM, not about the class. Two lanes reach a
+    head-shaped database with no expression indexes and never come back through this
+    entrypoint: any ``metadata.create_all`` consumer satisfies
+    ``background_tables_ready`` (which checks tables and columns, never indexes), and
+    the day ``LATEST_SCHEMA_REVISION`` moves past 0038 the stamp really would skip
+    them. So ``_ensure_new_background_indexes`` now installs the same three indexes,
+    sourced by import from the migrations that own the DDL rather than retyped — see
+    ``test_head_schema_repair_installs_agent_runs_expression_indexes``, which drives the
+    repair path alone. This test owns the REPLAY route, that one owns the REPAIR route,
+    and both compare byte-for-byte against the same full-replay reference, so the two
+    routes cannot converge on different SQL.
     """
-    settled_migration = import_module(
-        "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index"
-    )
-    owed_notice_migration = import_module(
-        "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index"
-    )
-    streak_migration = import_module(
-        "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index"
-    )
-    replayed_indexes = (
-        settled_migration._INDEX,
-        owed_notice_migration._INDEX,
-        streak_migration._INDEX,
-    )
+    owed_notice_migration = import_module(AGENT_RUNS_INDEX_MIGRATION_MODULES[1])
+    replayed_indexes = _agent_runs_index_names()
 
     # Reference: an empty path replays 0001 -> head with no stamping shortcut at all.
-    reference_db = tmp_path / "reference.sqlite"
-    run_migrations(reference_db)
-    with sqlite3.connect(reference_db) as conn:
-        reference_sql = {name: _index_sql(conn, name) for name in replayed_indexes}
+    reference_sql = _reference_agent_runs_index_sql(tmp_path)
 
-    db_path = tmp_path / "vibe.sqlite"
-    engine = create_sqlite_engine(db_path)
-    try:
-        metadata.create_all(engine)
-    finally:
-        engine.dispose()
-
-    with sqlite3.connect(db_path) as conn:
-        for name in replayed_indexes:
-            conn.execute(f"drop index if exists {name}")
-        conn.commit()
-        assert conn.execute("select name from sqlite_master where name = 'alembic_version'").fetchone() is None
-        assert not {
-            row[0]
-            for row in conn.execute(
-                "select name from sqlite_master where type = 'index' and name in (?, ?, ?)",
-                replayed_indexes,
-            )
-        }
+    db_path = _head_shaped_unversioned_db(tmp_path)
+    _seed_settled_history(db_path)
 
     run_migrations(db_path)
 
@@ -1164,6 +1392,70 @@ def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path)
     owed_notice_sql = upgraded_sql[owed_notice_migration._INDEX]
     assert owed_notice_migration._STATE_EXPR in owed_notice_sql
     assert owed_notice_migration._NEXT_ATTEMPT_EXPR in owed_notice_sql
+    # Existing SQL is not the claim; a bounded read is. Proven on the database the
+    # entrypoint actually produced.
+    _assert_live_reads_seek_agent_runs_indexes(db_path, route="the migration entrypoint")
+
+
+def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Path) -> None:
+    """The head-schema REPAIR path installs the 0039-0042 indexes by itself.
+
+    ``_ensure_head_indexes`` promises a head-shaped database every index head has, and
+    it silently lagged head by three: the settlement index, the owed-notice
+    eligibility/backoff expression index and the definition-streak index were only ever
+    created by their migrations. Two lanes make that a real gap. A database born from
+    ``metadata.create_all`` satisfies ``background_tables_ready`` — tables and columns
+    only, never indexes — so ``SQLiteBackgroundTaskStore`` accepts it as ready and
+    ``initialize_background_tables`` never runs; and if ``LATEST_SCHEMA_REVISION`` ever
+    moves past 0038, the stamp floor stops replaying them for everyone.
+
+    Driven through ``_stamp_existing_initial_schema`` rather than through
+    ``run_migrations``, and that choice is the whole point of the test: it is the only
+    production caller that reaches ``_ensure_head_indexes`` on a head-shaped database,
+    and it RETURNS after stamping the floor, leaving the database repaired-but-not-yet
+    -upgraded. ``run_migrations`` would immediately replay 0024-0042 over the result and
+    the assertions below could not tell which route created the indexes;
+    ``_repair_head_required_columns`` reaches the same helper but only as a side effect
+    of a column repair, so it would prove less about the index promise. The stamped
+    revision is asserted to still be the FLOOR, which is what proves no upgrade ran.
+    """
+    settled_index, owed_notice_index, streak_index = _agent_runs_index_names()
+    superseded = import_module(SUPERSEDED_OWED_NOTICE_MIGRATION_MODULE)
+    reference_sql = _reference_agent_runs_index_sql(tmp_path)
+
+    db_path = _head_shaped_unversioned_db(tmp_path)
+    _seed_settled_history(db_path)
+    # A survivor of the 0040 shape: same index NAME, one fewer indexed expression, so
+    # the backoff term would stay a per-row filter. Repairing has to REBUILD it, not
+    # leave it because the name is taken.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"create index {superseded._INDEX} on agent_runs "
+            f"({superseded._STATE_EXPR}, created_at, id)"
+        )
+        conn.commit()
+
+    migrations._stamp_existing_initial_schema(db_path, migrations.alembic_config(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert version == (migrations.LATEST_SCHEMA_REVISION,), (
+        "this test is only about the repair path: a database stamped past the floor has "
+        f"had migrations replayed over it, so it proves nothing; got {version}"
+    )
+    assert version != (HEAD_REVISION,)
+
+    _assert_agent_runs_indexes_present(db_path, route="the head-schema repair path")
+    with sqlite3.connect(db_path) as conn:
+        repaired_sql = {
+            name: _index_sql(conn, name)
+            for name in (settled_index, owed_notice_index, streak_index)
+        }
+    # Byte-equal to the full replay, because the repair path executes the migrations'
+    # own DDL rather than a copy of it. The owed-notice index in particular must be the
+    # 0041 shape — the 0040 survivor seeded above has to be gone.
+    assert repaired_sql == reference_sql
+    _assert_live_reads_seek_agent_runs_indexes(db_path, route="the head-schema repair path")
 
 
 def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> None:

@@ -26,6 +26,16 @@ branch_labels = None
 depends_on = None
 
 _INDEX = "ix_agent_runs_definition_settled"
+# Exported so the head-schema repair path in ``storage/migrations.py`` executes THIS
+# statement rather than a second copy of it. ``_ensure_head_indexes`` promises a
+# head-shaped unversioned database every index head has, and a retyped copy is how an
+# index ends up built with a different definition than the one the planner was measured
+# against.
+DROP_INDEX_SQL = f"drop index if exists {_INDEX}"
+CREATE_INDEX_SQL = (
+    f"create index {_INDEX} on agent_runs "
+    "(definition_id, coalesce(completed_at, created_at) desc, id desc)"
+)
 
 
 def _tables(bind) -> set[str]:
@@ -39,15 +49,12 @@ def upgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
-    bind.exec_driver_sql(
-        f"create index {_INDEX} on agent_runs "
-        "(definition_id, coalesce(completed_at, created_at) desc, id desc)"
-    )
+    bind.exec_driver_sql(DROP_INDEX_SQL)
+    bind.exec_driver_sql(CREATE_INDEX_SQL)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
+    bind.exec_driver_sql(DROP_INDEX_SQL)

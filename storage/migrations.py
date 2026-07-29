@@ -633,6 +633,59 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
+    _ensure_agent_runs_expression_indexes(conn)
+
+
+#: The ``agent_runs`` index migrations whose DDL the head-schema repair path must also
+#: install, oldest first. 0040 is deliberately absent: 0041 drops the index 0040 created
+#: and recreates it under its own two-expression definition, so 0040's shape is never a
+#: valid end state and replaying it here would only build an index 0041 has to replace.
+_AGENT_RUNS_INDEX_REVISION_MODULES = (
+    "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index",
+    "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
+    "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
+)
+#: Columns the three index expressions read. A head-shaped database has all of them, but
+#: this helper is also reached from ``_repair_head_required_columns`` on older drifted
+#: shapes, and ``create index`` on a missing column raises rather than skipping.
+_AGENT_RUNS_INDEX_COLUMNS = frozenset({"definition_id", "created_at", "completed_at", "metadata_json"})
+
+
+def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
+    """Install the 0039/0041/0042 ``agent_runs`` indexes on a head-shaped database.
+
+    ``_ensure_head_indexes`` promises that a head-shaped unversioned database ends up
+    with every index head has, and until now it silently lagged head by these three.
+    Two lanes make that gap reachable without any migration ever running: a database
+    born from ``metadata.create_all`` satisfies ``background_tables_ready`` (tables and
+    columns only — never indexes), so ``SQLiteBackgroundTaskStore`` accepts it as ready
+    and never calls ``initialize_background_tables``; and the day
+    ``LATEST_SCHEMA_REVISION`` moves past 0038 the stamp floor stops replaying them for
+    everyone. Both leave the two-second owed-notice tick, the health window and the
+    streak read scanning run history with nothing to repair them.
+
+    The DDL is IMPORTED from the revision that owns it, never retyped. The owed-notice
+    index is an expression index and SQLite matches an index expression against a query
+    expression by text, so a second copy of that string is an index that gets built and
+    silently ignored — the failure 0040 and 0041 were each written to correct. Importing
+    the revision module is the same technique ``_run_remove_legacy_default_agent_migration``
+    already uses; ``storage.background`` (which holds the query-side twins) cannot be
+    imported here because it imports this module.
+
+    Drop-then-create rather than ``create index if not exists``: a database carrying the
+    superseded 0040 shape of ``ix_agent_runs_owed_notice`` has the NAME already taken by
+    an index missing the backoff expression, and ``if not exists`` would leave that
+    weaker definition in place. Recreating unconditionally also makes the resulting
+    ``sqlite_master`` SQL byte-identical to the migration's, whichever route a database
+    took to head.
+    """
+
+    if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
+        return
+    for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
+        revision_module = import_module(module_name)
+        conn.execute(revision_module.DROP_INDEX_SQL)
+        conn.execute(revision_module.CREATE_INDEX_SQL)
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:

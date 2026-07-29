@@ -49,6 +49,13 @@ branch_labels = None
 depends_on = None
 
 _INDEX = "ix_agent_runs_definition_streak"
+# Exported so the head-schema repair path in ``storage/migrations.py`` executes THIS
+# statement rather than a second copy of it — the same reason ``20260728_0039`` and
+# ``20260728_0041`` export theirs. The note above about ``_ensure_new_background_indexes``
+# recreating ``ix_agent_runs_definition_created`` unconditionally still holds; that
+# helper now also installs this index, from this constant.
+DROP_INDEX_SQL = f"drop index if exists {_INDEX}"
+CREATE_INDEX_SQL = f"create index {_INDEX} on agent_runs (definition_id, created_at, id)"
 
 
 def _tables(bind) -> set[str]:
@@ -62,12 +69,12 @@ def upgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
-    bind.exec_driver_sql(f"create index {_INDEX} on agent_runs (definition_id, created_at, id)")
+    bind.exec_driver_sql(DROP_INDEX_SQL)
+    bind.exec_driver_sql(CREATE_INDEX_SQL)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     if "agent_runs" not in _tables(bind):
         return
-    bind.exec_driver_sql(f"drop index if exists {_INDEX}")
+    bind.exec_driver_sql(DROP_INDEX_SQL)
