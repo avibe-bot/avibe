@@ -240,6 +240,9 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   }
 
   private readonly handleTrackEnded = (): void => {
+    if (!this.stopping && !this.stopped) {
+      this.handlers.onError(new Error('voice microphone track ended unexpectedly'));
+    }
     this.stop();
   };
 
@@ -425,10 +428,11 @@ export class VoiceRecordingPipeline {
 
   private stop(reason: VoiceRecordingStopReason): void {
     if (!this.requestStop(reason)) return;
-    // Release the microphone even if asynchronous capture startup is stalled.
-    // The capture still flushes any PCM it already owns before completing.
-    this.stopStream();
+    // Mark the capture as stopping before releasing tracks so an implementation
+    // that synchronously emits "ended" does not turn an intentional stop into
+    // a device-loss failure. Buffered PCM still flushes before completion.
     this.capture.stop();
+    this.stopStream();
   }
 
   private requestStop(reason: VoiceRecordingStopReason): boolean {

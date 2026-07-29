@@ -307,6 +307,8 @@ describe('VoiceRecordingPipeline', () => {
     const stream = {
       getTracks: () => [track],
     } as unknown as MediaStream;
+    const onError = vi.fn();
+    const onStopRequested = vi.fn();
     const onStopped = vi.fn();
     vi.stubGlobal('AudioContext', FakeAudioContext);
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
@@ -318,6 +320,8 @@ describe('VoiceRecordingPipeline', () => {
       stream,
       segmentMs: 1000,
       onSegment: vi.fn(),
+      onError,
+      onStopRequested,
       onStopped,
     });
 
@@ -327,7 +331,11 @@ describe('VoiceRecordingPipeline', () => {
     resolveModule();
 
     await expect(starting).resolves.toBe(false);
-    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    expect(onStopRequested).toHaveBeenCalledWith('error', {
+      requestedAt: expect.any(Number),
+    });
+    expect(onStopped).toHaveBeenCalledWith('error', { pendingSegmentCount: 0 });
   });
 
   it('reports no queued segment when stopping exactly at a segment boundary', async () => {
