@@ -25,3 +25,15 @@ export function aggregateSyncStatus(counts: SyncCounts): AggregateSyncStatus {
   if (counts.applying > 0) return 'applying';
   return counts.active > 0 ? 'in_sync' : 'none';
 }
+
+export function isCurrentOrganizationLoad(
+  requestedOrganizationId: string,
+  selectedOrganizationId: string | null,
+  requestGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return (
+    requestedOrganizationId === selectedOrganizationId
+    && requestGeneration === currentGeneration
+  );
+}

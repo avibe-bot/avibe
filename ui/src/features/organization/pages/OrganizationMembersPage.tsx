@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Download,
   Mail,
@@ -49,6 +56,7 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
+import { isCurrentOrganizationLoad } from '../policy';
 
 type MemberFilter = 'all' | MemberStatus;
 
@@ -212,39 +220,70 @@ function MemberDialog({
 export function OrganizationMembersPage() {
   const { t } = useTranslation();
   const { detail, selectedOrganizationId, request, dataVersion, invalidate } = useOrganization();
-  const [members, setMembers] = useState<OrganizationMember[] | null>(null);
-  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    members: OrganizationMember[];
+    groups: OrganizationGroup[];
+  } | null>(null);
   const [filter, setFilter] = useState<MemberFilter>('all');
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string>();
+  const [errorState, setErrorState] = useState<{ organizationId: string; code: string } | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<OrganizationMember | null>(null);
   const [removing, setRemoving] = useState<OrganizationMember | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const currentDirectory = directory?.organizationId === selectedOrganizationId ? directory : null;
+  const members = currentDirectory?.members ?? null;
+  const groups = currentDirectory?.groups ?? [];
+  const error = errorState?.organizationId === selectedOrganizationId ? errorState.code : undefined;
   const canManage = detail?.capabilities.can_manage_organization === true;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    loadGeneration.current += 1;
+  }, [selectedOrganizationId]);
 
   const load = useCallback(async (): Promise<OrganizationMember[]> => {
     if (!selectedOrganizationId) return [];
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const [memberResult, groupResult] = await Promise.all([
         request<{ members: OrganizationMember[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/members`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/members`,
         ),
         request<{ groups: OrganizationGroup[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
         ),
       ]);
-      setMembers(memberResult.members);
-      setGroups(groupResult.groups);
+      if (!isCurrent()) return [];
+      setDirectory({
+        organizationId,
+        members: memberResult.members,
+        groups: groupResult.groups,
+      });
       return memberResult.members;
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return [];
+      setErrorState({
+        organizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
       return [];
     }
   }, [request, selectedOrganizationId]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [dataVersion, load]);
 
   const filtered = useMemo(() => (members ?? []).filter((member) => (
@@ -270,7 +309,10 @@ export function OrganizationMembersPage() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      setErrorState({
+        organizationId: selectedOrganizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   };
 
@@ -296,7 +338,10 @@ export function OrganizationMembersPage() {
             : null
         ));
       }
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      setErrorState({
+        organizationId: selectedOrganizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   };
 
@@ -308,7 +353,10 @@ export function OrganizationMembersPage() {
         { method: 'POST', body: jsonBody({}) },
       );
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      setErrorState({
+        organizationId: selectedOrganizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   };
 
@@ -389,9 +437,15 @@ export function OrganizationMembersPage() {
           ))}
         </TableFrame>
       )}
-      <MemberDialog open={dialogOpen} member={editing} groups={groups} onOpenChange={setDialogOpen} onSaved={load} />
+      <MemberDialog
+        open={dialogOpen && currentDirectory !== null}
+        member={currentDirectory ? editing : null}
+        groups={groups}
+        onOpenChange={setDialogOpen}
+        onSaved={load}
+      />
       <ConfirmDialog
-        open={Boolean(removing)}
+        open={Boolean(removing && currentDirectory)}
         onOpenChange={(open) => { if (!open) setRemoving(null); }}
         title={t('organization.members.removeTitle')}
         description={t('organization.members.removeBody', { email: removing?.email })}

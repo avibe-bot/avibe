@@ -161,27 +161,40 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
 
     def test_remote_callback_keeps_the_bound_subject(self):
         """Scenario: AUTH-SETUP-307"""
-        client = self.harness.remote_client(subject="user-1")
+        backend = SimpleNamespace(base_url="https://avibe.bot")
+        with patch.object(cloud_management, "_validated_backend", return_value=backend):
+            _, state = cloud_management.begin_authorization(
+                self.harness.config,
+                browser_id="browser-1",
+                remote_subject="user-1",
+                callback_origin=REMOTE_ORIGIN,
+                next_path="/admin/organization/overview",
+                silent=False,
+            )
+        client = self.harness.remote_client(subject="user-2")
         client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
-        grant = cloud_management.ManagementGrant(
-            handle="grant-1",
-            browser_id="browser-1",
-            subject="user-1",
-            email="alex@example.com",
-            token="not-exposed",
-            expires_at=4_102_444_800,
-        )
-        with patch.object(
-            cloud_management,
-            "complete_authorization",
-            return_value=(grant, "/admin/organization/overview"),
-        ) as complete:
+        token_payload = {
+            "access_token": "not-exposed",
+            "token_type": "Bearer",
+            "subject": "user-2",
+            "vibe_instance_id": "inst_123",
+        }
+        token_claims = {
+            "sub": "user-2",
+            "email": "other@example.com",
+            "vibe_instance_id": "inst_123",
+            "exp": 4_102_444_800,
+        }
+        with (
+            patch.object(cloud_management, "_backend_request", return_value=(200, token_payload)),
+            patch.object(cloud_management, "_validate_management_token", return_value=token_claims),
+        ):
             response = client.get(
-                "/auth/organization/callback?code=code-1&state=state-1",
+                f"/auth/organization/callback?code=code-1&state={state}",
                 base_url=REMOTE_ORIGIN,
             )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(complete.call_args.kwargs["remote_subject"], "user-1")
+        self.assertIn("cloud_management_error=cloud_management_subject_mismatch", response.headers["location"])
         self.assertNotIn("not-exposed", response.text)
 
     def test_trusted_loopback_flow_can_establish_the_first_subject(self):

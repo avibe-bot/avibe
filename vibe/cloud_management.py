@@ -300,16 +300,18 @@ def complete_authorization(
     email = str(claims.get("email") or "")
     response_subject = str(payload.get("subject") or "")
     response_instance = str(payload.get("vibe_instance_id") or "")
-    expected = remote_subject or handshake.expected_subject
+    subject_mismatch = any(
+        expected is not None and not secrets.compare_digest(expected, subject)
+        for expected in (handshake.expected_subject, remote_subject)
+    )
     if (
         payload.get("token_type") != "Bearer"
         or response_subject != subject
         or response_instance != config.remote_access.vibe_cloud.instance_id
         or str(claims.get("vibe_instance_id") or "") != config.remote_access.vibe_cloud.instance_id
-        or expected is not None
-        and not secrets.compare_digest(expected, subject)
+        or subject_mismatch
     ):
-        if expected is not None and subject and not secrets.compare_digest(expected, subject):
+        if subject_mismatch and subject:
             raise CloudManagementError("cloud_management_subject_mismatch", status=409)
         raise CloudManagementError("invalid_cloud_management_token", status=400)
     expires_at = float(claims["exp"])

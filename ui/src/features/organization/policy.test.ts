@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateSyncStatus,
   hasDuplicateProjectPrincipals,
+  isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
 } from './policy';
 
@@ -30,5 +31,11 @@ describe('Organization policy helpers', () => {
     expect(aggregateSyncStatus({ active: 2, error: 0, offline: 0, applying: 1, in_sync: 1 })).toBe('applying');
     expect(aggregateSyncStatus({ active: 1, error: 0, offline: 0, applying: 0, in_sync: 1 })).toBe('in_sync');
     expect(aggregateSyncStatus({ active: 0, error: 0, offline: 0, applying: 0, in_sync: 0 })).toBe('none');
+  });
+
+  it('accepts only the latest load for the currently selected Organization', () => {
+    expect(isCurrentOrganizationLoad('org-b', 'org-b', 4, 4)).toBe(true);
+    expect(isCurrentOrganizationLoad('org-a', 'org-b', 4, 4)).toBe(false);
+    expect(isCurrentOrganizationLoad('org-b', 'org-b', 3, 4)).toBe(false);
   });
 });
