@@ -1047,6 +1047,15 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
     assert store.config.sources[0].state.status == "standby"
     assert [model.id for model in store.config.sources[0].models] == ["claude-opus-4-6"]
 
+    original_start_reauth = adapter.start_reauth
+
+    async def assert_source_unavailable_before_logout(source_id, vendor):
+        persisted = store.config.sources[0]
+        assert persisted.state.status == "needs_action"
+        assert persisted.models == []
+        return await original_start_reauth(source_id, vendor)
+
+    adapter.start_reauth = assert_source_unavailable_before_logout
     started = client.post(
         f"/api/models/sources/{native.id}/reauth",
         json={"acknowledge_irreversible": True},
@@ -1084,6 +1093,35 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
     assert completed["recovered"] is False
     assert completed["source"]["account_label"] == "claude@example.test"
     assert completed["source"]["state"]["status"] == "standby"
+
+
+def test_native_reauth_reuses_pending_flow_per_source(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(source)
+    store.config.refresh_follow_orders()
+    payload = {"acknowledge_irreversible": True}
+
+    first = asyncio.run(service.reauth_source(source.id, payload))["flow"]
+    second = asyncio.run(service.reauth_source(source.id, payload))["flow"]
+
+    assert second["flow_id"] == first["flow_id"]
+    assert adapter.oauth_start_calls == [(source.id, "anthropic")]
 
 
 def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path):
@@ -1379,6 +1417,65 @@ def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
         asyncio.run(service.oauth_status(flow["flow_id"]))
 
     assert exc_info.value.code == "discovery_failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+    assert adapter.revoked == ["cred_hub_new"]
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
+
+
+def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_new",
+        }
+    )
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    original_remove = service.revocations.remove
+
+    def fail_old_journal_cleanup(source_id, credential_ref):
+        if credential_ref == "cred_hub_old":
+            raise OSError("journal cleanup failed")
+        return original_remove(source_id, credential_ref)
+
+    service.revocations.remove = fail_old_journal_cleanup
+    adapter.fail_sync = True
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "engine_down"
     assert json.dumps(
         store.config.to_payload(),
         sort_keys=True,

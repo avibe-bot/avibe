@@ -1164,6 +1164,36 @@ def test_supply_guard_reports_menu_identifier_and_effective_named_agents(tmp_pat
     ]
 
 
+def test_supply_guard_canonicalizes_opencode_effective_models(tmp_path):
+    service, _adapter = _repair_guard_service(tmp_path, enabled=False)
+    config = service.store.load()
+    config.sources[0].vendor = "zhipuai"
+    config.sources[0].models = [
+        ModelHubModelConfig(id="glm-5.2", provenance="discovered")
+    ]
+    config.sources[1].vendor = "anthropic"
+    config.sources[1].models = [
+        ModelHubModelConfig(id="claude-haiku-4-5", provenance="discovered")
+    ]
+    config.agents["claude"].mode = "direct"
+    config.agents["codex"].mode = "direct"
+    config.agents["opencode"].menu.checked = ["zhipuai/glm-5.2"]
+    service.named_agents_override = lambda backend: (
+        [("builder", "glm-5.2")] if backend == "opencode" else []
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.delete_source("src_primary01"))
+
+    assert exc_info.value.data["would_interrupt"] == [
+        {
+            "backend": "opencode",
+            "model_id": "zhipuai/glm-5.2",
+            "agents": ["builder"],
+        }
+    ]
+
+
 def test_credential_force_commits_same_narrowing_request_and_reports_gaps(tmp_path):
     service, adapter = _repair_guard_service(tmp_path, enabled=True)
     before = _serialized_config(service)
@@ -1236,6 +1266,39 @@ def test_credential_replacement_failure_preserves_prior_source(tmp_path, failure
     assert _serialized_config(service) == before
     assert "cred_replacement_1" in adapter.revoked
     assert service.revocations.list() == []
+
+
+def test_credential_replacement_rolls_back_when_old_journal_cleanup_fails(
+    tmp_path,
+):
+    adapter = NarrowingCredentialAdapter()
+    service, _adapter = _repair_guard_service(
+        tmp_path,
+        enabled=False,
+        adapter=adapter,
+    )
+    before = _serialized_config(service)
+    original_remove = service.revocations.remove
+
+    def fail_old_journal_cleanup(source_id, credential_ref):
+        if credential_ref == "cred_src_primary01":
+            raise OSError("journal cleanup failed")
+        return original_remove(source_id, credential_ref)
+
+    service.revocations.remove = fail_old_journal_cleanup
+    adapter.fail_sync = True
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.replace_credential(
+                "src_primary01",
+                {"key": "sk-failing-replacement"},
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert _serialized_config(service) == before
+    assert "cred_replacement_1" in adapter.revoked
 
 
 def test_failed_old_credential_revoke_reconciles_after_service_restart(tmp_path):

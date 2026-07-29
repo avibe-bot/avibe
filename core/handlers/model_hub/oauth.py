@@ -219,6 +219,21 @@ class OAuthFlowRegistry:
         with self._lock:
             return self._read().get(flow_id)
 
+    def pending_reauth(
+        self,
+        source_id: str,
+    ) -> tuple[str, OAuthFlowBinding] | None:
+        with self._lock:
+            flows = self._read()
+            for flow_id, binding in reversed(tuple(flows.items())):
+                if (
+                    binding.source_id == source_id
+                    and binding.intent == "reauth"
+                    and not binding.completed
+                ):
+                    return flow_id, binding
+        return None
+
     def forget(self, flow_id: str) -> None:
         with self._lock:
             flows = self._read()

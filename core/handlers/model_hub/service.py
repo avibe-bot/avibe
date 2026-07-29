@@ -70,6 +70,7 @@ from .resolver import (
     BackendName,
     ModelHubTurnResolution,
     allowed_origins,
+    normalize_opencode_requested_model,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -595,6 +596,22 @@ class ModelHubService:
             # A replayed revoke is safer than losing the only durable ref.
             pass
 
+    async def _rollback_replacement(
+        self,
+        source_id: str,
+        replacement_ref: str,
+        old_credential_ref: str | None,
+        *,
+        old_revocation_recorded: bool,
+    ) -> None:
+        if old_revocation_recorded and old_credential_ref:
+            try:
+                self.revocations.remove(source_id, old_credential_ref)
+            except OSError:
+                pass
+        if replacement_ref != old_credential_ref:
+            await self._rollback_credential(source_id, replacement_ref)
+
     def _raise_if_flow_expired(self, flow_id: str, flow: OAuthFlowState) -> None:
         if not flow.expires_at_iso or flow.state in {"success", "failed", "cancelled"}:
             return
@@ -952,15 +969,13 @@ class ModelHubService:
                     interrupted_pairs=interrupted_pairs,
                 )
             except Exception:
-                if (
-                    old_revocation_recorded
-                    and old_credential_ref
-                    and not committed
-                ):
-                    self.revocations.remove(source.id, old_credential_ref)
-                if not committed and replacement_ref != old_credential_ref:
-                    await self._rollback_credential(source.id, replacement_ref)
                 if not committed:
+                    await self._rollback_replacement(
+                        source.id,
+                        replacement_ref,
+                        old_credential_ref,
+                        old_revocation_recorded=old_revocation_recorded,
+                    )
                     try:
                         self.oauth_flows.forget(flow_id)
                     except OSError:
@@ -1226,10 +1241,13 @@ class ModelHubService:
                 await self._commit_synced(previous, config)
                 committed = True
             except Exception:
-                if old_revocation_recorded and not committed:
-                    self.revocations.remove(source.id, old_credential_ref)
                 if not committed:
-                    await self._rollback_credential(source.id, replacement_ref)
+                    await self._rollback_replacement(
+                        source.id,
+                        replacement_ref,
+                        old_credential_ref,
+                        old_revocation_recorded=old_revocation_recorded,
+                    )
                 raise
 
             if old_credential_ref != replacement_ref:
@@ -1333,6 +1351,14 @@ class ModelHubService:
             normalized = str(model_id or "").strip()
             if not normalized:
                 return
+            if backend == "opencode" and agent.menu is not None:
+                normalized = (
+                    normalize_opencode_requested_model(
+                        normalized,
+                        tuple(agent.menu.checked),
+                    )
+                    or normalized
+                )
             names = protected.setdefault(normalized, [])
             if named_agent is not None and named_agent not in names:
                 names.append(named_agent)
@@ -1803,18 +1829,34 @@ class ModelHubService:
             ):
                 raise ModelHubError("reauth_confirmation_required", status=409)
 
+            pending = self.oauth_flows.pending_reauth(source.id)
+            if pending is not None:
+                pending_flow_id, pending_binding = pending
+                try:
+                    pending_flow = await self._oauth_status(
+                        pending_flow_id,
+                        pending_binding.channel,
+                    )
+                    self._raise_if_flow_expired(pending_flow_id, pending_flow)
+                except ModelHubError as error:
+                    if error.code not in {"flow_expired", "flow_not_found"}:
+                        raise
+                else:
+                    if pending_flow.state not in {"failed", "cancelled"}:
+                        return {
+                            "flow": _oauth_payload(
+                                pending_flow,
+                                channel=pending_binding.channel,
+                                intent="reauth",
+                            )
+                        }
+                    try:
+                        self.oauth_flows.forget(pending_flow_id)
+                    except OSError:
+                        raise ModelHubError("engine_down", status=503) from None
+
             channel = cast(OAuthChannel, source.supply_channel)
             oauth_adapter = self._oauth_adapter(channel)
-            flow = await self._oauth_call(
-                (
-                    self.native_oauth_adapter.start_reauth(
-                        source.id,
-                        source.vendor,
-                    )
-                    if channel == "native_cli"
-                    else oauth_adapter.start_oauth(source.id, source.vendor)
-                )
-            )
             recovered = source.state.status in {"needs_action", "error"}
             if channel == "native_cli":
                 source.models = [
@@ -1828,6 +1870,16 @@ class ModelHubService:
                     detail_key="models.source.needs_action.oauth_expired",
                 )
                 self.store.save(config)
+            flow = await self._oauth_call(
+                (
+                    self.native_oauth_adapter.start_reauth(
+                        source.id,
+                        source.vendor,
+                    )
+                    if channel == "native_cli"
+                    else oauth_adapter.start_oauth(source.id, source.vendor)
+                )
+            )
             if flow.source_id != source.id or flow.vendor != source.vendor:
                 raise ModelHubError("flow_not_found", status=502)
             try:
