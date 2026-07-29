@@ -1262,15 +1262,23 @@ class SQLiteSessionsService:
                             scope_id=scope_id,
                             session_anchor=base_anchor,
                         )
-                        if existing_anchor_row is not None:
+                        skip_mapping = False
+                        while existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
                             existing_agent_id = str(existing_anchor_row["agent_id"] or "").strip() or None
                             existing_agent_name = str(existing_anchor_row["agent_name"] or "").strip() or None
                             existing_is_owned = _is_owned_backend(existing_backend)
+                            sentinel_variant_compatible = (
+                                existing_is_owned
+                                and _is_sentinel_variant(existing_variant)
+                                and imported_backend != "unknown"
+                                and existing_backend == imported_backend
+                            )
                             same_variant = existing_variant == imported_variant
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
-                            if existing_is_owned and (not same_variant or backend_conflicts):
+                            variant_conflicts = not same_variant and not sentinel_variant_compatible
+                            if existing_is_owned and (variant_conflicts or backend_conflicts):
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row to a different owner "
                                     "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
@@ -1282,7 +1290,8 @@ class SQLiteSessionsService:
                                     imported_backend,
                                     imported_variant,
                                 )
-                                continue
+                                skip_mapping = True
+                                break
                             identity_conflicts = False
                             if existing_is_owned and imported_agent_id is not None and existing_agent_id not in {
                                 None,
@@ -1306,7 +1315,8 @@ class SQLiteSessionsService:
                                     imported_agent_id,
                                     imported_agent_name,
                                 )
-                                continue
+                                skip_mapping = True
+                                break
                             update_values: dict[str, Any] = {"updated_at": now}
                             if not existing_is_owned:
                                 update_values["agent_variant"] = imported_variant
@@ -1326,16 +1336,43 @@ class SQLiteSessionsService:
                                     )
                                 update_values["agent_id"] = imported_agent_id
                                 update_values["agent_name"] = imported_agent_name
+                            if sentinel_variant_compatible and existing_variant != imported_variant:
+                                update_values["agent_variant"] = imported_variant
                             if existing_is_owned and imported_agent_id is not None and existing_agent_id is None:
                                 update_values["agent_id"] = imported_agent_id
                             if existing_is_owned and imported_agent_name is not None and existing_agent_name is None:
                                 update_values["agent_name"] = imported_agent_name
-                            if len(update_values) > 1:
-                                conn.execute(
-                                    agent_sessions.update()
-                                    .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
-                                    .values(**update_values)
-                                )
+                            if len(update_values) <= 1:
+                                break
+                            update_stmt = (
+                                agent_sessions.update()
+                                .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
+                                .where(agent_sessions.c.status != "archived")
+                            )
+                            if not existing_is_owned or sentinel_variant_compatible:
+                                update_stmt = update_stmt.where(
+                                    func.coalesce(agent_sessions.c.agent_backend, "") == existing_backend
+                                ).where(func.coalesce(agent_sessions.c.agent_variant, "default") == existing_variant)
+                            if existing_is_owned and imported_agent_id is not None and existing_agent_id is None:
+                                update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_id, "") == "")
+                            if existing_is_owned and imported_agent_name is not None and existing_agent_name is None:
+                                update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_name, "") == "")
+                            if conn.execute(update_stmt.values(**update_values)).rowcount:
+                                break
+                            logger.warning(
+                                "Lost the legacy-import anchor update race for session %s; re-resolving the anchor "
+                                "instead (imported backend=%s variant=%s)",
+                                existing_anchor_row["id"],
+                                imported_backend,
+                                imported_variant,
+                            )
+                            existing_anchor_row = _find_scope_anchor_row(
+                                conn,
+                                scope_id=scope_id,
+                                session_anchor=base_anchor,
+                            )
+                        if skip_mapping:
+                            continue
                         encoded_session_id = encode_session_value(native_session_id)
                         row_key = _session_row_key(
                             scope_id=scope_id,
@@ -1712,26 +1749,29 @@ def _is_owned_backend(agent_backend: str) -> bool:
     return str(agent_backend or "").strip() not in {"", "default", "unknown"}
 
 
+def _is_sentinel_variant(agent_variant: str) -> bool:
+    return str(agent_variant or "").strip() in {"", "default"}
+
+
 def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
     """Resolve a legacy mapping name through built-ins and the Vibe Agent catalog."""
     requested = str(agent_name or "").strip()
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", requested.lower()).strip("-_")
+    if normalized:
+        catalog_agent = conn.execute(
+            select(agents.c.id, agents.c.name, agents.c.backend)
+            .where(or_(agents.c.name == requested, agents.c.normalized_name == normalized))
+            .limit(1)
+        ).mappings().one_or_none()
+        if catalog_agent is not None:
+            catalog_backend = str(catalog_agent["backend"] or "").strip()
+            if catalog_backend not in _BACKEND_AGENT_NAMES:
+                return ("unknown", None, None)
+            return (catalog_backend, str(catalog_agent["id"]), str(catalog_agent["name"]))
     backend = _agent_backend(requested)
     if backend != "unknown":
         return (backend, None, None)
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", requested.lower()).strip("-_")
-    if not normalized:
-        return ("unknown", None, None)
-    catalog_agent = conn.execute(
-        select(agents.c.id, agents.c.name, agents.c.backend)
-        .where(or_(agents.c.name == requested, agents.c.normalized_name == normalized))
-        .limit(1)
-    ).mappings().one_or_none()
-    if catalog_agent is None:
-        return ("unknown", None, None)
-    catalog_backend = str(catalog_agent["backend"] or "").strip()
-    if catalog_backend not in _BACKEND_AGENT_NAMES:
-        return ("unknown", None, None)
-    return (catalog_backend, str(catalog_agent["id"]), str(catalog_agent["name"]))
+    return ("unknown", None, None)
 
 
 def _agent_session_name_predicate(agent_name: str) -> Any:
@@ -1952,6 +1992,7 @@ def _find_scope_anchor_row(
             )
             .where(agent_sessions.c.scope_id == scope_id)
             .where(agent_sessions.c.session_anchor == str(session_anchor))
+            .where(agent_sessions.c.status != "archived")
             .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
             .limit(1)
         )
