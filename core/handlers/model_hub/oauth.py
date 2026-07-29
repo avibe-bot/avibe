@@ -8,7 +8,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Protocol
+from typing import Callable, Literal, Optional, Protocol
 
 from .adapter import OAuthFlowState
 
@@ -47,7 +47,13 @@ class NativeOAuthSourceStatus:
 
 
 class NativeOAuthAdapter(OAuthAdapter, Protocol):
-    async def start_reauth(self, source_id: str, vendor: str) -> OAuthFlowState: ...
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[[], None] | None = None,
+    ) -> OAuthFlowState: ...
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
 
@@ -62,7 +68,13 @@ class UnavailableNativeOAuthAdapter:
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         raise NativeOAuthUnavailableError
 
-    async def start_reauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[[], None] | None = None,
+    ) -> OAuthFlowState:
         raise NativeOAuthUnavailableError
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:

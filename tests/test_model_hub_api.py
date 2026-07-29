@@ -170,7 +170,15 @@ class FakeAdapter:
         self.flows[flow.flow_id] = flow
         return flow
 
-    async def start_reauth(self, source_id, vendor):
+    async def start_reauth(
+        self,
+        source_id,
+        vendor,
+        *,
+        on_irreversible_start=None,
+    ):
+        if on_irreversible_start is not None:
+            on_irreversible_start()
         return await self.start_oauth(source_id, vendor)
 
     async def oauth_status(self, flow_id):
@@ -1049,8 +1057,17 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
 
     original_start_reauth = adapter.start_reauth
 
-    async def assert_source_unavailable_before_logout(source_id, vendor):
+    async def assert_source_unavailable_before_logout(
+        source_id,
+        vendor,
+        *,
+        on_irreversible_start=None,
+    ):
         persisted = store.config.sources[0]
+        assert persisted.state.status == "standby"
+        assert [model.id for model in persisted.models] == ["claude-opus-4-6"]
+        assert on_irreversible_start is not None
+        on_irreversible_start()
         assert persisted.state.status == "needs_action"
         assert persisted.models == []
         return await original_start_reauth(source_id, vendor)
@@ -1218,6 +1235,65 @@ def test_native_reauth_registry_failure_keeps_irreversible_state_honest(
     assert store.config.sources[0].state.status == "needs_action"
 
 
+def test_native_reauth_pre_boundary_failure_preserves_prior_supply(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(source)
+    store.config.refresh_follow_orders()
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    async def fail_before_logout(
+        source_id,
+        vendor,
+        *,
+        on_irreversible_start=None,
+    ):
+        flow = OAuthFlowState(
+            **{
+                **adapter._flow(source_id, "oaf_failed01").__dict__,
+                "vendor": vendor,
+                "state": "failed",
+                "error_key": "settings.models.oauth.error.generic",
+            }
+        )
+        adapter.flows[flow.flow_id] = flow
+        return flow
+
+    adapter.start_reauth = fail_before_logout
+    result = asyncio.run(
+        service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+    )
+
+    assert result["flow"]["state"] == "failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+
+
 def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -1363,6 +1439,111 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     }
     assert adapter.revoked == []
     assert service.revocations.list() == []
+
+
+def test_failed_undiscriminated_hub_reauth_fails_closed(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            ),
+            ModelHubModelConfig(
+                id="manual-model",
+                provenance="manual",
+            ),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+        }
+    )
+
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["flow"]["state"] == "failed"
+    persisted = store.config.sources[0]
+    assert persisted.credential_ref == "cred_hub_existing"
+    assert [model.id for model in persisted.models] == ["manual-model"]
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"
+    assert adapter.revoked == []
+    assert service.revocations.list() == []
+
+
+@pytest.mark.parametrize("registry_failure", ["missing", "unwritable"])
+def test_hub_reauth_returns_terminal_tail_when_registry_completion_fails(
+    tmp_path,
+    registry_failure,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+    original_complete = service.oauth_flows.complete
+    completion_calls = 0
+
+    def fail_registry_complete(*args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if registry_failure == "unwritable":
+            raise OSError("registry unavailable")
+        if completion_calls == 1:
+            service.oauth_flows.path.unlink()
+        return original_complete(*args, **kwargs)
+
+    service.oauth_flows.complete = fail_registry_complete
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["flow"]["state"] == "success"
+    assert result["source"]["state"]["status"] == "standby"
+    assert result["recovered"] is False
+    assert result["interrupted_pairs"] == []
+    assert completion_calls == (2 if registry_failure == "missing" else 1)
 
 
 @pytest.mark.parametrize("failure", ["discovery", "sync"])

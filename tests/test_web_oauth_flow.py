@@ -356,6 +356,28 @@ def test_claude_oauth_settings_cleanup_failure_fails_web_start(
     service._create_claude_control_client.assert_not_awaited()
 
 
+def test_claude_web_start_checks_prerequisites_before_irreversible_callback(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    irreversible_starts = []
+    monkeypatch.setattr(
+        "core.agent_auth_service.CLAUDE_SDK_AVAILABLE",
+        False,
+    )
+
+    flow = _run(
+        service.start_web_setup(
+            "claude",
+            force_reset=True,
+            on_irreversible_start=lambda: irreversible_starts.append("started"),
+        )
+    )
+
+    assert flow.state == "failed"
+    assert irreversible_starts == []
+
+
 def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(
     service: AgentAuthService,
 ) -> None:

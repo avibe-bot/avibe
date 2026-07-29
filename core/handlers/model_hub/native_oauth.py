@@ -25,7 +25,13 @@ _MAX_FLOWS = 100
 class AgentAuthService(Protocol):
     setup_timeout_seconds: float
 
-    async def start_web_setup(self, backend: str, *, force_reset: bool = True) -> Any: ...
+    async def start_web_setup(
+        self,
+        backend: str,
+        *,
+        force_reset: bool = True,
+        on_irreversible_start: Callable[[], None] | None = None,
+    ) -> Any: ...
 
     def get_web_flow_status(self, flow_id: str) -> dict[str, Any]: ...
 
@@ -127,11 +133,18 @@ class AgentAuthNativeOAuthAdapter:
             force_reset=False,
         )
 
-    async def start_reauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[[], None] | None = None,
+    ) -> OAuthFlowState:
         return await self._start_oauth(
             source_id,
             vendor,
             force_reset=True,
+            on_irreversible_start=on_irreversible_start,
         )
 
     async def _start_oauth(
@@ -140,6 +153,7 @@ class AgentAuthNativeOAuthAdapter:
         vendor: str,
         *,
         force_reset: bool,
+        on_irreversible_start: Callable[[], None] | None = None,
     ) -> OAuthFlowState:
         backend = _VENDOR_BACKENDS.get(vendor)
         if backend is None:
@@ -148,6 +162,7 @@ class AgentAuthNativeOAuthAdapter:
         flow = await self._agent_auth_service.start_web_setup(
             backend,
             force_reset=force_reset,
+            on_irreversible_start=on_irreversible_start,
         )
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:

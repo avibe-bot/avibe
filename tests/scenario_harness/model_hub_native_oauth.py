@@ -47,7 +47,15 @@ class FakeAgentAuthService:
         self.cancelled: list[str] = []
         self.start_calls: list[tuple[str, bool]] = []
 
-    async def start_web_setup(self, backend: str, *, force_reset: bool = True):
+    async def start_web_setup(
+        self,
+        backend: str,
+        *,
+        force_reset: bool = True,
+        on_irreversible_start=None,
+    ):
+        if force_reset and on_irreversible_start is not None:
+            on_irreversible_start()
         self.start_calls.append((backend, force_reset))
         flow_id = f"web_{uuid.uuid4().hex[:8]}"
         flow = SimpleNamespace(

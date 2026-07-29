@@ -533,26 +533,32 @@ class ModelHubService:
                 return
             config = self.store.load()
             await self._sync_sources(config, force_empty=bool(pending_revocations))
+            self._engine_synced = True
             active_credentials = {
                 source.id: source.credential_ref for source in config.sources
             }
             for pending in pending_revocations:
                 if active_credentials.get(pending.source_id) == pending.credential_ref:
-                    self.revocations.remove(
-                        pending.source_id,
-                        pending.credential_ref,
-                    )
+                    try:
+                        self.revocations.remove(
+                            pending.source_id,
+                            pending.credential_ref,
+                        )
+                    except OSError:
+                        pass
                     continue
                 try:
                     await self.adapter.revoke_credential(pending.credential_ref)
                 except Exception as error:
                     if not self._credential_was_already_revoked(error):
-                        raise ModelHubError("engine_down", status=503) from None
-                self.revocations.remove(
-                    pending.source_id,
-                    pending.credential_ref,
-                )
-            self._engine_synced = True
+                        continue
+                try:
+                    self.revocations.remove(
+                        pending.source_id,
+                        pending.credential_ref,
+                    )
+                except OSError:
+                    pass
 
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
@@ -916,7 +922,7 @@ class ModelHubService:
         flow_id: str,
         binding: OAuthFlowBinding,
         flow: OAuthFlowState,
-    ) -> None:
+    ) -> dict:
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
 
@@ -972,12 +978,16 @@ class ModelHubService:
                 self._apply_discovered_models(source, manual, discovered)
                 self.store.save(config)
                 interrupted_pairs = self._would_interrupt(config)
-                self.oauth_flows.complete(
+                self._complete_reauth_flow(
                     flow_id,
-                    recovered=binding.recovered is True,
-                    interrupted_pairs=interrupted_pairs,
+                    binding,
+                    interrupted_pairs,
                 )
-            return
+                return {
+                    "source": source.to_payload(),
+                    "recovered": binding.recovered is True,
+                    "interrupted_pairs": interrupted_pairs,
+                }
 
         if not flow.credential_ref:
             raise ModelHubError("flow_not_found", status=404)
@@ -1012,10 +1022,10 @@ class ModelHubService:
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
                 committed = True
-                self.oauth_flows.complete(
+                self._complete_reauth_flow(
                     flow_id,
-                    recovered=binding.recovered is True,
-                    interrupted_pairs=interrupted_pairs,
+                    binding,
+                    interrupted_pairs,
                 )
             except Exception:
                 if not committed:
@@ -1054,20 +1064,83 @@ class ModelHubService:
                         )
                     except OSError:
                         pass
+            return {
+                "source": source.to_payload(),
+                "recovered": binding.recovered is True,
+                "interrupted_pairs": interrupted_pairs,
+            }
+
+    def _complete_reauth_flow(
+        self,
+        flow_id: str,
+        binding: OAuthFlowBinding,
+        interrupted_pairs: list[dict],
+    ) -> None:
+        try:
+            self.oauth_flows.complete(
+                flow_id,
+                recovered=binding.recovered is True,
+                interrupted_pairs=interrupted_pairs,
+            )
+        except KeyError:
+            try:
+                self.oauth_flows.remember(
+                    flow_id,
+                    binding.channel,
+                    binding.source_id,
+                    binding.vendor,
+                    experimental_consent=binding.experimental_consent,
+                    intent="reauth",
+                    recovered=binding.recovered,
+                )
+                self.oauth_flows.complete(
+                    flow_id,
+                    recovered=binding.recovered is True,
+                    interrupted_pairs=interrupted_pairs,
+                )
+            except (KeyError, OSError):
+                pass
+        except OSError:
+            pass
 
     async def _materialize_completed_oauth(
         self,
         flow_id: str,
         binding: OAuthFlowBinding,
         flow: OAuthFlowState,
-    ) -> OAuthFlowState:
+    ) -> tuple[OAuthFlowState, dict | None]:
         if flow.state != "success":
-            return flow
+            if (
+                flow.state == "failed"
+                and binding.intent == "reauth"
+                and binding.channel == "hub"
+                and binding.source_id is not None
+            ):
+                async with self._mutation_lock:
+                    config = self.store.load()
+                    source = self._source(config, binding.source_id)
+                    if not self._source_matches_binding(source, binding):
+                        raise ModelHubError("flow_not_found", status=404)
+                    source.models = [
+                        model
+                        for model in source.models
+                        if model.provenance == "manual"
+                    ]
+                    source.state = ModelHubSourceStateConfig(
+                        status="needs_action",
+                        detail_key="models.source.needs_action.oauth_expired",
+                    )
+                    self.store.save(config)
+            return flow, None
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
         if binding.intent == "reauth":
-            await self._materialize_reauth(flow_id, binding, flow)
-            return flow
+            repair_result = await self._materialize_reauth(
+                flow_id,
+                binding,
+                flow,
+            )
+            return flow, repair_result
         if binding.channel == "hub" and not binding.experimental_consent:
             raise ModelHubError("consent_required", status=409)
 
@@ -1103,7 +1176,7 @@ class ModelHubService:
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is None:
             raise ModelHubError("flow_not_found", status=404)
-        return completed
+        return completed, None
 
     def list_sources(self) -> list[dict]:
         config = self.store.load()
@@ -1928,7 +2001,8 @@ class ModelHubService:
             channel = cast(OAuthChannel, source.supply_channel)
             oauth_adapter = self._oauth_adapter(channel)
             recovered = source.state.status in {"needs_action", "error"}
-            if channel == "native_cli":
+
+            def mark_native_irreversible_start() -> None:
                 source.models = [
                     model
                     for model in source.models
@@ -1940,11 +2014,13 @@ class ModelHubService:
                     detail_key="models.source.needs_action.oauth_expired",
                 )
                 self.store.save(config)
+
             flow = await self._oauth_call(
                 (
                     self.native_oauth_adapter.start_reauth(
                         source.id,
                         source.vendor,
+                        on_irreversible_start=mark_native_irreversible_start,
                     )
                     if channel == "native_cli"
                     else oauth_adapter.start_oauth(source.id, source.vendor)
@@ -2053,7 +2129,20 @@ class ModelHubService:
             )
         flow = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, flow)
-        flow = await self._materialize_completed_oauth(flow_id, binding, flow)
+        flow, repair_result = await self._materialize_completed_oauth(
+            flow_id,
+            binding,
+            flow,
+        )
+        if repair_result is not None:
+            return {
+                "flow": _oauth_payload(
+                    flow,
+                    channel=binding.channel,
+                    intent="reauth",
+                ),
+                **repair_result,
+            }
         return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_submit(self, payload: dict) -> dict:
@@ -2075,7 +2164,20 @@ class ModelHubService:
             self._oauth_adapter(binding.channel).submit_oauth(flow_id, value),
             flow_id=flow_id,
         )
-        flow = await self._materialize_completed_oauth(flow_id, binding, flow)
+        flow, repair_result = await self._materialize_completed_oauth(
+            flow_id,
+            binding,
+            flow,
+        )
+        if repair_result is not None:
+            return {
+                "flow": _oauth_payload(
+                    flow,
+                    channel=binding.channel,
+                    intent="reauth",
+                ),
+                **repair_result,
+            }
         return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_cancel(self, flow_id: object) -> None:

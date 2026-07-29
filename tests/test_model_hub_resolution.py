@@ -666,6 +666,28 @@ def test_pending_revoke_clears_when_credential_is_already_absent(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_pending_revoke_failure_does_not_block_hub_routing(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    adapter.fail_revoke = True
+    service = _service(tmp_path, adapter)
+    service.revocations.add("src_deleted", "cred_deleted")
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert adapter.revoked == ["cred_deleted"]
+    assert service.revocations.list()[0].credential_ref == "cred_deleted"
+    assert adapter.invocations == [
+        ("src_primary01", "claude-opus-4-6", "claude")
+    ]
+
+
 def test_direct_mode_never_enters_hub_resolution(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
