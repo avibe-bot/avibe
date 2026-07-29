@@ -54,8 +54,10 @@ from storage.workbench_sessions_service import (
     touch_session,
     update_session,
 )
+from vibe.i18n import t as i18n_t
 
 __all__ = [
+    "SESSION_ARCHIVED_I18N_KEY",
     "SessionArchivedError",
     "SessionBackendLockedError",
     "archive_session",
@@ -70,11 +72,44 @@ __all__ = [
     "list_sessions_page",
     "reset_running_agent_status",
     "set_agent_status",
+    "session_archived_message",
     "touch_session",
     "update_session",
     "reserve_agent_session",
     "reserve_standalone_agent_session",
 ]
+
+
+# --- Localized copy for the terminal-archive refusal ------------------
+#
+# ``SessionArchivedError`` carries a developer-facing sentence (it names the
+# session id), but the ``message`` a route puts in its 409 body is USER-visible:
+# direct API/CLI consumers read it verbatim, and a Web UI client that lacks the
+# ``errors.session_archived`` translation renders it as the fallback. So it has to
+# come from ``vibe/i18n`` rather than an English literal at the route (AGENTS.md
+# §6). Shaped exactly like ``core.show_session_events.localized_show_event_error``:
+# a module-level key constant beside the error it describes (so the parity guard in
+# ``tests/test_i18n_backend_keys.py`` can pin it) plus a factory that resolves the
+# user's configured language and degrades to English if the config is unreadable.
+SESSION_ARCHIVED_I18N_KEY = "error.sessionArchived"
+
+
+def session_archived_message(lang: Optional[str] = None) -> str:
+    """User-facing copy for a write refused because the session is archived.
+
+    ``lang`` defaults to the configured UI language; an unreadable/missing config
+    (a brand-new install, a partially-written file) falls back to English rather
+    than failing the response.
+    """
+
+    if not lang:
+        from config.v2_config import V2Config
+
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+    return i18n_t(SESSION_ARCHIVED_I18N_KEY, lang)
 
 
 # --- Reservation helpers (IM-style scope_key + session_anchor) --------

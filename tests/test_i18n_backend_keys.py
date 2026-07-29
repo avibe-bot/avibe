@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.run_settlement import SETTLEMENT_I18N_KEYS, SWEEP_I18N_KEYS
+from core.services.sessions import SESSION_ARCHIVED_I18N_KEY, session_archived_message
 from core.show_session_events import SHOW_EVENT_ERROR_I18N_KEYS
 from storage.background import (
     SWEEP_REASON_ORPHANED,
@@ -92,3 +93,15 @@ def test_every_show_event_error_resolves(code: str, key: str) -> None:
         resolved = t(key, lang)
         assert resolved != key, f"{key} is not translated in {lang} (code={code})"
         assert resolved.strip()
+
+
+def test_session_archived_message_resolves_in_every_language() -> None:
+    # This string ships in the ``409 session_archived`` response body, which direct
+    # API/CLI consumers read verbatim and the Web UI renders as its fallback when
+    # ``errors.session_archived`` is missing — so an unresolved key would leak the
+    # dotted path to a user, and a missing translation would leak English.
+    for lang in get_supported_languages():
+        resolved = session_archived_message(lang)
+        assert resolved != SESSION_ARCHIVED_I18N_KEY, f"{SESSION_ARCHIVED_I18N_KEY} is not translated in {lang}"
+        assert resolved.strip()
+        assert resolved == t(SESSION_ARCHIVED_I18N_KEY, lang)

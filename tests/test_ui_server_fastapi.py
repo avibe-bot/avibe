@@ -271,10 +271,16 @@ def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
     ``errors.session_archived``, and renders that English sentence under every
     locale. Asserting only ``body["code"]`` passed while that was broken — the field
     the frontend consumes is the nested one, so pin both.
+
+    The ``message`` must also come from ``vibe/i18n`` rather than a literal in the
+    route (AGENTS.md §6): direct API/CLI consumers read it verbatim, and a Web UI
+    client missing ``errors.session_archived`` renders it as the fallback.
     """
+    from core.services.sessions import SESSION_ARCHIVED_I18N_KEY, session_archived_message
     from storage.db import create_sqlite_engine
     from storage.projects_service import create_project
     from storage.workbench_sessions_service import archive_session, create_session, get_session
+    from vibe.i18n import t as i18n_t
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
@@ -295,8 +301,16 @@ def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
     blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
     assert blocked.status_code == 409
     body = blocked.get_json()
+    # Sourced from the i18n bundle, NOT a literal in the route. Resolving the key
+    # here (rather than pinning the English sentence) is what makes a hardcoded
+    # regression fail: an inlined string would no longer equal the bundle value.
+    expected_message = i18n_t(SESSION_ARCHIVED_I18N_KEY, "en")
+    assert expected_message != SESSION_ARCHIVED_I18N_KEY  # the key really resolves
+    assert body["message"] == expected_message == session_archived_message("en")
+    # ...and the pre-fix literal is gone for good.
+    assert body["message"] != "session is archived"
     # What the Web UI parser consumes: a nested object carrying the machine code.
-    assert body["error"] == {"code": "session_archived", "message": "session is archived"}
+    assert body["error"] == {"code": "session_archived", "message": expected_message}
     # Kept flat as well for the CLI / any direct consumer.
     assert body["code"] == "session_archived"
     assert body["ok"] is False
@@ -305,6 +319,121 @@ def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
     assert not isinstance(body["error"], str)
     with engine.connect() as conn:
         assert get_session(conn, sid)["title"] == "Live rename"
+
+
+def test_sessions_patch_archived_message_follows_configured_language(monkeypatch, tmp_path):
+    """The 409 ``message`` is localized, not just centralized.
+
+    A direct API/CLI consumer reads this field verbatim, and a Web UI client without
+    the ``errors.session_archived`` key falls back to it — so under a ``zh`` config
+    it must not be English. Guards the whole path (config language → ``vibe/i18n``
+    → response body), which is what a hardcoded literal or a hardwired ``lang="en"``
+    would break.
+    """
+    from config import paths
+    from core.services.sessions import session_archived_message
+    from core.services.settings import default_config
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+    blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
+    assert blocked.status_code == 409
+    body = blocked.get_json()
+    assert body["message"] == session_archived_message("zh")
+    assert body["message"] != session_archived_message("en")
+    assert body["error"]["message"] == body["message"]
+
+
+def test_sessions_patch_archived_outranks_the_backend_lock_preflight(monkeypatch, tmp_path):
+    """Archive is TERMINAL, so it must win over the transient backend lock.
+
+    ``archive_session`` cannot cancel an in-flight chat turn inside its transaction
+    (the turn lives in the controller process), so the DELETE route commits the
+    archive first and cancels best-effort afterwards. A stale cross-backend PATCH
+    landing in that window used to hit the controller-consulting preflight first and
+    come back ``409 backend_locked`` — a retryable code that masked the terminal
+    state, so the client could never recognize ``session_archived`` and converge.
+
+    Pinned two ways: the archived row answers ``session_archived`` AND the controller
+    is never consulted at all; the live row keeps its existing ``backend_locked``
+    answer, so the ordering change is scoped to archived sessions only.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        live = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Live")["id"]
+        archived = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Gone")["id"]
+        archive_session(conn, archived)
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+
+    with patch("vibe.internal_client.turn_state", in_flight):
+        # Positive control: an ACTIVE session with a live turn still refuses the
+        # cross-backend switch with the transient lock, via the controller.
+        locked = client.patch(f"/api/sessions/{live}", json={"agent_name": "reviewer"}, headers=headers)
+        assert locked.status_code == 409
+        assert locked.get_json()["code"] == "backend_locked"
+        assert in_flight.await_count == 1
+
+        blocked = client.patch(f"/api/sessions/{archived}", json={"agent_name": "reviewer"}, headers=headers)
+
+    assert blocked.status_code == 409
+    body = blocked.get_json()
+    assert body["code"] == "session_archived"
+    assert body["error"]["code"] == "session_archived"
+    # Short-circuited BEFORE the controller: no extra turn-state call was made.
+    assert in_flight.await_count == 1
+
+
+def test_sessions_patch_missing_session_is_still_404(monkeypatch, tmp_path):
+    """The archived short-circuit must not swallow the not-found case.
+
+    ``is_session_archived`` is "exists AND archived", so an unknown id falls through
+    to the 404 the route always returned.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    client = app.test_client()
+    missing = client.patch("/api/sessions/ses_nope", json={"title": "x"}, headers=csrf_headers(client))
+    assert missing.status_code == 404
+    # And an empty patch is still a 400 (validated before any row read).
+    empty = client.patch("/api/sessions/ses_nope", json={}, headers=csrf_headers(client))
+    assert empty.status_code == 400
 
 
 def test_sessions_patch_archived_conflict_survives_ui_error_parse(monkeypatch, tmp_path):

@@ -6454,6 +6454,38 @@ async def sessions_bootstrap(session_id: str):
     )
 
 
+def _session_archived_response():
+    """Shared 409 payload for a write refused because the session is archived.
+
+    STRUCTURED ``error`` (the shape ``_show_page_error_response`` /
+    ``_dock_error_response`` / ``_project_not_found`` use), not a flat string. The
+    Web UI's shared parser reads ``data.error`` FIRST and treats a string ``error``
+    as the machine code, so ``{"error": "<sentence>", "code": ...}`` would hand
+    callers ``ApiError.code == "<sentence>"``, never resolve
+    ``errors.session_archived``, and render that sentence verbatim under every
+    locale. The nested object keeps the code machine-readable; the flat top-level
+    ``code``/``message`` stay for the CLI and any direct consumer.
+
+    The ``message`` comes from ``vibe/i18n`` (AGENTS.md §6) rather than an English
+    literal: direct API/CLI consumers read it verbatim, and a Web UI client without
+    the ``errors.session_archived`` key falls back to it too.
+    """
+    from core.services import sessions as workbench_sessions_service
+
+    message = workbench_sessions_service.session_archived_message()
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": {"code": "session_archived", "message": message},
+                "code": "session_archived",
+                "message": message,
+            }
+        ),
+        409,
+    )
+
+
 def _backend_locked_response(err):
     """Shared 409 payload for a rejected cross-backend session change."""
     return (
@@ -6555,6 +6587,22 @@ async def sessions_update(session_id: str):
         return jsonify({"error": "no updatable fields supplied"}), 400
 
     engine = _projects_engine()
+    # Archive is TERMINAL, so it outranks every transient conflict below — most
+    # importantly the cross-backend lock preflight, which consults the controller
+    # and would answer a retryable ``backend_locked`` for an archived row whose
+    # in-flight turn is still unwinding: ``archive_session`` cannot cancel that turn
+    # inside its transaction, so the DELETE route commits the archive first and
+    # cancels best-effort afterwards (``_archive_cancel_turn``). A stale
+    # cross-backend PATCH landing in that window used to have its terminal state
+    # masked, leaving the client unable to recognize ``session_archived`` and
+    # converge. Short-circuit here so the archive conflict always wins.
+    #
+    # Same shared write-guard the messages POST uses. A MISSING session reads
+    # ``False``, so the 404s below are unchanged, and every non-archived PATCH pays
+    # only one indexed read and keeps its existing preflight ordering.
+    with engine.connect() as conn:
+        if workbench_sessions_service.is_session_archived(conn, session_id):
+            return _session_archived_response()
     should_check_backend_lock = "agent_backend" in updatable
     requested_backend = updatable.get("agent_backend")
     if "agent_name" in updatable and "agent_backend" not in updatable:
@@ -6606,29 +6654,11 @@ async def sessions_update(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except workbench_sessions_service.SessionArchivedError:
-        # Archive is terminal — the read-only chat UI relies on this backstop.
-        #
-        # STRUCTURED ``error`` (the shape ``_show_page_error_response`` /
-        # ``_dock_error_response`` / ``_project_not_found`` use), not a flat string.
-        # The Web UI's shared parser reads ``data.error`` FIRST and treats a string
-        # ``error`` as the machine code, so ``{"error": "session is archived",
-        # "code": ...}`` would hand callers ``ApiError.code == "session is
-        # archived"``, never resolve ``errors.session_archived``, and render that
-        # English sentence verbatim under every locale. The nested object keeps the
-        # code machine-readable; the flat top-level ``code``/``message`` stay for the
-        # CLI and any direct consumer.
-        message = "session is archived"
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": {"code": "session_archived", "message": message},
-                    "code": "session_archived",
-                    "message": message,
-                }
-            ),
-            409,
-        )
+        # Archive is terminal — the read-only chat UI relies on this backstop. The
+        # short-circuit above already answers the common case; this catches a
+        # session archived BETWEEN that read and this write, and keeps the service
+        # guard authoritative rather than trusting the route's preflight.
+        return _session_archived_response()
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:

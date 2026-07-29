@@ -87,10 +87,14 @@ def test_public_surface_is_stable():
         "SessionBackendLockedError",
         # Terminal-archive guard raised by update_session on an archived row:
         "SessionArchivedError",
+        # Localized user-facing copy for that guard's 409 body:
+        "session_archived_message",
     }
-    assert set(sessions_service.__all__) == expected
+    assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:
         assert callable(getattr(sessions_service, name))
+    # The one non-callable member: the i18n key constant the parity guard pins.
+    assert isinstance(sessions_service.SESSION_ARCHIVED_I18N_KEY, str)
 
 
 def test_each_workbench_function_delegates_to_storage():

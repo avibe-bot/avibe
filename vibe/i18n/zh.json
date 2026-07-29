@@ -103,6 +103,7 @@
     }
   },
   "error": {
+    "sessionArchived": "该会话已归档，无法再修改。",
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",
