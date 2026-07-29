@@ -154,6 +154,10 @@ export const OAuthConnectDialog: React.FC<{
       } else if (step.action === 'fail') {
         setErrorKey(result.flow.error_key ?? 'settings.models.oauth.error.generic');
       }
+      // A paste submit can terminate the flow while a poll timer is still armed;
+      // the guard above already makes that poll harmless, but there is no reason
+      // to let it fire.
+      if (isDone(step.action)) stop();
       return isDone(step.action);
     };
     settleRef.current = settle;

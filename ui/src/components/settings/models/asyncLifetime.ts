@@ -36,12 +36,21 @@ export const initialSeedState: SeedState = { seeded: false, baseline: null };
  * Whether a drawer holding `state` must re-seat itself now that the server's
  * saved state reads `authoritative`.
  *
- * Seeds once per mount. The page renders each drawer only while it is open, so
- * "on open" and "on mount" are the same moment, and every later arrival is
- * treated as a background refresh that must not clobber an edit in flight.
+ * Seeds on open, and again whenever the saved state MOVED under it. Keying on
+ * open alone is not enough: the page unmounts a drawer when it closes, so a
+ * drawer closed and reopened while its own PUT is in flight seeds from the
+ * pre-save props and then never learns that the save landed — and its next edit
+ * diffs against that superseded snapshot and writes the old state back over the
+ * save the user already saw succeed.
+ *
+ * A refetch that changed nothing is still inert, which is the whole reason this
+ * compares content rather than the props object: that is what protects an edit in
+ * flight from a background page refresh. When the saved state genuinely moved,
+ * re-seating is the only honest option — a draft built on a base the server has
+ * replaced can only be written back as a regression.
  */
 export const seedStep = (state: SeedState, authoritative: string): { state: SeedState; reseed: boolean } => {
-  if (state.seeded) return { state, reseed: false };
+  if (state.seeded && state.baseline === authoritative) return { state, reseed: false };
   return { state: { seeded: true, baseline: authoritative }, reseed: true };
 };
 
@@ -68,21 +77,25 @@ export type FlowAction = 'continue' | 'succeed' | 'fail' | 'timeout' | 'ignore';
 export type FlowView = { flow: OAuthFlow | null; settled: boolean };
 
 export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; action: FlowAction } => {
+  // Nothing gets to change a finished flow — checked before the event is read, so
+  // it holds for EVERY entry point (a poll still in flight when success landed, a
+  // paste submit racing that poll, and the deadline tick, which used to stamp
+  // `failed` over a success on a dialog left open because nothing adopted the
+  // source).
+  if (view.settled) return { view, action: 'ignore' };
   if (event.kind === 'tick') {
     if (!event.overdue) return { view, action: 'continue' };
     return {
-      view: { flow: view.flow ? { ...view.flow, state: 'failed' } : null, settled: view.settled },
+      view: { flow: view.flow ? { ...view.flow, state: 'failed' } : null, settled: true },
       action: 'timeout',
     };
   }
   const flow = event.flow;
-  const shown = { flow, settled: view.settled };
-  if (flow.state === 'success') {
-    if (view.settled) return { view: shown, action: 'ignore' };
-    return { view: { flow, settled: true }, action: 'succeed' };
-  }
-  if (flow.state === 'failed' || flow.state === 'cancelled') return { view: shown, action: 'fail' };
-  return { view: shown, action: 'continue' };
+  if (flow.state === 'success') return { view: { flow, settled: true }, action: 'succeed' };
+  // `settled` means terminal, not successful: a failed flow is just as finished,
+  // and a later arrival has just as little business reopening it.
+  if (flow.state === 'failed' || flow.state === 'cancelled') return { view: { flow, settled: true }, action: 'fail' };
+  return { view: { flow, settled: false }, action: 'continue' };
 };
 
 /** Whether an action ends the flow, so the caller stops polling. */
