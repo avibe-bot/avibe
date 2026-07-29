@@ -6585,6 +6585,35 @@ def _session_archived_response():
     return _coded_error_response("session_archived", workbench_sessions_service.session_archived_message(), 409)
 
 
+#: The archive/edit refusal's copy: the row exists to receive notices and cannot be
+#: torn down or re-labelled. Used by the DELETE and PATCH guards.
+RESERVED_SESSION_PROTECTED_I18N_KEY = "harness.notice.workspaceSessionProtected"
+#: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
+#: is not an answer to "why did my message not send", and the composer's own inert-state
+#: notice has to say the same thing this body says.
+RESERVED_SESSION_READ_ONLY_I18N_KEY = "harness.notice.workspaceSessionReadOnly"
+
+
+def _reserved_session_response(i18n_key: str, *, code: str = "reserved_session"):
+    """Shared 403 payload for a write refused because the RUNTIME reserves the session.
+
+    Third instance of the same three lines (DELETE teardown, PATCH edit, and now the
+    messages POST), so it is extracted rather than copied again. The refusal is 403 and
+    not the archive's 409: this is not a lifecycle state the caller could wait out, it is
+    a row the caller does not own.
+
+    One ``code`` for all three (``reserved_session``) so a Web UI client resolves one
+    ``errors.*`` entry, with the per-verb sentence chosen by ``i18n_key`` — the same split
+    the archived refusal uses (global ``errors.session_archived`` plus per-verb
+    ``chat.archived.*`` copy). ``storage`` raises the machine ``code`` and carries no
+    user-facing text, because the configured language is only resolvable up here.
+    """
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(code, t(i18n_key, lang), 403)
+
+
 def _backend_locked_response(err):
     """Shared 409 payload for a rejected cross-backend session change.
 
@@ -6767,12 +6796,9 @@ async def sessions_update(session_id: str):
         # same way it refuses archive: a flipped visibility or title would
         # un-project the system surface until the next heal. Mirror the DELETE
         # route's 403 + localized copy so the two guards read as one contract.
-        code = getattr(err, "code", "reserved_session")
-        from core.services import settings as settings_service
-
-        lang = settings_service.load_config_or_default().language
-        return _coded_error_response(
-            code, t("harness.notice.workspaceSessionProtected", lang), 403
+        return _reserved_session_response(
+            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code=getattr(err, "code", "reserved_session"),
         )
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
@@ -6900,13 +6926,9 @@ async def sessions_archive(session_id: str):
         # is D5 rung (5)'s home). ``storage`` raises a machine ``code`` and carries no
         # user-facing text, because the configured language is only resolvable up here.
         code = getattr(err, "code", "forbidden")
-        message = str(err)
         if code == "reserved_session":
-            from core.services import settings as settings_service
-
-            lang = settings_service.load_config_or_default().language
-            message = t("harness.notice.workspaceSessionProtected", lang)
-        return _coded_error_response(code, message, 403)
+            return _reserved_session_response(RESERVED_SESSION_PROTECTED_I18N_KEY, code=code)
+        return _coded_error_response(code, str(err), 403)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
 
@@ -8026,6 +8048,7 @@ async def sessions_messages_create(session_id: str):
 
     from core.services import sessions as workbench_sessions_service
     from storage import messages_service
+    from storage.agent_session_rows import session_is_runtime_owned
     from vibe import internal_client
 
     payload = request.json or {}
@@ -8046,6 +8069,17 @@ async def sessions_messages_create(session_id: str):
             # list, so this only fires on a leftover tab or a hand-crafted call).
             if session.get("status") == "archived":
                 return _session_archived_response()
+            # A runtime-owned session accepts NO turn. The reserved workspace-notifications
+            # row is ``visibility='system'``, which keeps it in the inbox on purpose — so
+            # its card links into this chat, and a chat's composer POSTs here. Archive and
+            # PATCH already refuse that row; this is the third door, and the only one that
+            # could put a real agent turn (against an empty ``agent_backend``) and a user's
+            # conversation into the machine's failure-notice transcript. The UI hides the
+            # composer for the same fact (``sessionReadOnlyReason``); this guard is what
+            # makes it true for a hand-crafted call. Free here — the payload just loaded
+            # carries ``visibility``.
+            if session_is_runtime_owned(session_id=session_id, visibility=session.get("visibility")):
+                return _reserved_session_response(RESERVED_SESSION_READ_ONLY_I18N_KEY)
             # Idempotency: a stale or duplicate quick-reply submit (a second tab, or
             # one that missed the message.new event) must not start a second turn
             # for an already-answered group. The answer lives on the agent message.

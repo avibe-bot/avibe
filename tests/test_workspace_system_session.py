@@ -476,6 +476,55 @@ def test_archive_still_refuses_the_reserved_id(monkeypatch, tmp_path: Path) -> N
         assert messages_service.get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None
 
 
+def test_the_row_accepts_no_turn_by_identity_or_by_projection(monkeypatch, tmp_path: Path) -> None:
+    """``system`` keeps the row in the inbox, so its card is a clickable chat — and a
+    chat has a composer. ``session_is_runtime_owned`` is the fact both the chat surface
+    and ``POST /api/sessions/<id>/messages`` read to refuse that send (the plan's "no
+    backend and no turns").
+
+    Both halves of the OR are pinned because they cover different failures:
+
+    * the PROJECTION half generalizes — a future ``system`` row is refused without a
+      second line — and is what the loaded session payload can answer for free;
+    * the IDENTITY half covers the window the heal has not reached yet. The row is
+      repaired LAZILY (on the next notice), so between a drifted
+      ``visibility='foreground'`` and that repair a projection-only test would admit a
+      turn into the machine's row. Same reason the archive/update guards test identity.
+
+    And an ordinary session must be untouched, or the guard breaks every send.
+    """
+    from storage.agent_session_rows import session_is_runtime_owned
+
+    db_path = _migrated_db(monkeypatch, tmp_path)
+    engine = _reserved_with_one_notice(db_path)
+
+    with engine.connect() as conn:
+        reserved = wss.get_session(conn, WORKSPACE_NOTICE_SESSION_ID)
+    assert reserved["visibility"] == WORKSPACE_NOTICE_SESSION_VISIBILITY
+    assert session_is_runtime_owned(
+        session_id=reserved["id"], visibility=reserved["visibility"]
+    ) is True
+    # Identity alone, i.e. a caller holding only the id (no row loaded) and a row whose
+    # visibility drifted and has not been healed back yet.
+    assert session_is_runtime_owned(session_id=WORKSPACE_NOTICE_SESSION_ID) is True
+    assert session_is_runtime_owned(
+        session_id=WORKSPACE_NOTICE_SESSION_ID, visibility="foreground"
+    ) is True
+    # Projection alone: a hypothetical second system-owned row inherits the refusal.
+    assert session_is_runtime_owned(
+        session_id="ses_some_other_system_row",
+        visibility=WORKSPACE_NOTICE_SESSION_VISIBILITY,
+    ) is True
+
+    ordinary, _ = _ordinary_session(db_path, channel="C703")
+    with engine.connect() as conn:
+        row = wss.get_session(conn, ordinary)
+    assert row["visibility"] == "foreground"
+    assert session_is_runtime_owned(session_id=row["id"], visibility=row["visibility"]) is False
+    for visibility in ("foreground", "background", None, ""):
+        assert session_is_runtime_owned(session_id=ordinary, visibility=visibility) is False
+
+
 def test_a_scoped_clear_cannot_reach_the_reserved_row(monkeypatch, tmp_path: Path) -> None:
     """``scope_id IS NULL`` is what keeps ``/new`` and per-scope teardown off this row.
 

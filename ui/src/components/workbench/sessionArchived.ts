@@ -9,16 +9,42 @@
 // transcript must stay fully readable while every mutating affordance is
 // withdrawn — hidden, not left clickable-and-erroring.
 //
+// Archive is no longer the ONLY read-only reason: a ``visibility === 'system'``
+// session is a row the RUNTIME owns (today the workspace-notifications session
+// that harness failure notices fall back to — "no backend and no turns"). It is
+// admitted to the Inbox on purpose, so its card is a clickable chat, and
+// ``POST /api/sessions/<id>/messages`` answers ``403 {"code":
+// "reserved_session"}`` there. Same shape as archive, different sentence — hence
+// a read-only REASON rather than a second boolean.
+//
 // These live beside ChatPage rather than inside it (the harnessRuns.ts pattern)
 // so the decisions are unit-tested without mounting a 3000-line component — the
 // page just reads the answers.
 import type { WorkbenchSession } from '../../context/ApiContext';
 
+/** Why the chat surface is read-only, or ``null`` when it is writable.
+ *
+ *  ``archived`` is checked FIRST: it is the terminal lifecycle state, so it wins over
+ *  ownership if a system row is ever also archived (the reserved row heals itself back
+ *  out of that, but only on the next notice). */
+export type SessionReadOnlyReason = 'archived' | 'system';
+
+export const sessionReadOnlyReason = (
+  session: WorkbenchSession | null,
+): SessionReadOnlyReason | null => {
+  if (!session) return null;
+  if (session.status === 'archived') return 'archived';
+  if (session.visibility === 'system') return 'system';
+  return null;
+};
+
 /** One predicate owns "this session can never accept another write", so the
  *  composer, header, transcript, queue strip and vault cards all derive the same
- *  fact instead of each site re-deriving it. */
+ *  fact instead of each site re-deriving it. Derived from the reason so a new reason
+ *  locks every one of those affordances by construction, and only the COPY has to
+ *  learn about it. */
 export const isSessionReadOnly = (session: WorkbenchSession | null): boolean =>
-  session?.status === 'archived';
+  sessionReadOnlyReason(session) !== null;
 
 /** A ``409 {"code": "session_archived"}`` from any session-scoped write is the
  *  server stating this row is archived. Same shape for the messages POST and the

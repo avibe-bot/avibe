@@ -298,6 +298,20 @@ def _machine_coded_error_builders():
         # Round 5d: terminal archive vs retryable lock, on the same route. A client can
         # only tell them apart if BOTH codes survive.
         ("backend_locked", lambda: ui_server._backend_locked_response(locked), "backend_locked", 409),
+        # The runtime-reserved workspace-notifications row: one code, three verbs, so the
+        # per-verb sentence is the only thing that varies and BOTH must keep the code.
+        (
+            "reserved_session_protected",
+            lambda: ui_server._reserved_session_response(ui_server.RESERVED_SESSION_PROTECTED_I18N_KEY),
+            "reserved_session",
+            403,
+        ),
+        (
+            "reserved_session_read_only",
+            lambda: ui_server._reserved_session_response(ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY),
+            "reserved_session",
+            403,
+        ),
         # Fork — every branch, since they share one body builder (this round's finding).
         (
             "fork_archived",
@@ -559,6 +573,135 @@ def test_sessions_patch_archived_message_follows_configured_language(monkeypatch
     assert body["message"] == session_archived_message("zh")
     assert body["message"] != session_archived_message("en")
     assert body["error"]["message"] == body["message"]
+
+
+def test_messages_post_into_the_reserved_system_session_dispatches_nothing(monkeypatch, tmp_path):
+    """The workspace-notifications row accepts NO turn — the third and last door.
+
+    ``visibility='system'`` deliberately keeps the reserved row in the Inbox, so its card
+    is a clickable chat (``ui/src/components/workbench/InboxPage.tsx``) — while
+    ``archive_session`` / ``update_session`` are the only writes that refused it. That
+    left ``POST /api/sessions/ses-workspace-notices/messages``, which checked archived
+    status only: a user could type into the workspace-notifications card and dispatch a
+    real agent turn into a machine-owned row whose ``agent_backend`` is empty, mixing
+    their conversation into the failure-notice transcript and breaking the accepted
+    plan's "no backend and no turns" contract
+    (``docs/plans/harness-run-reliability.md``).
+
+    Pinned by what the CONTROLLER saw, not just by the status code: the refusal has to
+    happen before dispatch and before the row is reserved, so the assertions are
+    ``dispatch_async`` await count plus an unchanged message count. The ordinary session
+    is the positive control — the guard must not make every send a 403.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import func, select
+
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+    from storage.db import create_sqlite_engine
+    from storage.models import messages as messages_table
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import create_session
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        ordinary = create_session(
+            conn, scope_id=project["scope_id"], agent_backend="claude", title="Live"
+        )["id"]
+        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
+            WORKSPACE_NOTICE_SESSION_ID
+        )
+
+    def _message_count(session_id: str) -> int:
+        with engine.connect() as conn:
+            return conn.execute(
+                select(func.count())
+                .select_from(messages_table)
+                .where(messages_table.c.session_id == session_id)
+            ).scalar_one()
+
+    assert _message_count(WORKSPACE_NOTICE_SESSION_ID) == 0
+    client = app.test_client()
+    headers = csrf_headers(client)
+    dispatch = AsyncMock(return_value={"status_code": 202, "body": {}})
+
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        blocked = client.post(
+            f"/api/sessions/{WORKSPACE_NOTICE_SESSION_ID}/messages",
+            json={"text": "hello?"},
+            headers=headers,
+        )
+        # Positive control: an ordinary session still dispatches its turn.
+        accepted = client.post(
+            f"/api/sessions/{ordinary}/messages",
+            json={"text": "hello?"},
+            headers=headers,
+        )
+
+    assert blocked.status_code == 403
+    body = blocked.get_json()
+    # The code the Web UI resolves ``errors.reserved_session`` from, in BOTH the nested
+    # object the shared parser reads and the flat field the CLI reads.
+    assert _ui_error_code(body) == "reserved_session"
+    assert body["code"] == "reserved_session"
+    assert not isinstance(body["error"], str)
+    # Copy from ``vibe/i18n``, and the SEND-specific sentence rather than the
+    # archive/edit one ("cannot be archived or modified" answers a different question).
+    expected = i18n_t(ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY, "en")
+    assert expected != ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY  # the key resolves
+    assert body["message"] == body["error"]["message"] == expected
+    assert expected != i18n_t(ui_server.RESERVED_SESSION_PROTECTED_I18N_KEY, "en")
+    # Refused BEFORE the reservation and BEFORE the controller: no row, no turn.
+    assert _message_count(WORKSPACE_NOTICE_SESSION_ID) == 0
+    assert dispatch.await_count == 1
+    assert accepted.status_code == 201
+    assert _message_count(ordinary) == 1
+
+
+def test_messages_post_reserved_refusal_follows_configured_language(monkeypatch, tmp_path):
+    """The 403 ``message`` is localized, like the archived 409's.
+
+    A direct API/CLI consumer reads it verbatim, and a Web UI client without the
+    ``errors.reserved_session`` key falls back to it — so a hardwired ``lang="en"`` in the
+    shared ``_reserved_session_response`` would ship English into a Chinese install.
+    """
+    from config import paths
+    from core.services.settings import default_config
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+    from storage.db import create_sqlite_engine
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resolve_workspace_notice_session(conn, title="工作区通知")
+
+    client = app.test_client()
+    blocked = client.post(
+        f"/api/sessions/{WORKSPACE_NOTICE_SESSION_ID}/messages",
+        json={"text": "hello?"},
+        headers=csrf_headers(client),
+    )
+    assert blocked.status_code == 403
+    key = ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY
+    assert blocked.get_json()["message"] == i18n_t(key, "zh") != i18n_t(key, "en")
 
 
 def test_sessions_patch_archived_outranks_the_backend_lock_preflight(monkeypatch, tmp_path):

@@ -75,6 +75,7 @@
       "runInspect": "Inspect the run with: vibe runs show {id}",
       "workspaceSession": "Workspace notifications",
       "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived or modified.",
+      "workspaceSessionReadOnly": "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
       "failureClass": "Failure class: {failureClass}",
       "lastSucceeded": "Last succeeded: {when}",
       "origin": "Created in: {origin}",

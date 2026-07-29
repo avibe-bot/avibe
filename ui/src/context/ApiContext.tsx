@@ -771,6 +771,13 @@ export type WorkbenchSession = {
   model: string | null;
   reasoning_effort: string | null;
   status: string;
+  /** Storage projection, not a user preference: ``foreground`` = an ordinary chat,
+   *  ``background`` = hidden and undelivered, ``system`` = a row the RUNTIME owns
+   *  (kept out of session lists, still an Inbox destination — today the
+   *  workspace-notifications session, which accepts no turn, see
+   *  ``sessionReadOnlyReason``). Optional because payloads cached by an older client
+   *  predate the field; the server always sends it. */
+  visibility?: 'foreground' | 'background' | 'system';
   pinned: boolean;
   /** Live agent-runtime status driving the sidebar dot: idle (gray) /
    *  running (green) / failed (red). Distinct from the lifecycle ``status``. */

@@ -221,6 +221,41 @@ WORKSPACE_NOTICE_SESSION_METADATA_KEY = "workspace_notice_session"
 WORKSPACE_NOTICE_SESSION_VISIBILITY = "system"
 
 
+def session_is_runtime_owned(*, session_id: Any, visibility: Any = None) -> bool:
+    """Whether the RUNTIME owns this session, i.e. it accepts no user turn.
+
+    ``resolve_workspace_notice_session`` creates its row with "no backend and no turns"
+    (``docs/plans/harness-run-reliability.md``): it exists only to hold workspace
+    failure notices. Everything that WRITES a session already refuses it —
+    ``archive_session`` and ``update_session`` raise ``ReservedSessionError`` — but
+    ``system`` visibility deliberately keeps the row in the inbox, so its card is a
+    clickable chat, and a chat's composer POSTs messages. Without this predicate that
+    was the one door left open: a user could type into the workspace-notifications card
+    and dispatch a real agent turn into a machine-owned row with an empty
+    ``agent_backend``, mixing conversation into the failure-notice transcript.
+
+    TWO TESTS, OR'd, because they fail in different directions:
+
+    * ``visibility == 'system'`` is the PROJECTION, and the axis every other surface
+      already filters on — so a future system-owned row inherits the refusal instead of
+      needing its own line here. It is also free at the call site: the payload
+      ``get_session`` already returns carries ``visibility``.
+    * the reserved IDENTITY covers the row in the states where the projection is
+      momentarily wrong. That row heals lazily — ``resolve_workspace_notice_session``
+      repairs an archived status, a drifted visibility or a vacated anchor on the NEXT
+      notice, not on read — so between an operator's ``UPDATE … SET
+      visibility='foreground'`` (or a round-12/13 development row) and that heal, a
+      visibility-only test would admit the turn. This is the same reason the archive and
+      update guards test identity rather than row state.
+
+    ``visibility`` is optional so a caller holding only an id (no row loaded) still gets
+    the identity half rather than a false ``False``.
+    """
+    if str(session_id or "").strip() == WORKSPACE_NOTICE_SESSION_ID:
+        return True
+    return str(visibility or "").strip() == WORKSPACE_NOTICE_SESSION_VISIBILITY
+
+
 def _workspace_notice_session_is_usable(conn: Connection) -> bool | None:
     """``True`` usable, ``False`` present-but-unusable, ``None`` absent.
 
