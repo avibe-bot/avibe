@@ -183,6 +183,26 @@ def _target_agent_variant(value: Any, backend: Any = None, agent_name: Any = Non
     return None if variant in sentinel_values else variant
 
 
+_MEMORY_RUNTIME_ENDPOINT_FIELDS = ("base_url", "model", "api_key")
+
+
+def _memory_runtime_identity(memory: Any) -> tuple:
+    """Project the Memory settings the local runtime actually consumes.
+
+    ``proactive_capture`` is deliberately absent: it selects which Memory
+    guidance is injected into the next turn's system prompt and reaches no
+    provider, queue, or sidecar state. Two configs with equal identities need no
+    sidecar reconciliation between them.
+    """
+
+    processing = memory.processing
+    endpoints = tuple(
+        tuple(getattr(endpoint, field) for field in _MEMORY_RUNTIME_ENDPOINT_FIELDS)
+        for endpoint in (processing.llm, processing.embedding)
+    )
+    return (bool(memory.enabled), bool(memory.embedding_change_pending), endpoints)
+
+
 def _refresh_status_bubble_config(controller: Any) -> None:
     """Best-effort, mtime-guarded reload so Web UI changes to the status-bubble
     settings (progress style + heartbeat/no-output thresholds) take effect for
@@ -549,8 +569,37 @@ class Controller:
             "states": states,
         }
 
+    def _memory_change_is_prompt_only(self, memory_config: MemoryConfig) -> bool:
+        """Whether this save changes only Agent-facing Memory prompt guidance.
+
+        Conservative by construction: any runtime-relevant difference, and any
+        config shape that cannot be projected and compared, reports False and
+        runs the full reconciliation.
+        """
+
+        current = getattr(self.config, "memory", None)
+        try:
+            if _memory_runtime_identity(current) != _memory_runtime_identity(memory_config):
+                return False
+            return bool(current.proactive_capture) != bool(memory_config.proactive_capture)
+        except Exception:
+            return False
+
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without restarting Avibe."""
+
+        if self._memory_change_is_prompt_only(memory_config):
+            # `proactive_capture` only selects which Memory guidance the next
+            # turn's system prompt carries; it reaches no provider, queue, or
+            # sidecar state. Reconciling anyway would probe the provider and
+            # swap a healthy sidecar for a new one to no effect -- and because
+            # a failed probe rolls the save back, it would leave an owner
+            # unable to turn Agent-initiated writes off while their provider
+            # endpoint is down.
+            self.config.memory = memory_config
+            # Not "ready": nothing here observed the sidecar, and the only
+            # consumer of this payload checks `ok`.
+            return {"ok": True, "state": "unchanged"}
 
         result = await self.memory_runtime.reconcile(memory_config)
         self.memory_module = self.memory_runtime.module

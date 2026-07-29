@@ -263,6 +263,67 @@ def test_memory_settings_round_trip_proactive_capture_opt_in(monkeypatch, tmp_pa
     assert api.load_config().memory.proactive_capture is True
 
 
+def test_disabling_memory_revokes_proactive_capture_without_the_client_saying_so(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The revoke is a server invariant, not something the browser must remember.
+
+    Settings PATCH is a merge, so a client that sends only ``{"enabled": false}``
+    would otherwise leave the stored opt-in armed and have it silently restored
+    by the next ``{"enabled": true}``.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def reconcile():
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    async def status():
+        return {"status_code": 200, "body": {"state": "disabled", "data_exists": False}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_status", status)
+    client = app.test_client()
+
+    def patch(payload: dict):
+        return client.patch(
+            "/api/memory/settings",
+            json=payload,
+            headers=csrf_headers(client, "http://127.0.0.1:15131"),
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+
+    opted_in = patch(
+        {
+            "enabled": True,
+            "proactive_capture": True,
+            "processing": {
+                "llm": {"base_url": "https://llm.example.test/v1", "model": "chat", "api_key": "llm-key"},
+                "embedding": {
+                    "base_url": "https://embed.example.test/v1",
+                    "model": "embed",
+                    "api_key": "embed-key",
+                },
+            },
+        }
+    )
+    assert opted_in.get_json()["proactive_capture"] is True
+
+    disabled = patch({"enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.get_json()["proactive_capture"] is False
+    assert api.load_config().memory.proactive_capture is False
+
+    # Re-enabling Memory must not resurrect the revoked opt-in.
+    re_enabled = patch({"enabled": True})
+    assert re_enabled.status_code == 200
+    assert re_enabled.get_json()["proactive_capture"] is False
+    assert api.load_config().memory.proactive_capture is False
+
+
 def test_memory_settings_patch_rejects_non_boolean_proactive_capture(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

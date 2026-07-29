@@ -448,11 +448,11 @@ Call `remember` proactively, without being asked, whenever the turn shows one of
 - a decision, conclusion, or agreement the conversation arrived at, which no single user message states in full;
 - an environment or account fact specific to this user or their machine that will still be true weeks from now. Project conventions, architecture, and workflows belong in the nearest `AGENTS.md`, which future Agents load early — never in Memory.
 
-Avibe already captured every user message on its own, so anything the user stated outright in one message is in Memory already. Never queue a paraphrase of it.
+Avibe captures the user's plain text messages on its own, so a fact stated outright in one of those is in Memory already — never queue a paraphrase of it. A message that arrived alongside a file is not always covered, so when a durable fact appears only in one of those, record it instead of assuming it was captured.
 
 ### Keeping the signal high
 - One call carries one self-contained fact, written so it still makes sense to someone with no access to this conversation.
-- A proactive write exists only for a conclusion automatic capture cannot reach. Never echo the user's wording back, and never restate a fact one of their messages already carries on its own.
+- A proactive write exists only for a conclusion automatic capture cannot reach. Never echo the user's wording back, and never restate a fact one of their plain text messages already carries on its own.
 - Skip one-off task detail, anything derivable from the code or git history, transient state, and any secret, credential, or token.
 - At most one or two calls per turn. When a fact is not clearly durable, leave it out.
 - Record silently: do not interrupt the conversation, announce a save, or report Memory activity turn by turn. Repeating identical text within one session is idempotent, so a retry is safe.

@@ -180,3 +180,34 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
       `memory.profile.sourceNote` and `memory.search.sourceNote` (en/zh) now
       cover notes the Agent records, not only conversation history. The
       pre-enable disclosure bullet is restated as conditional on the new toggle.
+
+## Review follow-ups, round 5 (Codex review of 1bcfc687)
+
+- [x] Enforce "disabling Memory revokes the opt-in" in the API, not just the UI.
+      Settings PATCH is a merge, so a client sending only `{"enabled": false}`
+      left the stored `proactive_capture: true` in place, and the next
+      `{"enabled": true}` silently restored Agent-initiated writes.
+      `_memory_settings_patch` now clears the flag whenever the merged result is
+      disabled, so an older client, a cached page, or a direct call cannot skip
+      the revoke that `proactiveCaptureFor` already applies in the browser.
+- [x] Stop the proactive guidance from over-claiming what automatic capture
+      holds. `CaptureAdmission.decide` drops IM turns carrying files, but the
+      prompt gate (`memory_capture_admitted` → `admits`) does not apply that
+      check, so an IM turn with an attachment and a caption still receives the
+      proactive prompt. The unconditional "anything you stated is already in
+      Memory, never restate it" would have stranded a durable fact that appears
+      only in such a caption. The claim is now scoped to plain text messages,
+      with the exception stated in terms the Agent can observe — whether the
+      message arrived alongside a file — rather than internal admission state.
+      Admission, queue, and schema are untouched.
+- [x] Stop binding a prompt-only flag to provider health.
+      `_apply_memory_settings_patch` always reconciles, and reconciliation
+      probes the provider and swaps the sidecar, rolling the save back on
+      failure — so an owner could not turn proactive capture off while their
+      endpoint was down. `Controller.reconcile_memory` now compares the
+      runtime-relevant projection of the two configs (`enabled`, both processing
+      endpoints, `embedding_change_pending`; deliberately not
+      `proactive_capture`) and, when only the flag differs, adopts the new
+      config and returns without touching `memory_runtime`. The comparison is
+      fail-safe: any runtime-relevant difference, and any config that cannot be
+      projected, runs the full reconciliation.

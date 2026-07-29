@@ -96,6 +96,13 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
         if not isinstance(patch_payload[flag], bool):
             raise ValueError("invalid_memory_patch")
         target[flag] = patch_payload[flag]
+    # A server-side invariant, not a UI convention. This is a merge patch, so a
+    # request carrying only `{"enabled": false}` would otherwise leave a stored
+    # opt-in armed, and the next `{"enabled": true}` would silently restore
+    # Agent-initiated writes. The browser already clears the pair together; an
+    # older client, a cached page, or a direct call must not be able to skip it.
+    if not target["enabled"]:
+        target["proactive_capture"] = False
     processing_patch = patch_payload.get("processing")
     if processing_patch is not None:
         if not isinstance(processing_patch, dict) or not set(processing_patch).issubset({"llm", "embedding"}):

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
 from core.memory import CaptureAccepted, CaptureDuplicate
@@ -431,3 +432,101 @@ def test_slack_manifest_has_no_native_memory_command() -> None:
 
     commands = manifest["features"].get("slash_commands", [])
     assert all(command.get("command") != "/memory" for command in commands)
+
+
+def _memory_config(
+    *,
+    enabled: bool = True,
+    proactive_capture: bool = False,
+    llm_model: str = "chat",
+    embedding_change_pending: bool = False,
+) -> MemoryConfig:
+    return MemoryConfig(
+        enabled=enabled,
+        proactive_capture=proactive_capture,
+        embedding_change_pending=embedding_change_pending,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example.test/v1",
+                model=llm_model,
+                api_key="llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embed.example.test/v1",
+                model="embed",
+                api_key="embed-key",
+            ),
+        ),
+    )
+
+
+class _FailingReconcileRuntime:
+    """A runtime whose reconciliation always fails, as when the provider is down."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.module = object()
+
+    async def reconcile(self, _config):
+        self.calls += 1
+        return {"ok": False, "error": "memory_sidecar_unavailable"}
+
+
+def _reconcile_controller(current: MemoryConfig) -> Controller:
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=current)
+    controller.memory_runtime = _FailingReconcileRuntime()
+    controller.memory_module = None
+    return controller
+
+
+def test_toggling_proactive_capture_never_touches_the_memory_runtime() -> None:
+    """The prompt-only flag must not be held hostage by provider health.
+
+    Reconciling probes the provider and swaps the sidecar, and a failed probe
+    rolls the save back — which would leave an owner unable to turn
+    Agent-initiated writes off while their endpoint is down.
+    """
+
+    controller = _reconcile_controller(_memory_config(proactive_capture=False))
+    target = _memory_config(proactive_capture=True)
+
+    result = asyncio.run(controller.reconcile_memory(target))
+
+    assert result["ok"] is True
+    assert controller.memory_runtime.calls == 0
+    assert controller.config.memory is target
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _memory_config(enabled=False),
+        _memory_config(llm_model="chat-2"),
+        _memory_config(embedding_change_pending=True),
+        # A runtime-relevant change riding along with the flag still reconciles.
+        _memory_config(enabled=False, proactive_capture=True),
+    ],
+)
+def test_runtime_relevant_memory_changes_still_reconcile(target: MemoryConfig) -> None:
+    controller = _reconcile_controller(_memory_config())
+
+    result = asyncio.run(controller.reconcile_memory(target))
+
+    assert result["ok"] is False
+    assert controller.memory_runtime.calls == 1
+    # A failed reconciliation must not adopt the candidate config.
+    assert controller.config.memory.enabled is True
+    assert controller.config.memory.proactive_capture is False
+
+
+def test_unreadable_current_memory_config_falls_back_to_full_reconciliation() -> None:
+    """Fail safe: what cannot be compared is reconciled, not skipped."""
+
+    controller = _reconcile_controller(_memory_config())
+    controller.config.memory = None
+
+    result = asyncio.run(controller.reconcile_memory(_memory_config(proactive_capture=True)))
+
+    assert result["ok"] is False
+    assert controller.memory_runtime.calls == 1

@@ -325,13 +325,26 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "a stable preference, habit, working style, or identity detail the user states about themselves",
             prompt,
         )
-        self.assertIn("anything the user stated outright in one message is in Memory already", prompt)
-        self.assertIn("Never queue a paraphrase of it", prompt)
+        self.assertIn("a fact stated outright in one of those is in Memory already", prompt)
+        self.assertIn("never queue a paraphrase of it", prompt)
         self.assertIn("only for a conclusion automatic capture cannot reach", prompt)
         self.assertIn(
-            "never restate a fact one of their messages already carries on its own",
+            "never restate a fact one of their plain text messages already carries on its own",
             prompt,
         )
+
+        # Automatic capture drops IM turns that carry files (see
+        # `CaptureAdmission.decide`), while the prompt gate does not, so an
+        # unconditional "everything you said is already stored" would strand a
+        # durable fact stated only in a message sent with an attachment.
+        self.assertIn("Avibe captures the user's plain text messages on its own", prompt)
+        self.assertIn(
+            "A message that arrived alongside a file is not always covered",
+            prompt,
+        )
+        self.assertIn("record it instead of assuming it was captured", prompt)
+        self.assertNotIn("Avibe already captured every user message on its own", prompt)
+        self.assertNotIn("anything the user stated outright in one message is in Memory already", prompt)
 
         self.assertIn("One call carries one self-contained fact", prompt)
         self.assertIn("any secret, credential, or token", prompt)
