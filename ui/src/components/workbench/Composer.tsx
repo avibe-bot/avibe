@@ -105,6 +105,7 @@ type VoiceRecordingSession = {
   reportedInsertionAttemptCount?: number;
   transcript?: string;
   error?: unknown;
+  captureError?: unknown;
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
 };
@@ -144,6 +145,12 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
       deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
       return;
     }
+    if (session.captureError !== undefined) {
+      session.transcript = undefined;
+      session.error = session.captureError;
+      session.status = 'failed';
+      return;
+    }
     settleVoiceSession(session);
   })();
   return session.finalization;
@@ -153,6 +160,7 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   session.retryCount += 1;
   session.status = 'transcribing';
   session.error = undefined;
+  session.captureError = undefined;
   session.finalization = (async () => {
     await transcribeVoiceSegments(session.segments, {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
@@ -650,6 +658,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (session.status === 'transcribing' && session.finalization) {
         transcribingRef.current = true;
         setTranscribing(true);
+        setVoiceRetainedSession(session);
         void session.finalization.finally(() => {
           if (!alive) return;
           transcribingRef.current = false;
@@ -707,11 +716,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         segmentMs: VOICE_SEGMENT_MS,
         onSegment: (blob, metadata) => queueVoiceSegment(session, blob, metadata.durationMs),
         onStopRequested: (reason, metadata) => {
-          if (reason !== 'finish') return;
+          if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
           session.backlogAtStop = session.segments.filter(
             (segment) => !segment.text && !segment.error,
           ).length;
+        },
+        onError: (error) => {
+          session.captureError = error;
+          if (!voiceSessionsById.has(session.sessionId)) {
+            voiceSessionsById.set(session.sessionId, session);
+          }
         },
         onStopped: (reason, metadata) => {
           if (recorderRef.current === pipeline) recorderRef.current = null;
@@ -725,7 +740,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
-          if (!session.segments.length) {
+          if (!session.segments.length && session.captureError === undefined) {
             reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && sessionId === session.sessionId) {
               showToast(t('chat.compose.voiceEmpty'), 'error');

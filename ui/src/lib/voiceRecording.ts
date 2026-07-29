@@ -288,7 +288,7 @@ export const isVoiceControlDisabled = (
   retained = false,
 ): boolean => transcribing || (!recording && (disabled || retained));
 
-export type VoiceRecordingStopReason = 'finish' | 'abort';
+export type VoiceRecordingStopReason = 'finish' | 'abort' | 'error';
 
 export type VoiceRecordingSegmentMetadata = {
   durationMs: number;
@@ -468,14 +468,16 @@ export class VoiceRecordingPipeline {
   }
 
   private handleCaptureError(error: unknown): void {
+    if (this.stopped || this.stopping === 'abort') return;
+    if (!this.stopping) this.requestStop('error');
+    else this.stopping = 'error';
     this.options.onError?.(error);
-    this.requestStop('finish');
   }
 
   private handleCaptureStopped(): void {
     if (this.stopped) return;
     this.requestStop('finish');
-    if (this.stopping === 'finish') this.emitSegment();
+    if (this.stopping !== 'abort') this.emitSegment();
     else {
       this.segmentChunks = [];
       this.segmentSampleCount = 0;
@@ -484,7 +486,7 @@ export class VoiceRecordingPipeline {
   }
 
   private pendingSegmentCount(): number {
-    if (this.stopping !== 'finish') return 0;
+    if (this.stopping === 'abort') return 0;
     return this.emittedSegmentCount - (this.segmentCountAtStop ?? this.emittedSegmentCount);
   }
 

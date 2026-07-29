@@ -78,6 +78,12 @@ export type VoiceTranscriptionSegment = {
   error?: unknown;
 };
 
+const isEmptyVoiceSegment = (segment: VoiceTranscriptionSegment): boolean => (
+  segment.error instanceof VoiceTranscriptionError
+  && segment.error.code === 'empty'
+  && !segment.text
+);
+
 type VoiceSegmentTranscriptionDependencies = VoiceTranscriptionDependencies & {
   transcribe?: (blob: Blob) => Promise<string>;
 };
@@ -441,7 +447,9 @@ export const transcribeVoiceSegments = async (
     transcribe: customTranscribe,
     ...transcriptionDependencies
   } = dependencies;
-  const queue = segments.filter((segment) => !segment.text);
+  const queue = segments.filter((segment) => (
+    !segment.text && !isEmptyVoiceSegment(segment)
+  ));
   const concurrency = Math.max(1, Math.floor(requestedConcurrency));
   const worker = async () => {
     let segment = queue.shift();
@@ -502,13 +510,8 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
 export const voiceTranscriptFromSegments = (
   segments: VoiceTranscriptionSegment[],
 ): string => {
-  const isEmptySegment = (segment: VoiceTranscriptionSegment): boolean => (
-    segment.error instanceof VoiceTranscriptionError
-    && segment.error.code === 'empty'
-    && !segment.text
-  );
   const failed = segments.find((segment) => (
-    !isEmptySegment(segment)
+    !isEmptyVoiceSegment(segment)
     && (segment.error || !segment.text)
   ));
   if (failed) {
@@ -517,7 +520,7 @@ export const voiceTranscriptFromSegments = (
   }
   const transcribed = segments.filter((segment) => Boolean(segment.text));
   if (!transcribed.length) {
-    const emptyError = segments.find(isEmptySegment)?.error;
+    const emptyError = segments.find(isEmptyVoiceSegment)?.error;
     if (emptyError instanceof Error) throw emptyError;
     throw new VoiceTranscriptionError('empty');
   }

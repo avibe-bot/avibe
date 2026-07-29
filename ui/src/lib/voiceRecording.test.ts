@@ -45,6 +45,7 @@ const setup = () => {
     getTracks: () => [track],
   } as unknown as MediaStream;
   const onSegment = vi.fn<(blob: Blob, metadata: { durationMs: number }) => void>();
+  const onError = vi.fn();
   const onStopRequested = vi.fn();
   const onStopped = vi.fn();
   let capture: FakeCapture | null = null;
@@ -53,6 +54,7 @@ const setup = () => {
     sampleRate: 4,
     segmentMs: 1000,
     onSegment,
+    onError,
     onStopRequested,
     onStopped,
     createCapture: (_stream, sampleRate, segmentSamples, handlers) => {
@@ -64,6 +66,7 @@ const setup = () => {
   });
   return {
     capture: () => capture!,
+    onError,
     onSegment,
     onStopRequested,
     onStopped,
@@ -201,18 +204,50 @@ describe('VoiceRecordingPipeline', () => {
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
   });
 
-  it('finalizes captured audio after the processor stops unexpectedly', async () => {
-    const { capture, onSegment, onStopRequested, onStopped, pipeline } = setup();
+  it('retains captured audio as failed after the processor stops unexpectedly', async () => {
+    const {
+      capture,
+      onError,
+      onSegment,
+      onStopRequested,
+      onStopped,
+      pipeline,
+    } = setup();
     await pipeline.start();
     capture().emit(1, 2);
+    const error = new Error('processor stopped');
 
-    capture().fail(new Error('processor stopped'));
+    capture().fail(error);
 
+    expect(onStopRequested).toHaveBeenCalledWith('error', {
+      requestedAt: expect.any(Number),
+    });
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    expect(onStopped).toHaveBeenCalledWith('error', { pendingSegmentCount: 1 });
+  });
+
+  it('upgrades a user stop to failure when the processor crashes while flushing', async () => {
+    const {
+      capture,
+      onError,
+      onStopRequested,
+      onStopped,
+      pipeline,
+    } = setup();
+    await pipeline.start();
+    capture().emit(1, 2);
+    pipeline.finish();
+    const error = new Error('processor stopped while flushing');
+
+    capture().fail(error);
+
+    expect(onStopRequested).toHaveBeenCalledOnce();
     expect(onStopRequested).toHaveBeenCalledWith('finish', {
       requestedAt: expect.any(Number),
     });
-    expect(onSegment).toHaveBeenCalledTimes(1);
-    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 1 });
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(onStopped).toHaveBeenCalledWith('error', { pendingSegmentCount: 1 });
   });
 
   it('reports inactive when capture stops before asynchronous startup completes', async () => {

@@ -536,6 +536,25 @@ describe('voice transcription', () => {
     ])).toThrowError(empty);
   });
 
+  it('does not resubmit accepted silent segments during explicit retry', async () => {
+    const silent = {
+      blob: new Blob(['silent']),
+      error: new VoiceTranscriptionError('empty'),
+    };
+    const failed = {
+      blob: new Blob(['failed']),
+      error: new VoiceTranscriptionError('failed'),
+    };
+    const transcribe = vi.fn(async () => 'recovered');
+
+    await transcribeVoiceSegments([silent, failed], { transcribe });
+
+    expect(transcribe).toHaveBeenCalledOnce();
+    expect(transcribe).toHaveBeenCalledWith(failed.blob);
+    expect(silent.error).toMatchObject({ code: 'empty' });
+    expect(failed).toMatchObject({ text: 'recovered', error: undefined });
+  });
+
   it('retries only failed segments without discarding completed text', async () => {
     const failed = new Error('provider failed');
     const segments = [
