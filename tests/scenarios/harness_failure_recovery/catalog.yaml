@@ -1254,9 +1254,157 @@ scenarios:
     # than being claimed here.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
-    # §10.7; landed in #1044, PR2 not started per its status header) -- §10.7's re-drawn
-    # HFR-280...319 overflow block is offered to the maintainer as follow-up, see the
-    # round-11 note under HFR-099.
+    # §10.7; landed in #1044, PR2 not started per its status header) -- and the offer to
+    # take §10.7's re-drawn HFR-280...319 block is WITHDRAWN as of round 14, for two
+    # independent reasons. The first is a ruling: cyhhao declined to consume an id for this
+    # round, so the subordinate tests documented throughout this file stay subordinate by
+    # DECISION, not merely because the block was full. The second is stronger and outlives
+    # the ruling: THAT BLOCK IS ALREADY DEAD. Master landed HFR-280 in ``807d1eee``
+    # (``feat(search): opt-in include-archived``) -- an unrelated PR that took the first id
+    # of the block §10.7 had just re-drawn for PR6 -- and §10.7's own rule is explicit:
+    # "an overflow block is dead the moment a landed catalog occupies any of it; reassign
+    # from above the highest landed ID, never reuse or straddle." So this is the THIRD
+    # occurrence of the exact failure §10.7 was written to prevent (after PR1/PR5 both
+    # claiming 041...048, and PR5's overflow landing across blocks promised to
+    # PR6/PR2/PR3), and it arrived the same way each previous one did: silently, visible
+    # only on comparing branches by hand. Any future assignment for these tests must be
+    # re-drawn above the highest landed id rather than taken from 280...319. Round 11's
+    # note under HFR-099 should be read with both facts attached.
+    # RETRACTED IN ROUND 14, THREE CLAIMS, and two of them are claims this block made
+    # about its own fix rather than about the code it replaced -- so read the marked
+    # sentences above as history.
+    # (a) "The delta rung (5) really buys is an ARCHIVED session: ``_session_row`` has no
+    # status filter where ``resolve_session_id_target`` refuses archived, so rung (2) is
+    # gone and rung (5) still delivers." REVERSED (round-13 P1, review thread
+    # 3676292667). The mechanism is real and still is; the CONCLUSION was wrong. An
+    # archived ``agent_sessions`` row is "a WRITABLE row that is not a VISIBLE surface":
+    # ``persist_agent_message`` resolves the scope through ``_session_row``, which has no
+    # status filter, so the write lands; a persisted receipt is the workbench class's ack
+    # source, so the rung ACKS and the notice is stamped ``sent`` and never retried; but
+    # ``list_inbox_sessions`` and ``get_inbox_session`` exclude archived sessions, so
+    # there is no inbox card, no ``inbox.session.updated`` patch for an open browser, and
+    # no Web Push. "The user is told nothing and the system believes it told them --
+    # worse than a dead letter, which at least says so." And the receipt-only ack policy
+    # this same block introduced CANNOT catch it: it is blind here precisely because the
+    # write really does happen.
+    # FIX: ``_rung_five_session_id`` reads the row's status and REROUTES rung (5) to
+    # ``WORKSPACE_NOTICE_SESSION_ID`` when it is ``archived``, keyed on that single
+    # literal "not on a whitelist of good ones, so a new status is treated as deliverable
+    # until somebody teaches the read paths otherwise", and failing OPEN (an unreadable
+    # DB returns the original id rather than hijacking the notice). ROUTING, NOT HEALING,
+    # and the asymmetry with round 12 is deliberate: the reserved row may never be
+    # archived at all, so an archived one is corruption and repairing it in place restores
+    # the invariant -- whereas an ordinary session was archived by its owner ON PURPOSE.
+    # "The session is not broken; the ADDRESS is. So the notice moves." Pinned by
+    # ``test_an_archived_ordinary_session_is_rerouted_instead_of_acked_into``, which
+    # asserts the ACK FIRST -- "it passes either way, which is what makes the bug silent"
+    # -- then the surface it claims to have reached, and which also requires the archived
+    # row to stay archived: delivering a notice may not un-archive a session the user
+    # archived deliberately, and the ``failure_id`` stays the bare run id because
+    # rerouting changes the address, never the identity.
+    # (c) "NOT hidden ... The row is ``foreground``" and the reasoning that a hidden row
+    # "would need a schema change this round does not take". SUPERSEDED. The impasse was
+    # real and was mis-diagnosed as a schema problem: ordinary session lists filter
+    # POSITIVELY on ``visibility == 'foreground'``, and so did the inbox -- which is why
+    # ``background`` hid the card as well as the row. The resolution is a THIRD value,
+    # ``visibility='system'``, and a vocabulary split rather than a migration:
+    # ``SESSION_VISIBILITIES`` widens to what may be STORED while
+    # ``ASSIGNABLE_SESSION_VISIBILITIES`` (foreground/background) stays what a CALLER may
+    # choose, and ``INBOX_SESSION_VISIBILITIES = ("foreground", "system")`` admits the row
+    # to ``list_inbox_sessions`` explicitly. The session lists needed NO change at all --
+    # a positive equality filter excludes an unrecognized value for free -- and
+    # ``suppress_delivery`` keys on ``== 'background'`` alone, so realtime and Web Push
+    # are untouched. ``unread_counts_by_session`` had to be edited even though its answer
+    # is the same shape, because its predicate is the NEGATIVE form and "has to name every
+    # visibility the inbox admits or the badge would disagree with the feed it is supposed
+    # to count". Message search deliberately keeps ``== 'foreground'``, narrower than the
+    # inbox. The Agents run graph is excluded EXPLICITLY, because its own filter was
+    # ``!= 'background'``, which admits by default.
+    # NO ALEMBIC MIGRATION, and the reason is worth keeping because it is unusual: "this
+    # row exists in no release (this PR created it), so there is nothing deployed to
+    # migrate." ``_workspace_notice_session_is_usable`` now requires ``system`` EXACTLY
+    # rather than accepting either value, so a round-12/13 development row is converted in
+    # place by the next notice, under the same write lock the create takes -- "the heal is
+    # also the migration". The naive alternative is kept as a PERMANENT REFUTATION rather
+    # than a comment: ``test_background_would_hide_the_card_which_is_why_system_exists``
+    # flips the row to ``background`` by direct SQL and asserts both halves of the cost in
+    # one failure -- the card disappears while the notice row is still persisted and still
+    # stamped ``sent``, and the badge stops counting it.
+    # (d) THE RESIDUALS ARE NOW TWO, NOT THREE. "The session appears in ordinary session
+    # lists" is closed by (c). "D5's remaining body item -- the creation channel/thread
+    # with a deep link -- is NOT implemented" is closed by round 14's origin contract; see
+    # HFR-094's round-14 paragraph, which also retracts the matching sentence there. What
+    # remains: the row's ``agent_backend`` is empty, since it has no backend and no turns;
+    # and it is still one ``DELETE /api/sessions/ses-workspace-notices`` from anyone
+    # holding the id, which the inbox card carries -- "hiding the row from the lists
+    # narrows the blast radius; it does not replace this guard, which is why both exist",
+    # and a delete HEALS on the next notice rather than being exempted.
+    # The system-surface behaviour has its own file, ``tests/test_workspace_system_session.py``,
+    # so only the doctrine is recorded here.
+    # THE ALWAYS-APPEND DOCTRINE (round 14, gate item 2; review thread 3676292675). Round
+    # 12's rule was that the workspace rung fires only for an otherwise-empty ladder, and
+    # that rule was "too narrow by exactly the case #1060 reported (maintainer note
+    # 5120451508): a NON-EMPTY ladder is not a DELIVERABLE one." A watch bound to a
+    # HARD-DELETED session builds a ladder whose every candidate resolves to nothing: each
+    # attempt sends, the receipt-only ack source correctly refuses it, the ``if not rungs``
+    # gate NEVER FIRES, all six attempts burn, and the notice dead-letters with nothing
+    # written anywhere. That silent dead letter is the 3.5 hours of silence in #1060's
+    # field evidence.
+    # TWO DESIGNS ARE RETIRED, named so neither comes back. (i) Round 12's "only when
+    # nothing else resolved". (ii) Round 13's FINAL-ATTEMPT fallback (``ce695b42``), which
+    # appended the same rung last but only on attempt ``MAX_ATTEMPTS``; it closed (i)'s
+    # hole and was overruled anyway -- "correct about the mechanism and overruled on the
+    # trade". It never shipped: the history was rebuilt and that commit is not an ancestor
+    # of the branch, so the catalog never documented it as landed and should not now.
+    # FIX: the workspace rung is appended UNCONDITIONALLY, once, last. "What survives of
+    # round 12's argument is ORDER, and it does the work a condition used to" -- a healthy
+    # preferred rung wins every walk because it comes first, not because a gate suppressed
+    # the fallback. The reviewer's ruling is quoted verbatim in the code rather than
+    # paraphrased: "Append one distinct workspace-notifications target after every
+    # person/context target, even when earlier candidates exist but are stale, unavailable,
+    # or fail delivery. It cannot be conditional on rungs being empty."
+    # THE REROUTE AND THE APPEND COLLAPSE TO ONE RUNG, and that is a property of the
+    # ``_add`` seen-set rather than of a special case: ``_rung_five_session_id`` returns the
+    # bare ``WORKSPACE_NOTICE_SESSION_ID`` constant, so an archived row's rerouted rung (5)
+    # and the unconditional append are byte-identical ``(parsed key, session id)`` tuples
+    # and dedupe for free. Pinned ladder-only by
+    # ``test_an_archived_session_ladder_holds_exactly_one_workspace_rung``, with a live
+    # rung (1) present so it covers POSITION as well as count.
+    # THE TRADE IS RECORDED, WITH ITS ACCEPTANCE, because it is a real behaviour change:
+    # any walk in which every preferred rung fails to deliver now reaches this rung on THAT
+    # walk, delivers, and acks -- so a preferred rung that failed TRANSIENTLY (a platform
+    # blip on attempt 1) permanently routes that one notice to the workspace inbox, and the
+    # user's own channel never receives the copy it would have got a minute later. Accepted
+    # explicitly by the maintainer in the ruling above ("...or fail delivery"), "on the
+    # judgement that a misrouted notice a user can find beats a notice nobody receives".
+    # Scope of the residual is ONE notice, not the definition: the next failure builds a
+    # fresh ladder and the recovered preferred rung wins it again.
+    # THE RESERVED ROW IS NOT MINTED ON HEALTHY INSTALLS, which is the cost the append
+    # would otherwise carry. The rung is appended at ladder-build time but RESOLVED at the
+    # walk, so ``_workspace_notice_session_id`` is only called when the walk actually
+    # reaches it -- the call is made "for its WRITE, not for its return".
+    # ``test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox`` is the negative
+    # pin nothing else in the file carried: one live rung (1) wins, no workspace
+    # ``messages`` row exists, and no reserved session row is created at all.
+    # The unwritable-DB residual MOVED rather than disappeared: from "nothing to append" to
+    # "the rung is skipped", with the walk logging it and preserving a preferred rung's own
+    # refusal rather than overwriting it with the resolve failure. Still a visible dead
+    # letter, pinned by ``test_an_unwritable_workspace_inbox_still_dead_letters_visibly``.
+    # Two further subordinate tests, both renamed from the retired design so no locator
+    # points at a name that never shipped:
+    # ``test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox`` (was
+    # ``test_the_final_attempt_falls_back_to_the_workspace_inbox``) pins the ladder before
+    # any send, the send ORDER, exactly one workspace row, and the round-14 delta --
+    # ``attempts == 1`` on ONE drain pass, where the retired design needed six; and
+    # ``test_replaying_the_workspace_walk_reuses_the_persisted_receipt`` (was
+    # ``test_replaying_the_final_walk_reuses_the_persisted_workspace_receipt``), which is
+    # explicitly a pin rather than a red-first case -- HFR-075's machinery already makes it
+    # green, and its red half is the mutation at the end: delete the persisted row and the
+    # same replay delivers again.
+    # ``attempt`` is no longer threaded into the walk. It used to be, only because the
+    # workspace rung's presence depended on the attempt number; with the rung unconditional
+    # the parameter had no other reader, and ``MAX_ATTEMPTS``, the backoff ladder and
+    # ``LADDER_ACK_SOURCES`` are untouched by all of this.
     # PR6 review round 7 (#1072) closed the CLASS instead of the third symptom of it.
     # Three rounds had each found one more target acking on evidence that proved
     # nothing, because "who may ack on what" lived as a predicate reading a platform
@@ -1294,6 +1442,16 @@ scenarios:
     # and the backoff rewound, the same still-owed notice is delivered by rung (5),
     # receipts, and acks with the attempt count carried forward. That second pass is
     # what makes "walks on and stays retryable" an assertion instead of a claim.
+    # CORRECTED IN ROUND 14: pass 2's SUBJECT changed, though its shape did not. It was
+    # written in round 9 to assert that rung (5) delivers INTO the archived row, on the
+    # premise that an archived row is a valid delivery surface; the premise was wrong (see
+    # the round-14 retraction (a) above), so the test's own docstring now records the
+    # reversal and pass 2 pins the REROUTE instead: the still-owed notice is delivered to
+    # the workspace-notifications session, receipts there, and acks with the attempt count
+    # carried forward. What survives of the round-9 claim is narrower and still worth
+    # having -- "the surviving delta rung (5) buys over rung (2) is a DELIVERY at all, not
+    # a delivery into that particular row" -- and pass 1 additionally has to SUPPRESS the
+    # now-mandatory workspace rung to keep testing what it was written to test.
     # PR6 review round 8 (#1072) named the ONE premise that table cannot check for
     # itself, since totality over an axis says nothing about the axis VALUE being
     # right: ``kind == "im"`` is a claim that the id a send returns was minted by a
@@ -1674,6 +1832,154 @@ scenarios:
     # last-success lines landed this round. No i18n key for a creation location or deep link
     # exists, and the commits state no reason for the omission, so this is recorded as an
     # open gap against the plan rather than as a documented deferral.
+    # CLOSED IN ROUND 14 (gate item 3). The gap above is the last item of D5 and it is now
+    # implemented end to end, so the paragraph stands only as the record of what was open.
+    # THE DEFECT, precisely: a failure notice "is context-free by construction -- an owner
+    # DM or a workspace card, delivered hours after the fire -- so the conversation that
+    # asked for the definition was unrecoverable from the notice." And the reason it could
+    # not simply be rendered: the ids had never been captured, and no permalink builder
+    # existed anywhere in the codebase.
+    # CAPTURE. ``CallerContext`` gains six fields -- ``platform``, ``user_id``,
+    # ``channel_id``, ``session_key``, ``message_id``, ``workspace_id`` -- each with its own
+    # ``AVIBE_CALLER_*`` env var, because the subprocess env is the ONLY channel available:
+    # an IM-created definition is created by an Agent run executing ``vibe task add``, so
+    # the env is the only hop between the conversation that asked and the row that records
+    # it. ``channel_id`` and ``session_key`` are both kept and are not redundant --
+    # ``session_key`` is the ADDRESS in the grammar ``parse_session_key`` speaks, while
+    # ``channel_id`` is the LOCATION a permalink needs; for a DM the session key's scope id
+    # is the USER id, and a permalink built from it would be fabricated.
+    # THE KEY NAMES ARE LOAD-BEARING, and this is the part that lights up the ladder:
+    # ``to_metadata`` writes exactly the names the ladder has always read --
+    # ``caller["session_key"]`` / ``caller["scope_id"]`` for rung (3) and
+    # ``caller["platform"]`` / ``caller["user_id"]`` for rung (4), the owner DM. "Writing
+    # them under any other name would leave them dormant." So rungs (3) and (4) become
+    # reachable for NEW definitions and D5's designed ladder shape finally exists in
+    # practice. The reading logic was never broken -- verified at ``3578f2b6``, where the
+    # rungs resolve fine from hand-written metadata; "nothing ever wrote it."
+    # THE HONESTY TABLE, in the new ``core/origin_links.py``: one public function,
+    # ``origin_link``, and "one rule: LINK OR ``None``, never a fabricated URL. A failure
+    # notice that offers a link the user cannot follow is worse than a notice that offers
+    # none -- it moves the failure from 'I do not know where this came from' to 'Avibe told
+    # me where and it was wrong', and the second is the one that costs trust." Linkable only
+    # when every id that platform's permalink grammar requires is present: ``slack``
+    # (channel + ts), ``discord`` (guild + channel + message -- and NEVER ``@me``, which
+    # "would read as a working link while being unfollowable for anyone else, including the
+    # workspace inbox, which is not a person at all"), ``telegram`` (a ``-100`` supergroup id
+    # + message). Named but never linked: ``lark`` and ``wechat`` have no stable public
+    # message permalink, and ``avibe`` has an addressable location whose only URL form is the
+    # local setup host -- "a ``http://127.0.0.1:<port>/...`` link pasted into a Slack DM or a
+    # phone push is not honestly reachable from where the notice is read." An unrecognised
+    # platform gets nothing, because "guessing a URL shape for it is the fabrication this
+    # whole module exists to prevent." Matching is exact on the wire value, and the wire
+    # value is ``lark`` rather than ``feishu`` -- keying the map on the product name would
+    # have made every Feishu origin unnameable.
+    # THREE INDEPENDENT REFUSALS, each yielding FEWER lines rather than vaguer ones: no
+    # provenance at all (every definition created before this round) takes no line and there
+    # is "no backfill and no migration, because the ids were never recorded and inventing
+    # them is the one thing a provenance line may not do"; an unmapped platform takes no
+    # line rather than leaking its wire value; and an unlinkable origin still renders the
+    # TEXT and drops only the link. The omission rule is the same judgement
+    # ``notice_failure_class_i18n_key`` already made -- "'Created in: unknown' would be copy
+    # about nothing on the lane that already carries the most lines."
+    # THE CLAUDE-PATH RESIDUAL, stated as a residual because it is one.
+    # ``SessionHandler`` is the sole caller passing ``session_stable_only=True``, and it is
+    # not a shortcut: that env "is baked into a Claude SDK client at spawn and is also the
+    # value compared to decide whether a cached client may be reused", so ``message_id``
+    # would respawn the Agent on every turn, and ``user_id`` -- which changes with the author
+    # on a deliberately shared channel session -- "would attribute a definition created by
+    # one participant to whoever happened to speak first, and the owner-DM rung would then
+    # notify the wrong person, which is worse than not notifying anybody." What survives is
+    # what the SESSION owns, so a Claude-created definition names its conversation and lights
+    # rung (3) but gets no owner-DM rung and no deep link: "an omission, not a wrong URL."
+    # Codex and OpenCode rewrite their caller env per turn and keep the full origin; a DM
+    # loses nothing either way, since its session key carries the person in the scope itself.
+    # Subordinate tests, none taking an id. The body half is
+    # ``test_the_notice_names_where_the_definition_was_created_and_links_to_it`` (both
+    # locales, red at ``3578f2b6`` where the body was four lines with no channel, no thread
+    # and no URL), with ``test_a_definition_with_no_captured_origin_gets_no_origin_line``,
+    # ``test_an_origin_that_cannot_be_linked_is_still_named`` and
+    # ``test_an_unmappable_origin_platform_takes_no_line_rather_than_leaking_itself`` for the
+    # three refusals. The capture half is
+    # ``test_the_creation_origin_survives_the_env_hop_into_created_by_caller``, also red at
+    # ``3578f2b6``. ``test_a_captured_origin_lights_up_the_scope_and_owner_dm_rungs`` has NO
+    # red of its own and says so -- overlaid at ``3578f2b6`` the ladder already resolved
+    # those rungs from hand-written metadata, which is the evidence for "the reading logic
+    # was never dead". ``test_the_workspace_card_carries_the_creation_origin`` is red at
+    # ``d2c3bf31`` rather than at ``3578f2b6``, a deliberately SPLIT baseline: it imports
+    # round-12+ symbols, and an ``ImportError`` is not evidence of a defect. The new
+    # ``tests/test_origin_links.py`` states the same discipline for itself -- "There is
+    # deliberately no red baseline for this file. It characterises a new pure module, so at
+    # any earlier commit it would only raise ``ImportError``."
+    # PR6 review round 14 (#1072), #1060's FIELD CASE, CONSUMED. A dead delivery target had
+    # no name of its own: a ``once`` watch pinned with ``--session-id`` to a session that
+    # later ceased to exist failed its follow-up delivery, retired, and "the only cause
+    # recorded anywhere was ``last_exit_code = 75`` -- the user's own ``--retry-exit-code``,
+    # i.e. the waiter's HEALTHY 'nothing new yet' signal", so "anyone debugging from exit 75
+    # starts by investigating a working waiter". The reporter's ask was literally "a cause
+    # field distinct from the last exit code".
+    # FIX: ``INTERRUPT_REASON_DELIVERY_TARGET_MISSING = "delivery_target_missing"``, grouped
+    # in a THIRD source vocabulary ``DISPATCH_FAILURE_REASONS`` "because it has a third
+    # origin", labelled ``harness.notice.class.deliveryTargetMissing`` in both locales, and
+    # threaded from ``_execute_claimed_request``'s ``UnresolvableSessionTarget`` handler into
+    # ``complete(interrupt_reason=...)`` -- as ONE named keyword rather than a general
+    # metadata dict, because "a wide-open passthrough at a completion site is how an
+    # unrelated key comes to overwrite ``interrupt_reason`` or the notice blob itself". The
+    # ordering is load-bearing: ``extra_metadata`` is applied BEFORE
+    # ``_owed_failure_notice_for_transition`` reads the reason, "so the notice is born
+    # already carrying its class. A second UPDATE afterwards would be too late."
+    # ONLY ``reason == "missing"`` IS CLASSIFIED, and the restraint is the interesting part:
+    # ``archived`` is left unclassified on purpose, because "an archived session's row still
+    # exists, and the honest description of that failure is 'the session is inert', not 'it
+    # no longer exists' ... A wrong class is worse than no class" -- and its notice is
+    # deliverable anyway, via the reroute in retraction (a) above.
+    # IT IS ON THE PER-FIRE LANE AND DELIBERATELY NOT AN INTERRUPTION, which is a routing
+    # decision with three consequences the docstring spells out: a definition pinned to a
+    # deleted session fails on EVERY fire, so admitting it to ``RUN_INTERRUPTION_REASONS``
+    # would give it an unsuppressed notice per fire, mint an ``interrupt:{run}:{reason}``
+    # identity the live path never uses, and take it out of the health window -- "reporting a
+    # permanently broken watch as healthy while notifying about it forever". Because it stays
+    # out of that set, ``failure_id`` remains the bare run id, the live path's dedup finds it,
+    # the streak collapses to one canonical notice, and derived health still reads
+    # ``failing``. Drift-pinned by a DIRECTION test rather than by the existing equality --
+    # ``test_a_dispatch_failure_class_joins_the_per_fire_lane_and_not_the_interrupted_one`` --
+    # because "the pin above is an equality between two sets that both grow, so it stays
+    # green for a reason added correctly AND for one added to the wrong source vocabulary".
+    # RETIRED IS NOT PAUSED. ``_failure_notice_body`` rendered the resume affordance for
+    # every disabled watch, so a retired one read FINISHED in the lifecycle projection while
+    # its notice offered ``vibe watch resume`` -- "an action that would arm a watch nobody
+    # paused". Root cause is that ``enabled=0`` carries three meanings. FIX: the copy branches
+    # on the ``retired_at`` column -- "the same column the projection's ``ended`` predicate
+    # uses, so the copy and the badge cannot disagree" -- with a new parameterless
+    # ``harness.notice.watchRetired``. A legacy row with no marker keeps the resume copy,
+    # because "its history genuinely cannot prove which of the two happened".
+    # THE FIELD CASE IS DRIVEN END TO END, which no previous test did: every existing layer
+    # test stubbed one of the four steps. ``test_a_watch_that_outlives_its_delivery_target_dies_visibly``
+    # asserts the maintainer note's five outcomes in labelled blocks -- (a) the terminal row
+    # is not indistinguishable from a pause or a retirement, checked through the real CLI
+    # payload; (b) the recorded cause is the delivery failure, never the retry sentinel, with
+    # the negative asserted on the definition too; (c) the terminal timestamps are coherent,
+    # re-read from a fresh store for durability; (d) exactly ONE actionable notice, in the
+    # workspace inbox, reachable only via the mandatory rung because every preferred rung
+    # names a session row that no longer exists; (e) a replay through a THIRD owner may
+    # neither duplicate nor erase it. ``test_a_forever_watch_repeating_the_field_failure_notifies_once``
+    # takes the repetition half with a real waiter subprocess exiting 75/0/0/75 "so the LAST
+    # recorded cycle is the sentinel -- the state #1060's row was actually read in", and pins
+    # that the sentinel never retires the watch, the projection reads ``waiting`` while health
+    # reads ``failing``, and the streak still collapses to one notice.
+    # WHAT WAS FOUND ALREADY COHERENT IS RECORDED TOO, "because the plan predicted
+    # otherwise": ``mark_cycle_result`` already writes ``retired_at``,
+    # ``last_finished_at`` and ``last_event_at`` in one guarded stamp, so (c) and half of (a)
+    # needed no change in ``core/watches.py`` at all -- #1060's row predates that stamp. They
+    # are asserted anyway, "the preconditions the rest of the case rests on, and a regression
+    # in them reopens the field bug by a different road".
+    # A third subordinate test,
+    # ``test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused``, covers the
+    # copy half in both locales through the real translator. All three are consuming tests
+    # for the fix in the preceding commit, so they are green at this head and were red before
+    # it; the honest framing is that they consume a fix rather than drive one.
+    # They take no ids of their own because PR6's block is full at 099, 100+ is contracted to
+    # PR2 by the merged plan, and cyhhao declined to consume an id from §10.7's HFR-280...319
+    # block for this round.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
