@@ -180,3 +180,4 @@ sessions/
 # Worktrees
 .worktrees/
 .gstack/
+docs/designs
