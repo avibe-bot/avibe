@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
+# Stamp FLOOR for head-shaped unversioned databases, deliberately NOT head: after
+# `_stamp_existing_initial_schema` stamps it, `_run_migrations_locked` upgrades to head,
+# so every revision after this one replays on a schema that already looks like head.
+# Each such migration must therefore stay idempotent/replay-safe against head shape
+# (e.g. `drop index if exists` before `create index`) rather than assume a virgin table.
 LATEST_SCHEMA_REVISION = "20260622_0023"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
 ALLOW_DEV_STATE_MIGRATION_ENV = "AVIBE_ALLOW_DEV_STATE_MIGRATION"

@@ -1095,6 +1095,77 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
     assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
 
 
+def test_head_shaped_stamp_replays_agent_runs_expression_indexes(tmp_path: Path) -> None:
+    """Head-shaped unversioned databases still receive the 0039-0042 agent_runs indexes.
+
+    This test is GREEN FROM BIRTH — it is a refutation pin, not a fix; red-first does
+    not apply. The refuted premise was that ``_stamp_existing_initial_schema`` stamps a
+    head-shaped database "directly at ``LATEST_SCHEMA_REVISION``" and therefore never
+    executes the owed-notice / settlement / streak index migrations, leaving the
+    two-second owed-notice tick scanning run history. ``LATEST_SCHEMA_REVISION`` is
+    ``20260622_0023``, which is the stamp FLOOR, not head: after that stamp
+    ``_run_migrations_locked`` runs ``command.upgrade(cfg, "head")``, so 0024 through
+    0042 — including all four index migrations — replay on exactly this path. The
+    assertions below compare byte-for-byte against the full 0001-to-head replay and
+    against the migrations' own exported expression SQL, so mirroring that DDL into
+    ``_ensure_new_background_indexes`` would be a third copy for zero behavior.
+    """
+    settled_migration = import_module(
+        "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index"
+    )
+    owed_notice_migration = import_module(
+        "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index"
+    )
+    streak_migration = import_module(
+        "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index"
+    )
+    replayed_indexes = (
+        settled_migration._INDEX,
+        owed_notice_migration._INDEX,
+        streak_migration._INDEX,
+    )
+
+    # Reference: an empty path replays 0001 -> head with no stamping shortcut at all.
+    reference_db = tmp_path / "reference.sqlite"
+    run_migrations(reference_db)
+    with sqlite3.connect(reference_db) as conn:
+        reference_sql = {name: _index_sql(conn, name) for name in replayed_indexes}
+
+    db_path = tmp_path / "vibe.sqlite"
+    engine = create_sqlite_engine(db_path)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    with sqlite3.connect(db_path) as conn:
+        for name in replayed_indexes:
+            conn.execute(f"drop index if exists {name}")
+        conn.commit()
+        assert conn.execute("select name from sqlite_master where name = 'alembic_version'").fetchone() is None
+        assert not {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index' and name in (?, ?, ?)",
+                replayed_indexes,
+            )
+        }
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        upgraded_sql = {name: _index_sql(conn, name) for name in replayed_indexes}
+
+    assert version == (HEAD_REVISION,)
+    assert upgraded_sql == reference_sql
+    # The owed-notice eligibility and backoff expressions must be the migration's own,
+    # never a retyped copy: the planner only matches byte-identical expression text.
+    owed_notice_sql = upgraded_sql[owed_notice_migration._INDEX]
+    assert owed_notice_migration._STATE_EXPR in owed_notice_sql
+    assert owed_notice_migration._NEXT_ATTEMPT_EXPR in owed_notice_sql
+
+
 def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
