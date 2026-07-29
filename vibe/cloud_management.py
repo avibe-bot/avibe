@@ -161,6 +161,22 @@ def _bound_subject(browser_id: str) -> str | None:
         return subject
 
 
+def authorization_subject(
+    browser_id: str | None,
+    remote_subject: str | None,
+) -> str | None:
+    """Return the subject that can safely bind a management authorization."""
+    return remote_subject or (_bound_subject(browser_id) if browser_id else None)
+
+
+def can_silent_reauthorize(
+    browser_id: str | None,
+    remote_subject: str | None,
+) -> bool:
+    """Silent authorization is safe only when it cannot switch Cloud users."""
+    return authorization_subject(browser_id, remote_subject) is not None
+
+
 def begin_authorization(
     config: V2Config,
     *,
@@ -177,7 +193,12 @@ def begin_authorization(
     state = _token(32)
     nonce = _token(24)
     redirect_uri = f"{callback_origin.rstrip('/')}/auth/organization/callback"
-    expected_subject = remote_subject or _bound_subject(browser_id)
+    expected_subject = authorization_subject(browser_id, remote_subject)
+    if silent and expected_subject is None:
+        raise CloudManagementError(
+            "cloud_management_authorization_required",
+            status=401,
+        )
     handshake = ManagementHandshake(
         state=state,
         browser_id=browser_id,

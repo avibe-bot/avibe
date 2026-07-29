@@ -29,6 +29,7 @@ import {
   SyncBadge,
 } from '../components';
 import { useOrganization } from '../context';
+import { aggregateSyncStatus } from '../policy';
 
 type OverviewData = {
   instances: OrganizationInstance[];
@@ -36,6 +37,20 @@ type OverviewData = {
   resources: OrganizationResource[];
   projects: OrganizationProject[];
 };
+
+function isUnhealthy(status: ReturnType<typeof aggregateSyncStatus>): boolean {
+  return status !== 'in_sync' && status !== 'none';
+}
+
+function instanceDiagnosticsPath(instance: OrganizationInstance, canManage: boolean): string {
+  if (isUnhealthy(aggregateSyncStatus(instance.policy_sync.projects))) {
+    return `/admin/organization/instances/${encodeURIComponent(instance.id)}/projects`;
+  }
+  if (canManage && isUnhealthy(aggregateSyncStatus(instance.policy_sync.resources))) {
+    return '/admin/organization/resources';
+  }
+  return '/admin/organization/instances';
+}
 
 export function OrganizationOverviewPage() {
   const { t } = useTranslation();
@@ -94,16 +109,26 @@ export function OrganizationOverviewPage() {
             to: '/admin/organization/members',
           }]
         : []),
-      ...data.instances
-        .filter((instance) => !['in_sync', 'none'].includes(instance.policy_sync.status))
-        .map((instance) => ({
-          key: instance.id,
-          title: t('organization.overview.instanceNeedsAttention', { name: instance.slug }),
-          body: t(`organization.sync.${instance.policy_sync.status}`),
-          to: `/admin/organization/instances/${encodeURIComponent(instance.id)}/projects`,
-        })),
+      ...data.instances.flatMap((instance) => {
+        const projectStatus = aggregateSyncStatus(instance.policy_sync.projects);
+        const resourceStatus = aggregateSyncStatus(instance.policy_sync.resources);
+        return [
+          ...(isUnhealthy(projectStatus) ? [{
+            key: `${instance.id}:projects`,
+            title: t('organization.overview.projectSyncNeedsAttention', { name: instance.slug }),
+            body: t(`organization.sync.${projectStatus}`),
+            to: `/admin/organization/instances/${encodeURIComponent(instance.id)}/projects`,
+          }] : []),
+          ...(isUnhealthy(resourceStatus) ? [{
+            key: `${instance.id}:resources`,
+            title: t('organization.overview.resourceSyncNeedsAttention', { name: instance.slug }),
+            body: t(`organization.sync.${resourceStatus}`),
+            to: canManage ? '/admin/organization/resources' : '/admin/organization/instances',
+          }] : []),
+        ];
+      }),
     ];
-  }, [canManage, data, detail?.counts.invitedMembers, t]);
+  }, [canManage, data, detail?.counts, t]);
 
   if (!detail) return null;
   if (!data && !error) return <LoadingState rows={6} />;
@@ -162,7 +187,7 @@ export function OrganizationOverviewPage() {
                 ) : data.instances.map((instance) => (
                   <Link
                     key={instance.id}
-                    to={`/admin/organization/instances/${encodeURIComponent(instance.id)}/projects`}
+                    to={instanceDiagnosticsPath(instance, canManage)}
                     className="flex items-center gap-3 border-b border-border px-5 py-4 last:border-b-0 hover:bg-foreground/[0.025]"
                   >
                     <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/10 font-bold text-mint">

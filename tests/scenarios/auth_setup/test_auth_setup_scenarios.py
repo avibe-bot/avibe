@@ -208,6 +208,30 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIsNone(complete.call_args.kwargs["remote_subject"])
 
+    def test_unbound_loopback_requires_interactive_sign_in(self):
+        """Scenario: AUTH-SETUP-309"""
+        client = self.harness.unbound_remote_client()
+        loopback_origin = "http://127.0.0.1:15131"
+
+        session = client.get("/api/cloud-management/session", base_url=loopback_origin)
+        silent = client.post(
+            "/api/cloud-management/session/start",
+            json={"mode": "silent", "next": "/admin/organization/overview"},
+            headers=self.harness.csrf(client, loopback_origin),
+            base_url=loopback_origin,
+        )
+
+        self.assertEqual(session.status_code, 200)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+        self.assertEqual(silent.status_code, 401)
+        self.assertEqual(
+            silent.get_json(),
+            {
+                "error": "cloud_management_authorization_required",
+                "retryable": False,
+            },
+        )
+
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_codex_failure_scenario_emits_reset_path(self):

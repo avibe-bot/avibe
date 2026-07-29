@@ -66,8 +66,10 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
   const [detail, setDetail] = useState<OrganizationDetail | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
   const silentAttempted = useRef(false);
+  const operationGeneration = useRef(0);
 
   const startAuthorization = useCallback(async (mode: 'interactive' | 'silent') => {
+    operationGeneration.current += 1;
     setGate('reauthorizing');
     try {
       const result = await organizationRequest<{ authorize_url: string }>(
@@ -90,19 +92,36 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     }
   }, [location.pathname, location.search]);
 
-  const loadOrganization = useCallback(async (organizationId: string) => {
-    const result = await organizationRequest<OrganizationDetail>(
-      `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}`,
-    );
+  const loadOrganizationAtGeneration = useCallback(async (
+    organizationId: string,
+    generation: number,
+  ): Promise<boolean> => {
+    let result: OrganizationDetail;
+    try {
+      result = await organizationRequest<OrganizationDetail>(
+        `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}`,
+      );
+    } catch (error) {
+      if (generation !== operationGeneration.current) return false;
+      throw error;
+    }
+    if (generation !== operationGeneration.current) return false;
     setSelectedOrganizationId(organizationId);
     setDetail(result);
     sessionStorage.setItem(SELECTED_ORG_KEY, organizationId);
+    return true;
   }, []);
 
-  const loadOrganizations = useCallback(async () => {
+  const selectOrganization = useCallback(async (organizationId: string) => {
+    const generation = ++operationGeneration.current;
+    await loadOrganizationAtGeneration(organizationId, generation);
+  }, [loadOrganizationAtGeneration]);
+
+  const loadOrganizations = useCallback(async (generation: number) => {
     const result = await organizationRequest<{ organizations: Organization[] }>(
       '/api/cloud-management/organizations',
     );
+    if (generation !== operationGeneration.current) return;
     setOrganizations(result.organizations);
     if (result.organizations.length === 0) {
       setSelectedOrganizationId(null);
@@ -114,11 +133,13 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     const selected = result.organizations.some((item) => item.id === remembered)
       ? remembered!
       : result.organizations[0].id;
-    await loadOrganization(selected);
-    setGate('connected');
-  }, [loadOrganization]);
+    if (await loadOrganizationAtGeneration(selected, generation)) {
+      setGate('connected');
+    }
+  }, [loadOrganizationAtGeneration]);
 
   const probe = useCallback(async () => {
+    const generation = ++operationGeneration.current;
     const returnedError = callbackError();
     if (returnedError === 'cloud_management_subject_mismatch') {
       setGate('subject_mismatch');
@@ -129,6 +150,7 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
       const result = await organizationRequest<CloudManagementSession>(
         '/api/cloud-management/session',
       );
+      if (generation !== operationGeneration.current) return;
       if (!result.connected) {
         setSession(null);
         setOrganizations([]);
@@ -151,8 +173,9 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
       }
       setSession(result);
       silentAttempted.current = false;
-      await loadOrganizations();
+      await loadOrganizations(generation);
     } catch (error) {
+      if (generation !== operationGeneration.current) return;
       if (error instanceof OrganizationApiError) {
         if (error.code === 'cloud_management_subject_mismatch') setGate('subject_mismatch');
         else if (error.status === 401) setGate(returnedError ? 'authorization_required' : 'revoked');
@@ -174,12 +197,14 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     } catch (error) {
       if (error instanceof OrganizationApiError) {
         if (error.code === 'cloud_management_subject_mismatch') {
+          operationGeneration.current += 1;
           setGate('subject_mismatch');
         } else if (error.status === 401) {
           if (error.canSilentReauthorize && !silentAttempted.current) {
             silentAttempted.current = true;
             await startAuthorization('silent');
           } else {
+            operationGeneration.current += 1;
             setGate('revoked');
           }
         } else if (error.status >= 500 && error.retryable) {
@@ -191,9 +216,11 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
   }, [startAuthorization]);
 
   const signOut = useCallback(async () => {
+    operationGeneration.current += 1;
     try {
       await organizationRequest('/api/cloud-management/session', { method: 'DELETE' });
     } finally {
+      operationGeneration.current += 1;
       setSession(null);
       setOrganizations([]);
       setDetail(null);
@@ -204,8 +231,9 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
 
   const refreshOrganization = useCallback(async () => {
     if (!selectedOrganizationId) return;
-    await loadOrganization(selectedOrganizationId);
-  }, [loadOrganization, selectedOrganizationId]);
+    const generation = ++operationGeneration.current;
+    await loadOrganizationAtGeneration(selectedOrganizationId, generation);
+  }, [loadOrganizationAtGeneration, selectedOrganizationId]);
 
   const value = useMemo<OrganizationContextValue>(() => ({
     gate,
@@ -217,7 +245,7 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     signIn: () => startAuthorization('interactive'),
     signOut,
     retry: probe,
-    selectOrganization: loadOrganization,
+    selectOrganization,
     refreshOrganization,
     invalidate: () => setDataVersion((version) => version + 1),
     request,
@@ -225,13 +253,13 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
     dataVersion,
     detail,
     gate,
-    loadOrganization,
     organizations,
     probe,
     refreshOrganization,
     request,
     selectedOrganizationId,
     session,
+    selectOrganization,
     signOut,
     startAuthorization,
   ]);

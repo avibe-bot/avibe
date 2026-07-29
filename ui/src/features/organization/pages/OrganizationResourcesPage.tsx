@@ -65,7 +65,7 @@ function ResourceAccessDialog({
   resource: OrganizationResource | null;
   groups: OrganizationGroup[];
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: () => Promise<OrganizationResource | null>;
 }) {
   const { t } = useTranslation();
   const { selectedOrganizationId, request } = useOrganization();
@@ -75,6 +75,7 @@ function ResourceAccessDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [authoritativeResource, setAuthoritativeResource] = useState<OrganizationResource | null>(null);
 
   useEffect(() => {
     if (!resource) return;
@@ -83,6 +84,7 @@ function ResourceAccessDialog({
     setRevision(resource.access?.revision ?? 0);
     setError(undefined);
     setConflict(false);
+    setAuthoritativeResource(null);
   }, [resource]);
 
   const visibleGroups = groups.filter((group) => !group.archived_at || groupIds.includes(group.id));
@@ -114,15 +116,27 @@ function ResourceAccessDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
+        setAuthoritativeResource(await onSaved());
         setConflict(true);
-        await onSaved();
-        if (caught.currentRevision !== undefined) setRevision(caught.currentRevision);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const reloadAuthoritativeResource = () => {
+    if (!authoritativeResource) {
+      onOpenChange(false);
+      return;
+    }
+    setLevel(authoritativeResource.access?.access_level ?? 'private');
+    setGroupIds(authoritativeResource.access?.group_ids ?? []);
+    setRevision(authoritativeResource.access?.revision ?? 0);
+    setError(undefined);
+    setConflict(false);
+    setAuthoritativeResource(null);
   };
 
   return (
@@ -132,7 +146,7 @@ function ResourceAccessDialog({
           <DialogTitle>{t('organization.resources.dialogTitle', { name: resource?.display_name })}</DialogTitle>
           <DialogDescription>{t('organization.resources.dialogBody')}</DialogDescription>
         </DialogHeader>
-        {conflict ? <ConflictBanner onReload={() => setConflict(false)} /> : null}
+        {conflict ? <ConflictBanner onReload={reloadAuthoritativeResource} /> : null}
         {error ? <ErrorBanner code={error} /> : null}
         <div className="space-y-5">
           <div className="space-y-1.5">
@@ -183,7 +197,7 @@ function ResourceAccessDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || (level === 'scope' && groupIds.length === 0)} onClick={() => void save()}>
+          <Button variant="brand" disabled={saving || conflict || (level === 'scope' && groupIds.length === 0)} onClick={() => void save()}>
             {saving ? t('organization.actions.saving') : t('organization.actions.saveChanges')}
           </Button>
         </DialogFooter>
@@ -204,8 +218,8 @@ export function OrganizationResourcesPage() {
   const [forbidden, setForbidden] = useState(false);
   const canManage = detail?.capabilities.can_manage_organization === true;
 
-  const load = useCallback(async () => {
-    if (!selectedOrganizationId || !canManage) return;
+  const load = useCallback(async (): Promise<OrganizationResource[]> => {
+    if (!selectedOrganizationId || !canManage) return [];
     setError(undefined);
     setForbidden(false);
     try {
@@ -220,15 +234,18 @@ export function OrganizationResourcesPage() {
           `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/instances`,
         ),
       ]);
-      setResources(resourceResult.resources.filter((resource) => resource.sync.status !== 'deleted'));
+      const activeResources = resourceResult.resources.filter((resource) => resource.sync.status !== 'deleted');
+      setResources(activeResources);
       setGroups(groupResult.groups);
       setInstances(instanceResult.instances);
+      return activeResources;
     } catch (caught) {
       if (caught instanceof OrganizationApiError && (caught.status === 403 || caught.status === 404)) {
         setForbidden(true);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
+      return [];
     }
   }, [canManage, request, selectedOrganizationId]);
 
@@ -319,7 +336,14 @@ export function OrganizationResourcesPage() {
         resource={editing}
         groups={groups}
         onOpenChange={(open) => { if (!open) setEditing(null); }}
-        onSaved={load}
+        onSaved={async () => {
+          const latestResources = await load();
+          return latestResources.find((resource) => (
+            resource.instance_id === editing?.instance_id
+            && resource.resource_kind === editing?.resource_kind
+            && resource.resource_id === editing?.resource_id
+          )) ?? null;
+        }}
       />
     </div>
   );

@@ -119,6 +119,7 @@
     "messagingPlatforms": "Messaging Platforms",
     "backends": "Backends",
     "remoteAccess": "Remote Access",
+    "organization": "Organization",
     "doctor": "Doctor",
     "inbox": "Inbox",
     "projects": "Projects",
@@ -3421,7 +3422,7 @@
       "unavailableBody": "Your current Organization or Avibe access does not allow this page.",
       "errorTitle": "Unable to complete the request",
       "conflictTitle": "This policy changed elsewhere",
-      "conflictBody": "The latest version has been loaded. Your draft is still here so you can compare it before saving again."
+      "conflictBody": "Your draft was not saved. Review it, then reload the latest version before making changes again."
     },
     "errors": {
       "generic": "Avibe could not complete this Organization request.",
@@ -3490,6 +3491,8 @@
       "policySync": "Policy sync",
       "needsAttention": "Needs attention",
       "instanceNeedsAttention": "{{name}} has policy changes that need attention.",
+      "projectSyncNeedsAttention": "{{name}} has Project policies that need attention.",
+      "resourceSyncNeedsAttention": "{{name}} has Resource policies that need attention.",
       "noAttention": "All visible managed policies are healthy.",
       "pendingInvites": "Pending invites",
       "pendingInvitesBody": "{{count}} invitation(s) are waiting to be accepted.",
@@ -3527,6 +3530,7 @@
       "emptyTitle": "No groups found",
       "emptyBody": "No groups match the current view.",
       "noDescription": "No description",
+      "yourGroup": "Your group",
       "createTitle": "Create group",
       "createBody": "Create an Organization group and optionally add initial members.",
       "editTitle": "Edit group",

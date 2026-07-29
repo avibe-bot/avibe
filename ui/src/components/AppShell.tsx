@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -321,6 +321,7 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    { to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2, match: (p) => p.startsWith('/admin/organization') },
     // Permanent escape hatch to the App Library (a workbench app). Always present,
     // so the Library is reachable from the control panel even when it is undocked
     // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
@@ -382,27 +383,18 @@ export const AppShell: React.FC = () => {
 
   // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
   // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
-  // green circle), 控制台, 菜单 (opens the full nested nav sheet below), 高级设置 —
+  // green circle), 控制台, Organization, 菜单 (opens the full nested nav sheet) —
   // and the 菜单 sheet renders the same nested adminItems so every page is
   // reachable + groups expand. See ``adminMenuOpen``.
   const adminMobileTabs: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    { to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 },
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
-    {
-      to: '/admin/settings/messaging',
-      label: t('nav.advancedSettings'),
-      icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
-    },
   ];
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
-  // bar (控制台 + 高级设置) — so nothing is duplicated.
-  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
+  // bar (控制台 + Organization) — so nothing is duplicated.
+  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/organization/overview']);
   const adminSheetItems = adminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
@@ -509,6 +501,16 @@ export const AppShell: React.FC = () => {
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
               {capabilities.can_use_system && <AppsLauncher />}
+              {shellMode === 'workbench' && (
+                <Link
+                  to="/admin/organization/overview"
+                  title={t('nav.organization')}
+                  aria-label={t('nav.organization')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
+                >
+                  <Building2 className="size-[18px] text-muted group-hover:text-foreground" />
+                </Link>
+              )}
               {shellMode === 'workbench' && capabilities.can_manage_instance && (
                 <Link
                   to="/admin/dashboard"
@@ -586,7 +588,17 @@ export const AppShell: React.FC = () => {
           {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
-          <InstallHint />
+          <div className="flex items-center gap-1.5">
+            <Link
+              to="/admin/organization/overview"
+              title={t('nav.organization')}
+              aria-label={t('nav.organization')}
+              className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+            >
+              <Building2 className="size-[18px]" />
+            </Link>
+            <InstallHint />
+          </div>
         </header>
       )}
 

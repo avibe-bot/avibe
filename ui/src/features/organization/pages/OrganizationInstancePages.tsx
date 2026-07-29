@@ -52,6 +52,10 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
+import {
+  hasDuplicateProjectPrincipals,
+  normalizeOrganizationPrincipal,
+} from '../policy';
 
 type PrincipalKind = InstanceAccessEntry['kind'];
 type ProjectMode = 'inherit' | 'owner_only' | 'restricted';
@@ -68,11 +72,6 @@ function principalIcon(kind: PrincipalKind) {
   if (kind === 'organization_group') return Users;
   if (kind === 'email_domain') return Globe2;
   return Mail;
-}
-
-function normalizePrincipal(kind: PrincipalKind, value: string): string {
-  const normalized = value.trim();
-  return kind === 'email_domain' ? normalized.replace(/^@/, '').toLowerCase() : normalized;
 }
 
 function projectMode(project: OrganizationProject): ProjectMode {
@@ -199,7 +198,7 @@ function AccessEntryDialog({
     : value;
   const candidate: InstanceAccessEntry = {
     kind,
-    value: normalizePrincipal(kind, resolvedValue),
+    value: normalizeOrganizationPrincipal(kind, resolvedValue),
     role,
   };
 
@@ -229,7 +228,7 @@ function AccessEntryDialog({
     const narrows = Boolean(editing) && (
       editing?.role === 'editor' && candidate.role === 'viewer'
       || editing?.kind !== candidate.kind
-      || normalizePrincipal(editing?.kind ?? 'email', editing?.value ?? '') !== candidate.value
+      || normalizeOrganizationPrincipal(editing?.kind ?? 'email', editing?.value ?? '') !== candidate.value
     );
     if (narrows) setConfirmNarrowing(true);
     else void commit();
@@ -451,7 +450,7 @@ function ProjectAccessDialog({
   groups: OrganizationGroup[];
   instanceId: string;
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: () => Promise<OrganizationProject | null>;
 }) {
   const { t } = useTranslation();
   const { request } = useOrganization();
@@ -460,6 +459,7 @@ function ProjectAccessDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [authoritativeProject, setAuthoritativeProject] = useState<OrganizationProject | null>(null);
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -469,6 +469,7 @@ function ProjectAccessDialog({
     setRevision(project.access.revision);
     setError(undefined);
     setConflict(false);
+    setAuthoritativeProject(null);
   }, [project]);
 
   const activeGroups = groups.filter((group) => !group.archived_at);
@@ -495,9 +496,14 @@ function ProjectAccessDialog({
     const wireBindings = mode === 'restricted'
       ? bindings.map((binding) => ({
           ...binding,
-          principal_value: normalizePrincipal(binding.principal_kind, binding.principal_value),
+          principal_value: normalizeOrganizationPrincipal(binding.principal_kind, binding.principal_value),
         }))
       : [];
+    if (hasDuplicateProjectPrincipals(wireBindings)) {
+      setError('duplicate_project_access_principal');
+      setSaving(false);
+      return;
+    }
     try {
       await request(
         `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/projects/${encodeURIComponent(project.project_id)}/access`,
@@ -514,15 +520,28 @@ function ProjectAccessDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
+        const latest = await onSaved();
+        setAuthoritativeProject(latest);
         setConflict(true);
-        await onSaved();
-        if (caught.currentRevision !== undefined) setRevision(caught.currentRevision);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const reloadAuthoritativeProject = () => {
+    if (!authoritativeProject) {
+      onOpenChange(false);
+      return;
+    }
+    setMode(projectMode(authoritativeProject));
+    setBindings(authoritativeProject.access.bindings);
+    setRevision(authoritativeProject.access.revision);
+    setError(undefined);
+    setConflict(false);
+    setAuthoritativeProject(null);
   };
 
   return (
@@ -532,7 +551,7 @@ function ProjectAccessDialog({
           <DialogTitle>{t('organization.projects.dialogTitle', { name: project?.display_name })}</DialogTitle>
           <DialogDescription>{t('organization.projects.dialogBody')}</DialogDescription>
         </DialogHeader>
-        {conflict ? <ConflictBanner onReload={() => setConflict(false)} /> : null}
+        {conflict ? <ConflictBanner onReload={reloadAuthoritativeProject} /> : null}
         {error ? <ErrorBanner code={error} /> : null}
         <div className="space-y-5">
           <div className="space-y-1.5">
@@ -612,7 +631,7 @@ function ProjectAccessDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
           <Button
             variant="brand"
-            disabled={saving || (mode === 'restricted' && (bindings.length === 0 || bindings.some((binding) => !binding.principal_value.trim())))}
+            disabled={saving || conflict || (mode === 'restricted' && (bindings.length === 0 || bindings.some((binding) => !binding.principal_value.trim())))}
             onClick={() => void save()}
           >
             {saving ? t('organization.actions.saving') : t('organization.actions.saveChanges')}
@@ -634,8 +653,8 @@ export function InstanceProjectsPage() {
   const [forbidden, setForbidden] = useState(false);
   const [editing, setEditing] = useState<OrganizationProject | null>(null);
 
-  const load = useCallback(async () => {
-    if (!instanceId) return;
+  const load = useCallback(async (): Promise<OrganizationProject[]> => {
+    if (!instanceId) return [];
     setError(undefined);
     setForbidden(false);
     try {
@@ -646,14 +665,17 @@ export function InstanceProjectsPage() {
       }>(
         `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/projects`,
       );
-      setProjects(result.projects.filter((project) => project.sync.status !== 'deleted'));
+      const activeProjects = result.projects.filter((project) => project.sync.status !== 'deleted');
+      setProjects(activeProjects);
       setGroups(result.groups);
+      return activeProjects;
     } catch (caught) {
       if (caught instanceof OrganizationApiError && (caught.status === 403 || caught.status === 404)) {
         setForbidden(true);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
+      return [];
     }
   }, [instanceId, request]);
 
@@ -726,7 +748,10 @@ export function InstanceProjectsPage() {
         groups={groups}
         instanceId={instance.id}
         onOpenChange={(open) => { if (!open) setEditing(null); }}
-        onSaved={load}
+        onSaved={async () => {
+          const latestProjects = await load();
+          return latestProjects.find((project) => project.project_id === editing?.project_id) ?? null;
+        }}
       />
     </div>
   );

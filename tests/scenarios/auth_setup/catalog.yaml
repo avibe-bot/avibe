@@ -182,6 +182,13 @@ scenarios:
     layer: scenario
     backend: cloud_management
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_trusted_loopback_flow_can_establish_the_first_subject
+  - id: AUTH-SETUP-309
+    name: Unbound trusted loopback cannot start silent Organization authorization
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_unbound_loopback_requires_interactive_sign_in
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

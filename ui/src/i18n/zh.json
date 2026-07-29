@@ -119,6 +119,7 @@
     "messagingPlatforms": "通讯平台",
     "backends": "后端",
     "remoteAccess": "远程访问",
+    "organization": "组织",
     "doctor": "诊断",
     "inbox": "收件箱",
     "projects": "项目",
@@ -3421,7 +3422,7 @@
       "unavailableBody": "当前组织权限或 Avibe 权限不允许访问此页面。",
       "errorTitle": "无法完成请求",
       "conflictTitle": "策略已在其他位置更改",
-      "conflictBody": "已加载最新版本，你的草稿仍然保留。对比后可再次保存。"
+      "conflictBody": "你的草稿尚未保存。请先检查草稿，再重新加载最新版本后继续修改。"
     },
     "errors": {
       "generic": "Avibe 无法完成此组织请求。",
@@ -3490,6 +3491,8 @@
       "policySync": "策略同步",
       "needsAttention": "需要处理",
       "instanceNeedsAttention": "{{name}} 的策略变更需要处理。",
+      "projectSyncNeedsAttention": "{{name}} 的 Project 策略需要处理。",
+      "resourceSyncNeedsAttention": "{{name}} 的资源策略需要处理。",
       "noAttention": "所有可见的受管策略状态正常。",
       "pendingInvites": "待接受邀请",
       "pendingInvitesBody": "有 {{count}} 个邀请等待接受。",
@@ -3527,6 +3530,7 @@
       "emptyTitle": "没有找到群组",
       "emptyBody": "当前视图中没有匹配的群组。",
       "noDescription": "没有描述",
+      "yourGroup": "我的群组",
       "createTitle": "创建群组",
       "createBody": "创建组织群组，并可选择初始成员。",
       "editTitle": "编辑群组",

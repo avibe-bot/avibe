@@ -69,7 +69,7 @@ function MemberDialog({
   member: OrganizationMember | null;
   groups: OrganizationGroup[];
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: () => Promise<OrganizationMember[]>;
 }) {
   const { t } = useTranslation();
   const { selectedOrganizationId, request, invalidate } = useOrganization();
@@ -79,6 +79,7 @@ function MemberDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [authoritativeMember, setAuthoritativeMember] = useState<OrganizationMember | null>(null);
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -89,6 +90,7 @@ function MemberDialog({
     setRevision(member?.member_revision ?? 0);
     setError(undefined);
     setConflict(false);
+    setAuthoritativeMember(null);
   }, [member, open]);
 
   const save = async () => {
@@ -117,15 +119,31 @@ function MemberDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
+        const latestMembers = await onSaved();
+        setAuthoritativeMember(
+          latestMembers.find((candidate) => candidate.id === member?.id) ?? null,
+        );
         setConflict(true);
-        await onSaved();
-        if (caught.currentRevision !== undefined) setRevision(caught.currentRevision);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const reloadAuthoritativeMember = () => {
+    if (!authoritativeMember) {
+      onOpenChange(false);
+      return;
+    }
+    setEmail(authoritativeMember.email);
+    setRole(authoritativeMember.role === 'admin' ? 'admin' : 'member');
+    setGroupIds(authoritativeMember.groups.map((group) => group.id));
+    setRevision(authoritativeMember.member_revision);
+    setError(undefined);
+    setConflict(false);
+    setAuthoritativeMember(null);
   };
 
   return (
@@ -135,7 +153,7 @@ function MemberDialog({
           <DialogTitle>{t(member ? 'organization.members.editTitle' : 'organization.members.inviteTitle')}</DialogTitle>
           <DialogDescription>{t(member ? 'organization.members.editBody' : 'organization.members.inviteBody')}</DialogDescription>
         </DialogHeader>
-        {conflict ? <ConflictBanner onReload={() => setConflict(false)} /> : null}
+        {conflict ? <ConflictBanner onReload={reloadAuthoritativeMember} /> : null}
         {error ? <ErrorBanner code={error} /> : null}
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -182,7 +200,7 @@ function MemberDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || !email.trim()} onClick={() => void save()}>
+          <Button variant="brand" disabled={saving || conflict || !email.trim()} onClick={() => void save()}>
             {saving ? t('organization.actions.saving') : t(member ? 'organization.actions.saveChanges' : 'organization.actions.sendInvite')}
           </Button>
         </DialogFooter>
@@ -204,8 +222,8 @@ export function OrganizationMembersPage() {
   const [removing, setRemoving] = useState<OrganizationMember | null>(null);
   const canManage = detail?.capabilities.can_manage_organization === true;
 
-  const load = useCallback(async () => {
-    if (!selectedOrganizationId) return;
+  const load = useCallback(async (): Promise<OrganizationMember[]> => {
+    if (!selectedOrganizationId) return [];
     setError(undefined);
     try {
       const [memberResult, groupResult] = await Promise.all([
@@ -218,8 +236,10 @@ export function OrganizationMembersPage() {
       ]);
       setMembers(memberResult.members);
       setGroups(groupResult.groups);
+      return memberResult.members;
     } catch (caught) {
       setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      return [];
     }
   }, [request, selectedOrganizationId]);
 
@@ -250,14 +270,6 @@ export function OrganizationMembersPage() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (caught) {
-      if (isRevisionConflict(caught)) {
-        await load();
-        if (caught.currentRevision !== undefined) {
-          setRemoving((current) => current
-            ? { ...current, member_revision: caught.currentRevision! }
-            : current);
-        }
-      }
       setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
     }
   };
@@ -276,6 +288,14 @@ export function OrganizationMembersPage() {
       invalidate();
       await load();
     } catch (caught) {
+      if (isRevisionConflict(caught)) {
+        const latestMembers = await load();
+        setRemoving((current) => (
+          current
+            ? latestMembers.find((member) => member.id === current.id && member.status !== 'removed') ?? null
+            : null
+        ));
+      }
       setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
     }
   };

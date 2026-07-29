@@ -63,7 +63,7 @@ function GroupDialog({
   group: OrganizationGroup | null;
   members: OrganizationMember[];
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: () => Promise<OrganizationGroup | null>;
 }) {
   const { t } = useTranslation();
   const { selectedOrganizationId, request, invalidate } = useOrganization();
@@ -74,6 +74,7 @@ function GroupDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [authoritativeGroup, setAuthoritativeGroup] = useState<OrganizationGroup | null>(null);
   const [revision, setRevision] = useState(0);
   const draftKey = useRef<string | null>(null);
 
@@ -92,6 +93,7 @@ function GroupDialog({
     setRevision(group?.group_revision ?? 0);
     setError(undefined);
     setConflict(false);
+    setAuthoritativeGroup(null);
   }, [group, open]);
 
   const save = async () => {
@@ -126,15 +128,28 @@ function GroupDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
+        setAuthoritativeGroup(await onSaved());
         setConflict(true);
-        await onSaved();
-        if (caught.currentRevision !== undefined) setRevision(caught.currentRevision);
       } else {
         setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const reloadAuthoritativeGroup = () => {
+    if (!authoritativeGroup) {
+      onOpenChange(false);
+      return;
+    }
+    setName(authoritativeGroup.name);
+    setDescription(authoritativeGroup.description ?? '');
+    setColor(authoritativeGroup.color ?? 'violet');
+    setRevision(authoritativeGroup.group_revision);
+    setError(undefined);
+    setConflict(false);
+    setAuthoritativeGroup(null);
   };
 
   return (
@@ -144,7 +159,7 @@ function GroupDialog({
           <DialogTitle>{t(group ? 'organization.groups.editTitle' : 'organization.groups.createTitle')}</DialogTitle>
           <DialogDescription>{t(group ? 'organization.groups.editBody' : 'organization.groups.createBody')}</DialogDescription>
         </DialogHeader>
-        {conflict ? <ConflictBanner onReload={() => setConflict(false)} /> : null}
+        {conflict ? <ConflictBanner onReload={reloadAuthoritativeGroup} /> : null}
         {error ? <ErrorBanner code={error} /> : null}
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -196,7 +211,7 @@ function GroupDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || !name.trim()} onClick={() => void save()}>
+          <Button variant="brand" disabled={saving || conflict || !name.trim()} onClick={() => void save()}>
             {saving ? t('organization.actions.saving') : t('organization.actions.saveChanges')}
           </Button>
         </DialogFooter>
@@ -216,12 +231,13 @@ function MemberPickerDialog({
   group: OrganizationGroup;
   allMembers: OrganizationMember[];
   onOpenChange: (open: boolean) => void;
-  onSaved: () => Promise<void>;
+  onSaved: () => Promise<OrganizationGroup | null>;
 }) {
   const { t } = useTranslation();
   const { selectedOrganizationId, request, invalidate } = useOrganization();
   const [memberIds, setMemberIds] = useState<string[]>([]);
   const [conflict, setConflict] = useState(false);
+  const [authoritativeGroup, setAuthoritativeGroup] = useState<OrganizationGroup | null>(null);
   const [saving, setSaving] = useState(false);
   const [revision, setRevision] = useState(group.group_revision);
   const draftGroupId = useRef<string | null>(null);
@@ -236,6 +252,7 @@ function MemberPickerDialog({
     setMemberIds(group.members?.map((member) => member.id) ?? []);
     setRevision(group.group_revision);
     setConflict(false);
+    setAuthoritativeGroup(null);
   }, [group, open]);
 
   const save = async () => {
@@ -254,15 +271,25 @@ function MemberPickerDialog({
       onOpenChange(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) {
+        setAuthoritativeGroup(await onSaved());
         setConflict(true);
-        await onSaved();
-        if (caught.currentRevision !== undefined) setRevision(caught.currentRevision);
       } else {
         setConflict(false);
       }
     } finally {
       setSaving(false);
     }
+  };
+
+  const reloadAuthoritativeGroup = () => {
+    if (!authoritativeGroup) {
+      onOpenChange(false);
+      return;
+    }
+    setMemberIds(authoritativeGroup.members?.map((member) => member.id) ?? []);
+    setRevision(authoritativeGroup.group_revision);
+    setConflict(false);
+    setAuthoritativeGroup(null);
   };
 
   return (
@@ -272,7 +299,7 @@ function MemberPickerDialog({
           <DialogTitle>{t('organization.groups.manageMembersTitle')}</DialogTitle>
           <DialogDescription>{t('organization.groups.manageMembersBody', { name: group.name })}</DialogDescription>
         </DialogHeader>
-        {conflict ? <ConflictBanner onReload={() => setConflict(false)} /> : null}
+        {conflict ? <ConflictBanner onReload={reloadAuthoritativeGroup} /> : null}
         <div className="max-h-[45vh] space-y-1 overflow-y-auto rounded-lg border border-border p-2">
           {allMembers.filter((member) => member.status === 'active').map((member) => (
             <button
@@ -294,7 +321,7 @@ function MemberPickerDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving} onClick={() => void save()}>{t('organization.actions.saveMembers')}</Button>
+          <Button variant="brand" disabled={saving || conflict} onClick={() => void save()}>{t('organization.actions.saveMembers')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -371,20 +398,31 @@ export function OrganizationGroupsPage() {
             <Link key={group.id} to={`/admin/organization/groups/${encodeURIComponent(group.id)}`} className="rounded-lg border border-border bg-card p-4 transition hover:border-border-strong">
               <div className="flex items-start justify-between gap-3">
                 <GroupPill name={group.name} color={group.color} />
-                <Badge variant={group.archived_at ? 'secondary' : 'success'}>{t(group.archived_at ? 'organization.groups.archived' : 'organization.groups.active')}</Badge>
+                <div className="flex flex-wrap justify-end gap-1.5">
+                  {!canManage && group.is_member ? <Badge variant="info">{t('organization.groups.yourGroup')}</Badge> : null}
+                  <Badge variant={group.archived_at ? 'secondary' : 'success'}>{t(group.archived_at ? 'organization.groups.archived' : 'organization.groups.active')}</Badge>
+                </div>
               </div>
               <p className="mt-3 min-h-10 text-[12px] leading-5 text-muted">{group.description || t('organization.groups.noDescription')}</p>
-              <div className="mt-4 grid grid-cols-4 gap-2 border-t border-border pt-3 text-center">
-                <div><div className="text-sm font-semibold">{group.member_count ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.members')}</div></div>
-                <div><div className="text-sm font-semibold">{group.usage?.instances ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.instances')}</div></div>
-                <div><div className="text-sm font-semibold">{group.usage?.projects ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.overview.projects')}</div></div>
-                <div><div className="text-sm font-semibold">{group.usage?.resources ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.resources')}</div></div>
-              </div>
+              {canManage ? (
+                <div className="mt-4 grid grid-cols-4 gap-2 border-t border-border pt-3 text-center">
+                  <div><div className="text-sm font-semibold">{group.member_count ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.members')}</div></div>
+                  <div><div className="text-sm font-semibold">{group.usage?.instances ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.instances')}</div></div>
+                  <div><div className="text-sm font-semibold">{group.usage?.projects ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.overview.projects')}</div></div>
+                  <div><div className="text-sm font-semibold">{group.usage?.resources ?? 0}</div><div className="text-[9px] uppercase text-muted">{t('organization.nav.resources')}</div></div>
+                </div>
+              ) : null}
             </Link>
           ))}
         </div>
       )}
-      <GroupDialog open={dialogOpen} group={null} members={members} onOpenChange={setDialogOpen} onSaved={load} />
+      <GroupDialog
+        open={dialogOpen}
+        group={null}
+        members={members}
+        onOpenChange={setDialogOpen}
+        onSaved={async () => { await load(); return null; }}
+      />
     </div>
   );
 }
@@ -400,8 +438,8 @@ export function OrganizationGroupDetailPage() {
   const [membersOpen, setMembersOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!selectedOrganizationId || !groupId) return;
+  const load = useCallback(async (): Promise<OrganizationGroup | null> => {
+    if (!selectedOrganizationId || !groupId) return null;
     setError(undefined);
     try {
       const result = await request<{ group: OrganizationGroup }>(
@@ -414,8 +452,10 @@ export function OrganizationGroupDetailPage() {
         );
         setAllMembers(members.members);
       }
+      return result.group;
     } catch (caught) {
       setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      return null;
     }
   }, [groupId, request, selectedOrganizationId]);
 
@@ -450,6 +490,7 @@ export function OrganizationGroupDetailPage() {
       <PageHeader
         eyebrow={t('organization.breadcrumb.groupDetail', { name: group.name })}
         title={group.name}
+        titleAccessory={!group.can_manage && group.is_member ? <Badge variant="info">{t('organization.groups.yourGroup')}</Badge> : undefined}
         description={group.description || t('organization.groups.noDescription')}
         actions={group.can_manage ? (
           <>
@@ -463,11 +504,11 @@ export function OrganizationGroupDetailPage() {
         ) : undefined}
       />
       {error ? <ErrorBanner code={error} onRetry={() => void load()} /> : null}
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
+      {group.can_manage ? <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
         <TableFrame>
           <div className="flex items-center justify-between border-b border-border px-5 py-4">
             <div className="text-[14px] font-semibold">{t('organization.nav.members')} <span className="ml-1 text-muted">{group.members?.length ?? group.member_count ?? 0}</span></div>
-            {group.can_manage && !group.archived_at ? <Button size="sm" variant="brand" onClick={() => setMembersOpen(true)}><Plus className="size-4" />{t('organization.actions.manageMembers')}</Button> : null}
+            {!group.archived_at ? <Button size="sm" variant="brand" onClick={() => setMembersOpen(true)}><Plus className="size-4" />{t('organization.actions.manageMembers')}</Button> : null}
           </div>
           {(group.members ?? []).length === 0 ? (
             <div className="p-5"><EmptyState title={t('organization.members.emptyTitle')} body={t('organization.members.emptyBody')} /></div>
@@ -479,8 +520,7 @@ export function OrganizationGroupDetailPage() {
             </div>
           ))}
         </TableFrame>
-        {group.can_manage ? (
-          <div className="space-y-4">
+        <div className="space-y-4">
             <TableFrame>
               <div className="border-b border-border px-5 py-4 text-[14px] font-semibold">
                 {t('organization.groups.referencedBy')} <span className="ml-1 text-muted">{referenceCount}</span>
@@ -495,9 +535,8 @@ export function OrganizationGroupDetailPage() {
               <div className="flex items-center gap-2 text-[13px] font-semibold"><Archive className="size-4 text-gold" />{t('organization.groups.archiveImpactTitle')}</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">{t('organization.groups.archiveImpactBody')}</p>
             </div>
-          </div>
-        ) : null}
-      </div>
+        </div>
+      </div> : null}
       <GroupDialog open={editOpen} group={group} members={allMembers} onOpenChange={setEditOpen} onSaved={load} />
       <MemberPickerDialog open={membersOpen} group={group} allMembers={allMembers} onOpenChange={setMembersOpen} onSaved={load} />
       <ConfirmDialog

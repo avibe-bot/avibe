@@ -5210,10 +5210,11 @@ def cloud_management_session_get():
         )
     handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
     browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    remote_subject = _cloud_management_subject(config)
     grant, error = cloud_management.resolve_grant(
         handle,
         browser_id,
-        _cloud_management_subject(config),
+        remote_subject,
     )
     if error:
         response = _cloud_management_json(
@@ -5229,7 +5230,13 @@ def cloud_management_session_get():
             {
                 "connected": False,
                 "state": "authorization_required",
-                "can_silent_reauthorize": not manual,
+                "can_silent_reauthorize": (
+                    not manual
+                    and cloud_management.can_silent_reauthorize(
+                        browser_id,
+                        remote_subject,
+                    )
+                ),
             }
         )
     return _cloud_management_json(
@@ -5260,6 +5267,15 @@ def cloud_management_session_start():
             401,
         )
     browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    remote_subject = _cloud_management_subject(config)
+    if silent and not cloud_management.can_silent_reauthorize(
+        browser_id,
+        remote_subject,
+    ):
+        return _cloud_management_json(
+            {"error": "cloud_management_authorization_required", "retryable": False},
+            401,
+        )
     if not browser_id:
         browser_id = cloud_management.new_browser_id()
     callback_origin = _cloud_management_callback_origin(config)
@@ -5272,7 +5288,7 @@ def cloud_management_session_start():
         authorize_url, state = cloud_management.begin_authorization(
             config,
             browser_id=browser_id,
-            remote_subject=_cloud_management_subject(config),
+            remote_subject=remote_subject,
             callback_origin=callback_origin,
             next_path=cloud_management.validate_next_path(payload.get("next")),
             silent=silent,
@@ -5418,10 +5434,11 @@ def _cloud_management_proxy(upstream_path: str) -> Response:
         )
     handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
     browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    remote_subject = _cloud_management_subject(config)
     grant, error = cloud_management.resolve_grant(
         handle,
         browser_id,
-        _cloud_management_subject(config),
+        remote_subject,
     )
     if error:
         response = _cloud_management_json({"error": error, "retryable": False}, 409)
@@ -5433,8 +5450,12 @@ def _cloud_management_proxy(upstream_path: str) -> Response:
             {
                 "error": "cloud_management_authorization_required",
                 "retryable": False,
-                "can_silent_reauthorize": not bool(
-                    request.cookies.get(cloud_management.MANUAL_COOKIE_NAME)
+                "can_silent_reauthorize": (
+                    not bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
+                    and cloud_management.can_silent_reauthorize(
+                        browser_id,
+                        remote_subject,
+                    )
                 ),
             },
             401,

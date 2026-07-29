@@ -199,6 +199,45 @@ def test_explicit_logout_suppresses_silent_reauthorization(monkeypatch, tmp_path
     assert cloud_management._bound_subject("browser-1") is None  # noqa: SLF001
 
 
+def test_unbound_browser_cannot_start_silent_authorization(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    backend = SimpleNamespace(base_url="https://avibe.bot")
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+
+    with pytest.raises(cloud_management.CloudManagementError) as error:
+        cloud_management.begin_authorization(
+            config,
+            browser_id="browser-1",
+            remote_subject=None,
+            callback_origin=REMOTE_ORIGIN,
+            next_path="/admin/organization/overview",
+            silent=True,
+        )
+
+    assert error.value.code == "cloud_management_authorization_required"
+    assert error.value.status == 401
+    assert not cloud_management._handshakes  # noqa: SLF001
+
+
+def test_bound_subject_allows_silent_reauthorization(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    backend = SimpleNamespace(base_url="https://avibe.bot")
+    monkeypatch.setattr(cloud_management, "_validated_backend", lambda _config: backend)
+    cloud_management._browser_subjects["browser-1"] = "user-1"  # noqa: SLF001
+
+    authorize_url, state = cloud_management.begin_authorization(
+        config,
+        browser_id="browser-1",
+        remote_subject=None,
+        callback_origin=REMOTE_ORIGIN,
+        next_path="/admin/organization/overview",
+        silent=True,
+    )
+
+    assert "prompt=none" in authorize_url
+    assert cloud_management.handshake_for_handoff(state).expected_subject == "user-1"
+
+
 def test_remote_viewer_can_use_identity_gate_but_only_allowlisted_proxy_paths(
     monkeypatch, tmp_path
 ) -> None:
