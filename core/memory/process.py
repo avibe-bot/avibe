@@ -305,6 +305,11 @@ class EverOSProcess:
             await self._notify_ready()
             return True
         except Exception:
+            # Every start failure collapses into `memory_sidecar_unavailable`, and
+            # some of them are permanent: a recorded orphan that cannot be
+            # identified fails each later attempt the same way. Log the cause
+            # first, before any cleanup branch can raise or return.
+            logger.exception("EverOS sidecar start failed")
             process = self._process
             process_group = self._process_group
             owned_processes = dict(self._owned_processes)
@@ -664,12 +669,16 @@ class EverOSProcess:
             # A live pid the OS will not describe well enough to rule out as our
             # own sidecar. Keep the record and fail the launch, exactly as for an
             # orphan that refuses to exit: a second sidecar on the same provider
-            # root is worse than a start that reports unavailable.
-            raise RuntimeError("recorded sidecar identity could not be verified")
+            # root is worse than a start that reports unavailable. Name the pid
+            # and the record, because no later attempt can clear this by itself.
+            raise RuntimeError(
+                "recorded sidecar identity could not be verified "
+                f"(pid {pid}, record {self._sidecar_record_path})"
+            )
 
         logger.warning("Reaping an orphaned EverOS sidecar left by a previous Avibe run")
         if not await self._terminate_orphan_tree(pid, confirmed_create_time):
-            raise RuntimeError("orphaned sidecar did not exit")
+            raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self._sidecar_record_path})")
         _remove_sidecar_record(self._sidecar_record_path)
 
     async def _terminate_orphan_tree(self, pid: int, created_at: float) -> bool:
@@ -888,28 +897,48 @@ def _inspect_process_identity(pid: int) -> _ProcessIdentity | None:
         return None
     except psutil.Error:
         pass
-    cmdline = _disclosed_identity_field(process.cmdline)
-    return _ProcessIdentity(
-        create_time=_disclosed_identity_field(process.create_time),
-        cmdline=None if cmdline is None else tuple(str(value) for value in cmdline),
-        uid=_process_real_uid(process),
-    )
+    try:
+        cmdline = _disclosed_identity_field(process.cmdline)
+        return _ProcessIdentity(
+            create_time=_disclosed_identity_field(process.create_time),
+            cmdline=None if cmdline is None else tuple(str(value) for value in cmdline),
+            uid=_process_real_uid(process),
+        )
+    except psutil.NoSuchProcess:
+        # The process exited between the reads. That is "gone", which retires the
+        # record, not "undisclosed", which would fail the launch for nothing.
+        return None
 
 
 def _disclosed_identity_field(read: Callable[[], _IdentityFieldT]) -> _IdentityFieldT | None:
-    """Read one identity field, or ``None`` when the OS will not disclose it."""
+    """Read one identity field, or ``None`` when the OS will not disclose it.
+
+    ``NoSuchProcess`` deliberately propagates: a pid that disappears mid-read is a
+    different verdict from a field the OS refuses to hand over.
+    """
 
     try:
         return read()
+    except psutil.NoSuchProcess:
+        raise
     except psutil.Error:
         return None
 
 
 def _process_real_uid(process: psutil.Process) -> int | None:
+    """The real uid, or ``None`` when the platform or the OS will not disclose it.
+
+    ``psutil`` declares ``uids`` on every platform but delegates it to a platform
+    object that only implements it on POSIX, so on Windows the *call* raises
+    ``AttributeError``. ``os.getuid`` is missing there too, so the caller applies
+    no uid check rather than failing closed.
+    """
+
     try:
-        return int(process.uids().real)
-    except (AttributeError, psutil.Error):
+        uids = _disclosed_identity_field(process.uids)
+    except AttributeError:
         return None
+    return None if uids is None else int(uids.real)
 
 
 def _recorded_sidecar_pid(record: object) -> int | None:

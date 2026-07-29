@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import signal
@@ -2554,9 +2555,27 @@ def test_process_identity_reports_undisclosed_fields_instead_of_gone(
         def __init__(self, process_id: int) -> None:
             raise psutil.NoSuchProcess(pid=process_id)
 
-    for stub in (_Zombie, _Gone):
+    class _ExitsMidRead(guarded):
+        def cmdline(self) -> list[str]:
+            raise psutil.NoSuchProcess(pid=self.pid)
+
+    for stub in (_Zombie, _Gone, _ExitsMidRead):
         monkeypatch.setattr(memory_process.psutil, "Process", stub)
         assert memory_process._inspect_process_identity(_ORPHAN_PID) is None
+
+    class _NoUidsPlatform(guarded):
+        def uids(self):
+            # ``psutil`` declares ``uids`` everywhere but only implements it on
+            # POSIX, so on Windows the call itself raises.
+            raise AttributeError("uids")
+
+    monkeypatch.setattr(memory_process.psutil, "Process", _NoUidsPlatform)
+
+    assert memory_process._inspect_process_identity(_ORPHAN_PID) == _ProcessIdentity(
+        create_time=_ORPHAN_CREATE_TIME,
+        cmdline=None,
+        uid=None,
+    )
 
 
 def test_sidecar_launch_reaps_a_recorded_orphan_from_a_previous_run(
@@ -2761,11 +2780,15 @@ def test_sidecar_launch_fails_closed_on_a_live_pid_it_cannot_describe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     short_socket_path: Path,
+    caplog,
 ) -> None:
     """A live pid that cannot be excluded is not the same thing as a gone one.
 
     Its record used to be retired on any unreadable identity, so a replacement
     sidecar started beside a process that may still have been serving the socket.
+    No later attempt can clear this by itself, so the log has to name the pid that
+    is blocking the launch and the record file that points at it -- ``last_error``
+    alone only ever says ``memory_sidecar_unavailable``.
     """
 
     process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
@@ -2787,11 +2810,18 @@ def test_sidecar_launch_fails_closed_on_a_live_pid_it_cannot_describe(
     monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
     monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
 
-    assert asyncio.run(process.start()) is False
+    with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
+        assert asyncio.run(process.start()) is False
+
     assert process.last_error == "memory_sidecar_unavailable"
     assert signalled == []
     assert spawns == []
     assert record_path.exists()
+    assert "recorded sidecar identity could not be verified" in caplog.text
+    assert str(_ORPHAN_PID) in caplog.text
+    assert str(record_path) in caplog.text
+    # `logger.exception`, so the traceback reaches the log too.
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_sidecar_launch_proceeds_past_a_recycled_pid_owned_by_another_user(
