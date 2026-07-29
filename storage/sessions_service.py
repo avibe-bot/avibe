@@ -29,6 +29,7 @@ from storage.agent_session_rows import (
     snapshot_scope_workdir,
 )
 from storage.models import (
+    agents,
     agent_sessions,
     metadata,
     run_definitions,
@@ -1252,23 +1253,19 @@ class SQLiteSessionsService:
                         dedup_key = (scope_id, base_anchor)
                         if dedup_key in seen_anchor_rows:
                             continue
-                        imported_backend = _agent_backend(str(agent_name))
+                        imported_variant = str(agent_name) or "default"
+                        imported_backend = _agent_backend_for_import(conn, imported_variant)
                         existing_anchor_row = _find_scope_anchor_row(
                             conn,
                             scope_id=scope_id,
                             session_anchor=base_anchor,
                         )
-                        imported_variant = str(agent_name) or "default"
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
                             existing_is_owned = existing_backend not in {"", "default"}
                             same_variant = existing_variant == imported_variant
-                            imported_is_owned = imported_backend != "unknown"
-                            if existing_is_owned and (
-                                (imported_is_owned and existing_backend != imported_backend)
-                                or (not imported_is_owned and not same_variant)
-                            ):
+                            if existing_is_owned and not same_variant and existing_backend != imported_backend:
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row across backends "
                                     "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
@@ -1281,7 +1278,7 @@ class SQLiteSessionsService:
                                     imported_variant,
                                 )
                                 continue
-                            if not existing_is_owned and imported_is_owned:
+                            if not existing_is_owned and imported_backend != "unknown":
                                 conn.execute(
                                     agent_sessions.update()
                                     .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
@@ -1659,6 +1656,23 @@ _ROUTING_SENTINEL_VARIANTS = {"", "default", *_BACKEND_AGENT_NAMES}
 
 def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
+
+
+def _agent_backend_for_import(conn: Connection, agent_name: str) -> str:
+    """Resolve a legacy mapping name through built-ins and the Vibe Agent catalog."""
+    requested = str(agent_name or "").strip()
+    backend = _agent_backend(requested)
+    if backend != "unknown":
+        return backend
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", requested.lower()).strip("-_")
+    if not normalized:
+        return "unknown"
+    catalog_backend = conn.execute(
+        select(agents.c.backend)
+        .where(or_(agents.c.name == requested, agents.c.normalized_name == normalized))
+        .limit(1)
+    ).scalar_one_or_none()
+    return str(catalog_backend) if catalog_backend in _BACKEND_AGENT_NAMES else "unknown"
 
 
 def _agent_session_name_predicate(agent_name: str) -> Any:
