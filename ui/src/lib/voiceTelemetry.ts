@@ -31,15 +31,19 @@ export type VoiceTelemetryEvent = {
 
 type TelemetryFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
-const browserFamily = (): string => {
-  if (typeof navigator === 'undefined') return 'unknown';
-  const userAgent = navigator.userAgent;
-  if (/Edg\//.test(userAgent)) return 'edge';
-  if (/Firefox\//.test(userAgent)) return 'firefox';
-  if (/Chrome\//.test(userAgent)) return 'chrome';
+export const browserFamilyFromUserAgent = (userAgent: string): string => {
+  if (/Edg(?:iOS|A)?\//.test(userAgent)) return 'edge';
+  if (/Firefox\/|FxiOS\//.test(userAgent)) return 'firefox';
+  if (/Chrome\/|CriOS\//.test(userAgent)) return 'chrome';
   if (/Safari\//.test(userAgent)) return 'safari';
   return 'other';
 };
+
+const browserFamily = (): string => (
+  typeof navigator === 'undefined'
+    ? 'unknown'
+    : browserFamilyFromUserAgent(navigator.userAgent)
+);
 
 export const emitVoiceTelemetry = (
   event: VoiceTelemetryEvent,

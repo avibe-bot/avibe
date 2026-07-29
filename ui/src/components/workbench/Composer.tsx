@@ -680,7 +680,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
       });
-      await pipeline.start();
+      const captureActive = await pipeline.start();
+      if (!captureActive) return;
       if (unmountedRef.current) {
         pipeline.abort();
         return;

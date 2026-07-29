@@ -188,6 +188,22 @@ describe('VoiceRecordingPipeline', () => {
     expect(onSegment).toHaveBeenCalledTimes(1);
     expect(onStopped).toHaveBeenCalledWith('finish');
   });
+
+  it('reports inactive when capture stops before asynchronous startup completes', async () => {
+    const { capture, onStopped, pipeline } = setup();
+    let resolveStart!: () => void;
+    capture().start.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveStart = resolve;
+    }));
+
+    const starting = pipeline.start();
+    await vi.waitFor(() => expect(capture().start).toHaveBeenCalledOnce());
+    capture().settle();
+    resolveStart();
+
+    await expect(starting).resolves.toBe(false);
+    expect(onStopped).toHaveBeenCalledWith('finish');
+  });
 });
 
 describe('voice PCM worklet', () => {
@@ -240,6 +256,66 @@ describe('voice PCM worklet', () => {
     expect(new Int16Array(sampleMessage.samples)).toHaveLength(4);
 
     processor.port.onmessage?.({ data: { type: 'stop' } });
+    expect(postMessage.mock.calls.at(-1)?.[0]).toEqual({ type: 'stopped' });
+  });
+
+  it('upsamples low-rate input before emitting target-rate PCM', () => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      readonly port = {
+        onmessage: null as ((event: { data: { type?: string } }) => void) | null,
+        postMessage,
+      };
+    }
+    let Processor: (new (options: {
+      processorOptions: {
+        targetSampleRate: number;
+        chunkSamples: number;
+      };
+    }) => {
+      port: FakeAudioWorkletProcessor['port'];
+      process: (inputs: Float32Array[][]) => boolean;
+    }) | null = null;
+    const loadModule = new Function(
+      'AudioWorkletProcessor',
+      'registerProcessor',
+      'sampleRate',
+      voicePcmWorkletSource,
+    );
+    loadModule(
+      FakeAudioWorkletProcessor,
+      (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+      4,
+    );
+
+    const processor = new Processor!({
+      processorOptions: {
+        targetSampleRate: 8,
+        chunkSamples: 8,
+      },
+    });
+    expect(processor.process([[
+      Float32Array.from([0, 1, 0, -1]),
+    ]])).toBe(true);
+    processor.port.onmessage?.({ data: { type: 'stop' } });
+
+    const sampleMessage = postMessage.mock.calls[0]?.[0] as {
+      type: string;
+      samples: ArrayBuffer;
+    };
+    expect(sampleMessage.type).toBe('samples');
+    expect(Array.from(new Int16Array(sampleMessage.samples))).toEqual([
+      0,
+      16384,
+      32767,
+      16384,
+      0,
+      -16384,
+      -32768,
+      -32768,
+    ]);
     expect(postMessage.mock.calls.at(-1)?.[0]).toEqual({ type: 'stopped' });
   });
 });

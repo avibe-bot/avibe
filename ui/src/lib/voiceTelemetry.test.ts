@@ -1,12 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { emitVoiceTelemetry } from './voiceTelemetry';
+import {
+  browserFamilyFromUserAgent,
+  emitVoiceTelemetry,
+} from './voiceTelemetry';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe('voice telemetry', () => {
+  it.each([
+    ['CriOS/126.0 Mobile/15E148 Safari/604.1', 'chrome'],
+    ['FxiOS/127.0 Mobile/15E148 Safari/605.1.15', 'firefox'],
+    ['EdgiOS/126.0 Mobile/15E148 Safari/605.1.15', 'edge'],
+  ])('classifies iOS browser token %s as %s', (userAgent, expected) => {
+    expect(browserFamilyFromUserAgent(userAgent)).toBe(expected);
+  });
+
   it('emits privacy-safe structured metadata without voice contents', async () => {
     vi.stubGlobal('window', {});
     vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 Chrome/126.0 Safari/537.36' });

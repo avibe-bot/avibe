@@ -13,6 +13,11 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
     this.phase = 0;
     this.sum = 0;
     this.sumCount = 0;
+    this.previousSample = 0;
+    this.hasPreviousSample = false;
+    this.nextOutputPosition = 0;
+    this.totalInputSamples = 0;
+    this.totalOutputSamples = 0;
     this.stopped = false;
     this.port.onmessage = (event) => {
       if (event.data && event.data.type === 'stop') this.finish();
@@ -24,6 +29,7 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
     this.output[this.outputOffset++] = normalized < 0
       ? Math.round(normalized * 32768)
       : Math.round(normalized * 32767);
+    this.totalOutputSamples += 1;
     if (this.outputOffset === this.output.length) this.flush();
   }
 
@@ -39,14 +45,57 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
 
   finish() {
     if (this.stopped) return;
-    if (this.sumCount) {
+    if (this.targetSampleRate <= sampleRate && this.sumCount) {
       this.emitSample(this.sum / this.sumCount);
       this.sum = 0;
       this.sumCount = 0;
+    } else if (this.targetSampleRate > sampleRate && this.hasPreviousSample) {
+      const expectedOutputSamples = Math.round(
+        this.totalInputSamples * this.targetSampleRate / sampleRate,
+      );
+      while (this.totalOutputSamples < expectedOutputSamples) {
+        this.emitSample(this.previousSample);
+      }
     }
     this.flush();
     this.stopped = true;
     this.port.postMessage({ type: 'stopped' });
+  }
+
+  processDownsample(sample) {
+    this.sum += sample;
+    this.sumCount += 1;
+    this.phase += this.targetSampleRate;
+    if (this.phase >= sampleRate) {
+      this.phase -= sampleRate;
+      this.emitSample(this.sum / this.sumCount);
+      this.sum = 0;
+      this.sumCount = 0;
+    }
+  }
+
+  processUpsample(sample) {
+    const currentPosition = this.totalInputSamples;
+    if (!this.hasPreviousSample) {
+      this.previousSample = sample;
+      this.hasPreviousSample = true;
+      this.emitSample(sample);
+      this.nextOutputPosition = sampleRate / this.targetSampleRate;
+    } else {
+      const previousPosition = currentPosition - 1;
+      while (this.nextOutputPosition <= currentPosition) {
+        const fraction = Math.max(
+          0,
+          Math.min(1, this.nextOutputPosition - previousPosition),
+        );
+        this.emitSample(
+          this.previousSample + (sample - this.previousSample) * fraction,
+        );
+        this.nextOutputPosition += sampleRate / this.targetSampleRate;
+      }
+      this.previousSample = sample;
+    }
+    this.totalInputSamples += 1;
   }
 
   process(inputs) {
@@ -59,15 +108,9 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
       for (let channel = 0; channel < channels.length; channel += 1) {
         sample += channels[channel][frame] || 0;
       }
-      this.sum += sample / channels.length;
-      this.sumCount += 1;
-      this.phase += this.targetSampleRate;
-      if (this.phase >= sampleRate) {
-        this.phase -= sampleRate;
-        this.emitSample(this.sum / this.sumCount);
-        this.sum = 0;
-        this.sumCount = 0;
-      }
+      const monoSample = sample / channels.length;
+      if (this.targetSampleRate <= sampleRate) this.processDownsample(monoSample);
+      else this.processUpsample(monoSample);
     }
     return true;
   }
@@ -317,7 +360,7 @@ export class VoiceRecordingPipeline {
     });
   }
 
-  async start(): Promise<void> {
+  async start(): Promise<boolean> {
     if (this.started || this.stopped) {
       throw new Error('voice recording pipeline already started');
     }
@@ -325,11 +368,14 @@ export class VoiceRecordingPipeline {
     try {
       await this.capture.start();
     } catch (error) {
+      if (this.stopped) return false;
       this.stopStream();
       this.stopped = true;
       throw error;
     }
-    if (!this.stopped) this.bindVisibilityStop();
+    if (this.stopped) return false;
+    this.bindVisibilityStop();
+    return true;
   }
 
   finish(): void {

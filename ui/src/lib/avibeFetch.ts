@@ -34,6 +34,9 @@ export class CloudUnavailableError extends Error {
 const EXPIRY_SKEW_MS = 30_000;
 // Floor for the background refresh delay so a near-expired token doesn't busy-loop.
 const MIN_REFRESH_DELAY_MS = 30_000;
+// Token minting is a local control-plane request. Bound the shared request
+// independently so one hung prewarm cannot poison every later caller.
+export const CLOUD_TOKEN_MINT_TIMEOUT_MS = 15_000;
 
 let current: CloudToken | null = null;
 let inflight: Promise<CloudToken | null> | null = null;
@@ -72,8 +75,20 @@ const bindActivityListeners = (): void => {
 const mint = (): Promise<CloudToken | null> => {
   if (inflight) return inflight;
   inflight = (async () => {
+    const controller = new AbortController();
+    const timeoutError = new DOMException('cloud token mint timed out', 'TimeoutError');
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = globalThis.setTimeout(() => {
+        controller.abort(timeoutError);
+        reject(timeoutError);
+      }, CLOUD_TOKEN_MINT_TIMEOUT_MS);
+    });
     try {
-      const res = await apiFetch('/api/cloud/token');
+      const res = await Promise.race([
+        apiFetch('/api/cloud/token', { signal: controller.signal }),
+        deadline,
+      ]);
       if (!res.ok) {
         current = null;
         return null;
@@ -95,6 +110,7 @@ const mint = (): Promise<CloudToken | null> => {
       bindActivityListeners();
       return current;
     } finally {
+      if (timeout != null) globalThis.clearTimeout(timeout);
       inflight = null;
     }
   })();

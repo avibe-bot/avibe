@@ -15,6 +15,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -31,7 +32,39 @@ describe('avibeFetch', () => {
     controller.abort(new DOMException('timed out', 'TimeoutError'));
 
     await expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
-    expect(apiFetch).toHaveBeenCalledWith('/api/cloud/token');
+    expect(apiFetch).toHaveBeenCalledWith('/api/cloud/token', {
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('evicts a stalled shared mint after its caller-independent deadline', async () => {
+    vi.useFakeTimers();
+    const {
+      apiFetch,
+      avibeFetch,
+      CLOUD_TOKEN_MINT_TIMEOUT_MS,
+      CloudUnavailableError,
+    } = await loadModules();
+    apiFetch.mockReset();
+    apiFetch
+      // Intentionally ignore abort to prove the shared promise itself expires.
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({
+        token: 'recovered',
+        base_url: 'https://example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ text: 'ok' })));
+
+    const stalled = avibeFetch('/api/cloud/audio/transcriptions');
+    const stalledResult = expect(stalled).rejects.toBeInstanceOf(CloudUnavailableError);
+    await vi.advanceTimersByTimeAsync(CLOUD_TOKEN_MINT_TIMEOUT_MS);
+
+    await stalledResult;
+    await expect(avibeFetch('/api/cloud/audio/transcriptions')).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
   it('does not let one waiter abort the shared token request', async () => {
