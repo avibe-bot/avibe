@@ -1,7 +1,7 @@
 // Pure formatting helpers for the Model Hub UI (no i18n — callers wrap the
 // returned values in translated templates).
 import { buildIdentifier } from './menus/identifiers';
-import type { AgentSupply, Source } from './types';
+import type { AgentSupply, Source, SuppliedModel } from './types';
 
 const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€' };
 
@@ -71,30 +71,50 @@ export function cooldownEtaMinutes(retryAt?: string | null): number {
  * `custom` source rebuilds to `custom/llama-v3`, which is not what was selected.
  *
  * An identifier neither lookup resolves renders as selected: verbose beats wrong.
+ *
+ * Two axes decide the lookup — WHICH SOURCE may answer, and WHICH READING of the id
+ * to match on — and nesting them the wrong way round is a bug of its own. The source
+ * axis outranks the form axis, because the server has already resolved which source
+ * serves: an ordered scan that tries a stronger *form* match in a source the server
+ * did NOT name walks past the serving source and renders someone else's model. So the
+ * source is settled first, and the reading is not searched at all — it is dictated by
+ * WHICH FIELD supplied the id, since the two fields are not the same shape:
+ *
+ *   `current.model_id`      the RESOLVED upstream id, mapping already applied — bare
+ *                           even on an open menu ("NOT a valid input to the chain
+ *                           query … the caller-facing identifier is prefixed").
+ *                           Read exactly, and only against `current.source_id`.
+ *   `selected_model_id`     the caller-facing MENU identifier — the built-in id for a
+ *                           fixed menu, `vendor/model` for an open one. Read per
+ *                           `menu_kind`, against every source: `current` is null
+ *                           exactly when nothing is serving, so no source is
+ *                           authoritative and none can be preferred honestly.
  */
 export function friendlyModelName(agent: AgentSupply, sources: Source[]): string {
-  const modelId = agent.current?.model_id ?? agent.selected_model_id ?? null;
-  if (!modelId) return '';
-
-  const supplying = sources.find((s) => s.id === agent.current?.source_id);
-  const ordered = supplying ? [supplying, ...sources.filter((s) => s !== supplying)] : sources;
-
-  // Existence, not `display_name`: a supplied model with no name still owns its id
-  // and must not fall through to the identifier branch.
-  for (const source of ordered) {
-    const exact = source.models.find((m) => m.id === modelId);
-    if (exact) return exact.display_name || modelId;
+  const current = agent.current ?? null;
+  if (current) {
+    // One source, one reading. A miss renders the upstream id — which is the honest
+    // answer when the serving source's inventory cannot name what it is running,
+    // and strictly better than a name borrowed from a source that is not serving.
+    const serving = sources.find((s) => s.id === current.source_id);
+    const model = serving?.models.find((m) => m.id === current.model_id);
+    return model?.display_name || current.model_id;
   }
 
-  if (modelId.includes('/')) {
-    const standardVendors = new Set(agent.standard_vendors ?? []);
-    for (const source of ordered) {
-      const model = source.models.find(
-        (m) => buildIdentifier(source.vendor, m.id, standardVendors) === modelId,
-      );
-      if (model) return model.display_name || model.id;
-    }
+  const selected = agent.selected_model_id ?? null;
+  if (!selected) return '';
+
+  const standardVendors = new Set(agent.standard_vendors ?? []);
+  // `display_name || id`, not a `display_name` predicate: a supplied model with no
+  // name still owns its id and must not fall through to a later source.
+  const holds = (source: Source, model: SuppliedModel): boolean =>
+    agent.menu_kind === 'open'
+      ? buildIdentifier(source.vendor, model.id, standardVendors) === selected
+      : model.id === selected;
+  for (const source of sources) {
+    const model = source.models.find((m) => holds(source, m));
+    if (model) return model.display_name || model.id;
   }
 
-  return modelId;
+  return selected;
 }

@@ -208,12 +208,53 @@ describe('friendlyModelName', () => {
     expect(friendlyModelName(opencode({ selected_model_id: 'zhipuai/glm-5.2' }), sources)).toBe('zhipuai/glm-5.2');
   });
 
-  it('prefers the supplying source when two sources rebuild the same identifier', () => {
+  it('prefers the supplying source when two sources supply the same model', () => {
+    // `current.model_id` is the RESOLVED upstream id — bare even on an open menu,
+    // per the contract ("NOT a valid input to the chain query"). An earlier version
+    // of this test fed it prefixed, which the payload cannot produce.
     const sources = [
       src('glm_b', [model('glm-5.2', 'Wrong One')], 'zhipuai'),
       src('glm_a', [model('glm-5.2', 'Right One')], 'zhipuai'),
     ];
-    const a = opencode({ current: { model_id: 'zhipuai/glm-5.2', source_id: 'glm_a', channel: 'hub' } });
+    const a = opencode({ current: { model_id: 'glm-5.2', source_id: 'glm_a', channel: 'hub' } });
     expect(friendlyModelName(a, sources)).toBe('Right One');
+  });
+
+  // ── Where the two axes DISAGREE ──────────────────────────────────────
+  // The 12 cases above all pin agreement: 「which source」 and 「which reading of
+  // the id」 point the same way, so they stayed green through a regression that
+  // nested the axes the wrong way round. These three make them conflict and
+  // assert which wins.
+
+  it('does not walk past the serving source to a source that can name the model', () => {
+    // The server named `glm_a`; its inventory does not (yet) list what it is
+    // running. The bare upstream id is the honest answer — `glm_b`'s name is for
+    // `glm_b`'s model, and borrowing it claims a route the user does not have.
+    const sources = [src('glm_b', [model('glm-5.2', 'Borrowed Name')], 'zhipuai'), src('glm_a', [], 'zhipuai')];
+    const a = opencode({ current: { model_id: 'glm-5.2', source_id: 'glm_a', channel: 'hub' } });
+    expect(friendlyModelName(a, sources)).toBe('glm-5.2');
+  });
+
+  it('reads an open-menu selection as an identifier even where another source lists it literally', () => {
+    // A relay can supply a model whose literal id looks like an identifier. On an
+    // open menu the selection IS an identifier, so the relay's `zhipuai/glm-5.2`
+    // rebuilds to `custom/zhipuai/glm-5.2` and does not answer for it — the
+    // exact-looking match is the wrong reading, not the stronger one.
+    const sources = [
+      src('relay', [model('zhipuai/glm-5.2', 'Wrong (relay)')], 'relay.example'),
+      src('glm', [model('glm-5.2', 'GLM-5.2')], 'zhipuai'),
+    ];
+    expect(friendlyModelName(opencode({ selected_model_id: 'zhipuai/glm-5.2' }), sources)).toBe('GLM-5.2');
+  });
+
+  it('names what is running, read as an upstream id, when a mapping redirected the selection', () => {
+    // 「我选的 anthropic/claude-opus-4-6, 实际在跑 glm-5.2」. Applying the identifier
+    // reading to a RESOLVED id would look for `zhipuai/glm-5.2` and miss.
+    const sources = [src('glm', [model('glm-5.2', 'GLM-5.2')], 'zhipuai')];
+    const a = opencode({
+      selected_model_id: 'anthropic/claude-opus-4-6',
+      current: { model_id: 'glm-5.2', source_id: 'glm', channel: 'hub' },
+    });
+    expect(friendlyModelName(a, sources)).toBe('GLM-5.2');
   });
 });
