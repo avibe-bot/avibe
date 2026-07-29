@@ -4135,11 +4135,49 @@ class SQLiteBackgroundTaskStore:
 
     # --- derived definition health -------------------------------------------
     #
+    # ONE STATEMENT, and per definition a BOUNDED SEEK. Those two requirements pull
+    # in opposite directions and both are load-bearing, so the shape is not a matter
+    # of taste:
+    #
+    # * one statement, because ``_enrich_definitions`` resolves the whole page here
+    #   (see the ``definition health`` lookup: "Derived health for the whole page in
+    #   one query") and ``test_a_page_costs_a_fixed_number_of_queries`` pins a page's
+    #   statement count at a fixed budget this read holds exactly one slot in. That
+    #   budget is #1033's invariant: the per-row enrichment it replaced issued a query
+    #   per row, and a 30-row page paid it thirty times over. A statement per
+    #   definition here would put it straight back.
+    # * a bounded seek, because ``HEALTH_WINDOW_RUNS`` advertises ten verdicts and the
+    #   window-function form it replaced had to rank the definition's ENTIRE 72 h
+    #   window before ``position <= 10`` could discard anything. On a definition firing
+    #   every minute that is thousands of rows examined per list row, and the
+    #   settled-time index cannot stop early because ``row_number()`` needs them all.
+    #
+    # The one shape that does both, SQLite having no ``LATERAL``: iterate the id list
+    # as a virtual table (``json_each``) and answer each id with a CORRELATED scalar
+    # subquery that seeks ``(definition_id, settled DESC, id DESC)`` and stops at
+    # ``LIMIT HEALTH_WINDOW_RUNS``, aggregated into one JSON blob per definition. The
+    # measured plan is a bounded ``SEARCH`` with no ``SCAN agent_runs`` and no temp
+    # B-tree; the residual ``SCAN d`` walks the id list and ``SCAN recent`` walks the
+    # already-limited ten-row co-routine. There is no ranking step left, which is the
+    # literal ask: the limit is applied before anything ranks.
+    #
+    # The honest framing of the trade: the budget invariant counts STATEMENTS because
+    # statement dispatch was the per-row cost #1033 removed. N bounded seeks are the
+    # irreducible work of answering N health questions — what changed is that each is
+    # now a ten-row early exit instead of a full-window rank, paid inside one dispatch.
+    #
+    # ORDER IS RE-ESTABLISHED IN PYTHON. ``json_group_array`` makes no promise about
+    # the order it aggregates in — the inner ``ORDER BY`` is what bounds the seek, not
+    # what orders the array — so the blob is sorted by ``(settled, id)`` descending
+    # after decoding. Ten entries per definition, so it costs nothing, and relying on
+    # the aggregate's incidental order would be a badge that flips between reads with
+    # no write in between.
+    #
     # ``agent_runs`` filtered to one definition is a history of ROWS, and health is
     # a function of settled OUTCOMES only. Four row classes therefore have to be
     # excluded, and every one of them by predicate rather than while classifying,
-    # because ``LIMIT N`` is the last thing that happens — anything the classifier
-    # would ignore must never reach it:
+    # because the ``LIMIT`` is applied to whatever the predicates let through —
+    # anything the classifier would ignore must never reach it:
     #
     # 1. the watch supervisor heartbeat (``run_type = watch_runtime``), which shares
     #    the watch's ``definition_id``, is refreshed to the waiter's ``started_at``
@@ -4183,56 +4221,79 @@ class SQLiteBackgroundTaskStore:
         # written as ``completed`` and report a healthy definition as failing.
         verdicts = _status_query_values("succeeded") + _status_query_values("failed")
 
-        def _statement(batch: list[str]):
-            ranked = (
-                select(
-                    agent_runs.c.definition_id.label("definition_id"),
-                    agent_runs.c.status.label("status"),
-                    func.row_number()
-                    .over(
-                        partition_by=agent_runs.c.definition_id,
-                        order_by=[settled_at.desc(), agent_runs.c.id.desc()],
-                    )
-                    .label("position"),
-                )
-                .where(agent_runs.c.definition_id.in_(batch))
-                .where(
-                    or_(
-                        agent_runs.c.run_type.is_(None),
-                        agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                    )
-                )
-                .where(agent_runs.c.status.in_(verdicts))
-                .where(settled_at >= cutoff)
-                # The same expression the streak read excludes interruptions with,
-                # shared by NAME rather than retyped: two copies of a JSON extract
-                # drift silently, and the copy that drifts is the one the planner
-                # stops matching.
-                .where(_not_an_out_of_band_interruption())
-                .subquery()
+        # The id list travels as ONE json parameter and is iterated as a virtual
+        # table, so the bound-parameter count is constant in the number of definitions
+        # — which is what lets the unpaged harness list stay a single statement where
+        # an ``IN`` list had to be chunked by ``_id_batches``.
+        id_list = func.json_each(_json_dumps(ids)).table_valued("value").alias("d")
+        recent = (
+            select(
+                settled_at.label("settled"),
+                agent_runs.c.id.label("id"),
+                agent_runs.c.status.label("status"),
             )
+            # Correlated to the id currently being iterated, which is what makes the
+            # LIMIT below per-definition rather than per-batch.
+            .where(agent_runs.c.definition_id == id_list.c.value)
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(agent_runs.c.status.in_(verdicts))
+            .where(settled_at >= cutoff)
+            # The same expression the streak read excludes interruptions with, shared
+            # by NAME rather than retyped: two copies of a JSON extract drift
+            # silently, and the copy that drifts is the one the planner stops
+            # matching. Its ``CASE json_valid`` guard is also what keeps one
+            # unparseable blob from failing the whole statement (HFR-072).
+            .where(_not_an_out_of_band_interruption())
             # ``id DESC`` is a required tie-break, not tidiness: these timestamps are
             # application-written ISO strings and several writers stamp a whole batch
             # with ONE value, so without a secondary key "the newest run" is whichever
             # row SQLite happens to return first and the badge can flip between reads
             # with no write in between. ``list_pending_callbacks`` already orders this
-            # way one screen away.
-            return (
-                select(ranked.c.definition_id, ranked.c.status)
-                .where(ranked.c.position <= HEALTH_WINDOW_RUNS)
-                .order_by(ranked.c.definition_id, ranked.c.position)
+            # way one screen away — and both keys are the index's own, so the order is
+            # free and the LIMIT early-exits on it.
+            .order_by(settled_at.desc(), agent_runs.c.id.desc())
+            .limit(HEALTH_WINDOW_RUNS)
+            # Explicit: the inner seek must NOT put the id list in its own FROM, or
+            # every definition would answer with every definition's runs.
+            .correlate(id_list)
+            .subquery("recent")
+        )
+        # ``settled`` and ``id`` are carried out of SQL, not dropped, because the sort
+        # has to be redone in Python — see the block comment: ``json_group_array``
+        # promises no order.
+        blob = select(
+            func.json_group_array(
+                func.json_array(recent.c.settled, recent.c.id, recent.c.status)
             )
+        ).scalar_subquery()
+        statement = select(id_list.c.value.label("definition_id"), blob.label("verdicts"))
 
         verdicts_by_definition: dict[str, list[str]] = {}
 
         def _collect(active: Any) -> None:
-            # Chunked: the unpaged harness list resolves every definition in the
-            # store at once, which would blow SQLite's bound-parameter cap.
-            for batch in _id_batches(ids):
-                for row in active.execute(_statement(batch)):
-                    verdicts_by_definition.setdefault(str(row[0]), []).append(
-                        normalize_run_status(row[1])
-                    )
+            for row in active.execute(statement):
+                entries = _json_loads(row[1], [])
+                if not isinstance(entries, list) or not entries:
+                    # A definition with no verdicts is ABSENT from the mapping rather
+                    # than mapped to an empty list, exactly as the batched form was:
+                    # ``_classify_health`` already defaults a missing id to no
+                    # verdicts, and inventing a key here would change what
+                    # ``definition_health_batch`` reports for a never-run definition.
+                    continue
+                rows = [entry for entry in entries if isinstance(entry, list) and len(entry) == 3]
+                rows.sort(key=lambda entry: (str(entry[0] or ""), str(entry[1] or "")), reverse=True)
+                verdicts_by_definition[str(row[0])] = [
+                    # Raw column values, so the legacy spellings ``_status_query_values``
+                    # deliberately matched have to be normalized here — the batched form
+                    # did the same one line down.
+                    normalize_run_status(entry[2])
+                    for entry in rows
+                ]
 
         if conn is not None:
             _collect(conn)

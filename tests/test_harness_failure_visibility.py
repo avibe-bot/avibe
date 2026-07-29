@@ -4411,6 +4411,262 @@ def test_one_malformed_metadata_row_does_not_blank_health_for_every_definition(
     assert healths["task-a"]["health"] in {"failing", "unknown"}
 
 
+def _ranked_health_rows(sqlite_store, definition_ids, *, now: str) -> dict[str, list[str]]:
+    """The WINDOW-FUNCTION health read, kept as the oracle for the bounded one.
+
+    Byte-for-byte the implementation ``_health_rows`` had before the correlated seek
+    replaced it: ``row_number()`` over the whole 72 h window per definition, then
+    ``position <= HEALTH_WINDOW_RUNS`` on the outside. It is the SEMANTICS that are
+    being preserved — the cost is what changed — so the old shape stays here as an
+    executable specification rather than as prose in a docstring (HFR-096's pattern:
+    ``_materialized_streak`` does the same job for the streak read).
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, or_
+
+    from storage.background import (
+        HEALTH_WINDOW_HOURS,
+        HEALTH_WINDOW_RUNS,
+        _id_batches,
+        _not_an_out_of_band_interruption,
+        _parse_iso_instant,
+        _status_query_values,
+        _WATCH_RUNTIME_RUN_TYPE,
+        normalize_run_status,
+    )
+    from storage.models import agent_runs
+
+    ids = [str(value or "").strip() for value in definition_ids]
+    ids = [value for value in dict.fromkeys(ids) if value]
+    if not ids:
+        return {}
+    instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
+    cutoff = (instant - timedelta(hours=HEALTH_WINDOW_HOURS)).isoformat()
+    settled_at = func.coalesce(agent_runs.c.completed_at, agent_runs.c.created_at)
+    verdicts = _status_query_values("succeeded") + _status_query_values("failed")
+
+    def _statement(batch):
+        ranked = (
+            select(
+                agent_runs.c.definition_id.label("definition_id"),
+                agent_runs.c.status.label("status"),
+                func.row_number()
+                .over(
+                    partition_by=agent_runs.c.definition_id,
+                    order_by=[settled_at.desc(), agent_runs.c.id.desc()],
+                )
+                .label("position"),
+            )
+            .where(agent_runs.c.definition_id.in_(batch))
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(agent_runs.c.status.in_(verdicts))
+            .where(settled_at >= cutoff)
+            .where(_not_an_out_of_band_interruption())
+            .subquery()
+        )
+        return (
+            select(ranked.c.definition_id, ranked.c.status)
+            .where(ranked.c.position <= HEALTH_WINDOW_RUNS)
+            .order_by(ranked.c.definition_id, ranked.c.position)
+        )
+
+    out: dict[str, list[str]] = {}
+    with sqlite_store.engine.connect() as conn:
+        for batch in _id_batches(ids):
+            for row in conn.execute(_statement(batch)):
+                out.setdefault(str(row[0]), []).append(normalize_run_status(row[1]))
+    return out
+
+
+def test_the_health_read_is_bounded_before_it_is_ranked(tmp_path: Path) -> None:
+    """Subordinate to HFR-068 — the advertised 10-run bound must bound the DB work.
+
+    ``HEALTH_WINDOW_RUNS`` says "the last ten verdicts", and the windowed form made
+    SQLite assign ``row_number()`` to EVERY verdict in the 72 h window before the outer
+    ``position <= 10`` could discard any of them. The settled-time index narrows by
+    time and cannot stop after ten entries, so a high-frequency definition made every
+    Harness list, show and mutation read walk its entire recent history to return ten
+    rows. Measured on this history, the plan was::
+
+        CO-ROUTINE anon_1
+        CO-ROUTINE (subquery-3)
+        SEARCH agent_runs USING INDEX ix_agent_runs_definition_settled (definition_id=? AND <expr>>?)
+        SCAN (subquery-3)
+        SCAN anon_1
+        USE TEMP B-TREE FOR ORDER BY
+
+    — the seek is there, and then the whole result is scanned twice and sorted, with no
+    ``LIMIT`` anywhere to stop it.
+
+    TWO properties, and the test would be wrong without either. The bound has to be in
+    the DATABASE (``LIMIT`` inside the per-definition seek, an indexed order so it can
+    early-exit), and it has to be reached in ONE statement, because
+    ``test_a_page_costs_a_fixed_number_of_queries`` in
+    ``tests/test_harness_definition_lifecycle.py`` pins a page's statement count at a
+    fixed budget that the health read holds exactly one slot in. A per-definition
+    statement loop satisfies the bound and reintroduces the per-row query that #1033
+    removed; a batched window function satisfies the budget and walks the window. Only
+    a batched statement whose per-definition work is a bounded correlated seek does
+    both.
+
+    Asserted on the CONSTRAINED TERMS, never on an index name: HFR-095 and HFR-086 are
+    the same lesson — a plan can name the index while the term stays a per-row filter.
+    """
+
+    sqlite, _ = _store(tmp_path)
+    # Far more than ten verdicts inside the window, which is the only case where the
+    # ranking cost differs from the bound.
+    for definition_id in ("task-hot-a", "task-hot-b", "task-hot-c"):
+        _task(sqlite, definition_id)
+        for index in range(400):
+            instant = f"2026-07-27T{index // 60:02d}:{index % 60:02d}:00+00:00"
+            sqlite.enqueue_run(
+                {
+                    "id": f"run-{definition_id}-{index:04d}",
+                    "request_type": "scheduled",
+                    "status": "failed" if index % 4 else "succeeded",
+                    "definition_id": definition_id,
+                    "error": "boom" if index % 4 else None,
+                    "created_at": instant,
+                    "completed_at": instant,
+                }
+            )
+
+    plans = _agent_run_query_plans(
+        sqlite,
+        tmp_path / "state" / "vibe.sqlite",
+        lambda: sqlite._health_rows(
+            ["task-hot-a", "task-hot-b", "task-hot-c"], now="2026-07-27T12:00:00+00:00"
+        ),
+    )
+    assert len(plans) == 1, (
+        "three definitions must cost ONE statement: the page-budget invariant in "
+        "test_a_page_costs_a_fixed_number_of_queries gives this read a single slot, so "
+        f"a statement per definition breaks it; issued {len(plans)}"
+    )
+    statement, plan = plans[0]
+    rendered = "\n".join(plan)
+    compact = rendered.replace(" ", "")
+
+    assert "LIMIT" in statement.upper(), (
+        "without a LIMIT inside the per-definition seek the bound is applied after the "
+        f"read, and the whole window is still walked: {statement}"
+    )
+    assert "TEMP B-TREE" not in rendered, (
+        f"the newest-first order must come from an index, not a sort; plan was:\n{rendered}"
+    )
+    # ``SCAN agent_runs``, not bare ``SCAN``. Two residual SCANs are correct and
+    # unavoidable in this shape: ``SCAN d VIRTUAL TABLE INDEX 1`` walks the ``json_each``
+    # id list, which is bounded by the page, and ``SCAN (subquery-1)`` walks the
+    # already-LIMITed <=10-row co-routine. Neither touches the table. A ``SCAN
+    # agent_runs`` would be the unbounded history read this scenario exists to remove.
+    assert "SCAN agent_runs" not in rendered, (
+        f"the health read must never scan a definition's history; plan was:\n{rendered}"
+    )
+    assert "(definition_id=?AND<expr>>?)" in compact, (
+        "the per-definition window must be an indexed seek on (definition_id, settled) "
+        f"— both terms constrained, not one plus a filter; plan was:\n{rendered}"
+    )
+
+
+def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) -> None:
+    """Subordinate to HFR-068 — the bounded read has to be the SAME ten verdicts.
+
+    Parity against ``_ranked_health_rows``, the window-function form this replaces,
+    over randomised histories containing every row class that decides the answer:
+    verdicts and non-verdicts (``canceled``, ``queued``, ``running``), the LEGACY
+    ``completed`` spelling that a literal ``('succeeded','failed')`` would drop,
+    interruptions whose reason IS in ``RUN_INTERRUPTION_REASONS`` (excluded) and whose
+    reason is not (an ordinary per-fire failure, counted), ``watch_runtime`` heartbeats
+    sharing the definition id, rows sharing one ``created_at`` so the ``id`` tie-break
+    decides the order, more than ten verdicts inside the window, rows straddling the
+    72 h cutoff on both sides, and a definition with NO rows at all — the ranked form
+    omits that key entirely rather than mapping it to an empty list, so the bounded
+    form has to skip its empty result instead of returning one.
+
+    Green on BOTH sides of the change by construction — that is the point. The plan
+    test above is the one that goes red; this one exists so the plan test cannot be
+    satisfied by a query that answers a different question, in particular by a LIMIT
+    applied to a population the interruption predicate had not yet filtered, or by a
+    result whose order comes from an aggregate that does not promise one.
+    """
+
+    import random
+
+    sqlite, _ = _store(tmp_path)
+    rng = random.Random(20260729)
+    now = "2026-07-29T00:00:00+00:00"
+    statuses = ["succeeded", "failed", "completed", "canceled", "queued", "running"]
+    reasons = [None, None, *sorted(RUN_INTERRUPTION_REASONS)[:3], "transport_unavailable"]
+    definition_ids = [f"task-parity-{index}" for index in range(6)]
+
+    for definition_id in definition_ids:
+        _task(sqlite, definition_id)
+        # Enough rows that at least one definition reaches the ten-verdict bound after
+        # the non-verdict, interruption and cutoff filters have taken their share —
+        # asserted below, because a fixture that never fills the window never tests the
+        # LIMIT at all.
+        for index in range(rng.randint(0, 60)):
+            # Hours spread across and beyond the 72 h window, so rows land on both
+            # sides of the cutoff and a few sit right on it.
+            hours = rng.choice([0, 1, 12, 12, 40, 40, 71, 71, 72, 73, 100])
+            day = 29 - (hours // 24)
+            hour = 23 - (hours % 24)
+            # Some rows deliberately SHARE a timestamp, which is when ``id`` decides.
+            minute = rng.choice([0, 0, 0, index % 60])
+            instant = f"2026-07-{day:02d}T{hour:02d}:{minute:02d}:00+00:00"
+            reason = rng.choice(reasons)
+            sqlite.enqueue_run(
+                {
+                    "id": f"run-{definition_id}-{index:03d}",
+                    "request_type": "scheduled",
+                    "status": rng.choice(statuses),
+                    "definition_id": definition_id,
+                    "error": "boom",
+                    "created_at": instant,
+                    # Sometimes unset, so ``coalesce`` has to fall back.
+                    "completed_at": instant if rng.random() < 0.8 else None,
+                    "metadata": {"interrupt_reason": reason} if reason else {},
+                }
+            )
+        # A supervisor heartbeat under the same definition id.
+        if rng.random() < 0.5:
+            sqlite.write_watch_runtime(
+                {definition_id: {"running": True}},
+                updated_at="2026-07-28T23:59:00+00:00",
+            )
+
+    # A definition that exists and has never run, asked for alongside the rest.
+    _task(sqlite, "task-parity-empty")
+    asked = [*definition_ids, "task-parity-empty"]
+
+    live = sqlite._health_rows(asked, now=now)
+    oracle = _ranked_health_rows(sqlite, asked, now=now)
+
+    assert live == oracle, (
+        "the bounded correlated seek must return the same verdicts, in the same order, "
+        f"as the ranked read:\nlive   {live}\noracle {oracle}"
+    )
+    assert "task-parity-empty" not in live, (
+        "a definition with no verdicts must be ABSENT from the mapping, not present "
+        f"with an empty list: {live}"
+    )
+    # And the fixture actually exercised the interesting case.
+    assert any(len(values) >= 5 for values in oracle.values()), (
+        f"the randomised history produced almost no verdicts: {oracle}"
+    )
+    assert any(len(values) == 10 for values in oracle.values()), (
+        f"no definition reached the 10-verdict bound, so the LIMIT was never tested: {oracle}"
+    )
+
+
 # --- group 4: a binding change is a notice, not just a log line ------------
 #
 # The rebind lane is the one transition where the run SUCCEEDS and the user still
