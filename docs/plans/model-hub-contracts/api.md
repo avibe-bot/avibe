@@ -234,18 +234,30 @@ exists to repair.
 ## Credential replacement and reauth
 
 The commit point is the single durable write that makes the replacement source state
-live. Implementations may sequence adapter calls differently only if all invariants
-remain true:
+live. Hub OAuth has an earlier credential-irreversibility boundary when new grant
+material is written under its identity-bound stable ref; that boundary does not make
+the replacement source state live. Implementations may sequence adapter calls
+differently only if all invariants remain true:
 
 1. **Atomic source state.** Before the commit point, readers see the old source.
    After it, readers see the replacement credential reference, mask, discovered
    models, and derived state together.
-2. **Rollback before commit.** Any failure before commit preserves the old source and
-   revokes replacement engine material created by that attempt.
+2. **Rollback before commit, scoped to what is preservable.** API-key replacement and
+   any repair that receives a distinct replacement ref stay strict: every failure
+   before commit preserves the old source and revokes replacement engine material
+   created by that attempt. Hub-OAuth re-auth is the deliberate exception because the
+   engine binds OAuth identity to a stable ref. Failures before new grant material is
+   written under that ref still preserve everything. Once the write occurs, prior
+   material is unrecoverable through the ref: a later failure MUST fail the request,
+   clear discovered supply, and persist `state.status: needs_action` with
+   `state.detail_key: models.source.needs_action.oauth_expired`. The key means the
+   convergent remedy is OAuth re-auth; this state is never silently routed.
 3. **Guard before commit.** Elective API-key replacement evaluates the supply guard
    against the discovered replacement model set before the write.
-4. **Per-channel truth.** Hub credentials are engine-owned and transactional.
-   Native credentials are CLI-owned and replacement is irreversible once login starts.
+4. **Per-channel truth.** Hub API-key material is engine-owned and transactional.
+   Hub OAuth material is engine-owned but identity-bound to a stable ref, so replacing
+   its grant is irreversible once the new material is written. Native credentials are
+   CLI-owned and replacement is likewise irreversible once login starts.
 5. **Server-enforced native acknowledgement.** For a `native_cli` source,
    `POST …/reauth` requires `{"acknowledge_irreversible": true}`. Missing or false
    returns `reauth_confirmation_required` before any OAuth adapter call. This is
