@@ -487,7 +487,11 @@ class ModelHubService:
         return [
             _binding(source)
             for source in config.sources
-            if source.supply_channel == "hub" and source.models
+            if source.supply_channel == "hub"
+            and (
+                source.models
+                or source.state.status not in {"needs_action", "error"}
+            )
         ]
 
     @staticmethod
@@ -613,10 +617,18 @@ class ModelHubService:
             logger.warning("Failed to persist Model Hub resolution event")
 
     async def _rollback_credential(self, source_id: str, credential_ref: str) -> None:
-        self.revocations.add(source_id, credential_ref)
+        journaled = False
+        try:
+            self.revocations.add(source_id, credential_ref)
+        except OSError:
+            pass
+        else:
+            journaled = True
         try:
             await self.adapter.revoke_credential(credential_ref)
         except Exception:
+            return
+        if not journaled:
             return
         try:
             self.revocations.remove(source_id, credential_ref)
@@ -680,13 +692,13 @@ class ModelHubService:
         manual_models: list[ModelHubModelConfig],
         discovered: list[str],
     ) -> None:
-        if any(
+        if (not discovered and not manual_models) or any(
             not isinstance(model_id, str)
             or not model_id
             or contains_credential_material(model_id)
             for model_id in discovered
         ):
-            raise ModelHubError("discovery_failed")
+            raise ModelHubError("discovery_failed", status=502)
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         source.models = [
@@ -1591,6 +1603,12 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
             try:
                 model_ids = await self._discover(source)
+                manual = [
+                    model
+                    for model in source.models
+                    if model.provenance == "manual"
+                ]
+                self._apply_discovered_models(source, manual, model_ids)
             except ModelHubError as exc:
                 if exc.code != "discovery_failed":
                     raise
@@ -1600,8 +1618,6 @@ class ModelHubService:
                 )
                 self.store.save(config)
                 raise
-            manual = [model for model in source.models if model.provenance == "manual"]
-            self._apply_discovered_models(source, manual, model_ids)
             source.state = ModelHubSourceStateConfig(status="standby")
             await self._commit_synced(previous, config)
             return source.to_payload(), len(model_ids)

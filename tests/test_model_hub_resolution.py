@@ -816,6 +816,60 @@ def test_failed_create_rollback_is_journaled_until_revoke_recovers(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_failed_create_rollback_attempts_revoke_when_journal_add_fails(tmp_path):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+
+    def fail_journal_add(source_id, credential_ref):
+        raise OSError("journal write failed")
+
+    service.revocations.add = fail_journal_add
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Rollback source",
+                    "key": "sk-test-transaction-only",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.revoked == ["cred_test"]
+    assert service.revocations.list() == []
+
+
+def test_empty_discovery_rejects_source_creation_and_revokes_credential(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    before = _serialized_config(service)
+
+    async def empty_discovery(vendor, protocol, base_url, credential_ref):
+        return ()
+
+    adapter.discover_models = empty_discovery
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Empty source",
+                    "key": "sk-test-empty-discovery",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert _serialized_config(service) == before
+    assert adapter.revoked == ["cred_test"]
+
+
 def test_subscription_source_rejects_api_key_credentials(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)
@@ -1316,6 +1370,34 @@ def test_credential_replacement_failure_preserves_prior_source(tmp_path, failure
     assert service.revocations.list() == []
 
 
+def test_empty_discovery_rejects_credential_replacement(tmp_path):
+    adapter = NarrowingCredentialAdapter()
+    service, _adapter = _repair_guard_service(
+        tmp_path,
+        enabled=False,
+        adapter=adapter,
+    )
+    before = _serialized_config(service)
+
+    async def empty_discovery(vendor, protocol, base_url, credential_ref):
+        return ()
+
+    adapter.discover_models = empty_discovery
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.replace_credential(
+                "src_primary01",
+                {"key": "sk-empty-replacement"},
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert _serialized_config(service) == before
+    assert adapter.revoked == ["cred_replacement_1"]
+    assert service.revocations.list() == []
+
+
 def test_credential_replacement_rolls_back_when_old_journal_cleanup_fails(
     tmp_path,
 ):
@@ -1437,6 +1519,29 @@ def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
     assert service.store.load().sources[0].state.detail_key == (
         "models.source.error.unclassified"
     )
+
+
+def test_existing_source_test_rejects_empty_discovery_before_recovery(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    source = service.store.load().sources[0]
+    source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.balance_exhausted",
+    )
+
+    async def empty_discovery(vendor, protocol, base_url, credential_ref):
+        return ()
+
+    adapter.discover_models = empty_discovery
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.test_source(source.id))
+
+    assert exc_info.value.code == "discovery_failed"
+    persisted = service.store.load().sources[0]
+    assert persisted.state.status == "error"
+    assert persisted.state.detail_key == "models.source.error.unclassified"
 
 
 def test_existing_source_test_preserves_health_on_engine_outage(tmp_path):
