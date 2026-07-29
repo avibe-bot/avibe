@@ -15,14 +15,20 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
-import { createFlowAuthority, isDone, type FlowAuthority } from './asyncLifetime';
+import {
+  createFlowAuthority,
+  initialFlowView,
+  isDone,
+  type FlowAuthority,
+  type FlowView,
+} from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi, type OAuthResult } from './modelsApi';
 import { serverText } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
-import type { AdoptedBy, OAuthFlow, SupplyChannel } from './types';
+import type { AdoptedBy, SupplyChannel } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
@@ -61,10 +67,9 @@ export const OAuthConnectDialog: React.FC<{
   const { t } = useTranslation();
   const { showToast } = useToast();
 
-  const [flow, setFlow] = React.useState<OAuthFlow | null>(null);
+  const [view, setView] = React.useState<FlowView>(initialFlowView);
   const [code, setCode] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
-  const [errorKey, setErrorKey] = React.useState<string | null>(null);
   const [channel, setChannel] = React.useState<SupplyChannel>('native_cli');
   const [consentOpen, setConsentOpen] = React.useState(false);
   // Which Agents took the new subscription in, frozen at commit (api.md). Same
@@ -117,7 +122,7 @@ export const OAuthConnectDialog: React.FC<{
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       pollTimer = null;
     };
-    const authority = createFlowAuthority((view) => setFlow(view.flow));
+    const authority = createFlowAuthority(setView);
     flowAuthorityRef.current = authority;
     const transition = authority.transition;
 
@@ -146,8 +151,6 @@ export const OAuthConnectDialog: React.FC<{
         // least — `adoptionVerdict(null)` is indeterminate, so it now waits.
         if (adoptionVerdict(created?.adopted_by ?? null).kind === 'covered')
           successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
-      } else if (step.action === 'fail') {
-        setErrorKey(result.flow.error_key ?? 'settings.models.oauth.error.generic');
       }
       // A paste submit can terminate the flow while a poll timer is still armed;
       // the guard above already makes that poll harmless, but there is no reason
@@ -160,12 +163,7 @@ export const OAuthConnectDialog: React.FC<{
     const poll = async (flowId: string) => {
       if (cancelled) return;
       const overdue = transition({ kind: 'tick', overdue: Date.now() > deadline });
-      if (isDone(overdue.action)) {
-        if (overdue.action === 'timeout') {
-          setErrorKey('settings.models.oauth.error.timeout');
-        }
-        return;
-      }
+      if (isDone(overdue.action)) return;
       try {
         const result = await modelsApi.getOAuthStatus(flowId);
         if (cancelled) return;
@@ -178,14 +176,13 @@ export const OAuthConnectDialog: React.FC<{
         // (consent_required / discovery_failed / engine_down): the vendor said
         // yes and the Source still doesn't exist. Naming that separately is the
         // difference between 「重试授权」 and 「授权成功但没能建立来源」.
-        setErrorKey(errorKeyFor((err as { code?: string } | null)?.code));
+        transition({ kind: 'error', errorKey: errorKeyFor((err as { code?: string } | null)?.code) });
       }
     };
 
     // Clear any stale flow from a prior open so the previous success/failure
     // isn't shown while the new startOAuth request is in flight.
     transition({ kind: 'reset' });
-    setErrorKey(null);
     setCode('');
     setSubmitting(false);
     setAdoptedBy(null);
@@ -202,7 +199,13 @@ export const OAuthConnectDialog: React.FC<{
       } catch (err) {
         if (cancelled) return;
         const code = (err as { code?: string } | null)?.code;
-        setErrorKey(code === 'consent_required' ? 'settings.models.oauth.error.consent' : 'settings.models.oauth.error.start');
+        transition({
+          kind: 'error',
+          errorKey:
+            code === 'consent_required'
+              ? 'settings.models.oauth.error.consent'
+              : 'settings.models.oauth.error.start',
+        });
       }
     })();
 
@@ -250,22 +253,23 @@ export const OAuthConnectDialog: React.FC<{
       settleRef.current?.(result);
     } catch (err) {
       if (!isCurrent()) return;
-      setErrorKey(errorKeyFor((err as { code?: string } | null)?.code));
+      authority.transition({ kind: 'error', errorKey: errorKeyFor((err as { code?: string } | null)?.code) });
     } finally {
       if (isCurrent()) setSubmitting(false);
     }
   };
 
+  const { flow, errorKey } = view;
   const presentation = flow?.presentation;
   const expects = presentation?.expects;
   const isDevice = expects === 'none';
   const state = flow?.state;
   // A `success` state now means the Source exists: the server materializes it in
-  // the same call, so there is no in-between to hold the banner for. An errorKey
-  // still wins — a terminal response can fail while creating the Source.
-  const success = state === 'success' && !errorKey;
-  const failed = state === 'failed' || state === 'cancelled' || Boolean(errorKey);
-  const active = !success && !failed;
+  // the same call, so there is no in-between to hold the banner for. The complete
+  // rendered state comes from the authority's landed view.
+  const success = view.settled && flow?.state === 'success';
+  const failed = view.settled && Boolean(errorKey);
+  const active = !view.settled;
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
   const mmss =

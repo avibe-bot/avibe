@@ -146,7 +146,7 @@ describe('seedStep', () => {
 });
 
 describe('flowStep', () => {
-  const fresh: FlowView = { flow: null, settled: false };
+  const fresh: FlowView = { flow: null, errorKey: null, settled: false };
 
   it('keeps polling while the flow is running', () => {
     const step = flowStep(fresh, { kind: 'response', flow: flow('awaiting_action') });
@@ -158,6 +158,7 @@ describe('flowStep', () => {
   it('reports the first success once', () => {
     const step = flowStep(fresh, { kind: 'response', flow: flow('success') });
     expect(step.action).toBe('succeed');
+    expect(step.view.errorKey).toBeNull();
     expect(step.view.settled).toBe(true);
     expect(flowStep(step.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
   });
@@ -197,6 +198,7 @@ describe('flowStep', () => {
     const tick = flowStep(running, { kind: 'tick', overdue: true });
     expect(tick.action).toBe('timeout');
     expect(tick.view.flow?.state).toBe('failed');
+    expect(tick.view.errorKey).toBe('settings.models.oauth.error.timeout');
     expect(isDone(tick.action)).toBe(true);
   });
 
@@ -208,12 +210,49 @@ describe('flowStep', () => {
   it('settles on a failure and ignores what follows it', () => {
     const failed = flowStep(fresh, { kind: 'response', flow: flow('cancelled') });
     expect(failed.action).toBe('fail');
+    expect(failed.view.errorKey).toBe('settings.models.oauth.error.generic');
     expect(failed.view.settled).toBe(true);
     expect(flowStep(failed.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
   });
 });
 
 describe('flow authority', () => {
+  it('ignores a poll flow_not_found that lands after success settled', () => {
+    const authority = createFlowAuthority(() => {});
+
+    authority.transition({ kind: 'response', flow: flow('verifying') });
+    authority.transition({ kind: 'response', flow: flow('success') });
+    const latePoll = authority.transition({
+      kind: 'error',
+      errorKey: 'settings.models.oauth.error.generic',
+    });
+
+    expect(latePoll.action).toBe('ignore');
+    expect(authority.current()).toEqual({
+      flow: expect.objectContaining({ state: 'success' }),
+      errorKey: null,
+      settled: true,
+    });
+  });
+
+  it('ignores a paste rejection that lands after success settled', () => {
+    const authority = createFlowAuthority(() => {});
+
+    authority.transition({ kind: 'response', flow: flow('awaiting_action') });
+    authority.transition({ kind: 'response', flow: flow('success') });
+    const latePaste = authority.transition({
+      kind: 'error',
+      errorKey: 'settings.models.oauth.error.finalize',
+    });
+
+    expect(latePaste.action).toBe('ignore');
+    expect(authority.current()).toEqual({
+      flow: expect.objectContaining({ state: 'success' }),
+      errorKey: null,
+      settled: true,
+    });
+  });
+
   it('keeps the deadline terminal when a paste success resolves afterward', () => {
     const landed: FlowView[] = [];
     const authority = createFlowAuthority((view) => landed.push(view));
@@ -231,6 +270,7 @@ describe('flow authority', () => {
     expect(connected).toBe(0);
     expect(authority.current()).toEqual({
       flow: expect.objectContaining({ state: 'failed' }),
+      errorKey: 'settings.models.oauth.error.timeout',
       settled: true,
     });
     expect(landed.at(-1)).toEqual(authority.current());

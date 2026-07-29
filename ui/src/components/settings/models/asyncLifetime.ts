@@ -82,6 +82,7 @@ export const seedStep = (state: SeedState, authoritative: string): { state: Seed
  */
 export type FlowEvent =
   | { kind: 'reset' }
+  | { kind: 'error'; errorKey: string }
   | { kind: 'response'; flow: OAuthFlow }
   | { kind: 'tick'; overdue: boolean };
 
@@ -91,36 +92,54 @@ export type FlowEvent =
  *
  *   continue  not finished, keep polling
  *   succeed   first terminal success: fire the connected side effects, once
- *   fail      first terminal failure: show the flow's error
+ *   fail      first terminal failure: show the authority-owned error
  *   timeout   the deadline passed with the flow unfinished
  *   ignore    stale arrival — the dialog already finished
  */
 export type FlowAction = 'continue' | 'succeed' | 'fail' | 'timeout' | 'ignore';
 
-/** What the dialog shows, plus the latch that says it has already finished. */
-export type FlowView = { flow: OAuthFlow | null; settled: boolean };
+/** Everything that decides what the dialog shows, including its terminal latch. */
+export type FlowView = { flow: OAuthFlow | null; errorKey: string | null; settled: boolean };
+
+export const initialFlowView: FlowView = { flow: null, errorKey: null, settled: false };
 
 export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; action: FlowAction } => {
-  if (event.kind === 'reset') return { view: { flow: null, settled: false }, action: 'continue' };
+  if (event.kind === 'reset') return { view: { ...initialFlowView }, action: 'continue' };
   // Nothing gets to change a finished flow — checked before the event is read, so
   // it holds for EVERY entry point (a poll still in flight when success landed, a
   // paste submit racing that poll, and the deadline tick, which used to stamp
   // `failed` over a success on a dialog left open because nothing adopted the
   // source).
   if (view.settled) return { view, action: 'ignore' };
+  if (event.kind === 'error') {
+    return { view: { flow: view.flow, errorKey: event.errorKey, settled: true }, action: 'fail' };
+  }
   if (event.kind === 'tick') {
     if (!event.overdue) return { view, action: 'continue' };
     return {
-      view: { flow: view.flow ? { ...view.flow, state: 'failed' } : null, settled: true },
+      view: {
+        flow: view.flow ? { ...view.flow, state: 'failed' } : null,
+        errorKey: 'settings.models.oauth.error.timeout',
+        settled: true,
+      },
       action: 'timeout',
     };
   }
   const flow = event.flow;
-  if (flow.state === 'success') return { view: { flow, settled: true }, action: 'succeed' };
+  if (flow.state === 'success') return { view: { flow, errorKey: null, settled: true }, action: 'succeed' };
   // `settled` means terminal, not successful: a failed flow is just as finished,
   // and a later arrival has just as little business reopening it.
-  if (flow.state === 'failed' || flow.state === 'cancelled') return { view: { flow, settled: true }, action: 'fail' };
-  return { view: { flow, settled: false }, action: 'continue' };
+  if (flow.state === 'failed' || flow.state === 'cancelled') {
+    return {
+      view: {
+        flow,
+        errorKey: flow.error_key ?? 'settings.models.oauth.error.generic',
+        settled: true,
+      },
+      action: 'fail',
+    };
+  }
+  return { view: { flow, errorKey: null, settled: false }, action: 'continue' };
 };
 
 export type FlowAuthority = {
@@ -134,7 +153,7 @@ export type FlowAuthority = {
  * caller silently drop `settled` and reopen an already terminal flow.
  */
 export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthority => {
-  let current: FlowView = { flow: null, settled: false };
+  let current: FlowView = { ...initialFlowView };
 
   return {
     current: () => current,
