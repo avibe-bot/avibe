@@ -318,3 +318,13 @@ runtime stub that reproduces the startup-reconciliation race.
       recorded" so they read accurately in either state. Copy-only, no
       conditional rendering — the strings are honest without one, and the
       pre-enable disclosure bullet keeps its existing conditional form.
+
+## Review follow-ups, round 8 (Codex review of 6b13a0f2)
+
+- [x] Exclude `proactive_capture` from settlement equality:
+      `_same_memory_configuration` normalized only the pending marker, so an
+      owner toggling the prompt-only flag while a pending embedding change was
+      settling made the candidate look like a different configuration, failing
+      the settlement with `memory_runtime_install_failed` and leaving both the
+      marker and the runtime unreconciled. The comparison now normalizes both
+      settlement-irrelevant fields, mirroring the controller's runtime identity.

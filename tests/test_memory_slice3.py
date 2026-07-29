@@ -638,3 +638,25 @@ def test_a_superseded_reconciliation_still_publishes_the_settings_it_applied() -
     memory = asyncio.run(scenario())
     assert memory.proactive_capture is False
     assert memory.processing.llm.model == "chat-2"
+
+
+def test_settling_a_pending_embedding_change_ignores_the_prompt_only_flag():
+    """A concurrent opt-in toggle must not look like a different configuration.
+
+    `_settle_embedding_change_pending` clears the persisted marker only when the
+    candidate still matches what is on disk. `proactive_capture` reaches no
+    runtime state, so an owner toggling it while a pending embedding change is
+    settling would otherwise fail the settlement, report
+    `memory_runtime_install_failed`, and leave both the marker and the runtime
+    unreconciled.
+    """
+
+    from core.memory.runtime import _same_memory_configuration
+
+    persisted = _memory_config(proactive_capture=True, embedding_change_pending=True)
+    candidate = _memory_config(proactive_capture=False)
+
+    assert _same_memory_configuration(persisted, candidate) is True
+    assert (
+        _same_memory_configuration(persisted, _memory_config(llm_model="chat-2")) is False
+    )
