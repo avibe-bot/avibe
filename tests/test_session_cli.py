@@ -192,6 +192,124 @@ def test_get_missing_is_not_found(monkeypatch, tmp_path, capsys):
     assert payload["code"] == "session_not_found"
 
 
+# -------------------------------------------------------------------- send now
+
+
+def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+    called: list[str] = []
+
+    async def _send_now(session_id):
+        called.append(session_id)
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "status": "flushed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 0
+    assert called == ["sesaaa"]
+    assert payload == {
+        "schema_version": 1,
+        "ok": True,
+        "kind": "session_send_now",
+        "session_id": "sesaaa",
+        "status": "flushed",
+        "result": {
+            "ok": True,
+            "session_id": "sesaaa",
+            "status": "flushed",
+        },
+    }
+
+
+def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, capsys):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+
+    async def _send_now(session_id):
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "session_id": session_id,
+                "code": "stop_failed",
+                "detail": "backend refused Stop",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "stop_failed"
+    assert payload["error"] == "backend refused Stop"
+    assert payload["details"]["session_id"] == "sesaaa"
+    assert payload["details"]["controller_status_code"] == 409
+
+
+def test_send_now_rejects_an_archived_session_before_controller_call(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesarch", status="archived")
+
+    async def _send_now(_session_id):
+        raise AssertionError("archived Session must not reach the live controller")
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesarch"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "session_not_found"
+
+
+def test_send_now_requires_an_explicit_target(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "send-now"])
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert payload["help_command"] == "vibe session send-now --help"
+
+
 # ------------------------------------------------------------------------- update
 
 

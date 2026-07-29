@@ -1119,7 +1119,8 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Add --send-now to interrupt its active turn and dispatch the FIFO queue head.
+          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
+          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -1145,6 +1146,7 @@ def _agent_run_examples_text() -> str:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
           vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe session send-now sesk8m4q2p7x
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -5097,6 +5099,77 @@ def cmd_session_get(args):
         session=_session_row(payload, brief=False),
         message=_session_get_hint(session_id),
         **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+    )
+    return 0
+
+
+def cmd_session_send_now(args):
+    """Apply Workbench's Session-level Send now transition without adding work."""
+
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+        controller_result = asyncio.run(internal_client.send_now(session_id))
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except internal_client.InternalServerUnavailable as exc:
+        _print_task_error(
+            TaskCliError(
+                "the live Session controller is unavailable",
+                code="internal_unavailable",
+                hint="Keep the queued messages intact and retry after the Avibe service is reachable.",
+                details={"session_id": session_id, "detail": str(exc)},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session send-now --help")
+        return 1
+
+    raw_status_code = controller_result.get("status_code")
+    try:
+        status_code = int(raw_status_code)
+    except (TypeError, ValueError):
+        status_code = 500
+    body = controller_result.get("body")
+    result = dict(body) if isinstance(body, dict) else {}
+    if not 200 <= status_code < 300 or result.get("ok") is False:
+        code = str(result.get("code") or result.get("status") or "send_now_failed")
+        detail = str(result.get("detail") or result.get("message") or code)
+        _print_task_error(
+            TaskCliError(
+                detail,
+                code=code,
+                hint="The active turn and durable queue were left intact; retry or let the turn finish normally.",
+                details={
+                    "session_id": session_id,
+                    "controller_status_code": status_code,
+                    "controller_response": result,
+                },
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+
+    _print_cli_payload(
+        "session_send_now",
+        session_id=session_id,
+        status=str(result.get("status") or "unknown"),
+        result=result,
     )
     return 0
 
@@ -12480,17 +12553,21 @@ def build_parser():
 
     session_parser = subparsers.add_parser(
         "session",
-        help="List, inspect, and rename Agent sessions",
+        help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'update' renames a session's title. Archived sessions are soft-deleted "
-            "and never surfaced."
+            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'update' changes title, visibility, or scope. Archived sessions are "
+            "soft-deleted and never surfaced."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session --help",
         error_hint="Run one of the session subcommands below. Start with: vibe session list",
     )
-    session_subparsers = session_parser.add_subparsers(dest="session_command", metavar="{list,get,update}")
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_command",
+        metavar="{list,get,send-now,update}",
+    )
     session_subparsers.required = True
     session_list_parser = session_subparsers.add_parser(
         "list",
@@ -12517,6 +12594,20 @@ def build_parser():
     )
     session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     _add_json_noop(session_get_parser)
+    session_send_now_parser = session_subparsers.add_parser(
+        "send-now",
+        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        description=(
+            "Apply the same Session-level Send now transition as Workbench without "
+            "adding another message. If the Session is busy, Avibe interrupts the "
+            "active turn and starts the durable FIFO queue head as a new turn. If "
+            "the Session is idle, Avibe starts the queue head directly."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session send-now --help",
+    )
+    session_send_now_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_json_noop(session_send_now_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
         help="Update a session's title, visibility, or scope",
@@ -13664,6 +13755,8 @@ def main():
             sys.exit(cmd_session_list(args))
         if args.session_command == "get":
             sys.exit(cmd_session_get(args))
+        if args.session_command == "send-now":
+            sys.exit(cmd_session_send_now(args))
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")

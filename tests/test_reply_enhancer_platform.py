@@ -432,6 +432,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("### Choosing the right Harness shape", prompt)
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
+        self.assertIn(
+            "| Dispatch an existing queued Session head now | `vibe session send-now <session-id>` |",
+            prompt,
+        )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
         self.assertIn("Tasks created from an Avibe Agent shell continue this conversation by default", prompt)
         self.assertIn("`vibe task add` creates a time-triggered saved Agent message", prompt)
@@ -457,15 +461,23 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
+            "an explicit user request is one signal, not a prerequisite",
+            prompt,
+        )
+        self.assertIn(
             "vibe agent run --session-id <id> --send-now --message ...",
             prompt,
         )
         self.assertIn(
-            "It does not steer the same native turn or move the new message ahead of older queued work",
+            "vibe session send-now <id>",
             prompt,
         )
         self.assertIn(
-            "If interruption is refused, the active turn continues and the Run remains queued",
+            "the new message does not leapfrog it",
+            prompt,
+        )
+        self.assertIn(
+            "If interruption is refused, the active turn and durable queue remain intact",
             prompt,
         )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)

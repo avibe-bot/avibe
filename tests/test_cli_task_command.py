@@ -314,6 +314,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --fork-self --message" in captured.out
     assert "vibe agent run --session-id sesk8m4q2p7x --send-now --message" in captured.out
+    assert "vibe session send-now sesk8m4q2p7x" in captured.out
     assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
     assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
     assert (
