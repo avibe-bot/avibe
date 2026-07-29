@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
-import { flowStep, isDone, type FlowView } from './asyncLifetime';
+import { createFlowAuthority, isDone, type FlowAuthority } from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi, type OAuthResult } from './modelsApi';
@@ -75,13 +75,11 @@ export const OAuthConnectDialog: React.FC<{
   const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[] | null>(null);
   const [, tick] = React.useReducer((x) => x + 1, 0);
 
-  // One-shot latch so a terminal result is consumed exactly once per flow: a
-  // paste submit can return `success` while a poll for the same flow is already
-  // in flight, and both carry the same terminal envelope.
-  const settledRef = React.useRef(false);
-  // Set by the flow effect so `submit` settles through the very same handler.
+  // Set by the flow effect so `submit` lands through the very same owners as a
+  // poll response: one authority owns the complete view and one handler owns
+  // terminal side effects.
+  const flowAuthorityRef = React.useRef<FlowAuthority | null>(null);
   const settleRef = React.useRef<((result: OAuthResult) => void) | null>(null);
-  const flowRef = React.useRef<OAuthFlow | null>(null);
   const successTimer = React.useRef<number | null>(null);
   const onConnectedRef = React.useRef(onConnected);
   onConnectedRef.current = onConnected;
@@ -118,13 +116,9 @@ export const OAuthConnectDialog: React.FC<{
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       pollTimer = null;
     };
-    const apply = (f: OAuthFlow | null) => {
-      flowRef.current = f;
-      setFlow(f);
-    };
-
-    // What the dialog currently shows, as the value `flowStep` decides against.
-    const view = (): FlowView => ({ flow: flowRef.current, settled: settledRef.current });
+    const authority = createFlowAuthority((view) => setFlow(view.flow));
+    flowAuthorityRef.current = authority;
+    const transition = authority.transition;
 
     // The single place a terminal result becomes a finished (or failed) connect.
     // Shared by the poll and the paste submit because api.md gives both the SAME
@@ -135,9 +129,7 @@ export const OAuthConnectDialog: React.FC<{
     // done, so the caller stops polling.
     const settle = (result: OAuthResult): boolean => {
       const { created } = result;
-      const step = flowStep(view(), { kind: 'response', flow: result.flow });
-      settledRef.current = step.view.settled;
-      apply(step.view.flow);
+      const step = transition({ kind: 'response', flow: result.flow });
       if (step.action === 'succeed') {
         // The Source already exists. The status/submit call that first reports
         // success materializes it server-side and consumes the flow binding doing
@@ -164,11 +156,10 @@ export const OAuthConnectDialog: React.FC<{
 
     const poll = async (flowId: string) => {
       if (cancelled) return;
-      const overdue = flowStep(view(), { kind: 'tick', overdue: Date.now() > deadline });
+      const overdue = transition({ kind: 'tick', overdue: Date.now() > deadline });
       if (isDone(overdue.action)) {
         if (overdue.action === 'timeout') {
           setErrorKey('settings.models.oauth.error.timeout');
-          apply(overdue.view.flow);
         }
         return;
       }
@@ -190,12 +181,11 @@ export const OAuthConnectDialog: React.FC<{
 
     // Clear any stale flow from a prior open so the previous success/failure
     // isn't shown while the new startOAuth request is in flight.
-    apply(null);
+    transition({ kind: 'reset' });
     setErrorKey(null);
     setCode('');
     setSubmitting(false);
     setAdoptedBy(null);
-    settledRef.current = false;
     void (async () => {
       try {
         // A hub-held subscription connect (channel === 'hub' only when the user
@@ -203,7 +193,7 @@ export const OAuthConnectDialog: React.FC<{
         // the server returns consent_required.
         const started = await modelsApi.startOAuth(vendor, channel, channel === 'hub');
         if (cancelled) return;
-        apply(started);
+        transition({ kind: 'response', flow: started });
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
       } catch (err) {
@@ -218,9 +208,10 @@ export const OAuthConnectDialog: React.FC<{
       stop();
       settleRef.current = null;
       if (successTimer.current !== null) window.clearTimeout(successTimer.current);
-      const cur = flowRef.current;
+      const cur = authority.current().flow;
+      transition({ kind: 'reset' });
+      if (flowAuthorityRef.current === authority) flowAuthorityRef.current = null;
       if (cur && !TERMINAL.includes(cur.state)) modelsApi.cancelOAuth(cur.flow_id).catch(() => {});
-      flowRef.current = null;
     };
   }, [open, vendor, channel, t, showToast]);
 
@@ -240,22 +231,25 @@ export const OAuthConnectDialog: React.FC<{
   }, [open]);
 
   const submit = async () => {
-    const cur = flowRef.current;
+    const authority = flowAuthorityRef.current;
+    const cur = authority?.current().flow;
     if (!cur || !code.trim()) return;
+    const isCurrent = () =>
+      flowAuthorityRef.current === authority && authority.current().flow?.flow_id === cur.flow_id;
     setSubmitting(true);
     try {
       const result = await modelsApi.submitOAuth(cur.flow_id, code.trim());
       // Drop the response if the dialog closed or a new flow started meanwhile.
-      if (flowRef.current?.flow_id !== cur.flow_id) return;
+      if (!isCurrent()) return;
       // Submit can terminate the flow outright (the contract gives status and
       // submit the same terminal shape), so it goes through the same handler
       // rather than storing the flow and waiting for a poll to notice.
       settleRef.current?.(result);
     } catch (err) {
-      if (flowRef.current?.flow_id !== cur.flow_id) return;
+      if (!isCurrent()) return;
       setErrorKey(errorKeyFor((err as { code?: string } | null)?.code));
     } finally {
-      if (flowRef.current?.flow_id === cur.flow_id) setSubmitting(false);
+      if (isCurrent()) setSubmitting(false);
     }
   };
 

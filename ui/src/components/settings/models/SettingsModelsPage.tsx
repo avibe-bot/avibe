@@ -19,6 +19,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
+import { createLatestAsyncAuthority } from './asyncLifetime';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
@@ -116,6 +117,14 @@ export const SettingsModelsPage: React.FC = () => {
     };
   }, []);
 
+  const [refreshAuthority] = React.useState(() =>
+    createLatestAsyncAuthority<[Source[], AgentSupply[]]>(([nextSources, nextAgents]) => {
+      if (!aliveRef.current) return;
+      setSources(nextSources);
+      setAgents(nextAgents);
+    }),
+  );
+
   React.useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -146,16 +155,13 @@ export const SettingsModelsPage: React.FC = () => {
 
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
-      const [s, a] = await Promise.all([modelsApi.listSources(), modelsApi.listAgents()]);
-      if (!aliveRef.current) return;
-      setSources(s);
-      setAgents(a);
+      await refreshAuthority.run(() => Promise.all([modelsApi.listSources(), modelsApi.listAgents()]));
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
       // the user the view might be stale rather than silently swallowing it.
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-  }, [showToast, t]);
+  }, [refreshAuthority, showToast, t]);
 
   const loadOlderEvents = React.useCallback(async () => {
     const oldest = events[events.length - 1]?.id;

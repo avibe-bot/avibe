@@ -1,10 +1,31 @@
-// Two decisions that used to live inline in a component, and could therefore only
-// be checked by running one: what a drawer does when the server's saved state
-// arrives, and what the connect dialog does when a response arrives after it has
-// already finished. Both answer the same question — does this async arrival still
-// get to change what the user sees — and both got it wrong in a way no unit test
-// could reach, which is why they are functions here instead of effect bodies there.
+// Async ownership rules extracted from the Models components so interleavings can
+// be exercised directly: which request may land, when a drawer re-seeds, and
+// whether a connect-flow transition may change an already terminal view.
 import type { AgentMenu, AgentSupply, OAuthFlow } from './types';
+
+// ── Latest async result ────────────────────────────────────────────────────
+/**
+ * Owns request ordering and the only path that may land a result. Callers start
+ * reads; they never reconstruct whether a response is still current.
+ */
+export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
+  let latestRequest = 0;
+
+  return {
+    run: async (read: () => Promise<T>): Promise<'landed' | 'stale'> => {
+      const request = ++latestRequest;
+      try {
+        const value = await read();
+        if (request !== latestRequest) return 'stale';
+        land(value);
+        return 'landed';
+      } catch (error) {
+        if (request !== latestRequest) return 'stale';
+        throw error;
+      }
+    },
+  };
+};
 
 // ── The drawers' seed ──────────────────────────────────────────────────────
 // A drawer seeds its editable state from the server's saved state, and needs to
@@ -56,10 +77,13 @@ export const seedStep = (state: SeedState, authoritative: string): { state: Seed
 
 // ── The OAuth dialog's terminal ordering ───────────────────────────────────
 /**
- * Every way a response or a timer can reach the connect dialog. A `tick` is the
- * dialog's own deadline check, which also wants to change what is shown.
+ * Every way flow state can reach the connect dialog. A `tick` is the dialog's
+ * own deadline check; `reset` starts a new attempt from an unsettled view.
  */
-export type FlowEvent = { kind: 'response'; flow: OAuthFlow } | { kind: 'tick'; overdue: boolean };
+export type FlowEvent =
+  | { kind: 'reset' }
+  | { kind: 'response'; flow: OAuthFlow }
+  | { kind: 'tick'; overdue: boolean };
 
 /**
  * What the caller must DO about an event. The side effects (toast, refetch,
@@ -77,6 +101,7 @@ export type FlowAction = 'continue' | 'succeed' | 'fail' | 'timeout' | 'ignore';
 export type FlowView = { flow: OAuthFlow | null; settled: boolean };
 
 export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; action: FlowAction } => {
+  if (event.kind === 'reset') return { view: { flow: null, settled: false }, action: 'continue' };
   // Nothing gets to change a finished flow — checked before the event is read, so
   // it holds for EVERY entry point (a poll still in flight when success landed, a
   // paste submit racing that poll, and the deadline tick, which used to stamp
@@ -96,6 +121,30 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   // and a later arrival has just as little business reopening it.
   if (flow.state === 'failed' || flow.state === 'cancelled') return { view: { flow, settled: true }, action: 'fail' };
   return { view: { flow, settled: false }, action: 'continue' };
+};
+
+export type FlowAuthority = {
+  current: () => FlowView;
+  transition: (event: FlowEvent) => ReturnType<typeof flowStep>;
+};
+
+/**
+ * Owns the complete view, including its terminal latch, and is the only path
+ * that may land a new one. Keeping only `flow` at the landing site would let a
+ * caller silently drop `settled` and reopen an already terminal flow.
+ */
+export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthority => {
+  let current: FlowView = { flow: null, settled: false };
+
+  return {
+    current: () => current,
+    transition: (event) => {
+      const step = flowStep(current, event);
+      current = step.view;
+      land(current);
+      return step;
+    },
+  };
 };
 
 /** Whether an action ends the flow, so the caller stops polling. */

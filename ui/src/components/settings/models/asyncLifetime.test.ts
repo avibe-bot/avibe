@@ -18,6 +18,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  createFlowAuthority,
+  createLatestAsyncAuthority,
   flowStep,
   initialSeedState,
   isDone,
@@ -43,6 +45,33 @@ const flow = (state: OAuthFlow['state']): OAuthFlow => ({
   channel: 'native_cli',
   state,
   presentation: { auth_url: null, device_code: null, expects: 'none', instructions_key: null },
+});
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
+
+describe('latest async authority', () => {
+  it('drops an older refresh that lands after the newer refresh', async () => {
+    const older = deferred<string>();
+    const newer = deferred<string>();
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthority<string>((value) => landed.push(value));
+
+    const olderRun = authority.run(() => older.promise);
+    const newerRun = authority.run(() => newer.promise);
+
+    newer.resolve('server order: b,a');
+    await newerRun;
+    older.resolve('server order: a,b');
+    await olderRun;
+
+    expect(landed).toEqual(['server order: b,a']);
+  });
 });
 
 describe('savedSourcesKey / savedMappingsKey / savedMenuKey', () => {
@@ -181,5 +210,29 @@ describe('flowStep', () => {
     expect(failed.action).toBe('fail');
     expect(failed.view.settled).toBe(true);
     expect(flowStep(failed.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
+  });
+});
+
+describe('flow authority', () => {
+  it('keeps the deadline terminal when a paste success resolves afterward', () => {
+    const landed: FlowView[] = [];
+    const authority = createFlowAuthority((view) => landed.push(view));
+    let connected = 0;
+
+    authority.transition({ kind: 'response', flow: flow('success') });
+    authority.transition({ kind: 'reset' });
+    authority.transition({ kind: 'response', flow: flow('awaiting_action') });
+    const timeout = authority.transition({ kind: 'tick', overdue: true });
+    const latePaste = authority.transition({ kind: 'response', flow: flow('success') });
+    if (latePaste.action === 'succeed') connected += 1;
+
+    expect(timeout.action).toBe('timeout');
+    expect(latePaste.action).toBe('ignore');
+    expect(connected).toBe(0);
+    expect(authority.current()).toEqual({
+      flow: expect.objectContaining({ state: 'failed' }),
+      settled: true,
+    });
+    expect(landed.at(-1)).toEqual(authority.current());
   });
 });
