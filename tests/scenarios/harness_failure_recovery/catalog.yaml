@@ -1269,6 +1269,35 @@ scenarios:
     # for a create (the id is simply absent from the database) and for an adopt or a
     # delete (the previous row comes back).
     test: tests/test_watches.py::test_a_failed_create_leaves_no_phantom_watch_in_the_live_store
+  - id: HFR-276
+    name: a reclaim that fails must record the orphan, not report a completed reclaim
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer INSIDE the HFR-270 fix, and the same class as HFR-263..266: the caller
+    # ignored the guard's answer. _release_reserved_session is deliberately never fatal
+    # (it runs on a path already reporting a failure to the user), so it catches every
+    # exception and returns False; _recover_pinned_session_binding dropped that boolean
+    # and emitted SessionBindingChange(action="reclaimed") regardless. A locked database
+    # or an I/O fault during the release therefore left exactly the orphan HFR-270
+    # promises cannot remain -- a live, unreferenced background session and its workspace
+    # -- told the user it had been given back, and lost the only handle on it: the
+    # reserved id is random and is never written to the definition, so the next fire that
+    # loses the same race reserved and leaked another one, untracked.
+    # FIX, both clauses. The boolean is consumed and the losing branch emits a distinct
+    # action="orphaned" whose detail names the session that is still live; and the id is
+    # recorded durably on the definition that reserved it
+    # (metadata.orphaned_reservations in run_definitions.metadata_json, the same row the
+    # binding-recovery record already uses), so a reservation may accumulate only in a
+    # TRACKED, retryable form. That record is itself written through the guarded full-row
+    # writer, so its own False is consumed too: the notice then says the id could not be
+    # recorded either. The next fire of the same definition retries the release from the
+    # record (_retry_orphaned_reservations) and drops the entries it resolves, keeping the
+    # ones whose release failed again. release_reserved_agent_session keeps its exact-id /
+    # empty-native / unreferenced predicates unchanged, so no retry can take a concurrent
+    # winner. Asserted on the live store mirror AND the durable row:
+    test: tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

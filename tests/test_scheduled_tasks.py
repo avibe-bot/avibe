@@ -9323,6 +9323,240 @@ def test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved(
     )
 
 
+#: Spelled out rather than imported from ``core.scheduled_tasks``: this is a DURABLE
+#: definition-metadata key, so the name itself is the contract a later fire (and any
+#: operator reading ``run_definitions.metadata_json``) depends on.
+_ORPHAN_RESERVATIONS_KEY = "orphaned_reservations"
+
+
+def test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-276 — the consuming end of HFR-270's own cleanup.
+
+    THE PRODUCTION STORY, one layer inside the fix. Same race as HFR-268/HFR-270: a
+    ``create_once`` definition's pinned Session is gone, the fire reserves a
+    replacement, a second teardown pauses the definition, and the guarded rebind is
+    refused. HFR-270 then gives the replacement back. That release is deliberately
+    NEVER FATAL -- it runs on a path that is already reporting a failure to the user
+    and must not raise a second exception on top of it -- so ``_release_reserved_session``
+    catches everything and returns ``False``.
+
+    THE CALLER IGNORED THE ANSWER. ``_recover_pinned_session_binding`` emitted
+    ``action="reclaimed"`` unconditionally, so a locked database or an I/O fault during
+    the release produced exactly the orphan HFR-270 promises cannot remain, told the
+    user the opposite, and lost the only handle on it: the reserved session's id is
+    random, it is never written to the definition, and nothing else ever knew it. The
+    next fire that loses the same race reserves and leaks another one, untracked.
+
+    THE REQUIREMENT HAS TWO CLAUSES and a truthful terminal outcome only satisfies the
+    first. The losing path must not report a completed reclaim, AND it must not keep
+    accumulating UNTRACKED reservations -- so the id is recorded durably on the
+    definition (``metadata.orphaned_reservations``, the same ``run_definitions``
+    metadata the binding-recovery record already uses) and a later fire retries the
+    release from it.
+
+    THE FAULT IS INJECTED INSIDE THE RELEASE, which is the only moment that satisfies
+    both preconditions at once: the replacement row already exists (the reservation
+    committed) and the rebind CAS has already lost (the definition still names the
+    session the teardown cleared). The injection asserts both, so a refactor that moved
+    the release earlier could not leave this test passing vacuously.
+    """
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr276",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    # THE OPERATIONAL FAULT, inside the release itself: the shape a locked database
+    # takes on the DELETE, which ``_release_reserved_session`` is required to swallow.
+    observed: dict[str, Any] = {"calls": 0, "fail": True}
+    original_release = SQLiteSessionsService.release_reserved_agent_session
+
+    def _failing_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        observed["calls"] += 1
+        observed["session_id"] = str(session_id)
+        observed["row_existed"] = self.get_agent_session_by_id(str(session_id)) is not None
+        observed["stored_session_id"] = _stored_definition_row(task.id)["session_id"]
+        if not observed["fail"]:
+            return original_release(self, session_id, reason=reason)
+        raise OperationalError(
+            "DELETE FROM agent_sessions ...", {}, sqlite3.OperationalError("database is locked")
+        )
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "release_reserved_agent_session", _failing_release
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert observed["calls"] == 1, (
+        f"the release was not attempted exactly once ({observed!r}), so the failure this "
+        "test injects never reached the branch under test"
+    )
+    assert observed["row_existed"] is True, (
+        "the replacement session did not exist when the release ran, so the fault was "
+        "injected before the reservation committed and no orphan is possible"
+    )
+    assert observed["stored_session_id"] == pinned, (
+        "the definition had already been repointed when the release ran, so the rebind "
+        f"CAS did NOT lose ({observed['stored_session_id']!r}) and this is a different case"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, f"expected exactly one reservation, got {reserved!r}"
+    orphan = reserved[0]
+    assert observed["session_id"] == orphan, (
+        "the release was attempted against a session this fire did not reserve"
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+    finally:
+        sessions.close()
+    assert orphan_row is not None, (
+        "the injected fault did not actually prevent the release, so there is no orphan "
+        "and the reporting/tracking assertions below prove nothing"
+    )
+
+    # CLAUSE ONE: the outcome must not claim the session was reclaimed. ``action`` is
+    # what the notice, the durable ``binding_recovery`` record and every future
+    # consumer key off, so "reclaimed" here is the lie, not a wording preference.
+    assert [notice.action for notice in notices] == ["orphaned"], (
+        "the failed cleanup was reported as a completed reclaim: the user is told the "
+        f"replacement was given back while it is still live ({[n.action for n in notices]})"
+    )
+    notice = notices[0]
+    assert notice.orphaned_session_id == orphan and notice.orphan_tracked is True
+    assert orphan in (notice.detail or "") and "could NOT be given back" in (notice.detail or ""), (
+        f"the notice does not name the session that leaked: {notice.detail!r}"
+    )
+
+    # CLAUSE TWO: the reservation must not be UNTRACKED. Durable row and live mirror
+    # both, because a fact that only one of them holds is not a fact the next fire can
+    # act on (the round-18 rule applied to a record instead of a rollback).
+    durable_metadata = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    durable_entries = durable_metadata.get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [entry.get("session_id") for entry in durable_entries] == [orphan], (
+        f"the orphaned reservation {orphan} was not durably recorded on the definition "
+        f"({durable_entries!r}): its id is random and nothing else ever knew it, so the "
+        "leak is untracked and no later attempt can find it"
+    )
+    live = store.get_task(task.id)
+    assert live is not None
+    live_entries = (live.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [entry.get("session_id") for entry in live_entries] == [orphan], (
+        f"the live store mirror does not carry the orphan record ({live_entries!r}), so "
+        "the next fire reads a definition that has forgotten it"
+    )
+    assert live.session_id == pinned and live.enabled is False, (
+        "recording the orphan restored the binding or the enabled state the teardown "
+        f"cleared (session_id={live.session_id!r}, enabled={live.enabled!r})"
+    )
+    assert _stored_definition_row(task.id)["session_id"] == pinned, (
+        "recording the orphan wrote the refused rebind through after all"
+    )
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_error and orphan in stored.last_error, (
+        f"the durable error does not name the leaked session: {stored.last_error!r}"
+    )
+
+    # AND THE RECORD IS ACTIONABLE, THROUGH THE FIRE PATH: with the database healthy
+    # again, the NEXT FIRE of the same definition -- ``_execute_task``, not a helper
+    # called by hand -- reads the record, finishes the release and drops the entry.
+    # That is what makes the accumulation tracked-and-retryable rather than merely
+    # written down, and it is why the record lives on the definition that reserved it.
+    observed["fail"] = False
+    next_fire = ScheduledTaskStore()
+    refire = next_fire.get_task(task.id)
+    assert refire is not None
+    assert (refire.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY), (
+        "the re-read definition carries no orphan record, so the retry has nothing to act on"
+    )
+    later = _dispatching_binding_service(tmp_path, next_fire, db_path=db_path)
+
+    asyncio.run(later._execute_task(refire, execution_id="exec-2", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(orphan) is None, (
+            "the next fire did not release the recorded orphan, so the durable fact leads "
+            "nowhere and the reservation accumulates anyway"
+        )
+    finally:
+        sessions.close()
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable_after.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the released orphan is still recorded durably, so every later fire retries a "
+        f"session that is already gone ({durable_after.get(_ORPHAN_RESERVATIONS_KEY)!r})"
+    )
+    live_after = next_fire.get_task(task.id)
+    assert live_after is not None and not (live_after.metadata or {}).get(
+        _ORPHAN_RESERVATIONS_KEY
+    ), "the live mirror still records an orphan the retry released"
+
+
 #: Every guarded writer that mutates the cached ``ScheduledTask`` before persisting it.
 _TASK_MIRROR_WRITERS = {
     "set_enabled": lambda store, task_id: store.set_enabled(task_id, False),
