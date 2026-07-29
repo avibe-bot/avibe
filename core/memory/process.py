@@ -184,10 +184,10 @@ class EverOSProcess:
                     process_group=process_group,
                     owned_processes=owned_processes,
                 )
-                # Only a reaped tracked child retires the record. Stopping a
-                # supervisor that holds no child must leave any recorded orphan
-                # discoverable by the next launch.
-                _remove_sidecar_record(self._sidecar_record_path)
+                # Only a reaped tracked child retires the record, and only once
+                # its group is clear. Stopping a supervisor that holds no child
+                # must leave any recorded orphan discoverable by the next launch.
+                self._retire_record_if_group_is_clear(process_group)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -338,9 +338,10 @@ class EverOSProcess:
                 return False
             if process is not None:
                 # Retire the record only for a child this attempt actually
-                # reaped. A startup that failed while reaping a recorded orphan
-                # must leave that orphan discoverable by the next attempt.
-                _remove_sidecar_record(self._sidecar_record_path)
+                # reaped, and only once its group is clear. A startup that failed
+                # while reaping a recorded orphan must leave that orphan
+                # discoverable by the next attempt.
+                self._retire_record_if_group_is_clear(process_group)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -411,7 +412,7 @@ class EverOSProcess:
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
-            _remove_sidecar_record(self._sidecar_record_path)
+            self._retire_record_if_group_is_clear(process_group)
             self._starting = False
             if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
                 self._consecutive_failures = 0
@@ -453,10 +454,11 @@ class EverOSProcess:
                 self._desired_running = False
                 self._down = True
                 self._last_error = "memory_sidecar_unavailable"
+                process_group = self._process_group
                 try:
                     await self._terminate_owned_tree(
                         process,
-                        process_group=self._process_group,
+                        process_group=process_group,
                         owned_processes=dict(self._owned_processes),
                     )
                 except Exception:
@@ -469,7 +471,7 @@ class EverOSProcess:
                 self._healthy_since = None
                 self._monitor_task = None
                 self._remove_owned_socket()
-                _remove_sidecar_record(self._sidecar_record_path)
+                self._retire_record_if_group_is_clear(process_group)
 
     def _record_start_failure_locked(self) -> None:
         self._consecutive_failures += 1
@@ -710,6 +712,11 @@ class EverOSProcess:
         logger.warning("Reaping an orphaned EverOS sidecar left by a previous Avibe run")
         if not await self._terminate_orphan_tree(pid, confirmed_create_time):
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self._sidecar_record_path})")
+        # The recorded root is gone, but a helper it spawned after the last
+        # rediscovery is not among the identities that proved it. With the leader
+        # dead, that is exactly the sweep below, and it fails the launch rather
+        # than spawning a replacement beside whatever it could not clear.
+        await self._reap_recorded_group_without_leader(record, leader_pid=pid)
         _remove_sidecar_record(self._sidecar_record_path)
 
     async def _terminate_orphan_tree(self, pid: int, created_at: float) -> bool:
@@ -800,6 +807,45 @@ class EverOSProcess:
                 "orphaned sidecar group did not exit "
                 f"(leader pid {leader_pid}, group {group}, record {self._sidecar_record_path})"
             )
+
+    def _retire_record_if_group_is_clear(self, process_group: int | None) -> None:
+        """Retire the ownership record, unless the group still holds one of ours.
+
+        A successful ``_terminate_owned_tree`` proves that every identity it
+        captured is gone, and nothing more. A helper the sidecar spawned after the
+        monitor's last snapshot is not in that set, and once the leader has exited
+        nothing puts it there: rediscovery is anchored on the live leader, and the
+        group-wide signal is refused because the unknown member cannot be
+        confirmed. The wait then reports success over the identities it does hold.
+
+        Retiring the record on that evidence discards the next launch's only route
+        to the survivor -- ``_reap_recorded_group_without_leader`` needs the
+        recorded group -- so the replacement sidecar comes up beside it on the same
+        provider root. Keeping the record instead leaves the sweep to the next
+        launch, which fails closed if the group still will not clear.
+
+        Keeping it is safe to act on later: the record names the leader's pid, and
+        a pid is not reused while its group still has members, so the boot that
+        reads this record cannot find a stranger at that pid. A successful launch
+        overwrites the record as it always has.
+        """
+
+        if process_group is not None:
+            claimed, _foreign = _recorded_group_members(
+                process_group,
+                socket_path=self._socket_path,
+                provider_root=self._provider_root,
+            )
+            if claimed:
+                logger.warning(
+                    "Keeping the EverOS ownership record: process group %s still holds %s of ours (%s), record %s",
+                    process_group,
+                    len(claimed),
+                    sorted(claimed),
+                    self._sidecar_record_path,
+                )
+                return
+        _remove_sidecar_record(self._sidecar_record_path)
 
     async def _reap_unidentified_sidecar(self) -> None:
         """Re-establish ownership from live processes when the record cannot.
