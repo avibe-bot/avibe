@@ -3377,11 +3377,30 @@ class ScheduledTaskService:
         ack/dead-letter another rung's ``ack_evidence``. The caller ends up with the
         winning rung's evidence, or — when no rung was accepted — the last one's, so
         the dead letter reports what actually went wrong on the final attempt.
+
+        A rung that RAISES is an unusable rung, not the end of the walk. Every other
+        way a rung can fail to deliver already continues — ``_build_context`` raising,
+        a stale synthetic candidate, an un-acked send — so a delivery that throws
+        (a platform whose settings manager is gone, an adapter that fails before its
+        transport) has to continue too, or the notice spends every attempt on rung (1)
+        and dead-letters without rungs (2)…(5) ever being tried. ``Exception`` and not
+        ``BaseException``: the walk-level deadline cancels this coroutine, and
+        cancellation must unwind the walk rather than advance it past the bound it was
+        cancelled to respect.
+
+        The cost is real and is recorded rather than hidden. A rung that raises AFTER
+        its transport accepted the send, leaving no evidence behind, now delivers again
+        on the next rung. The adapters no longer manufacture that state — post-send
+        bookkeeping is guarded in every one of them, so an already-delivered id is not
+        destroyed on its way out — and what remains is the same at-least-once residual
+        documented on ``CLAIM_LEASE_SECONDS``, narrowed on the retry by the duplicate
+        short-circuit's persisted receipt.
         """
 
         body = self._failure_notice_body(run, notice)
         failure_id = str(notice.get("failure_id") or f"failure:{run['id']}")
         last_rung: Optional[DeliveryEvidence] = None
+        first_raise: Optional[DeliveryEvidence] = None
         try:
             for target, session_id in self._failure_notice_targets(run):
                 try:
@@ -3405,20 +3424,42 @@ class ScheduledTaskService:
                 # whatever ``task_execution_id`` this rebuilt context happens to supply.
                 # See ``emit_replayed_backend_failure`` for why each of those is a
                 # property of the emitter instead of an argument to the live one.
-                await emit_replayed_backend_failure(
-                    self.controller,
-                    context,
-                    str(run.get("agent_backend") or "harness"),
-                    str(run.get("error") or "").strip() or body,
-                    display_text=body,
-                    failure_id=failure_id,
-                    delivery=rung,
-                )
+                try:
+                    await emit_replayed_backend_failure(
+                        self.controller,
+                        context,
+                        str(run.get("agent_backend") or "harness"),
+                        str(run.get("error") or "").strip() or body,
+                        display_text=body,
+                        failure_id=failure_id,
+                        delivery=rung,
+                    )
+                except Exception as exc:
+                    # This rung is unusable; the ladder is not. See the docstring for
+                    # why ``Exception`` and not ``BaseException``.
+                    logger.warning(
+                        "failure notice rung raised, continuing the walk: %s",
+                        target.to_key(),
+                        exc_info=True,
+                    )
+                    if rung.error is None:
+                        rung.error = exc
+                        rung.error_stage = "deliver"
+                    if first_raise is None:
+                        first_raise = rung
+                    continue
                 if self._rung_acknowledges(target, rung):
                     return True
         finally:
             if last_rung is not None:
                 _adopt_delivery_evidence(evidence, last_rung)
+            if evidence.error is None and first_raise is not None:
+                # The winning rung carries no error of its own, so the skipped rung's
+                # does not compete with anything: it is recorded on the acknowledged
+                # row purely for diagnosis, the same way a post-delivery stream error
+                # is, and — like that one — must never be read as a delivery failure.
+                evidence.error = first_raise.error
+                evidence.error_stage = first_raise.error_stage
         return False
 
     @staticmethod

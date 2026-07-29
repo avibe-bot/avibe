@@ -7071,3 +7071,179 @@ def test_a_deleted_definition_binding_notice_drops_the_repin_command(tmp_path: P
             parser.parse_args(argv)
         except SystemExit:  # pragma: no cover - the assertion is the point
             raise AssertionError(f"the copy prints {argv!r}, which the CLI cannot parse: {body}")
+
+
+# =============================================================================
+# round 12: drain semantics and interruption copy
+# =============================================================================
+#
+# Four defects and one consuming-path pin, all in the owed-notice drain's own
+# control flow rather than in the store:
+#
+# * T-1 (G) a rung that RAISES must not kill the ladder walk;
+# * T-2 (L) one pass may not hold the whole backlog for batch x timeout;
+# * T-3 (E) an interruption reason is a wire value, not user-visible copy;
+# * T-4 (F) a nonnumeric ``attempts`` must degrade, not wedge the batch;
+# * T-5 (B) the consuming-path pin for the adapter bookkeeping guard.
+#
+# Appended as one block on purpose: several rounds run in parallel worktrees and
+# a single trailing section is the cheapest thing to cherry-pick.
+
+
+def _ladder_task(
+    sqlite,
+    definition_id: str,
+    *,
+    first: str,
+    second: str,
+) -> None:
+    """A definition whose ladder has exactly TWO rungs, in a known order.
+
+    Rung (1) is the delivery key and rung (3) is caller provenance; the caller
+    carries a ``session_key`` and NOTHING else, because a ``platform`` +
+    ``user_id`` pair would add rung (4) and make "the walk continued" ambiguous
+    about which later rung it reached.
+    """
+
+    _task(
+        sqlite,
+        definition_id,
+        name="daily report",
+        deliver_key=first,
+        metadata={"created_by": {"caller": {"session_key": second}}},
+    )
+
+
+def test_a_raising_ladder_rung_does_not_abandon_the_rest_of_the_walk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079, subordinate — a rung that raises is an UNUSABLE rung, not a dead walk.
+
+    The per-rung ``try/except`` covered ``_build_context`` alone. The
+    ``emit_replayed_backend_failure`` call one line below it was unwrapped, so any
+    raise from a rung's delivery — a platform whose settings manager is gone, a
+    client lookup that fails, an adapter that throws before the transport — escaped
+    the ``for`` body entirely, unwound through the walk's ``finally`` and landed in
+    ``_deliver_one_failure_notice``'s handler, which consumed the attempt and armed
+    the backoff. The next pass then started the SAME ladder from rung (1) and raised
+    again, so the notice burned every attempt on one broken rung and dead-lettered
+    without ever trying rung (2) — even though the walk already CONTINUES for a rung
+    whose send is un-acked (``_rung_acknowledges`` returning False), which is the
+    weaker version of the same condition.
+
+    Round 7's accepted contract is that an unresolvable or stale candidate continues
+    the walk. A raising one is the same class of unusable and must be treated the
+    same way.
+
+    The cost, stated rather than hidden: a rung that raises AFTER its transport
+    accepted the send, without leaving evidence, now duplicates onto the next rung.
+    That is exactly the class finding B's adapter guard (0ebf4c55, shipped in this
+    same round) closes at the source — an already-delivered id is no longer destroyed
+    by post-send bookkeeping — and what remains is covered by the duplicate
+    short-circuit on the retry plus the at-least-once residual documented on
+    ``CLAIM_LEASE_SECONDS``.
+    """
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+
+    sqlite, requests = _store(tmp_path)
+    _ladder_task(
+        sqlite,
+        "task-raising-rung",
+        first="slack::channel::C-FIRST",
+        second="slack::channel::C-SECOND",
+    )
+    run = requests.enqueue_task_run("task-raising-rung")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-raising-rung")
+
+    attempted: list[str] = []
+
+    async def _first_rung_raises(controller, context, backend, diagnostic, **kwargs):
+        attempted.append(context.channel_id)
+        if context.channel_id == "C-FIRST":
+            raise RuntimeError("no settings manager for slack")
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.send_returned = True
+            evidence.delivered_id = "ts-second"
+            evidence.persisted_row = {"id": "msg-second"}
+        return False
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _first_rung_raises)
+
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert attempted == ["C-FIRST", "C-SECOND"], (
+        "a raising rung must be skipped, not end the walk; attempted=" f"{attempted}"
+    )
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT, f"the second rung delivered it: {notice}"
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT
+    assert notice["attempts"] == 1, "one pass, one attempt"
+    # The skipped rung is recorded rather than swallowed: the aggregate evidence
+    # carries the first raise so an operator can see WHY rung (1) was passed over,
+    # on a row that is nonetheless acknowledged and will never be resent.
+    assert "no settings manager for slack" in (notice["error"] or ""), (
+        f"the skipped rung's own error must survive for diagnosis: {notice}"
+    )
+
+
+def test_the_walk_deadline_still_cancels_through_a_rung(tmp_path: Path, monkeypatch) -> None:
+    """HFR-079, subordinate — the per-rung handler may not eat ``CancelledError``.
+
+    The fix above catches ``Exception``, deliberately and not ``BaseException``: the
+    walk-level deadline (``NOTICE_DELIVERY_TIMEOUT_SECONDS``) cancels the delivery
+    task, and cancellation has to unwind the whole walk rather than being converted
+    into "this rung was unusable, try the next one". A handler one letter wider would
+    turn one wedged rung into a walk that keeps going past its own deadline, holding
+    the claim beyond the lease it was cancelled to respect.
+
+    Rung (2) never being attempted is the assertion: it is what distinguishes
+    cancellation from the raise above.
+    """
+
+    import core.failure_notices as failure_notices
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _ladder_task(
+        sqlite,
+        "task-cancel-rung",
+        first="slack::channel::C-HANG",
+        second="slack::channel::C-NEVER",
+    )
+    run = requests.enqueue_task_run("task-cancel-rung")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-cancel-rung")
+
+    attempted: list[str] = []
+
+    async def _first_rung_hangs(controller, context, backend, diagnostic, **kwargs):
+        attempted.append(context.channel_id)
+        await asyncio.Event().wait()
+        return False  # pragma: no cover - the wait never returns
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _first_rung_hangs)
+    monkeypatch.setattr(failure_notices, "NOTICE_DELIVERY_TIMEOUT_SECONDS", 0.05)
+
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert attempted == ["C-HANG"], (
+        "the deadline must unwind the whole walk, not advance it to the next rung: "
+        f"{attempted}"
+    )
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == "pending", f"a timed-out delivery stays retryable: {notice}"
+    assert notice["attempts"] == 1, "the claim's attempt is consumed by the timeout"
+    assert "timed out" in (notice["error"] or ""), f"the timeout must say so: {notice}"
