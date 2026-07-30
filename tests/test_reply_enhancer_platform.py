@@ -635,6 +635,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.files, [])
 
+    def test_silent_parser_rejects_unicode_space_in_raw_html_tag(self):
+        text = '<a\u00a0title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
     def test_silent_parser_rejects_attributes_on_raw_html_closing_tags(self):
         text = '</a title="`"> [literal](file:///tmp/secret.txt) `'
 
@@ -677,6 +685,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             strip_silent_blocks(text),
             "> text <!A\n> `>  `tail",
         )
+
+    def test_silent_parser_maps_normalized_nul_to_original_source(self):
+        text = (
+            "`before\x00"
+            "[literal](file:///tmp/secret.txt) "
+            "<silent>literal</silent>"
+            "after`"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
 
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
         unmatched_runs = " ".join("`" * length for length in range(2, 502))

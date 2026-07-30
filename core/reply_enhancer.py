@@ -166,12 +166,13 @@ _SILENT_OPEN_RE = re.compile(r"<silent\b[^>]*>", re.IGNORECASE)
 _SILENT_CLOSE_RE = re.compile(r"</silent\s*>", re.IGNORECASE)
 _RAW_HTML_OPEN_TAG_RE = re.compile(
     r"""<[A-Za-z][A-Za-z0-9-]*"""
-    r"""(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"""
-    r"""(?:\s*=\s*(?:[^"'=<>`\x00-\x20]+|'[^']*'|"[^"]*"))?)*"""
-    r"""\s*/?>"""
+    r"""(?:[ \t\n\f\r]+[A-Za-z_:][A-Za-z0-9_.:-]*"""
+    r"""(?:[ \t\n\f\r]*=[ \t\n\f\r]*"""
+    r"""(?:[^"'=<>`\x00-\x20]+|'[^']*'|"[^"]*"))?)*"""
+    r"""[ \t\n\f\r]*/?>"""
 )
 _RAW_HTML_CLOSE_TAG_RE = re.compile(
-    r"</[A-Za-z][A-Za-z0-9-]*\s*>"
+    r"</[A-Za-z][A-Za-z0-9-]*[ \t\n\f\r]*>"
 )
 
 # Dynamic secret-ask markers: ``$<openAiKey>`` (case-preserving shell name). Matched only
@@ -465,7 +466,8 @@ def _inline_backtick_source_offsets(
         if "`" in content_line:
             for candidate_index in range(source_index, len(source_lines)):
                 absolute_start, source_line = source_lines[candidate_index]
-                relative_start = source_line.find(content_line)
+                normalized_source_line = source_line.replace("\x00", "\ufffd")
+                relative_start = normalized_source_line.find(content_line)
                 if relative_start < 0:
                     continue
                 for relative_offset, char in enumerate(content_line):
