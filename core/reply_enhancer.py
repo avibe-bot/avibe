@@ -193,9 +193,10 @@ def strip_silent_blocks(text: str) -> str:
 
 
 def _extract_file_links(text: str) -> List[FileLink]:
-    """Return all ``FileLink`` instances found in *text*."""
+    """Return ``FileLink`` instances found outside Markdown code."""
     results: List[FileLink] = []
-    for bang, label, url in _FILE_LINK_RE.findall(text):
+    masked = _mask_markdown_code(text)
+    for bang, label, url in _FILE_LINK_RE.findall(masked):
         parsed = urlparse(url)
         if parsed.scheme != "file":
             continue
@@ -221,16 +222,19 @@ def _file_uri_to_local_path(parsed) -> str:
 
 
 def _strip_file_links(text: str) -> str:
-    """Replace ``[label](file://…)`` with just the label."""
+    """Replace file links outside Markdown code with their labels."""
+    matches = list(_FILE_LINK_RE.finditer(_mask_markdown_code(text)))
+    if not matches:
+        return text
 
-    def _replacer(m: re.Match) -> str:
-        label = m.group(2)
-        url = m.group(3)
-        if url.startswith("file://"):
-            return label  # keep the label text, drop the link
-        return m.group(0)
-
-    return _FILE_LINK_RE.sub(_replacer, text)
+    parts: List[str] = []
+    cursor = 0
+    for match in matches:
+        parts.append(text[cursor : match.start()])
+        parts.append(match.group(2))
+        cursor = match.end()
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def _extract_secret_requests(text: str) -> List[SecretRequest]:
@@ -341,25 +345,27 @@ def _opening_fence_delimiter(
     """Parse a fence opener and its block quote/list container context."""
     quote_depth, prefix_end = _quote_prefix(line)
     cursor = prefix_end
+    column = 0
     list_indent: int | None = None
 
     while True:
-        indent_start = cursor
-        while cursor < len(line) and line[cursor] == " ":
-            cursor += 1
-        if cursor - indent_start > 3:
+        indent_start_column = column
+        cursor, column = _consume_indentation(line, cursor, column)
+        if column - indent_start_column > 3:
             return None
 
         marker_end = _list_marker_end(line, cursor)
         if marker_end is None:
             break
+        column += marker_end - cursor
         cursor = marker_end
         whitespace_start = cursor
-        while cursor < len(line) and line[cursor] in {" ", "\t"}:
-            cursor += 1
-        if cursor == whitespace_start:
+        padding_start_column = column
+        cursor, column = _consume_indentation(line, cursor, column)
+        padding = column - padding_start_column
+        if cursor == whitespace_start or padding > 4:
             return None
-        list_indent = cursor - prefix_end
+        list_indent = column
 
     delimiter = _fence_run(line, cursor)
     if delimiter is None:
@@ -378,10 +384,7 @@ def _closing_fence_delimiter(
     if line_quote_depth != quote_depth:
         return None
 
-    cursor = prefix_end
-    while cursor < len(line) and line[cursor] == " ":
-        cursor += 1
-    indent = cursor - prefix_end
+    cursor, indent = _consume_indentation(line, prefix_end, 0)
     minimum_indent = list_indent or 0
     if indent < minimum_indent or indent > minimum_indent + 3:
         return None
@@ -437,6 +440,22 @@ def _list_marker_end(line: str, start: int) -> int | None:
     return cursor + 1
 
 
+def _consume_indentation(
+    line: str,
+    start: int,
+    column: int,
+) -> Tuple[int, int]:
+    """Consume spaces/tabs, expanding tabs to four-column Markdown stops."""
+    cursor = start
+    while cursor < len(line) and line[cursor] in {" ", "\t"}:
+        if line[cursor] == "\t":
+            column += 4 - (column % 4)
+        else:
+            column += 1
+        cursor += 1
+    return cursor, column
+
+
 def _line_leaves_fence_container(
     line: str,
     quote_depth: int,
@@ -451,10 +470,8 @@ def _line_leaves_fence_container(
     if list_indent is None:
         return False
 
-    cursor = prefix_end
-    while cursor < len(line) and line[cursor] == " ":
-        cursor += 1
-    return cursor - prefix_end < list_indent
+    _, indent = _consume_indentation(line, prefix_end, 0)
+    return indent < list_indent
 
 
 def _inline_code_ranges(
@@ -477,7 +494,23 @@ def _inline_code_ranges_in_segment(
     start: int,
     end: int,
 ) -> List[Tuple[int, int]]:
-    """Pair inline backtick runs in one pass over a non-fenced segment."""
+    """Pair inline backtick runs without crossing line/block boundaries."""
+    ranges: List[Tuple[int, int]] = []
+    line_start = start
+    while line_start < end:
+        newline = text.find("\n", line_start, end)
+        line_end = end if newline == -1 else newline
+        ranges.extend(_inline_code_ranges_in_line(text, line_start, line_end))
+        line_start = line_end + 1
+    return ranges
+
+
+def _inline_code_ranges_in_line(
+    text: str,
+    start: int,
+    end: int,
+) -> List[Tuple[int, int]]:
+    """Pair inline backtick runs in one linear pass over a single line."""
     runs: List[Tuple[int, int, int]] = []
     cursor = start
     while cursor < end:

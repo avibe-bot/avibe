@@ -229,6 +229,33 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.files, [])
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_silent_file_link_literal_inside_code(self):
+        specimens = [
+            "Example `<silent>[file](file:///tmp/secret.txt)</silent>` remains.",
+            "```markdown\n<silent>[file](file:///tmp/secret.txt)</silent>\n```",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                reply = process_reply(text)
+                self.assertEqual(reply.text, text)
+                self.assertEqual(reply.files, [])
+
+    def test_process_reply_only_extracts_file_links_outside_markdown_code(self):
+        text = (
+            "Attach [report](file:///tmp/report.txt); preserve "
+            "`<silent>[example](file:///tmp/secret.txt)</silent>`."
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(
+            reply.text,
+            "Attach report; preserve "
+            "`<silent>[example](file:///tmp/secret.txt)</silent>`.",
+        )
+        self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
+
     def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
         trailing_report = "\n".join(
             [
@@ -274,6 +301,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ">   ```nested```\n"
             ">   <silent>nested literal</silent>\n"
             ">   ````\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_tab_indented_list_fence(self):
+        text = (
+            "-\t```text\n"
+            "\t<silent>tab-indented literal</silent>\n"
+            "\t```\n"
             "Tail remains."
         )
 
@@ -343,6 +380,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
 
         self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_does_not_pair_inline_spans_across_lines(self):
+        text = "    ```\n<silent>remove outside code</silent>\n    ```\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), "```\n\n    ```\nTail remains.")
 
     def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
         text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
