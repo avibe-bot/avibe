@@ -15,20 +15,38 @@ describe('resolveLocalFileLink', () => {
     expect(resolveLocalFileLink('./src/main.ts', 'C:\\workspace\\project\\')).toEqual({
       path: 'C:\\workspace\\project\\src\\main.ts',
     });
+    expect(resolveLocalFileLink('./a%5Cb', '/workspace')).toEqual({
+      path: '/workspace/a\\b',
+    });
+    expect(resolveLocalFileLink('./a%5Cb', 'C:\\workspace')).toEqual({
+      path: 'C:\\workspace\\a\\b',
+    });
   });
 
   it('extracts common source line and column suffixes', () => {
     expect(resolveLocalFileLink('/root/app.py:42')).toEqual({
       path: '/root/app.py',
       line: 42,
-      column: 1,
-      endColumn: 1,
+      column: 0,
+      endColumn: 0,
     });
     expect(resolveLocalFileLink('./app.py:42:7', '/workspace')).toEqual({
       path: '/workspace/app.py',
       line: 42,
-      column: 7,
-      endColumn: 7,
+      column: 6,
+      endColumn: 6,
+    });
+  });
+
+  it('decodes filenames only after identifying literal source suffixes', () => {
+    expect(resolveLocalFileLink('/tmp/report%3A2026')).toEqual({
+      path: '/tmp/report:2026',
+    });
+    expect(resolveLocalFileLink('/tmp/report%3A2026:42')).toEqual({
+      path: '/tmp/report:2026',
+      line: 42,
+      column: 0,
+      endColumn: 0,
     });
   });
 

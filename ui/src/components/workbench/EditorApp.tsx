@@ -411,9 +411,9 @@ export const EditorApp: React.FC<{
         const line = typeof params?.line === 'number' && Number.isInteger(params.line) && params.line > 0
           ? params.line
           : null;
-        const column = typeof params?.column === 'number' && Number.isInteger(params.column) && params.column > 0
+        const column = typeof params?.column === 'number' && Number.isInteger(params.column) && params.column >= 0
           ? params.column
-          : 1;
+          : 0;
         const endColumn = typeof params?.endColumn === 'number' && Number.isInteger(params.endColumn) && params.endColumn >= column
           ? params.endColumn
           : column;

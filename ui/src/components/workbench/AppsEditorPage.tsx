@@ -35,7 +35,7 @@ function readLaunch(state: unknown): LaunchFile | null {
   const s = state as Record<string, unknown>;
   if (typeof s.path !== 'string') return null;
   const line = typeof s.line === 'number' && Number.isInteger(s.line) && s.line > 0 ? s.line : undefined;
-  const column = typeof s.column === 'number' && Number.isInteger(s.column) && s.column > 0 ? s.column : 1;
+  const column = typeof s.column === 'number' && Number.isInteger(s.column) && s.column >= 0 ? s.column : 0;
   const endColumn = typeof s.endColumn === 'number' && Number.isInteger(s.endColumn) && s.endColumn >= column
     ? s.endColumn
     : column;
@@ -159,8 +159,8 @@ const MobileEditor: React.FC<{
           onDirtyChange={onDirtyChange}
           reveal={file.line ? {
             line: file.line,
-            column: file.column ?? 1,
-            endColumn: file.endColumn ?? file.column ?? 1,
+            column: file.column ?? 0,
+            endColumn: file.endColumn ?? file.column ?? 0,
             nonce: 0,
           } : null}
         />

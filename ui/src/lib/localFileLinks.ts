@@ -5,11 +5,11 @@ export type LocalFileLinkTarget = {
   endColumn?: number;
 };
 
-function decodeHref(href: string): string {
+function decodePath(path: string): string {
   try {
-    return decodeURIComponent(href);
+    return decodeURIComponent(path);
   } catch {
-    return href;
+    return path;
   }
 }
 
@@ -18,8 +18,12 @@ function splitSourcePosition(path: string): LocalFileLinkTarget {
   if (!match) return { path };
 
   const line = Number.parseInt(match[1], 10);
-  const column = match[2] ? Number.parseInt(match[2], 10) : 1;
-  if (line < 1 || column < 1) return { path };
+  const sourceColumn = match[2] ? Number.parseInt(match[2], 10) : 1;
+  if (line < 1 || sourceColumn < 1) return { path };
+
+  // Source links use human-facing 1-based columns; Editor reveal targets use
+  // 0-based offsets and convert to Monaco coordinates at the final boundary.
+  const column = sourceColumn - 1;
 
   return {
     path: path.slice(0, match.index),
@@ -36,8 +40,8 @@ function isAbsoluteWorkdir(path: string): boolean {
 function joinWorkdir(workdir: string, relativePath: string): string {
   const windowsPath = /^[A-Za-z]:[\\/]/.test(workdir) || workdir.startsWith('\\\\');
   const separator = windowsPath ? '\\' : '/';
-  const base = workdir.replace(/[\\/]+$/, '');
-  const tail = relativePath.replace(/[\\/]+/g, separator);
+  const base = windowsPath ? workdir.replace(/[\\/]+$/, '') : workdir.replace(/\/+$/, '');
+  const tail = windowsPath ? relativePath.replace(/[\\/]+/g, separator) : relativePath;
   return base ? `${base}${separator}${tail}` : `${separator}${tail}`;
 }
 
@@ -49,15 +53,17 @@ function joinWorkdir(workdir: string, relativePath: string): string {
  * suffixes are kept as an editor reveal target rather than part of the path.
  */
 export function resolveLocalFileLink(href: string, workdir?: string | null): LocalFileLinkTarget | null {
-  const decoded = decodeHref(href);
-  const absolute = decoded.startsWith('/') && !decoded.startsWith('//') && decoded !== '/';
-  const relative = decoded.startsWith('./') && decoded !== './';
+  const absolute = href.startsWith('/') && !href.startsWith('//') && href !== '/';
+  const relative = href.startsWith('./') && href !== './';
   if (!absolute && !relative) return null;
 
-  const target = splitSourcePosition(decoded);
-  if (!target.path) return null;
-  if (absolute) return target;
+  // Parse only literal source suffixes. An escaped colon belongs to the
+  // filename, so decoding the whole href before this step would be ambiguous.
+  const target = splitSourcePosition(href);
+  const decodedPath = decodePath(target.path);
+  if (!decodedPath) return null;
+  if (absolute) return { ...target, path: decodedPath };
   if (!workdir || !isAbsoluteWorkdir(workdir)) return null;
 
-  return { ...target, path: joinWorkdir(workdir, target.path.slice(2)) };
+  return { ...target, path: joinWorkdir(workdir, decodedPath.slice(2)) };
 }
