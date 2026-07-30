@@ -226,24 +226,36 @@ def strip_silent_blocks(text: str) -> str:
     if "<silent" not in text.lower():
         return text
 
+    source_offsets = list(range(len(text)))
     changed = False
     while True:
         masked = _mask_markdown_code(text)
         ranges: List[Tuple[int, int]] = []
         search_from = 0
 
-        while opener := _SILENT_OPEN_RE.search(masked, search_from):
-            closing = _SILENT_CLOSE_RE.search(text, opener.end())
+        while opener := _search_original_match(
+            _SILENT_OPEN_RE,
+            masked,
+            source_offsets,
+            search_from,
+        ):
+            closing = _search_original_match(
+                _SILENT_CLOSE_RE,
+                text,
+                source_offsets,
+                opener.end(),
+            )
             if closing is None:
                 ranges.append((opener.start(), len(text)))
-                return _remove_ranges(text, ranges).strip()
+                return _trim_blank_boundary_lines(_remove_ranges(text, ranges))
             ranges.append((opener.start(), closing.end()))
             search_from = closing.end()
 
         if not ranges:
-            return text.strip() if changed else text
+            return _trim_blank_boundary_lines(text) if changed else text
         changed = True
         text = _remove_ranges(text, ranges)
+        source_offsets = _remove_offset_ranges(source_offsets, ranges)
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +374,49 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _remove_offset_ranges(
+    offsets: List[int],
+    ranges: List[Tuple[int, int]],
+) -> List[int]:
+    """Remove the same ranges from a source-offset map."""
+    result: List[int] = []
+    cursor = 0
+    for start, end in ranges:
+        result.extend(offsets[cursor:start])
+        cursor = end
+    result.extend(offsets[cursor:])
+    return result
+
+
+def _search_original_match(
+    pattern: re.Pattern,
+    text: str,
+    source_offsets: List[int],
+    start: int,
+) -> re.Match | None:
+    """Find a directive token that was contiguous in the original source."""
+    while match := pattern.search(text, start):
+        if (
+            source_offsets[match.end() - 1] - source_offsets[match.start()]
+            == match.end() - match.start() - 1
+        ):
+            return match
+        start = match.start() + 1
+    return None
+
+
+def _trim_blank_boundary_lines(text: str) -> str:
+    """Remove blank boundary lines without stripping content indentation."""
+    lines = text.splitlines(keepends=True)
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip(" \t\r\n"):
+        start += 1
+    while end > start and not lines[end - 1].strip(" \t\r\n"):
+        end -= 1
+    return "".join(lines[start:end]).rstrip("\r\n")
+
+
 def _markdown_block_ranges(
     text: str,
 ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, str]]]:
@@ -467,8 +522,19 @@ def _inline_backtick_source_offsets(
             for candidate_index in range(source_index, len(source_lines)):
                 absolute_start, source_line = source_lines[candidate_index]
                 normalized_source_line = source_line.replace("\x00", "\ufffd")
-                relative_start = normalized_source_line.find(content_line)
-                if relative_start < 0:
+                matched_start = normalized_source_line.find(content_line)
+                relative_start = matched_start if matched_start >= 0 else None
+                if relative_start is None:
+                    first_backtick = content_line.find("`")
+                    source_backtick = normalized_source_line.find("`")
+                    if (
+                        source_backtick >= 0
+                        and normalized_source_line[source_backtick:].startswith(
+                            content_line[first_backtick:]
+                        )
+                    ):
+                        relative_start = source_backtick - first_backtick
+                if relative_start is None:
                     continue
                 for relative_offset, char in enumerate(content_line):
                     if char == "`":

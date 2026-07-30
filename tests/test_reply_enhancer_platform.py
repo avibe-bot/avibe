@@ -699,6 +699,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.files, [])
 
+    def test_silent_parser_maps_tab_expanded_list_continuation(self):
+        text = (
+            "- item\n"
+            "\t`<silent>[literal](file:///tmp/secret.txt)</silent>`"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
         unmatched_runs = " ".join("`" * length for length in range(2, 502))
         text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
@@ -708,7 +719,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_silent_parser_does_not_pair_inline_spans_across_lines(self):
         text = "    ```\n<silent>remove outside code</silent>\n    ```\nTail remains."
 
-        self.assertEqual(strip_silent_blocks(text), "```\n\n    ```\nTail remains.")
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "    ```\n\n    ```\nTail remains.",
+        )
 
     def test_silent_parser_ends_quoted_fence_at_unmarked_blank_line(self):
         text = (
@@ -799,7 +813,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_silent_parser_does_not_pair_inline_spans_across_cr_lines(self):
         text = "    ```\r<silent>remove outside code</silent>\r    ```\rTail remains."
 
-        self.assertEqual(strip_silent_blocks(text), "```\r\r    ```\rTail remains.")
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "    ```\r\r    ```\rTail remains.",
+        )
 
     def test_silent_parser_closes_real_block_before_parsing_hidden_markdown(self):
         text = "Before\n<silent>\n```\nhidden\n</silent>\nTail remains."
@@ -813,6 +830,32 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     def test_silent_parser_keeps_all_silent_response_empty(self):
         self.assertEqual(strip_silent_blocks("<silent>internal only</silent>"), "")
+
+    def test_silent_parser_preserves_boundary_indented_code(self):
+        text = (
+            "<silent>remove real directive</silent>\n\n"
+            "    <silent>[literal](file:///tmp/secret.txt)</silent>"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(
+            reply.text,
+            "    <silent>[literal](file:///tmp/secret.txt)</silent>",
+        )
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_does_not_reparse_synthesized_openers(self):
+        text = (
+            "Visible <sil"
+            "<silent>hidden</silent>"
+            "ent>KEEP</silent> tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "Visible <silent>KEEP</silent> tail",
+        )
 
     def test_process_reply_can_disable_quick_reply_button_parsing_only(self):
         reply = process_reply(
