@@ -60,14 +60,26 @@ class CredentialRevocationJournal:
 
     def add(self, source_id: str, credential_ref: str) -> None:
         with self._lock:
-            entries = [entry for entry in self._read() if entry.source_id != source_id]
-            entries.append(PendingCredentialRevocation(source_id, credential_ref))
-            self._write(entries)
+            entries = self._read()
+            entry = PendingCredentialRevocation(source_id, credential_ref)
+            if entry not in entries:
+                entries.append(entry)
+                self._write(entries)
 
-    def remove(self, source_id: str) -> None:
+    def remove(self, source_id: str, credential_ref: str | None = None) -> None:
         with self._lock:
             entries = self._read()
-            remaining = [entry for entry in entries if entry.source_id != source_id]
+            remaining = [
+                entry
+                for entry in entries
+                if not (
+                    entry.source_id == source_id
+                    and (
+                        credential_ref is None
+                        or entry.credential_ref == credential_ref
+                    )
+                )
+            ]
             if len(remaining) != len(entries):
                 self._write(remaining)
 

@@ -18,6 +18,16 @@ async def dispatch_model_hub_rpc(
         return await service.create_source(payload.get("source"))
     if operation == "patch_source":
         return await service.patch_source(payload.get("source_id"), payload.get("patch"))
+    if operation == "replace_credential":
+        return await service.replace_credential(
+            payload.get("source_id"),
+            payload.get("credential"),
+        )
+    if operation == "reauth_source":
+        return await service.reauth_source(
+            payload.get("source_id"),
+            payload.get("reauth"),
+        )
     if operation == "delete_source":
         await service.delete_source(payload.get("source_id"), force=payload.get("force") is True)
         return None

@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +9,15 @@ from unittest.mock import AsyncMock
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from config.v2_config import (
+    ModelHubModelConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+)
+from core.handlers.model_hub.service import ModelHubError
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
+from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
 
 
 class _FakeNextTurnRuntime:
@@ -42,6 +50,73 @@ class _FakeCodexNextTurnRuntime:
 
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_model_hub_reauth_confirms_before_honest_failure(self):
+        """Scenario: AUTH-SETUP-106"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(
+            Path(state_dir.name),
+        )
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                )
+            ],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.reauth_source(source.id, {})
+
+        self.assertEqual(
+            refused.exception.code,
+            "reauth_confirmation_required",
+        )
+        self.assertEqual(harness.agent_auth.flows, {})
+        self.assertEqual(harness.store.config.sources[0].state.status, "standby")
+        self.assertEqual(
+            [model.id for model in harness.store.config.sources[0].models],
+            ["claude-opus-4-6"],
+        )
+
+        started = await harness.service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+        flow_id = started["flow"]["flow_id"]
+        self.assertEqual(started["flow"]["intent"], "reauth")
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        harness.agent_auth.timeout(flow_id)
+        failed = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(failed["flow"]["state"], "failed")
+        self.assertNotIn("source", failed)
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "interrupted",
+        )
+
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
         harness = AuthSetupScenarioHarness()

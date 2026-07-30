@@ -24,17 +24,14 @@ def _decode(response: httpx.Response) -> Any:
     if response.status_code >= 400 or body.get("ok") is not True:
         code = body.get("error")
         detail = body.get("detail")
+        data = {key: value for key, value in body.items() if key not in {"ok", "error", "detail", "contract_version"}}
         error = ModelHubError(
             code if isinstance(code, str) else "engine_down",
             status=response.status_code if response.status_code >= 400 else 503,
+            data=data,
         )
         if isinstance(detail, str):
             error.detail = detail
-        error.payload = {
-            key: value
-            for key, value in body.items()
-            if key not in {"ok", "contract_version", "error", "detail"}
-        }
         raise error
     return body.get("result")
 
@@ -90,6 +87,18 @@ class ModelHubRemoteService:
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
         return await _rpc("patch_source", {"source_id": source_id, "patch": payload})
+
+    async def replace_credential(self, source_id: str, payload: object) -> dict:
+        return await _rpc(
+            "replace_credential",
+            {"source_id": source_id, "credential": payload},
+        )
+
+    async def reauth_source(self, source_id: str, payload: object) -> dict:
+        return await _rpc(
+            "reauth_source",
+            {"source_id": source_id, "reauth": payload},
+        )
 
     async def delete_source(self, source_id: str, *, force: bool = False) -> None:
         await _rpc("delete_source", {"source_id": source_id, "force": force})

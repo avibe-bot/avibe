@@ -91,6 +91,13 @@ order after any mutation; clients never compute partial reorders.
   `docs(model-hub): freeze interface contracts v3` and announces the commit SHA
   in every lane brief. From then on: lanes cite, never edit; changes go through
   the orchestrator and bump `contract_version`.
+- **Targeted v4 process instance trail — entry 2 (v4b).** Following v4a commit
+  `37285675`, the dedicated commit
+  `docs(model-hub): scope hub OAuth reauth rollback invariant v4b` is
+  orchestrator-authorized, evidence-pinned to review finding `3675168031` and
+  `vibe/model_hub_runtime/state.py:135-166`, and owner-vetoable. It corrects only
+  the hub-OAuth stable-ref repair invariant; chat messages alone did not unfreeze
+  these files.
 - Contract tests (implementation plan §5) validate both directions against
   these schemas.
 

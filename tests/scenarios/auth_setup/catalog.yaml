@@ -8,6 +8,7 @@ capability:
   shared_harness:
     - tests/scenario_harness/core.py
     - tests/scenario_harness/auth_setup.py
+    - tests/scenario_harness/model_hub_native_oauth.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete
@@ -70,6 +71,13 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_callback_submission_and_fallback_command_do_not_double_consume_claude_flow
+  - id: AUTH-SETUP-106
+    name: Native Model Hub re-auth confirms before irreversible honest failure
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_native_model_hub_reauth_confirms_before_honest_failure
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
@@ -141,5 +149,4 @@ scenarios:
     backend: claude
     test: tests/test_claude_agent_sessions.py::test_assistant_auth_error_without_is_api_error_flag_still_triggers_recovery
 next_priority:
-  - AUTH-SETUP-106
   - AUTH-SETUP-301

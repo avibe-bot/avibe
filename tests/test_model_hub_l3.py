@@ -719,7 +719,7 @@ def test_probe_no_candidate_and_direct_mode_are_typed(tmp_path: Path) -> None:
         asyncio.run(service.probe_agent("claude", "shared-model"))
     assert exc_info.value.code == "probe_no_candidate"
     assert exc_info.value.detail == "models.probe.no_candidate.waiting"
-    assert exc_info.value.payload == {
+    assert exc_info.value.data == {
         "supply": {
             "supply_state": "waiting",
             "retry_at": cooling.state.retry_at,

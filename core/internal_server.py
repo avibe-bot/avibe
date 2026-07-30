@@ -590,7 +590,7 @@ def create_app(controller: "Controller") -> FastAPI:
             response = {"ok": False, "error": exc.code}
             if exc.detail:
                 response["detail"] = exc.detail
-            response.update(exc.payload)
+            response.update(exc.data)
             return JSONResponse(status_code=exc.status, content=response)
         return {"ok": True, "result": result}
 

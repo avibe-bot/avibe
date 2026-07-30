@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from modules.claude_sdk_compat import (
     CLAUDE_SDK_AVAILABLE,
@@ -1001,10 +1001,21 @@ class AgentAuthService:
         fallback_text = self._t("command.setup.claudeMethodFallback")
         await self._send_message_with_keyboard(context, text, keyboard, fallback_text=fallback_text)
 
-    async def _start_codex_process(self, *, force_reset: bool) -> asyncio.subprocess.Process:
+    async def _start_codex_process(
+        self,
+        *,
+        force_reset: bool,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> asyncio.subprocess.Process:
         binary = self._get_cli_binary("codex")
         if force_reset:
-            await self._run_utility_command(binary, "logout")
+            await self._run_utility_command(
+                binary,
+                "logout",
+                prepare_start=on_irreversible_start,
+            )
         return await asyncio.create_subprocess_exec(
             binary,
             "login",
@@ -1020,12 +1031,20 @@ class AgentAuthService:
         *,
         force_reset: bool,
         login_with_claude_ai: bool,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> tuple[ClaudeSDKClient, str, ClaudeOAuthAttempt]:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
         if force_reset:
-            await self._run_utility_command(self._get_cli_binary("claude"), "auth", "logout")
+            await self._run_utility_command(
+                self._get_cli_binary("claude"),
+                "auth",
+                "logout",
+                prepare_start=on_irreversible_start,
+            )
         # Claude Code re-applies ``settings.json`` env at startup, so an
         # OAuth flow must clear stale API-key settings before the control
         # client or follow-up probes launch.
@@ -1209,14 +1228,23 @@ class AgentAuthService:
         self,
         *cmd: str,
         env: dict[str, str] | None = None,
+        prepare_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> tuple[bool, str | None]:
         """Run a short CLI side-call. Returns ``(ok, error_excerpt)``.
 
         Callers that don't care about the outcome (setup preflight)
         can ignore the return; ``remove_web_auth`` uses it to surface
         ``codex logout`` / ``claude auth logout`` failures so the UI
-        doesn't lie about a partial sign-out.
+        doesn't lie about a partial sign-out. ``prepare_start`` persists
+        pre-command state and may return a spawn-failure restoration.
         """
+        restore_on_spawn_failure = (
+            prepare_start()
+            if prepare_start is not None
+            else None
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1224,6 +1252,14 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+        except Exception as err:  # noqa: BLE001
+            if restore_on_spawn_failure is not None:
+                restore_on_spawn_failure()
+            if prepare_start is not None:
+                raise
+            logger.info("Utility command raised for %s: %s", " ".join(cmd), err)
+            return False, str(err)
+        try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=20)
             if process.returncode == 0:
                 return True, None
@@ -1903,6 +1939,9 @@ class AgentAuthService:
         *,
         force_reset: bool = True,
         provider_id: Optional[str] = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> WebAuthFlow:
         """Start an OAuth flow initiated from the Settings page.
 
@@ -1930,7 +1969,10 @@ class AgentAuthService:
 
         try:
             if backend == "codex":
-                flow.process = await self._start_codex_process(force_reset=force_reset)
+                flow.process = await self._start_codex_process(
+                    force_reset=force_reset,
+                    on_irreversible_start=on_irreversible_start,
+                )
                 flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
                 flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
             elif backend == "claude":
@@ -1938,6 +1980,7 @@ class AgentAuthService:
                     context=None,
                     force_reset=force_reset,
                     login_with_claude_ai=True,
+                    on_irreversible_start=on_irreversible_start,
                 )
                 flow.claude_client = client
                 flow.claude_oauth_attempt = attempt
