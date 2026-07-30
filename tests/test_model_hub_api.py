@@ -1968,6 +1968,87 @@ def test_failed_hub_create_orphan_is_journaled_before_flow_can_be_forgotten(
     assert service.revocations.list()
 
 
+def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
+    tmp_path,
+):
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    class Client:
+        def management_request(
+            self,
+            method,
+            path,
+            *,
+            query=None,
+            payload=None,
+            timeout=None,
+        ):
+            assert (method, path) == ("DELETE", "/auth-files")
+            return {"status": "ok"}
+
+    class Supervisor:
+        def __init__(self, client):
+            self._client = client
+
+        def client_if_running(self):
+            return self._client
+
+    class RuntimeCleanupAdapter(FakeAdapter):
+        def __init__(self, runtime_adapter):
+            super().__init__()
+            self.runtime_adapter = runtime_adapter
+
+        async def cleanup_orphaned_oauth_material(self, credential_ref):
+            self.orphan_cleanup_calls.append(credential_ref)
+            return await self.runtime_adapter.cleanup_orphaned_oauth_material(
+                credential_ref
+            )
+
+    state = EngineStateStore(tmp_path / "runtime-state")
+    state.prepare_instance("install-1")
+    auth_file = state.auth_dir / "claude-account.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.chmod(0o600)
+    credential_ref = state.bind_oauth_credential(
+        "src_pending01",
+        "anthropic",
+        auth_file.name,
+    )
+    runtime_adapter = CLIProxyEngineAdapter(
+        supervisor=Supervisor(Client()),  # type: ignore[arg-type]
+        state_store=state,
+    )
+    journal = CredentialRevocationJournal(tmp_path / "revocations.json")
+    journal.add(
+        "src_pending01",
+        credential_ref,
+        operation="cleanup_orphaned_oauth_material",
+    )
+
+    assert (
+        asyncio.run(
+            runtime_adapter.cleanup_orphaned_oauth_material(credential_ref)
+        )
+        is True
+    )
+    assert journal.list()
+
+    adapter = RuntimeCleanupAdapter(runtime_adapter)
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth-flows.json"),
+        revocations=journal,
+    )
+
+    asyncio.run(service._ensure_engine_synced())
+
+    assert adapter.orphan_cleanup_calls == [credential_ref]
+    assert journal.list() == []
+
+
 @pytest.mark.parametrize(
     ("disposition", "retained_credential_ref", "expected_revoked"),
     [
