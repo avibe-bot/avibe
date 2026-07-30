@@ -70,11 +70,22 @@ class ModelHubTurnGateway:
         *,
         process_scope: Optional[str] = None,
         turn_id: Optional[str] = None,
+        requested_model_id: Optional[str] = None,
+        resolved_model_id: Optional[str] = None,
+        via_mapping: bool = False,
     ) -> tuple[str, str]:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(backend, scope, turn_id)
+        if requested_model_id and resolved_model_id:
+            self.correlation.prepare_gateway_turn(
+                backend=backend,
+                token=token,
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                via_mapping=via_mapping,
+            )
         await self._ensure_started()
         assert self._base_url is not None
         return f"{self._base_url}/{backend}", token

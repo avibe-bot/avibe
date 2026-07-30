@@ -473,12 +473,18 @@ class ModelHubRuntimeRouter:
         *,
         process_scope: Optional[str],
         turn_id: Optional[str],
+        requested_model_id: Optional[str] = None,
+        resolved_model_id: Optional[str] = None,
+        via_mapping: bool = False,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
                 backend,
                 process_scope=process_scope,
                 turn_id=turn_id,
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                via_mapping=via_mapping,
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -804,6 +810,9 @@ class ModelHubRuntimeRouter:
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
                 turn_id=turn_id,
+                requested_model_id=requested_model,
+                resolved_model_id=target_model,
+                via_mapping=resolution.mapping_applied,
             )
             runtime_model = target_model
             if self.turn_gateway is None:

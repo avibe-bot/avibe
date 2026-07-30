@@ -1035,6 +1035,9 @@
       "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
       "consent_required": "Needs your consent for experimental hub supply first"
     },
+    "probe": {
+      "native_cli_unavailable": "CLI login is not available in this process"
+    },
     "source": {
       "cooldown": {
         "network": "Network unreachable",

@@ -269,6 +269,86 @@ def test_process_credentials_record_only_exact_turns(tmp_path: Path) -> None:
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_gateway_provenance_retains_pre_mapping_model_identity(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "provenance.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("codex", "/repo", "turn_mapped")
+    registry.prepare_gateway_turn(
+        backend="codex",
+        token=token,
+        requested_model_id="gpt-5",
+        resolved_model_id="custom-gpt-5",
+        via_mapping=True,
+    )
+
+    exact_turn = registry.begin_gateway_request(
+        backend="codex",
+        token=token,
+        requested_model_id="custom-gpt-5",
+    )
+    registry.begin_attempt(
+        exact_turn,
+        source_id="src_primary01",
+        resolved_model_id="custom-gpt-5",
+        channel="hub",
+        via_mapping=False,
+    )
+    success = _outcome(RawOutcomeKind.SUCCESS)
+    registry.finish_attempt(
+        exact_turn,
+        outcome=success,
+        decision=classify_outcome(success),
+    )
+    registry.settle(
+        "turn_mapped",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get("turn_mapped")
+    assert record is not None
+    assert record["requested_model_id"] == "gpt-5"
+    assert record["served"] == {
+        "source_id": "src_primary01",
+        "resolved_model_id": "custom-gpt-5",
+        "channel": "hub",
+        "via_mapping": True,
+    }
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_gateway_model_outside_prepared_turn_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "provenance.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("codex", "/repo", "turn_expected")
+    registry.prepare_gateway_turn(
+        backend="codex",
+        token=token,
+        requested_model_id="gpt-5",
+        resolved_model_id="custom-gpt-5",
+        via_mapping=True,
+    )
+
+    assert (
+        registry.begin_gateway_request(
+            backend="codex",
+            token=token,
+            requested_model_id="untracked-model",
+        )
+        is None
+    )
+    registry.settle(
+        "turn_expected",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert store.get("turn_expected") is None
+
+
 def test_fsm_drop_overrides_a_completed_gateway_attempt(tmp_path: Path) -> None:
     store = BoundedProvenanceStore(tmp_path / "provenance.json")
     registry = TurnCorrelationRegistry(store)

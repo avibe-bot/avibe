@@ -1035,6 +1035,9 @@
       "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
       "consent_required": "需要先同意实验性中枢供给"
     },
+    "probe": {
+      "native_cli_unavailable": "当前进程无法使用 CLI 登录"
+    },
     "source": {
       "cooldown": {
         "network": "网络不通",

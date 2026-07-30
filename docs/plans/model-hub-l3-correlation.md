@@ -1,7 +1,7 @@
 # Model Hub L3 Turn Correlation
 
-Status: implementation note for frozen contract v3. Contract files remain
-read-only.
+Status: implementation note for provenance v3 and the orchestrator-delivered,
+channel-aware chain/probe v4. Contract files remain read-only to L3 authorship.
 
 ## Purpose
 
@@ -94,6 +94,13 @@ or credentials. The service contributes the selected source, resolved model,
 channel, mapping flag, and supply state. Streaming attempts are finalized only
 after their stream outcome is known.
 
+For Hub launches, the registry also retains the caller-facing model and mapping
+decision before the backend CLI replaces the request model with the resolved
+target. The gateway accepts that request only when its model matches the
+prepared target; a different-model request is untracked use and makes the turn
+ineligible for a record. This preserves `requested_model_id` and `via_mapping`
+without adding a wire field or a second correlator.
+
 `SessionTurnManager` calls one additive settlement hook before retiring the
 `Turn`. The hook receives the existing turn token and the FSM settlement:
 
@@ -160,6 +167,9 @@ The acceptance suite contains separate fixtures for:
 - one known OpenCode turn: the shared server writes no record and the read API
   returns `provenance_unavailable` / `models.provenance.attribution_ambiguous`,
   never `turn_not_found`;
+- one mapped Hub turn: the record retains the pre-mapping menu model and marks
+  every matching attempt `via_mapping: true`; an unexpected request model
+  makes the record absent;
 - user Stop, dropped connection, and successful control settlements;
 - Direct, ambiguous-known, and unknown provenance route absences;
 - source chain order and model-scoped supply state;

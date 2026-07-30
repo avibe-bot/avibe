@@ -56,6 +56,8 @@ class TurnTrace:
     terminal_error: Optional[dict] = None
     pending_attempt: Optional[AttemptIdentity] = None
     model_supply_state: Optional[SupplyState] = None
+    gateway_model_id: Optional[str] = None
+    gateway_via_mapping: bool = False
     ambiguous: bool = False
 
 
@@ -240,7 +242,41 @@ class TurnCorrelationRegistry:
             if exact is None:
                 return None
             turn_id, key = exact
-            self._traces.setdefault(
+            trace = self._traces.get(turn_id)
+            if trace is None:
+                trace = TurnTrace(
+                    turn_id=turn_id,
+                    agent=key[0],
+                    requested_model_id=requested_model_id,
+                    scope_key=key,
+                )
+                self._traces[turn_id] = trace
+            elif (
+                trace.gateway_model_id is not None
+                and trace.gateway_model_id != requested_model_id
+            ):
+                trace.ambiguous = True
+                self._scopes[key].ambiguous_turns.add(turn_id)
+                return None
+            return turn_id
+
+    def prepare_gateway_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+        requested_model_id: str,
+        resolved_model_id: str,
+        via_mapping: bool,
+    ) -> None:
+        """Retain the caller-facing model before the CLI rewrites its request."""
+
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None:
+                return
+            turn_id, key = exact
+            trace = self._traces.setdefault(
                 turn_id,
                 TurnTrace(
                     turn_id=turn_id,
@@ -249,7 +285,18 @@ class TurnCorrelationRegistry:
                     scope_key=key,
                 ),
             )
-            return turn_id
+            if (
+                trace.requested_model_id != requested_model_id
+                or (
+                    trace.gateway_model_id is not None
+                    and trace.gateway_model_id != resolved_model_id
+                )
+            ):
+                trace.ambiguous = True
+                self._scopes[key].ambiguous_turns.add(turn_id)
+                return
+            trace.gateway_model_id = resolved_model_id
+            trace.gateway_via_mapping = via_mapping
 
     def begin_native_attempt(
         self,
@@ -341,11 +388,15 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None:
                 return
+            observed_via_mapping = via_mapping or (
+                trace.gateway_via_mapping
+                and trace.gateway_model_id == resolved_model_id
+            )
             trace.pending_attempt = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel=channel,
-                via_mapping=via_mapping,
+                via_mapping=observed_via_mapping,
             )
 
     def finish_attempt(
