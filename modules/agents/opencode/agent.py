@@ -843,11 +843,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         opencode_session_id = None
         if req_info:
             opencode_session_id = req_info[0]
-            try:
-                server = await self._get_server()
-                await server.abort_session(req_info[0], req_info[1])
-            except Exception as e:
-                logger.warning(f"Failed to abort OpenCode session: {e}")
+        try:
+            await self._abort_active_request(request.base_session_id, task, req_info)
+        except Exception as e:
+            logger.warning(f"Failed to abort OpenCode session: {e}")
 
         task.cancel()
         try:
@@ -884,8 +883,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 opencode_session_id = req_info[0]
                 if not task.done():
                     try:
-                        server = await self._get_server()
-                        await server.abort_session(req_info[0], req_info[1])
+                        await self._abort_active_request(base_id, task, req_info)
                     except Exception:
                         pass
                     task.cancel()
@@ -896,6 +894,24 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     terminated += 1
                 self.sessions.remove_active_poll(opencode_session_id)
         return terminated
+
+    async def _abort_active_request(
+        self,
+        base_session_id: str,
+        task: asyncio.Task,
+        request_session: tuple[str, str, str] | None,
+    ) -> None:
+        state = self._steering_states.get(base_session_id)
+        if state is not None and state.task is task:
+            async with state.lock:
+                state.closing = True
+                if request_session:
+                    server = await self._get_server()
+                    await server.abort_session(request_session[0], request_session[1])
+            return
+        if request_session:
+            server = await self._get_server()
+            await server.abort_session(request_session[0], request_session[1])
 
     def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
         return {

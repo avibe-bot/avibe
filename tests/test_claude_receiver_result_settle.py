@@ -33,6 +33,12 @@ class _ResultMessage:
     duration_ms = 1
 
 
+class _AssistantFailureMessage:
+    content: list = []
+    error = "primary failed"
+    is_error = True
+
+
 def _one_result_client():
     class _Client:
         def receive_messages(self):
@@ -156,6 +162,201 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_not_awaited()
 
         second_result_ready.set()
+        await receiver_task
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "steered result")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+
+    async def test_ambiguous_steer_retains_owner_past_a_concurrent_primary_result(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-ambiguous:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        first_result_ready = asyncio.Event()
+        first_result_yielded = asyncio.Event()
+        second_result_ready = asyncio.Event()
+
+        class _AmbiguousClient:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+                raise TimeoutError(f"ambiguous write for {session_id}")
+
+            def receive_messages(self):
+                async def _iterate():
+                    await first_result_ready.wait()
+                    first_result_yielded.set()
+                    first = _ResultMessage()
+                    first.result = "primary result"
+                    yield first
+                    await second_result_ready.wait()
+                    second = _ResultMessage()
+                    second.result = "reconciled result"
+                    yield second
+
+                return _iterate()
+
+        client = _AmbiguousClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-ambiguous",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-ambiguous",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="ambiguous input",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        first_result_ready.set()
+        await first_result_yielded.wait()
+        await asyncio.sleep(0)
+        release_query.set()
+
+        receipt = await steer_task
+        await asyncio.sleep(0)
+        self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        second_result_ready.set()
+        await receiver_task
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "reconciled result")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+
+    async def test_successful_steer_supersedes_concurrent_assistant_terminal_failure(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-assistant-failure:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        agent._detect_message_type = lambda message: (
+            "assistant" if isinstance(message, _AssistantFailureMessage) else "result"
+        )
+        agent._handle_assistant_terminal_failure = AsyncMock(return_value="failure")
+        consume_suppressed_result = ClaudeAgent._consume_suppressed_synthetic_result.__get__(agent)
+        paired_result_consumed = asyncio.Event()
+
+        def _consume_suppressed_result(*args):
+            consumed = consume_suppressed_result(*args)
+            if consumed:
+                paired_result_consumed.set()
+            return consumed
+
+        agent._consume_suppressed_synthetic_result = _consume_suppressed_result
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        failure_ready = asyncio.Event()
+        failure_generation_captured = asyncio.Event()
+        paired_result_ready = asyncio.Event()
+        final_result_ready = asyncio.Event()
+
+        class _SteeringClient:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await failure_ready.wait()
+                    yield _AssistantFailureMessage()
+                    await paired_result_ready.wait()
+                    failed = _ResultMessage()
+                    failed.result = "primary failed"
+                    yield failed
+                    await final_result_ready.wait()
+                    final = _ResultMessage()
+                    final.result = "steered result"
+                    yield final
+
+                return _iterate()
+
+        client = _SteeringClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-assistant-failure",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        steering_generation = agent._steering_generation
+
+        def _capture_receiver_generation(key):
+            generation = steering_generation(key)
+            if asyncio.current_task() is receiver_task:
+                failure_generation_captured.set()
+            return generation
+
+        agent._steering_generation = _capture_receiver_generation
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-assistant-failure",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="continue after failure",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        failure_ready.set()
+        await failure_generation_captured.wait()
+        release_query.set()
+
+        receipt = await steer_task
+        await asyncio.sleep(0)
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        agent._handle_assistant_terminal_failure.assert_not_awaited()
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        self.assertIn(composite_key, agent._suppressed_synthetic_results)
+
+        paired_result_ready.set()
+        await paired_result_consumed.wait()
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        final_result_ready.set()
         await receiver_task
 
         agent.emit_result_message.assert_awaited_once()

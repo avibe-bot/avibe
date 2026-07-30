@@ -547,6 +547,10 @@ class ClaudeAgent(BaseAgent):
             self._steering_generations = generations
         return generations.get(composite_key, 0)
 
+    def _advance_steering_generation(self, composite_key: str) -> None:
+        current_generation = self._steering_generation(composite_key)
+        self._steering_generations[composite_key] = current_generation + 1
+
     async def steer_active_turn(
         self,
         request: SteerRequest,
@@ -589,6 +593,7 @@ class ClaudeAgent(BaseAgent):
             try:
                 await client.query(request.text, session_id=composite_key)
             except (asyncio.TimeoutError, TimeoutError) as exc:
+                self._advance_steering_generation(composite_key)
                 return steer_result(
                     SteerOutcome.UNKNOWN,
                     reason="acknowledgement_ambiguous",
@@ -611,6 +616,7 @@ class ClaudeAgent(BaseAgent):
                         "unexpected eof",
                     )
                 ):
+                    self._advance_steering_generation(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="acknowledgement_ambiguous",
@@ -632,6 +638,7 @@ class ClaudeAgent(BaseAgent):
                         backend=self.name,
                         diagnostic=diagnostic,
                     )
+                self._advance_steering_generation(composite_key)
                 return steer_result(
                     SteerOutcome.UNKNOWN,
                     reason="unclassified_transport_failure",
@@ -639,8 +646,7 @@ class ClaudeAgent(BaseAgent):
                     diagnostic=diagnostic,
                 )
 
-            current_generation = self._steering_generation(composite_key)
-            self._steering_generations[composite_key] = current_generation + 1
+            self._advance_steering_generation(composite_key)
             touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
             if callable(touch_session_activity):
                 touch_session_activity(composite_key)
@@ -797,9 +803,9 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     message_type = self._detect_message_type(message)
-                    result_steering_generation = (
+                    terminal_steering_generation = (
                         self._steering_generation(composite_key)
-                        if message_type == "result"
+                        if message_type in {"assistant", "result"}
                         else None
                     )
                     formatter = self._get_formatter(context)
@@ -887,12 +893,26 @@ class ClaudeAgent(BaseAgent):
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
-                        failure_disposition = await self._handle_assistant_terminal_failure(
-                            context,
-                            composite_key,
-                            message,
-                            assistant_text,
-                        )
+                        async with self._steering_lock(composite_key):
+                            diagnostic = self._terminal_backend_failure(message, assistant_text)
+                            if (
+                                diagnostic is not None
+                                and terminal_steering_generation
+                                != self._steering_generation(composite_key)
+                            ):
+                                self._suppressed_synthetic_results.add(composite_key)
+                                self._suppressed_synthetic_error_text[composite_key] = diagnostic
+                                logger.info(
+                                    "Ignoring Claude terminal assistant failure superseded by steering for %s",
+                                    composite_key,
+                                )
+                                continue
+                            failure_disposition = await self._handle_assistant_terminal_failure(
+                                context,
+                                composite_key,
+                                message,
+                                assistant_text,
+                            )
                         if failure_disposition == "auth":
                             return
                         if failure_disposition:
@@ -1069,7 +1089,7 @@ class ClaudeAgent(BaseAgent):
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
                         async with self._steering_lock(composite_key):
-                            if result_steering_generation != self._steering_generation(
+                            if terminal_steering_generation != self._steering_generation(
                                 composite_key
                             ):
                                 logger.info(

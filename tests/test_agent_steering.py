@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -116,6 +117,8 @@ class _OpenCodeServer:
         status: dict | None = None,
         status_error: Exception | None = None,
         status_responses: list[dict | None] | None = None,
+        prompt_started: asyncio.Event | None = None,
+        release_prompt: asyncio.Event | None = None,
     ) -> None:
         self.error = error
         self.list_error = list_error
@@ -125,12 +128,18 @@ class _OpenCodeServer:
         self.status = status or {"type": "busy"}
         self.status_error = status_error
         self.status_responses = list(status_responses or [])
+        self.prompt_started = prompt_started
+        self.release_prompt = release_prompt
         self.list_calls = 0
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple] = []
 
     async def prompt_async(self, **kwargs) -> None:
         self.prompt_calls.append(kwargs)
+        if self.prompt_started is not None:
+            self.prompt_started.set()
+        if self.release_prompt is not None:
+            await self.release_prompt.wait()
         if self.error is not None:
             raise self.error
         self.messages.append(
@@ -471,6 +480,47 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
         assert server.abort_calls == []
         assert len(agent._active_requests) == 1
         assert not gate_task.done()
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    prompt_started = asyncio.Event()
+    release_prompt = asyncio.Event()
+    server = _OpenCodeServer(prompt_started=prompt_started, release_prompt=release_prompt)
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    controller.emit_agent_message = AsyncMock()
+    agent._get_server = AsyncMock(return_value=server)
+    removed_polls: list[str] = []
+    agent.sessions = SimpleNamespace(remove_active_poll=removed_polls.append)
+    state = agent._steering_states[primary.base_session_id]
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        steer_task = asyncio.create_task(
+            steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        )
+        await prompt_started.wait()
+
+        stop_task = asyncio.create_task(agent.handle_stop(primary))
+        await asyncio.sleep(0)
+        assert server.abort_calls == []
+        assert not gate_task.done()
+
+        release_prompt.set()
+        receipt = await steer_task
+        stopped = await stop_task
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert stopped is True
+        assert state.closing is True
+        assert server.abort_calls == [("opencode-session", primary.working_path)]
+        assert gate_task.cancelled()
+        assert removed_polls == ["opencode-session"]
     finally:
         await _cancel_tasks(gate_task)
 
