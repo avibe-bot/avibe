@@ -18,7 +18,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -89,6 +89,94 @@ def _build_agent(mark_idle_calls):
 
 
 class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_interrupt_reconciles_on_assistant_failure(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-interrupt-assistant-failure:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent._detect_message_type = lambda message: (
+            "assistant" if isinstance(message, _AssistantFailureMessage) else "result"
+        )
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        agent.record_model_hub_native_failure = AsyncMock(return_value=True)
+        agent._remove_ack_reaction = AsyncMock(return_value=None)
+        agent._requeue_request_activity = lambda request: None
+        agent._consume_suppressed_synthetic_result = (
+            ClaudeAgent._consume_suppressed_synthetic_result.__get__(agent)
+        )
+        assistant_ready = asyncio.Event()
+        assistant_processed = asyncio.Event()
+        paired_result_ready = asyncio.Event()
+        paired_result_processed = asyncio.Event()
+        end_stream = asyncio.Event()
+
+        class _Client:
+            async def interrupt(self):
+                raise TimeoutError("interrupt acknowledgement timed out")
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    await assistant_ready.wait()
+                    yield _AssistantFailureMessage()
+                    assistant_processed.set()
+                    await paired_result_ready.wait()
+                    paired = _ResultMessage()
+                    paired.result = "primary failed"
+                    yield paired
+                    paired_result_processed.set()
+                    await end_stream.wait()
+
+                return _iterate()
+
+        client = _Client()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-interrupt-assistant-failure",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        stop_request = SimpleNamespace(
+            context=context,
+            composite_session_id=composite_key,
+            stop_failure_reason=None,
+        )
+
+        self.assertFalse(await agent.handle_stop(stop_request))
+        self.assertIn(composite_key, agent._ambiguous_interrupt_keys())
+
+        with patch(
+            "modules.agents.claude_agent.emit_backend_failure",
+            new=AsyncMock(return_value=False),
+        ):
+            assistant_ready.set()
+            await asyncio.wait_for(assistant_processed.wait(), timeout=1)
+
+            self.assertFalse(agent._has_pending_requests(composite_key))
+            self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
+            self.assertIn(composite_key, agent._suppressed_synthetic_results)
+            self.assertFalse(receiver_task.done())
+
+            paired_result_ready.set()
+            await asyncio.wait_for(paired_result_processed.wait(), timeout=1)
+
+        self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
+        self.assertNotIn(composite_key, agent._suppressed_synthetic_results)
+        self.assertFalse(receiver_task.done())
+
+        end_stream.set()
+        await receiver_task
+
     async def test_failed_interrupt_stays_nonsteerable_while_result_settles(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)

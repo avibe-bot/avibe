@@ -1830,6 +1830,7 @@ class ClaudeAgent(BaseAgent):
             return True
 
         popped_request = self._pop_pending_request(composite_key)
+        self._ambiguous_interrupt_keys().discard(composite_key)
         self._requeue_request_activity(popped_request)
         if popped_request is not None:
             await self._remove_ack_reaction(popped_request)

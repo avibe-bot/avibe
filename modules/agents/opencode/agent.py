@@ -274,10 +274,10 @@ class _SteeringAwareOpenCodeServer:
                         wait_for_insert = True
                     else:
                         self._state.status_reconciliation_failures = 0
-                        self._state.reconcile_initial_status = False
                         if status is not None and status.get("type") in {"busy", "retry"}:
                             wait_for_insert = True
                         else:
+                            self._state.reconcile_initial_status = False
                             if reconcile_insert:
                                 inserted_user_missing = (
                                     inserted_user_text is not None
@@ -1299,9 +1299,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 status_unknown = True
                 native_status = None
 
+            native_status_is_active = (
+                native_status is not None
+                and native_status.get("type") in {"busy", "retry"}
+            )
+            if native_status_is_active and reconcile_after_message_ids is None:
+                reconcile_after_message_ids = {
+                    str(message.get("info", {}).get("id"))
+                    for message in messages[: last_completed_assistant_index + 1]
+                    if message.get("info", {}).get("id")
+                }
             session_still_active = (
                 status_unknown
-                or (native_status is not None and native_status.get("type") in {"busy", "retry"})
+                or native_status_is_active
                 or has_in_progress
                 or last_assistant_finish == "tool-calls"
                 or has_post_assistant_user
