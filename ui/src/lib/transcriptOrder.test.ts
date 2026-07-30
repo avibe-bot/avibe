@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
-import { byCreatedThenId, mergeById, insertMessageOrdered } from './transcriptOrder';
+import {
+  byCreatedThenId,
+  mergeById,
+  insertMessageOrdered,
+  messageOrderTimeMs,
+  timestampOrderTimeMs,
+} from './transcriptOrder';
 
 // The transcript keeps its rows in durable (created_at, id) order at all times.
 // Only id + created_at drive ordering, so fixtures fill just those; the rest is
@@ -14,6 +20,30 @@ const t = (s: number) => `2024-01-01T00:00:${String(s).padStart(2, '0')}Z`;
 const mk = (id: string, created_at: string): WorkbenchMessage =>
   ({ id, created_at }) as unknown as WorkbenchMessage;
 const ids = (list: WorkbenchMessage[]): string[] => list.map((m) => m.id);
+
+describe('messageOrderTimeMs', () => {
+  it('recovers subsecond positions from canonical message ids', () => {
+    const createdAt = '2026-07-30T10:00:00Z';
+    const preciseTime = Date.parse('2026-07-30T10:00:00.800Z');
+    const preciseId = `msg_${Math.floor(preciseTime * 1_000).toString(16).padStart(15, '0')}deadbeef`;
+
+    expect(messageOrderTimeMs(mk(preciseId, createdAt))).toBe(preciseTime);
+    expect(messageOrderTimeMs(mk('imported-id', createdAt))).toBe(Date.parse(createdAt));
+  });
+});
+
+describe('timestampOrderTimeMs', () => {
+  it('retains microseconds from UTC and offset ISO timestamps', () => {
+    const base = Date.parse('2026-07-30T10:00:00.500Z');
+
+    expect(timestampOrderTimeMs('2026-07-30T10:00:00.500100Z')).toBeCloseTo(base + 0.1, 6);
+    expect(timestampOrderTimeMs('2026-07-30T18:00:00.500900+08:00')).toBeCloseTo(base + 0.9, 6);
+  });
+
+  it('preserves Date.parse invalid timestamp behavior', () => {
+    expect(timestampOrderTimeMs('not-a-timestamp')).toBeNaN();
+  });
+});
 
 describe('byCreatedThenId', () => {
   it('orders by created_at first', () => {
