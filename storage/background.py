@@ -735,19 +735,23 @@ def _publish_queue_updated(session_id: str) -> None:
     if not normalized_session_id:
         return
     try:
-        from core.inbox_events import bus, is_controller_process
+        from core.inbox_events import (
+            QUEUE_UPDATED_EVENT,
+            bus,
+            is_controller_process,
+        )
     except Exception:
         logger.debug("failed to import queue event publisher", exc_info=True)
         return
     payload = {"session_id": normalized_session_id}
     try:
-        bus.publish("queue.updated", payload)
+        bus.publish(QUEUE_UPDATED_EVENT, payload)
         if bus.subscriber_count() == 0 and not is_controller_process():
             try:
                 from vibe import internal_client
 
                 internal_client.publish_event_sync(
-                    "queue.updated",
+                    QUEUE_UPDATED_EVENT,
                     payload,
                     timeout=1.5,
                 )

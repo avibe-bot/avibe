@@ -728,14 +728,23 @@ def create_app(controller: "Controller") -> FastAPI:
         but they can reach this permission-restricted Unix socket and reuse the
         same Controller -> UI-server -> browser SSE path.
         """
-        from core.inbox_events import RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT, bus
+        from core.inbox_events import (
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+            bus,
+        )
 
         payload = await _safe_json(request)
         if not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payload"})
         event_type = str(payload.get("type") or "").strip()
         data = payload.get("data")
-        if event_type not in {RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT}:
+        if event_type not in {
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+        }:
             return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_event_type"})
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_event_data"})

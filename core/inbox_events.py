@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
+QUEUE_UPDATED_EVENT = "queue.updated"
 WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT = "workbench.events.bridge.status"
 _CONTROLLER_PROCESS = False
 

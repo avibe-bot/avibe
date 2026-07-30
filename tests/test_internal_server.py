@@ -253,22 +253,37 @@ async def _publish_event_round_trip():
                     "data": {"scope": "request", "request_id": "vreq_1", "request_status": "pending"},
                 },
             )
+            queue_resp = await client.post(
+                "/internal/events",
+                json={
+                    "type": "queue.updated",
+                    "data": {"session_id": "ses_queue"},
+                },
+            )
             bad_resp = await client.post("/internal/events", json={"type": "unsupported", "data": {}})
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        return resp, bad_resp, event
+        events = [
+            await asyncio.wait_for(queue.get(), timeout=1.0),
+            await asyncio.wait_for(queue.get(), timeout=1.0),
+        ]
+        return resp, queue_resp, bad_resp, events
     finally:
         inbox_events.bus.unsubscribe(sub_id)
 
 
 def test_publish_event_endpoint_emits_allowlisted_bus_event():
-    resp, bad_resp, event = asyncio.run(_publish_event_round_trip())
+    resp, queue_resp, bad_resp, events = asyncio.run(_publish_event_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    assert queue_resp.status_code == 200
+    assert queue_resp.json() == {"ok": True}
     assert bad_resp.status_code == 400
-    assert event == (
-        "vaults.updated",
-        {"scope": "request", "request_id": "vreq_1", "request_status": "pending"},
-    )
+    assert events == [
+        (
+            "vaults.updated",
+            {"scope": "request", "request_id": "vreq_1", "request_status": "pending"},
+        ),
+        ("queue.updated", {"session_id": "ses_queue"}),
+    ]
 
 
 def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
