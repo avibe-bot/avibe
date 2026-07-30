@@ -83,26 +83,15 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
 
     from config.v2_config import memory_config_to_payload
 
-    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
-        {"enabled", "proactive_capture", "processing"}
-    ):
+    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset({"enabled", "processing"}):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     for endpoint in ("llm", "embedding"):
         target["processing"][endpoint].pop("has_api_key", None)
-    for flag in ("enabled", "proactive_capture"):
-        if flag not in patch_payload:
-            continue
-        if not isinstance(patch_payload[flag], bool):
+    if "enabled" in patch_payload:
+        if not isinstance(patch_payload["enabled"], bool):
             raise ValueError("invalid_memory_patch")
-        target[flag] = patch_payload[flag]
-    # A server-side invariant, not a UI convention. This is a merge patch, so a
-    # request carrying only `{"enabled": false}` would otherwise leave a stored
-    # opt-in armed, and the next `{"enabled": true}` would silently restore
-    # Agent-initiated writes. The browser already clears the pair together; an
-    # older client, a cached page, or a direct call must not be able to skip it.
-    if not target["enabled"]:
-        target["proactive_capture"] = False
+        target["enabled"] = patch_payload["enabled"]
     processing_patch = patch_payload.get("processing")
     if processing_patch is not None:
         if not isinstance(processing_patch, dict) or not set(processing_patch).issubset({"llm", "embedding"}):

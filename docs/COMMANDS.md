@@ -527,7 +527,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe memory ...` | Read scoped Memory or queue durable context to remember (user-requested, or Agent-distilled from conversations and local work once proactive capture is on) through the running controller |
+| `vibe memory ...` | Read scoped Memory or queue durable context to remember (user-requested, or Agent-distilled from conversations and local work) through the running controller |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |

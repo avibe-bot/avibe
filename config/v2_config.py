@@ -283,19 +283,12 @@ class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
 
     enabled: bool = False
-    # Agent-initiated proactive writes widen what an owner consented to when they
-    # enabled Memory, so they are opt-in on their own and default off. An install
-    # upgraded from a Memory-enabled release must keep requested-only behavior
-    # until the owner turns this on in Settings.
-    proactive_capture: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     embedding_change_pending: bool = False
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
-        if not isinstance(self.proactive_capture, bool):
-            raise ValueError("Config 'memory.proactive_capture' must be a boolean")
         if not isinstance(self.embedding_change_pending, bool):
             raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
         self.processing.validate()
@@ -395,7 +388,6 @@ def memory_config_to_payload(
 
     payload = {
         "enabled": memory.enabled,
-        "proactive_capture": memory.proactive_capture,
         "processing": {
             "llm": endpoint_payload(memory.processing.llm),
             "embedding": endpoint_payload(memory.processing.embedding),
@@ -1167,7 +1159,6 @@ class V2Config:
             raise ValueError("Config 'memory.processing.embedding' must be an object")
         memory = MemoryConfig(
             enabled=memory_payload.get("enabled", False),
-            proactive_capture=memory_payload.get("proactive_capture", False),
             embedding_change_pending=memory_payload.get("embedding_change_pending", False),
             processing=MemoryProcessingConfig(
                 llm=MemoryEndpointConfig(

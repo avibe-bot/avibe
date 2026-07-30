@@ -5,7 +5,6 @@ import {
   memoryNavShouldBeVisible,
   memoryRuntimeRecoveryAvailable,
   memorySetupStage,
-  proactiveCaptureFor,
 } from './memorySettings';
 
 
@@ -27,20 +26,12 @@ describe('memorySetupStage', () => {
     expect(memoryNavShouldBeVisible({
       status: 'ok',
       enabled: true,
-      proactive_capture: false,
       processing: {
         llm: { base_url: null, model: null, api_key: null, has_api_key: false },
         embedding: { base_url: null, model: null, api_key: null, has_api_key: false },
       },
     })).toBe(true);
     expect(memoryNavShouldBeVisible({ status: 'failed', error: 'memory_store_unavailable' })).toBe(false);
-  });
-
-  it('never leaves proactive capture armed once Memory is switched off', () => {
-    expect(proactiveCaptureFor(true, true)).toBe(true);
-    expect(proactiveCaptureFor(true, false)).toBe(false);
-    expect(proactiveCaptureFor(false, true)).toBe(false);
-    expect(proactiveCaptureFor(false, false)).toBe(false);
   });
 });
 

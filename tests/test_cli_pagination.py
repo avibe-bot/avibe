@@ -94,16 +94,11 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
         platform="avibe",
         platform_specific={"agent_session_id": "ses-test"},
     )
-    # Both Memory variants ship CLI examples, and only one of them is injected
-    # per turn, so scanning a single build would leave the other unchecked.
-    commands: list[str] = []
-    for proactive in (False, True):
-        prompt = build_system_prompt_injection(
-            context=context,
-            include_memory_cli=True,
-            include_memory_proactive=proactive,
-        )
-        commands.extend(re.findall(r"`(vibe [^`\n]+)`", prompt))
+    prompt = build_system_prompt_injection(
+        context=context,
+        include_memory_cli=True,
+    )
+    commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
     checked_commands = 0
     checked_paths: set[tuple[str, ...]] = set()
 

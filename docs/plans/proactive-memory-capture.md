@@ -328,3 +328,33 @@ runtime stub that reproduces the startup-reconciliation race.
       the settlement with `memory_runtime_install_failed` and leaving both the
       marker and the runtime unreconciled. The comparison now normalizes both
       settlement-irrelevant fields, mirroring the controller's runtime identity.
+
+## Follow-up: the opt-in switch is removed (2026-07-30)
+
+The `memory.proactive_capture` opt-in shipped in #1092 as a response to the
+round-4 consent finding, but it was never part of the approved product design,
+and it carried most of the PR's accidental complexity: the flag lived inside
+`MemoryConfig`, whose changes otherwise drive sidecar reconciliation, so every
+config path had to learn to classify prompt-only versus runtime-relevant
+changes (runtime identity projection, a prompt-only fast path, a
+sequence-numbered publication merge against a reconcile race, and a
+settlement-equality exclusion).
+
+After re-evaluation the owner decided proactive capture is part of what
+enabling Memory means. The switch, its UI toggle, and the whole prompt-only
+machinery are removed:
+
+- `MemoryConfig` no longer carries `proactive_capture`; a stored flag from the
+  interim release is dropped on load and no longer serialized.
+- `build_system_prompt_injection` has a single Memory prompt: enabling Memory
+  injects the proactive contract (When to remember / noise controls / surface
+  routing) directly. The requested-only variant is gone.
+- `reconcile_memory` is back to its pre-#1092 shape; the settlement comparison
+  normalizes only `embedding_change_pending` again.
+- The settings PATCH whitelist is `{enabled, processing}`; a stale client
+  sending the retired field gets `memory_invalid_input`.
+- Settings UI and disclosure describe Agent-recorded facts unconditionally.
+
+Consent posture: the Memory enable disclosure now states Agent-recorded
+durable facts as part of what enabling Memory means, instead of gating them
+behind a second toggle.

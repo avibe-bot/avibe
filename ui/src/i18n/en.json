@@ -3147,7 +3147,7 @@
   "memory": {
     "title": "Memory",
     "betaTitle": "Memory · Beta",
-    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus, when proactive capture is on, durable facts your Agent records while working for you. Review it, search it, or clear it here.",
+    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus durable facts your Agent records while working for you. Review it, search it, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
       "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
@@ -3250,11 +3250,9 @@
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
       "enableLabel": "Memory",
-      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory. Turn on proactive capture as well and durable facts your Agent records while working for you are included.",
+      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory. Durable facts your Agent records while working for you are included as well.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
-      "proactiveLabel": "Proactive capture",
-      "proactiveHint": "Let your Agent decide on its own what to remember: without being asked, it records durable conclusions it distills from your conversations and from work on your machine — preferences, corrections, decisions, and lasting environment or account facts. Leave this off to keep Memory to your own messages plus what you explicitly ask it to remember.",
       "llmTitle": "LLM endpoint",
       "embeddingTitle": "Embedding endpoint",
       "baseUrl": "Base URL",
@@ -3275,7 +3273,7 @@
       "disclosureTitle": "Before you enable Memory",
       "disclosure": [
         "Eligible Workbench and bound, enabled private-IM text is copied into a bounded local queue for processing.",
-        "With proactive capture turned on, your Agent also records durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
+        "Your Agent also records durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
         "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
         "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
         "These remote endpoints receive captured text or search queries and may retain them under their own policy.",

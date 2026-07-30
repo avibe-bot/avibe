@@ -18,7 +18,7 @@ import type {
   MemoryStatus,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
-import { buildEndpointPatch, draftFromConfig, proactiveCaptureFor } from '../../../lib/memorySettings';
+import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
 import type { EndpointDraft } from '../../../lib/memorySettings';
 import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
 
@@ -126,7 +126,6 @@ export const MemorySettingsPanel: React.FC<{
   const api = useApi();
   const { showToast } = useToast();
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
-  const [proactiveDraft, setProactiveDraft] = useState(settings.proactive_capture);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
   const [saving, setSaving] = useState(false);
@@ -135,15 +134,9 @@ export const MemorySettingsPanel: React.FC<{
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
     setEnabledDraft(settings.enabled);
-    setProactiveDraft(settings.proactive_capture);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
   }, [settings]);
-
-  const changeEnabled = (next: boolean) => {
-    setEnabledDraft(next);
-    setProactiveDraft((proactive) => proactiveCaptureFor(next, proactive));
-  };
 
   // `data_exists` is only known once status resolves. Settings can render first (the two loads run
   // concurrently), so until status is known we must NOT let the embedding endpoint be edited: a
@@ -177,7 +170,6 @@ export const MemorySettingsPanel: React.FC<{
     try {
       const patch: MemorySettingsPatch = {};
       if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-      if (proactiveDraft !== settings.proactive_capture) patch.proactive_capture = proactiveDraft;
       // A key clear is accepted only while the resulting state stays disabled.
       const allowClear = !enabledDraft;
       const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
@@ -206,13 +198,11 @@ export const MemorySettingsPanel: React.FC<{
         // reality, and refresh status so a runtime-dependency blocker (and its Dependencies
         // affordance) reappears instead of a stale "enabled" toggle hiding it.
         setEnabledDraft(settings.enabled);
-        setProactiveDraft(settings.proactive_capture);
         onReloadStatus();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
       setEnabledDraft(settings.enabled);
-      setProactiveDraft(settings.proactive_capture);
       onReloadStatus();
     } finally {
       setSaving(false);
@@ -240,22 +230,9 @@ export const MemorySettingsPanel: React.FC<{
         </div>
         <Switch
           checked={enabledDraft}
-          onCheckedChange={changeEnabled}
+          onCheckedChange={setEnabledDraft}
           disabled={saving || (!enabledDraft && !dependencyReady)}
           label={t('memory.settings.enableLabel')}
-        />
-      </div>
-
-      <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3.5">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.proactiveLabel')}</span>
-          <span className="text-[11.5px] leading-snug text-muted">{t('memory.settings.proactiveHint')}</span>
-        </div>
-        <Switch
-          checked={proactiveDraft}
-          onCheckedChange={setProactiveDraft}
-          disabled={saving || !enabledDraft}
-          label={t('memory.settings.proactiveLabel')}
         />
       </div>
 
