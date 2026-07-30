@@ -512,12 +512,15 @@ def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
     dead letter.
     """
 
-    attempts = _attempts_read(notice.get("attempts")) + 1
+    # The POLICY counter clamps a negative read to the start of the ladder; the CAS
+    # expectation deliberately does not (``notice_write_expectation`` asserts the raw
+    # stored value, so the guarded claim still matches the row as it is). CAST
+    # semantics can read a negative from an out-of-band value ("-3q" reads -3,
+    # INT64_MIN from a saturated number), and incrementing FROM it would grant the
+    # notice more than ``MAX_ATTEMPTS`` attempts — ~9.2 quintillion for the saturated
+    # case, each on the shortest backoff. Clamped, the first claim stamps attempt 1
+    # over the poison and the row is a normal notice again in one pass.
+    attempts = max(_attempts_read(notice.get("attempts")), 0) + 1
     if attempts >= MAX_ATTEMPTS:
         return attempts, None
-    # ``max(..., 0)`` because CAST semantics can read a negative counter from an
-    # out-of-band value ("-3q" reads -3): the CAS still asserts the raw number so
-    # the claim lands and the counter advances one per pass toward the ordinary
-    # range — bounded progress — but a negative index here would silently wrap to
-    # the END of the ladder and hand the earliest retries the longest waits.
-    return attempts, BACKOFF_SECONDS[max(attempts - 1, 0)]
+    return attempts, BACKOFF_SECONDS[attempts - 1]

@@ -5046,6 +5046,35 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
         )
 
 
+@pytest.mark.parametrize(
+    "attempts",
+    ["-3q", -3, -(2**63), -1e100],
+    ids=["negative-prefix-string", "negative-int", "int64-min", "saturated-real"],
+)
+def test_a_negative_attempt_counter_starts_the_ladder_instead_of_counting_up(
+    attempts,
+) -> None:
+    """Subordinate to HFR-076 — the round-20 finding: clamp the POLICY, not the CAS.
+
+    CAST semantics can read a negative counter from an out-of-band value ("-3q"
+    reads -3; a saturated number reads INT64_MIN), and a policy that increments
+    FROM it grants the notice more than ``MAX_ATTEMPTS`` attempts — roughly 9.2
+    quintillion for the saturated case, each armed with the shortest backoff.
+    The split is deliberate and directional: ``notice_write_expectation`` keeps
+    asserting the RAW stored value (the CAS must match the row as it is, or the
+    claim never lands at all), while ``next_attempt`` clamps the policy read to
+    the start of the ladder — so the first claim stamps attempt 1 over the poison
+    and the row is a normal notice again in one pass.
+    """
+
+    from core.failure_notices import BACKOFF_SECONDS, next_attempt
+
+    assert next_attempt({"state": "pending", "attempts": attempts}) == (
+        1,
+        BACKOFF_SECONDS[0],
+    ), "a negative counter must start the retry ladder, not extend it downward"
+
+
 def test_twelve_cast_divergent_attempt_counters_do_not_starve_the_notice_behind_them(
     tmp_path: Path,
 ) -> None:
