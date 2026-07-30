@@ -15,6 +15,20 @@
 //      is replaced by a non-terminal one, so a connect that succeeded renders as
 //      still running — and the same hole in the deadline branch stamps `failed`
 //      over a success once the timeout passes.
+//
+//   3. cancel-after-terminal. A teardown cancels the flow it opened, reading a
+//      snapshot that says `awaiting_action` — while the poll in flight is about to
+//      report success. `oauth_cancel` materializes a terminal flow instead of
+//      cancelling it, so that call IS the write, and the rows the page keeps
+//      showing were read before it happened.
+//
+//   4. cancel-after-handoff. The dialog closes while its start is still in flight
+//      and a replacement opens; the server's pending-flow reuse hands the
+//      replacement THAT SAME flow. The first journey's cleanup then cancels the
+//      login the user is watching in the dialog that replaced it.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -23,6 +37,7 @@ import {
   flowStep,
   initialSeedState,
   isDone,
+  releaseFlow,
   savedMappingsKey,
   savedMenuKey,
   savedSourcesKey,
@@ -298,5 +313,89 @@ describe('startNeedsStatusRead — a start response that is already terminal', (
   it('leaves a running start to the poll it already schedules', () => {
     expect(startNeedsStatusRead(flow('awaiting_action'))).toBe(false);
     expect(startNeedsStatusRead(flow('verifying'))).toBe(false);
+  });
+});
+
+describe('releaseFlow — what a teardown does with the flow it opened', () => {
+  /** A journey, plus a recorder for the two things a teardown can do. */
+  const teardown = () => {
+    const log: string[] = [];
+    return {
+      log,
+      journey: createFlowAuthority(() => {}),
+      ops: (cancel: (() => Promise<unknown>) | null) => ({
+        cancel: cancel && (() => (log.push('cancel'), cancel())),
+        reread: () => log.push('reread'),
+      }),
+    };
+  };
+
+  it('rereads only after the cancel it made has settled', async () => {
+    // Interleaving 3. The snapshot this teardown could have read said
+    // `awaiting_action`, and the poll in flight is about to report success — so
+    // this cancel reaches `_materialize_completed_oauth` and IS the write. A
+    // reread beside it, rather than after it, reads the rows before it happened.
+    const { log, journey, ops } = teardown();
+    const settle = deferred<void>();
+
+    const released = releaseFlow(journey, journey, ops(() => settle.promise));
+
+    expect(log).toEqual(['cancel']);
+    settle.resolve();
+    await released;
+    expect(log).toEqual(['cancel', 'reread']);
+  });
+
+  it('rereads even when its own cancel failed', async () => {
+    // The writes this journey already made upstream do not depend on the cleanup
+    // succeeding, so a failed cancel is a reason to reread rather than not to.
+    const { log, journey, ops } = teardown();
+    await releaseFlow(journey, journey, ops(() => Promise.reject(new Error('engine_down'))));
+    expect(log).toEqual(['cancel', 'reread']);
+  });
+
+  it('lets go once a newer journey owns the source flow', async () => {
+    // Interleaving 4. `POST …/reauth` reuses a live pending flow, so the
+    // replacement dialog is polling THIS flow id. Cancelling it here ends a login
+    // the user is watching — and the reread is still owed, because the start this
+    // journey made had already committed the irreversible half.
+    const { log, journey, ops } = teardown();
+    const successor = createFlowAuthority(() => {});
+
+    await releaseFlow(journey, successor, ops(() => Promise.resolve()));
+
+    expect(log).toEqual(['reread']);
+  });
+
+  it('lets go when nobody owns the flow yet', async () => {
+    // The same handoff one beat earlier: the replacement's start request is in
+    // flight and the server has not handed it this flow yet. 「Nobody owns it」 and
+    // 「a successor is about to」 are indistinguishable from here, so this path does
+    // not get to guess — and guessing wrong kills a live login.
+    const { log, journey, ops } = teardown();
+    await releaseFlow(journey, null, ops(() => Promise.resolve()));
+    expect(log).toEqual(['reread']);
+  });
+
+  it('still rereads when there was no flow to release', async () => {
+    // No flow id means no call to make, which is not the same as deciding a
+    // reread is unnecessary. A redundant reread is inert; a missing one is the bug.
+    const { log, journey, ops } = teardown();
+    await releaseFlow(journey, journey, ops(null));
+    expect(log).toEqual(['reread']);
+  });
+
+  it('leaves the cleanup cancel to the one owner that also rereads', () => {
+    // Structural, because this class has now been filed four times: both teardown
+    // paths hand their cancel to `releaseFlow`, so neither can decide for itself
+    // whether to reread — and no snapshot-shaped list is left behind to decide
+    // from. A `TERMINAL` array is what the retracted argument was made of.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const calls = dialog.match(/modelsApi\.cancelOAuth\(/g) ?? [];
+    const handedOver = dialog.match(/=> modelsApi\.cancelOAuth\(/g) ?? [];
+
+    expect(calls.length).toBeGreaterThan(0);
+    expect(handedOver.length).toBe(calls.length);
+    expect(dialog).not.toMatch(/TERMINAL/);
   });
 });

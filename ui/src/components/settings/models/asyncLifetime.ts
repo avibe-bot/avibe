@@ -185,3 +185,49 @@ export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthori
 
 /** Whether an action ends the flow, so the caller stops polling. */
 export const isDone = (action: FlowAction): boolean => action !== 'continue';
+
+/**
+ * Hands back the flow a journey opened, and is the ONLY authorization for a
+ * teardown cancel.
+ *
+ * Cancelling is conditional on still owning the flow, because `POST …/reauth`
+ * REUSES a live pending flow: the next journey for the same source is handed the
+ * SAME flow id. A teardown that cancels after ownership moved therefore does not
+ * clean up after itself — it ends the login the user is watching in the dialog
+ * that replaced it. So the answer depends on WHEN a path asks: the effect's own
+ * cleanup asks at the instant ownership transfers and still holds it, while a
+ * start whose dialog closed mid-request asks after that same cleanup already
+ * released it. Identical call, right in one place and wrong in the other. `null`
+ * ownership is let-go too, and deliberately: a replacement's start can be in
+ * flight this very moment, and 「nobody owns it」 is indistinguishable from
+ * 「a successor is about to」 from here. What gets left behind is a pending login
+ * the server itself times out, and that the next start adopts.
+ *
+ * Rereading is unconditional, and this function is not given the flow so that no
+ * caller can argue otherwise from it. `POST /oauth/cancel` is not always a
+ * cancel — `oauth_cancel` routes a `success` flow, and a failed hub reauth, into
+ * `_materialize_completed_oauth` — so the call can BE the write. The only state a
+ * caller could branch on is the last POLLED snapshot, which an in-flight poll or
+ * a paste submit can terminalize between that read and the cancel landing. An
+ * earlier revision branched on exactly that, from a list named `TERMINAL`;
+ * naming a snapshot after a fact did not make it one.
+ *
+ * A `null` cancel means the journey never got a flow id — there is no call to
+ * make, which is not the same as deciding not to make one.
+ */
+export const releaseFlow = async (
+  journey: FlowAuthority,
+  owner: FlowAuthority | null,
+  ops: { cancel: (() => Promise<unknown>) | null; reread: () => void },
+): Promise<void> => {
+  if (ops.cancel && owner === journey) {
+    try {
+      await ops.cancel();
+    } catch {
+      // Nothing to show — the dialog this belonged to is already gone. The reread
+      // below still has to run: the writes upstream of this call do not depend on
+      // it succeeding.
+    }
+  }
+  ops.reread();
+};

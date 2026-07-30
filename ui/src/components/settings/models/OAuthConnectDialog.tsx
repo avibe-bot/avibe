@@ -27,6 +27,7 @@ import {
   createFlowAuthority,
   initialFlowView,
   isDone,
+  releaseFlow,
   startNeedsStatusRead,
   type FlowAuthority,
   type FlowView,
@@ -43,7 +44,6 @@ import type { AdoptedBy, Source, SupplyChannel, SupplyGap } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
-const TERMINAL = ['success', 'failed', 'cancelled'];
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
@@ -271,33 +271,24 @@ export const OAuthConnectDialog: React.FC<{
         if (cancelled) {
           // The dialog closed while this request was in flight, so the cleanup
           // below found no flow to cancel — the flow id exists nowhere but here.
-          // Returning without it would leave a live login running against a
-          // source whose old sign-in the server has ALREADY invalidated, and the
-          // next reauth would find that flow still pending. Cancel it where it is
-          // known instead of dropping it.
+          // Dropping it would leave a live login running against a source whose
+          // old sign-in the server has ALREADY invalidated. Hand it back where it
+          // is known instead.
           //
-          // AWAITED, not fire-and-forget: for a flow that has already reached a
-          // terminal state this endpoint does not cancel anything — `oauth_cancel`
-          // routes a `success` flow (and a failed hub reauth) into
-          // `_materialize_completed_oauth` instead of the adapter's cancel. A
-          // reused pending flow can be exactly that by the time we get here, so
-          // this call can BE the write, and reading the rows before it returns is
-          // reading before it happened.
-          try {
-            await modelsApi.cancelOAuth(started.flow_id);
-          } catch {
-            // Nothing to show — the dialog is already gone. The refetch below
-            // still has to run: the irreversible half committed at the start
-            // call, whether or not this cleanup succeeded.
-          } finally {
-            // And re-read, because these responses are the PROOF that the writes
-            // landed. The close path refetches too, but it does so while this
-            // request is still in flight: that read can return the row as it was
-            // before `mark_native_irreversible_start` committed, and nothing
-            // afterwards would correct it. The abandoned journey is the one case
-            // where the user is no longer looking at a dialog that could tell them.
-            reauthLeftRowsStale();
-          }
+          // Through `releaseFlow`, which decides whether this journey may still
+          // cancel: by the time we resume, our own cleanup has already released
+          // the ref, so a replacement dialog may own the source's flow — and it
+          // would own THIS one, since a start reuses a live pending flow. The
+          // refetch happens either way, and only after the call settles.
+          await releaseFlow(authority, flowAuthorityRef.current, {
+            cancel: () => modelsApi.cancelOAuth(started.flow_id),
+            // The close path refetches too, but while this request is still in
+            // flight: that read can return the row as it was before
+            // `mark_native_irreversible_start` committed, and nothing afterwards
+            // would correct it. The abandoned journey is the one case where the
+            // user is no longer looking at a dialog that could tell them.
+            reread: () => reauthLeftRowsStale(),
+          });
           return;
         }
         // A reused pending flow can arrive already finished. Read its status
@@ -335,13 +326,23 @@ export const OAuthConnectDialog: React.FC<{
       if (successTimer.current !== null) window.clearTimeout(successTimer.current);
       const cur = authority.current().flow;
       transition({ kind: 'reset' });
-      if (flowAuthorityRef.current === authority) flowAuthorityRef.current = null;
-      // Fire-and-forget is right HERE, unlike the abandoned-start path above, and
-      // the guard is why: `TERMINAL` excludes exactly the states in which cancel
-      // materializes instead of cancelling, so what this call can reach is only a
-      // pending flow being thrown away. There is nothing for a refetch to see, and
-      // a cleanup function cannot await anyway.
-      if (cur && !TERMINAL.includes(cur.state)) modelsApi.cancelOAuth(cur.flow_id).catch(() => {});
+      // Read ownership BEFORE releasing it. React runs this cleanup ahead of the
+      // next effect body, so at this instant the ref is still ours whenever it is
+      // this dialog re-running — which is why the same `releaseFlow` call answers
+      // differently here than on the abandoned-start path above: that one only
+      // gets to ask after this line has already run.
+      const owner = flowAuthorityRef.current;
+      if (owner === authority) flowAuthorityRef.current = null;
+      // A cleanup cannot await, but the refetch inside `releaseFlow` still has to
+      // wait for the cancel: this call can BE the write (`oauth_cancel` on a
+      // terminal flow materializes it), and the only state to branch on here is
+      // `cur` — the last POLLED snapshot, which a poll in flight can terminalize
+      // between that read and the cancel landing. So nothing branches on it; it
+      // supplies the flow id and nothing else.
+      void releaseFlow(authority, owner, {
+        cancel: cur ? () => modelsApi.cancelOAuth(cur.flow_id) : null,
+        reread: () => reauthLeftRowsStale(),
+      });
     };
   }, [open, vendor, channel, reauthId, t, showToast]);
 
