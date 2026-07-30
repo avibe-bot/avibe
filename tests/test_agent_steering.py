@@ -925,12 +925,27 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
         identity = active_steer_identity(controller, "opencode", "avibe-session")
         assert identity is not None
         receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        await asyncio.sleep(0.15)
 
+        assert not poll_task.done()
+        assert state.closing is False
+        server.messages.append(
+            {
+                "info": {
+                    "id": "steered-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "second response"}],
+            }
+        )
+        server.status = {"type": "idle"}
         messages = await asyncio.wait_for(poll_task, timeout=1)
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
-        assert messages[-1]["info"]["id"] == "steer-user-1"
-        assert state.closing is False
+        assert messages[-1]["info"]["id"] == "steered-assistant"
+        assert state.closing is True
         assert agent._active_requests == {primary.base_session_id: gate_task}
     finally:
         await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
@@ -1004,6 +1019,45 @@ async def test_opencode_ambiguous_write_reconciles_unchanged_messages_when_idle(
 
         assert receipt.outcome is SteerOutcome.UNKNOWN
         assert messages[-1]["info"]["id"] == "primary-assistant"
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_insert_reconciliation_survives_visible_user_until_idle() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        assert server.messages[-1]["info"]["role"] == "user"
+
+        server.status = {"type": "idle"}
+        messages = await poll_server.list_messages("opencode-session", primary.working_path)
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert messages[-1]["info"]["error"]["name"] == "NativeSessionEndedBeforeResult"
         assert state.awaiting_after_message_ids is None
         assert state.closing is True
     finally:

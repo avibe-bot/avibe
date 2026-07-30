@@ -118,6 +118,18 @@ class _SteeringAwareOpenCodeServer:
             and not info.get("error")
         )
 
+    @staticmethod
+    def _has_completed_assistant_after(
+        messages: list[Dict[str, Any]],
+        excluded_message_ids: set[str],
+    ) -> bool:
+        return any(
+            message.get("info", {}).get("role") == "assistant"
+            and message.get("info", {}).get("id") not in excluded_message_ids
+            and message.get("info", {}).get("time", {}).get("completed")
+            for message in messages
+        )
+
     def _has_pending_question_tool(self, messages: list[Dict[str, Any]]) -> bool:
         return any(
             message.get("info", {}).get("id") not in self._state.baseline_message_ids
@@ -166,12 +178,10 @@ class _SteeringAwareOpenCodeServer:
                     self._state.closing = True
                     return messages
                 awaiting = self._state.awaiting_after_message_ids
-                unchanged_since_insert = (
-                    awaiting is not None and self._message_ids(messages).issubset(awaiting)
-                )
                 final_snapshot = self._is_final_assistant_snapshot(messages)
                 reconcile_initial_status = self._state.reconcile_initial_status
-                if unchanged_since_insert or final_snapshot or reconcile_initial_status:
+                reconcile_insert = awaiting is not None
+                if reconcile_insert or final_snapshot or reconcile_initial_status:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
                     except Exception as exc:
@@ -198,12 +208,15 @@ class _SteeringAwareOpenCodeServer:
                             self._state.awaiting_after_message_ids = None
                             if final_snapshot:
                                 self._state.closing = True
-                            elif reconcile_initial_status and not any(
-                                message.get("info", {}).get("role") == "assistant"
-                                and message.get("info", {}).get("id")
-                                not in self._state.baseline_message_ids
-                                and message.get("info", {}).get("time", {}).get("completed")
-                                for message in messages
+                            elif (
+                                reconcile_insert
+                                and not self._has_completed_assistant_after(messages, awaiting)
+                            ) or (
+                                reconcile_initial_status
+                                and not self._has_completed_assistant_after(
+                                    messages,
+                                    self._state.baseline_message_ids,
+                                )
                             ):
                                 return self._terminal_reconciliation_failure(
                                     session_id,
@@ -1076,6 +1089,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 stale_poll_ids.append(session_id)
                 continue
 
+            baseline_message_ids = set(poll_info.baseline_message_ids)
             has_in_progress = False
             last_assistant_finish = None
             last_completed_assistant_index = -1
@@ -1087,10 +1101,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 if not time_info.get("completed"):
                     has_in_progress = True
                     continue
+                if info.get("id") in baseline_message_ids:
+                    continue
                 last_completed_assistant_index = index
                 last_assistant_finish = info.get("finish")
 
-            baseline_message_ids = set(poll_info.baseline_message_ids)
             has_post_assistant_user = any(
                 last_completed_assistant_index >= 0
                 and index > last_completed_assistant_index

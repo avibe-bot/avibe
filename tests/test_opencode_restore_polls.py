@@ -255,6 +255,28 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
     assert removed == ["oc-1"]
 
 
+def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.baseline_message_ids = ["baseline-assistant"]
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {
+            "info": {
+                "id": "baseline-assistant",
+                "role": "assistant",
+                "time": {"completed": 1},
+                "finish": "stop",
+            },
+            "parts": [],
+        },
+        {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []},
+    ]
+    agent._test_server.status = {"type": "idle"}
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert removed == ["oc-1"]
+
+
 def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     agent, _, removed, _ = _build_agent({"oc-1": poll})
