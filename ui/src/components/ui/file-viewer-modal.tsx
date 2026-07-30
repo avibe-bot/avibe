@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { FilePreview } from '@/components/ui/file-preview';
 import { apiFetch } from '@/lib/apiFetch';
 import { handleMediaDownloadClick } from '@/lib/downloadMedia';
+import { contentUrl, downloadFile } from '@/lib/filesApi';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { formatBytes } from '@/lib/filePreview';
 import { copyTextToClipboard } from '@/lib/utils';
@@ -16,33 +17,38 @@ import type { FilePreviewTarget } from '@/components/ui/file-viewer';
 // kernel, which owns every renderer (Shiki, the JSON tree, papaparse, the Office parsers, images, PDF,
 // HTML) and lazy-loads each. Default export so ``React.lazy`` can split it out of the main bundle.
 //
-// A lightweight /meta fetch resolves the real name / size / content-type before rendering, so the
-// kernel can pick the right renderer for a proxy URL whose path is just a token. In-app preview is
-// restricted to our own same-origin media proxy — a non-proxy URL is never auto-fetched (it would
-// leak the viewer's network to a third-party host).
+// A lightweight /meta fetch resolves media-proxy metadata before rendering. Local file targets are
+// already classified from `/api/files/meta` by the caller and use the same-origin Files content API.
+// Arbitrary non-proxy URLs are never auto-fetched, so preview cannot leak a request to a third party.
 
 type Meta = { name: string; size: number | null; mime: string | null; ext: string | null };
 
 export default function FileViewerModal({ target, onClose }: { target: FilePreviewTarget; onClose: () => void }) {
   const { t } = useTranslation();
-  const proxy = isProxyMediaUrl(target.url);
-  const [meta, setMeta] = React.useState<Meta>(() => ({ name: target.name || '', size: null, mime: null, ext: null }));
-  const [metaLoaded, setMetaLoaded] = React.useState(false);
+  const local = target.kind === 'local';
+  const localPath = local ? target.path : null;
+  const mediaUrl = target.kind === 'local' ? null : target.url;
+  const targetName = target.name || '';
+  const proxy = mediaUrl ? isProxyMediaUrl(mediaUrl) : false;
+  const [meta, setMeta] = React.useState<Meta>(() => target.kind === 'local'
+    ? { name: target.name, size: target.size, mime: target.mime, ext: target.ext }
+    : { name: targetName, size: null, mime: null, ext: null });
+  const [metaLoaded, setMetaLoaded] = React.useState(local);
   // The kernel reports the file's text when it loads a text kind — enables the copy button (and stays
   // null for image / pdf / office, where copy is meaningless).
   const [text, setText] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
 
   React.useEffect(() => {
-    if (!proxy) return; // non-proxy → never fetch; the body shows an error instead
+    if (!proxy || !mediaUrl) return; // local metadata is supplied; arbitrary remote URLs are never fetched
     let alive = true;
-    apiFetch(`${target.url}/meta`, { headers: { Accept: 'application/json' } })
+    apiFetch(`${mediaUrl}/meta`, { headers: { Accept: 'application/json' } })
       .then((res) => (res.ok ? res.json() : null))
       .then((m: { name?: string; size?: number; content_type?: string; ext?: string } | null) => {
         if (!alive) return;
         if (m) {
           setMeta({
-            name: m.name || target.name || '',
+            name: m.name || targetName,
             size: typeof m.size === 'number' ? m.size : null,
             mime: m.content_type || null,
             ext: m.ext || null,
@@ -56,7 +62,7 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
     return () => {
       alive = false;
     };
-  }, [target.url, target.name, proxy]);
+  }, [mediaUrl, targetName, proxy]);
 
   const copy = async () => {
     if (text == null) return;
@@ -66,14 +72,15 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
     }
   };
 
-  const name = meta.name || target.name || '';
+  const name = meta.name || targetName;
   const ext = name.includes('.') ? (name.split('.').pop() || '').toUpperCase() : '';
   const metaLine = [ext || null, formatBytes(meta.size) || null].filter(Boolean).join(' · ');
 
   let body: React.ReactNode;
-  if (!proxy) body = <div className="vr-fileview-msg">{t('preview.failed')}</div>;
+  const previewUrl = localPath ? contentUrl(localPath) : mediaUrl || '';
+  if (!local && !proxy) body = <div className="vr-fileview-msg">{t('preview.failed')}</div>;
   else if (!metaLoaded) body = <div className="vr-fileview-msg">{t('common.loading')}</div>;
-  else body = <FilePreview source={{ url: target.url, name, ext: meta.ext, mime: meta.mime, size: meta.size }} onText={setText} />;
+  else body = <FilePreview source={{ url: previewUrl, name, ext: meta.ext, mime: meta.mime, size: meta.size }} onText={setText} />;
 
   return (
     <Dialog
@@ -99,11 +106,24 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
               {copied ? <Check className="size-4 text-mint" /> : <Copy className="size-4" />}
             </Button>
           )}
-          <Button asChild variant="ghost" size="icon" className="size-8 text-mint" aria-label={t('chat.media.download')}>
-            <a href={`${target.url}?download=1`} download onClick={(e) => handleMediaDownloadClick(e, target.url, name || undefined)}>
+          {local && localPath ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8 text-mint"
+              aria-label={t('chat.media.download')}
+              onClick={() => downloadFile(localPath)}
+            >
               <Download className="size-4" />
-            </a>
-          </Button>
+            </Button>
+          ) : (
+            <Button asChild variant="ghost" size="icon" className="size-8 text-mint" aria-label={t('chat.media.download')}>
+              <a href={`${mediaUrl}?download=1`} download onClick={(e) => handleMediaDownloadClick(e, mediaUrl || '', name || undefined)}>
+                <Download className="size-4" />
+              </a>
+            </Button>
+          )}
         </div>
         <div className="vr-fileview-body min-h-0 flex-1 overflow-hidden">{body}</div>
       </DialogContent>
