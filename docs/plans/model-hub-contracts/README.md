@@ -2,9 +2,10 @@
 
 Status: **FROZEN v4 (targeted)** · 2026-07-30 · change only via orchestrator
 Advances `agent-chain`, `probe-result`, and `turn-provenance` from contract
-version 3 to 4. The same-assumption audit makes prose-only corrections in
-`source` and `agent-supply`; the versionless `resolution-event` adds the
-request-scoped `permission_denied` cause.
+version 3 to 4. Later targeted-v4 amendments retain those pins while tightening
+the channel-aware adapter seam and grafting derived truth onto the live
+AgentSupply/source-creation projections. The versionless `resolution-event`
+includes the request-scoped `permission_denied` cause.
 Derived from: spec v2 (`../model-hub.md`), implementation plan
 (`../model-hub-implementation.md`),
 spike S1 engine survey (`docs/plans/model-hub-engine-survey.md`),
@@ -107,6 +108,15 @@ order after any mutation; clients never compute partial reorders.
   `permission_denied` is an attempt failure, mirrored into provenance and legal
   only on a switch event; it has no Source-state `detail_key` and never mutates
   source health.
+- **Targeted v4 process instance trail — entry 4 (channel class pass).** Owner
+  Plan A approval at 2026-07-30 09:47 authorized the class-level correction
+  proved necessary by the five-stop v4c evidence history, rooted in finding
+  `3675528561`. The earlier v4a audit missed `adapter-interface.py` and its
+  global success-implies-ref assertion; this dedicated commit repairs that
+  omission by splitting the seam per channel, carries the retained-material
+  discriminator into both producers, and audits every remaining contract file.
+  It is evidence-pinned, delivered into the implementing lane rather than by
+  chat, and remains owner-vetoable.
 - Contract tests (implementation plan §5) validate both directions against
   these schemas.
 
@@ -274,7 +284,7 @@ loads it and mutation-tests every comparable row.
 | M5 | the supply-state taxonomy | `agent-supply.schema.json` → `supply_status` | `named_agents[].supply_status`; `agent-chain.schema.json` → `supply_state`; `turn-provenance.schema.json` → `model_supply_state` | `projection` |
 | M6 | backend identifiers | `agent-supply.schema.json` → `backend` | `agent-chain.schema.json` and `probe-result.schema.json` → `backend`; `turn-provenance.schema.json` and `resolution-event.schema.json` → `agent` (`system` is the declared event-only extra) | `equality` |
 | M7 | supply channel | `source.schema.json` → `supply_channel` | `agent-supply.schema.json` → `current.channel`; `agent-chain.schema.json` → `chain[].channel`; `probe-result.schema.json` → `channel`; all four turn-provenance attempt slots | `equality` |
-| M8 | native CLI process availability | `agent-chain.schema.json` → `chain[].reason` (`native_cli_unavailable`) | `probe-result.schema.json` → native not-ready `error` (`models.probe.native_cli_unavailable`) | `mapping` |
+| M8 | native CLI process availability | `agent-chain.schema.json` → `chain[].reason` (`native_cli_unavailable`) | `agent-supply.schema.json` → `sources.eligibility[].process_availability_reason` (same bare token); `probe-result.schema.json` → native not-ready `error` (`models.probe.native_cli_unavailable`) | `mapping` |
 | N1 | source recommendation rule | `agent-supply.schema.json` → `sources.policy` | — | `none` |
 
 What the rules mean, and why the non-equality rules differ:
@@ -299,9 +309,10 @@ What the rules mean, and why the non-equality rules differ:
   `permission_denied` belongs here because it describes the failed request
   attempt, but deliberately does not join M4: the preserved machine code does not
   prove a source-global credential or account state.
-- **`mapping`** — M8 is one concept in two field conventions: a bare classifier in
-  the chain and an i18n key in the probe error slot. The explicit one-to-one map is
-  checked in both directions; adding a spelling on either side fails until paired.
+- **`mapping`** — M8 is one concept across two field conventions: the same bare
+  classifier in chain and AgentSupply inventory, plus an i18n key in the probe
+  error slot. Per-target one-to-one maps are checked in both directions; adding a
+  spelling at any of the three surfaces fails until the row binds it.
 - **`bijection`** — M4 checks both sets and each explicit cause→detail-key pair;
   a permuted pairing therefore fails even when the two sets still match.
 - **`none`** — registered as non-comparable, with the reason. N1 is a pointer to a
@@ -312,17 +323,42 @@ What the rules mean, and why the non-equality rules differ:
 | File | Consumers |
 | --- | --- |
 | `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action`, immutable `created_at`, optional `usage.projected_exhaust_at`. Targeted v4 audit changes no shape: healthy source state and a lapsed `retry_at` do not assert process-local native CLI availability. No ordering field, ever. |
-| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. Targeted v4 audit changes no shape: `supply_status` is derived from complete process-aware runnability, so unavailable native CLI supply is `interrupted`, not cooldown-only `waiting`. Hub with no pinned selection remains null throughout. |
+| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. The channel class pass extends the complete eligibility inventory with current-chain membership and process availability, retaining non-members so one projection serves both the Agent row and all-sources drawer. |
 | `agent-chain.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain and preserves visibility/order for blocked members. Each item now distinguishes source-global `health` from resolve-time channel availability: `runnable = health-permits AND process-available`; Hub availability is definitionally true, while an unavailable native CLI item at any health stays dimmed in place with `reason: native_cli_unavailable`. Cooldown plus unavailable is `interrupted`, not `waiting`. |
 | `probe-result.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. The probe selects the first runnable item; unavailable chain items are skipped. Hub keeps v3's completed-request truth table. Native CLI re-verifies process readiness, never claims completion evidence, and pins `latency_ms: null` in both directions. It reads the requested model's `supply_state`, never `supply_status`. |
 | `turn-provenance.schema.json` | L2 API, L3 writer. v4 adds request-scoped `permission_denied` to failed attempts without changing the exact-attribution rule. The FSM-truth `canceled` outcome keeps its reason-free `canceled_attempt` slot. Direct and ambiguous absence remain route errors in `api.md`. |
 | `resolution-event.schema.json` | L2 emitter, L4 UI. The versionless feed adds `permission_denied` only for a model-scoped switch; it cannot describe cooldown, recovery, or needs-action source state. The record stays single-grained with impact derived live. |
-| `oauth-flow.schema.json` | L2, L4 UI, L1 engine adapter |
+| `oauth-flow.schema.json` | L2, L4 UI. Remains presentation-only: channel is public, while engine credential refs and retained-material disposition stay on the service seam because the UI never consumes them. |
 | `migration-scan.schema.json` | L6, L5 UI. Unchanged by the v2 ruling — native-config import is an onboarding feature, not a priority mechanism. |
 | `runtime-dependency.schema.json` | L1, L2 status API, L7 guards. **URL policy (orchestrator, 07-23 12:05):** the example URLs are placeholders; L1 ships with upstream release URLs + SHA256 integrity verification. Availability guard = L7/orchestrator deliverable BEFORE GA: mirror the pinned assets into Avibe-owned release storage (same manifest-verified backup/recovery pattern as Show Runtime, per repo release rules), then point the manifest at the mirror with upstream recorded as provenance. SHA256s never change (same bytes). L1 must NOT build the mirror or touch the Show Runtime guard. **Platform expansion (07-23 13:13):** linux-arm64 / darwin-x64 assets get pinned (+ schema platform-enum rev) together with the mirror work at L7; until then unsupported hosts fail closed, Direct = escape hatch (L1's `model_hub_engine_platform_unsupported` coverage is the intended behavior). **Cross-vendor note (07-29):** if the v2.1 cross-vendor spike (spec §10.4) concludes that a conversion pair needs a CPA plugin or a different engine build, that lands here as a pin + SHA256 revision with mirrored assets published before the manifest moves — never as user-facing configuration. |
-| `api.md` | All route and envelope contracts. Targeted v4 keeps the shared envelope at v3 while documenting nested v4 chain/probe channel truth, orthogonal native availability, first-runnable probe selection, and stale readiness re-verification. The remaining route contracts are unchanged. |
+| `api.md` | All route and envelope contracts. Targeted v4 keeps the shared envelope at v3 while documenting channel truth, the five-way OAuth repair partition, complete AgentSupply source signals, explicit skipped custom orders, and mapping/menu enrollment. |
 | `opencode-overlay.md` | L3, L7 (identifier-stability tests). Identifiers stay stable across per-agent reordering — a source is never encoded into the provider segment. |
-| `adapter-interface.py` | L1 (implements), L2 (consumes; owns in-repo copy). Dual-copy rule: both lanes copy VERBATIM to `core/handlers/model_hub/adapter.py` in their branches — byte-identical, merge is a no-op. Added 07-23 10:55 after L1 raised the ordering race; **v1.1 07-23 11:05**: +OAuth surface with deterministic source binding (`start_oauth(source_id)` → success carries `credential_ref`), +`allowed_origins`/`invoke(origin)`/`OriginNotAllowedError` (both from L1 review findings). Unchanged by v2: candidate walking and error classification stay Python-side, so moving ordering from global to per-agent needs no adapter or engine change (spec §8). |
+| `adapter-interface.py` | L1 (implements), L2 (consumes; owns in-repo copy). v1.3 makes OAuth flow success channel-aware and adds the total retained-material disposition. The contract and `core/handlers/model_hub/adapter.py` remain byte-identical by mechanical guard. |
+
+## Full channel audit (owner Plan A)
+
+The audit question was fixed: does this file assume every supply/login path is
+Hub-engine-owned, or collapse source-global state into serving-process truth?
+
+| File | Disposition |
+| --- | --- |
+| `README.md` | **Fixed.** Records the missed adapter seam, the owner authorization chain, M8's AgentSupply spelling, and this complete audit. |
+| `adapter-interface.py` | **Fixed.** Replaces global success/ref semantics with Hub and native branches; adds the five retained-material placements. |
+| `agent-chain.schema.json` | **Audited clean.** v4a already keeps channel, health, availability, and runnability orthogonal at every chain position. |
+| `agent-supply.schema.json` | **Fixed.** Complete per-source inventory now carries current-chain membership plus the per-process native blocker without dropping non-members. |
+| `api.md` | **Fixed.** Adds the five-arm repair consumer contract, source-signal grain, `skipped_by`, and mapping enrollment; existing probe text already says readiness is not completion. |
+| `migration-scan.schema.json` | **Audited clean.** Each import item already declares `supply_channel`; scanning native config never claims engine ownership. |
+| `mirror-registry.json` | **Fixed.** M8 binds chain, AgentSupply, and probe spellings as one process-availability concept. |
+| `oauth-flow.schema.json` | **Fixed.** Pins the user-wire/service-seam exclusion and makes source binding channel-neutral; refs remain off the wire. |
+| `opencode-overlay.md` | **Audited clean.** Provider/model identifiers remain source- and channel-independent, so no gateway ownership is implied. |
+| `probe-result.schema.json` | **Audited clean.** Hub records completion evidence; native records readiness with null latency in both directions. |
+| `resolution-event.schema.json` | **Audited clean.** Events classify observed attempts and state changes without deriving process availability from global health. |
+| `runtime-dependency.schema.json` | **Audited clean.** It describes the optional managed Hub engine itself, not native CLI availability or login ownership. |
+| `source.schema.json` | **Fixed.** The existing channel/ref and global-health boundaries hold; `oauth_expired` now explicitly covers unknown retained placement. |
+| `turn-provenance.schema.json` | **Audited clean.** Every attempt-bearing slot already carries `channel`; exact attribution never assumes gateway execution. |
+| `core/handlers/model_hub/adapter.py` | **Fixed mechanically.** Byte-identical v1.3 copy of the contract seam. |
+| `core/handlers/model_hub/native_oauth.py` | **Fixed.** Every produced flow is tagged `native_cli`, carries no engine ref, and pins retained material to `none`. |
+| `vibe/model_hub_runtime/adapter.py` | **Fixed.** Every Hub terminal path reports a proved disposition and cleanup retains the ref until both auth-file deletions are confirmed. |
 
 ## Security invariants (from S1/S2, non-negotiable)
 

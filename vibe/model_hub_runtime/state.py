@@ -250,18 +250,28 @@ class EngineStateStore:
             return updated_record
 
     def credential_metadata(self, credential_ref: str) -> dict[str, Any]:
-        path = self._credential_path(credential_ref)
-        try:
-            mode = path.lstat().st_mode
-        except FileNotFoundError:
-            mode = 0
-        if mode and (not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600):
-            raise EngineStateError("credential permissions are unsafe")
-        payload = self._read_json(path)
-        kind = payload.get("kind") if payload else None
-        if kind not in {"api_key", "oauth"}:
+        payload = self.credential_metadata_if_present(credential_ref)
+        if payload is None:
             raise EngineStateError("credential is unavailable")
         return payload
+
+    def credential_metadata_if_present(
+        self,
+        credential_ref: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            path = self._credential_path(credential_ref)
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                return None
+            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                raise EngineStateError("credential permissions are unsafe")
+            payload = self._read_json(path)
+            kind = payload.get("kind") if payload else None
+            if kind not in {"api_key", "oauth"}:
+                raise EngineStateError("credential is unavailable")
+            return payload
 
     def validate_api_key_target(
         self,

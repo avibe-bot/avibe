@@ -189,13 +189,23 @@
         "schema": "agent-chain.schema.json",
         "path": "/properties/chain/items/properties/reason/anyOf/0"
       },
-      "target": {
-        "schema": "probe-result.schema.json",
-        "path": "/allOf/6/then/properties/error"
-      },
-      "mapping": {
-        "native_cli_unavailable": "models.probe.native_cli_unavailable"
-      }
+      "targets": [
+        {
+          "schema": "agent-supply.schema.json",
+          "path": "/properties/sources/properties/eligibility/items/properties/process_availability_reason",
+          "exclude": [null],
+          "mapping": {
+            "native_cli_unavailable": "native_cli_unavailable"
+          }
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "path": "/allOf/6/then/properties/error",
+          "mapping": {
+            "native_cli_unavailable": "models.probe.native_cli_unavailable"
+          }
+        }
+      ]
     },
     {
       "id": "N1",
