@@ -21,6 +21,7 @@ import {
   repairAction,
   REPAIR_LABEL_KEY,
   REPAIR_LINE_KEY,
+  REPAIR_TOAST,
   repairOutcome,
   repairSettles,
 } from './repair';
@@ -205,6 +206,46 @@ describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog, ReplaceK
   it('covers every verdict that renders as one line', () => {
     const kinds: RepairOutcome['kind'][] = ['repaired', 'refreshed', 'unresolved', 'gaps'];
     expect(kinds.filter((k) => k !== 'gaps').sort()).toEqual(Object.keys(REPAIR_LINE_KEY).sort());
+    // The toast has no list to fall back on, so it answers for the full union —
+    // including the one kind the line map leaves to the panel.
+    expect(kinds.sort()).toEqual(Object.keys(REPAIR_TOAST).sort());
+  });
+
+  it.each(Object.entries(REPAIR_TOAST))('has toast copy in both locales for the %s verdict', (_kind, toast) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, toast.key)).toBe('string');
+  });
+
+  /**
+   * The finding this map exists for: written at the call site as 「warning if
+   * unresolved, success otherwise」, a gap report got the green tone — a toast
+   * saying 连接成功 over a dialog reporting that Agents now have no source at all.
+   *
+   * Asserted as pairs rather than as `!== 'success'`, because the mistake to catch
+   * is a tone that contradicts its own sentence, and only naming both halves
+   * catches it.
+   */
+  it('never celebrates a verdict whose own line is bad news', () => {
+    expect(REPAIR_TOAST.gaps.tone).toBe('warning');
+    expect(REPAIR_TOAST.unresolved.tone).toBe('warning');
+    expect(REPAIR_TOAST.repaired.tone).toBe('success');
+    expect(REPAIR_TOAST.refreshed.tone).toBe('success');
+    // And the tone tracks the verdict, not the branch: exactly the verdicts that
+    // may auto-dismiss are the ones allowed to be green.
+    for (const [kind, toast] of Object.entries(REPAIR_TOAST))
+      expect(toast.tone === 'success', kind).toBe(
+        repairSettles(kind === 'gaps' ? { kind: 'gaps', gaps: [] } : ({ kind } as RepairOutcome)),
+      );
+  });
+
+  it('reuses the line copy where a line exists', () => {
+    // One sentence per verdict on this page: the toast and the panel must not
+    // drift into two wordings of the same finding.
+    for (const kind of Object.keys(REPAIR_LINE_KEY) as (keyof typeof REPAIR_LINE_KEY)[])
+      expect(REPAIR_TOAST[kind].key).toBe(REPAIR_LINE_KEY[kind]);
+    // `gaps` is the exception, and deliberately not `gapsDone`: that string ends
+    // in a colon because a list follows it, and a toast has no list.
+    expect(REPAIR_TOAST.gaps.key).not.toBe('settings.models.repair.gapsDone');
+    for (const bundle of [en, zh]) expect(translated(bundle, REPAIR_TOAST.gaps.key)).not.toMatch(/[:：]$/);
   });
 });
 

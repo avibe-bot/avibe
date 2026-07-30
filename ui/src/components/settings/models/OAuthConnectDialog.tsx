@@ -34,8 +34,8 @@ import {
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { apiFailure, modelsApi, type OAuthResult } from './modelsApi';
-import { REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { serverText } from './serverCopy';
+import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
+import { oauthFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
 import { SupplyGapNote } from './SupplyGapNote';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
@@ -44,19 +44,6 @@ import type { AdoptedBy, Source, SupplyChannel, SupplyGap } from './types';
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
 const TERMINAL = ['success', 'failed', 'cancelled'];
-
-// The creation half of a terminal status/submit response fails with its own
-// codes (api.md → POST /sources errors, raised while materializing the Source).
-const CREATION_CODES = ['discovery_failed', 'engine_down', 'migration_item_conflict'];
-
-/** Terminal-response failure code → copy, keeping 「授权没成」 distinct from
- *  「授权成了但来源没建起来」 instead of collapsing both into 连接失败. */
-const errorKeyFor = (code?: string): string =>
-  code === 'consent_required'
-    ? 'settings.models.oauth.error.consent'
-    : code && CREATION_CODES.includes(code)
-      ? 'settings.models.oauth.error.finalize'
-      : 'settings.models.oauth.error.generic';
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
@@ -123,6 +110,10 @@ export const OAuthConnectDialog: React.FC<{
   // terminal handler and the title alike.
   const reauthId = reauth?.id ?? null;
   const isReauth = reauthId !== null;
+  // The same derivation as a value, because the failure copy needs it as one: a
+  // terminal code means 「couldn't create it」 on a connect and 「it's still broken」
+  // on a repair, and `oauthFailureKey` takes the journey rather than guessing.
+  const journey: OAuthJourney = isReauth ? 'reauth' : 'connect';
 
   /**
    * One owner for 「this reauth already reached the server」, reached from EVERY
@@ -197,14 +188,14 @@ export const OAuthConnectDialog: React.FC<{
         const verdict = result.repaired ? repairOutcome(result.repaired) : null;
         setRepair(verdict);
         onConnectedRef.current();
+        // Line AND tone from the verdict's own owner (`REPAIR_TOAST`), because
+        // choosing them separately here is what put a green 「连接成功」 over a gap
+        // report. An absent tail is the only arrival with no verdict to speak for
+        // it, and 「连接成功」 is what it has always said.
+        const toast = verdict ? REPAIR_TOAST[verdict.kind] : null;
         showToast(
-          (verdict && verdict.kind !== 'gaps'
-            ? t(REPAIR_LINE_KEY[verdict.kind])
-            : t('settings.models.oauth.status.success')) as string,
-          // 「仍然不可用」 in a green toast would contradict its own text. The call
-          // succeeded and the source is still stopped, which is this page's gold
-          // 需处理 tone, not a red failure.
-          verdict?.kind === 'unresolved' ? 'warning' : 'success',
+          t(toast?.key ?? 'settings.models.oauth.status.success') as string,
+          toast?.tone ?? 'success',
         );
         // Unlike the adoption auto-close below this one is PROVABLE: 「nothing was
         // stranded」 is a field the server sends, so a clean repair may dismiss
@@ -248,13 +239,14 @@ export const OAuthConnectDialog: React.FC<{
       } catch (err) {
         if (cancelled) return;
         // A poll that lands on a just-succeeded flow is also the call that
-        // materializes the Source, so it can fail for creation reasons
-        // (consent_required / discovery_failed / engine_down): the vendor said
-        // yes and the Source still doesn't exist. Naming that separately is the
-        // difference between 「重试授权」 and 「授权成功但没能建立来源」.
+        // materializes the outcome, so it can fail for reasons that have nothing
+        // to do with the authorization (consent_required / discovery_failed /
+        // engine_down): the vendor said yes and what came after it broke. Naming
+        // that separately is the difference between 「重试授权」 and 「授权成功，
+        // 后面没成」 — and WHICH object it broke is the journey's to say.
         const failure = apiFailure(err);
         reauthLeftRowsStale(failure);
-        transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
+        transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
       }
     };
 
@@ -283,14 +275,29 @@ export const OAuthConnectDialog: React.FC<{
           // source whose old sign-in the server has ALREADY invalidated, and the
           // next reauth would find that flow still pending. Cancel it where it is
           // known instead of dropping it.
-          modelsApi.cancelOAuth(started.flow_id).catch(() => {});
-          // And re-read, because this response is the PROOF that the write landed.
-          // The close path refetches too, but it does so while this request is
-          // still in flight: that read can return the row as it was before
-          // `mark_native_irreversible_start` committed, and nothing afterwards
-          // would correct it. The abandoned journey is the one case where the user
-          // is no longer looking at a dialog that could tell them.
-          reauthLeftRowsStale();
+          //
+          // AWAITED, not fire-and-forget: for a flow that has already reached a
+          // terminal state this endpoint does not cancel anything — `oauth_cancel`
+          // routes a `success` flow (and a failed hub reauth) into
+          // `_materialize_completed_oauth` instead of the adapter's cancel. A
+          // reused pending flow can be exactly that by the time we get here, so
+          // this call can BE the write, and reading the rows before it returns is
+          // reading before it happened.
+          try {
+            await modelsApi.cancelOAuth(started.flow_id);
+          } catch {
+            // Nothing to show — the dialog is already gone. The refetch below
+            // still has to run: the irreversible half committed at the start
+            // call, whether or not this cleanup succeeded.
+          } finally {
+            // And re-read, because these responses are the PROOF that the writes
+            // landed. The close path refetches too, but it does so while this
+            // request is still in flight: that read can return the row as it was
+            // before `mark_native_irreversible_start` committed, and nothing
+            // afterwards would correct it. The abandoned journey is the one case
+            // where the user is no longer looking at a dialog that could tell them.
+            reauthLeftRowsStale();
+          }
           return;
         }
         // A reused pending flow can arrive already finished. Read its status
@@ -329,6 +336,11 @@ export const OAuthConnectDialog: React.FC<{
       const cur = authority.current().flow;
       transition({ kind: 'reset' });
       if (flowAuthorityRef.current === authority) flowAuthorityRef.current = null;
+      // Fire-and-forget is right HERE, unlike the abandoned-start path above, and
+      // the guard is why: `TERMINAL` excludes exactly the states in which cancel
+      // materializes instead of cancelling, so what this call can reach is only a
+      // pending flow being thrown away. There is nothing for a refetch to see, and
+      // a cleanup function cannot await anyway.
       if (cur && !TERMINAL.includes(cur.state)) modelsApi.cancelOAuth(cur.flow_id).catch(() => {});
     };
   }, [open, vendor, channel, reauthId, t, showToast]);
@@ -369,7 +381,7 @@ export const OAuthConnectDialog: React.FC<{
       // same way — including after the credential change has committed.
       const failure = apiFailure(err);
       reauthLeftRowsStale(failure);
-      authority.transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
+      authority.transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
     } finally {
       if (isCurrent()) setSubmitting(false);
     }

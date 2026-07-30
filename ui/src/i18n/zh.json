@@ -811,6 +811,7 @@
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建来源失败，请重试",
+          "finalizeReauth": "已重新登录，但这个来源还是不可用，请重试",
           "consent": "连接中枢托管订阅需先同意实验条款；请重新发起连接并在弹窗中开启「中枢托管」选项。"
         },
         "hubOption": {
@@ -1000,6 +1001,7 @@
         "forceConfirm": "强制更换",
         "gapsTitle": "继续后这些 Agent 将没有来源可用：",
         "gapsDone": "这些 Agent 现在没有来源可用：",
+        "gaps": "有 Agent 现在没有来源可用",
         "repaired": "已恢复可用",
         "refreshed": "已更新",
         "unresolved": "仍然不可用",

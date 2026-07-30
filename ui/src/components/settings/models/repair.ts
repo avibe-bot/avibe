@@ -215,6 +215,29 @@ export const REPAIR_LINE_KEY: Record<RepairLine, string> = {
   unresolved: 'settings.models.repair.unresolved',
 };
 
+/**
+ * A verdict's TOAST — the line and the tone, decided together, for every kind.
+ *
+ * The toast is not the panel. A gap report renders there as a heading over a list
+ * of pairs, which is why the map above has no `gaps` entry; a toast has no list, so
+ * it needs a sentence for the one verdict that panel handles structurally.
+ *
+ * Tone belongs here for the reason the gap case proves: written at the call site as
+ * 「warning if unresolved, success otherwise」, the gap report got the one tone that
+ * contradicts its own text — a green 「连接成功」 over a dialog reporting that Agents
+ * now have no source at all. Tone is a property OF the verdict, not of the branch
+ * that happens to render it, and a Record over the full union makes the next
+ * verdict added answer for its own tone instead of inheriting green.
+ */
+export const REPAIR_TOAST: Record<RepairOutcome['kind'], { key: string; tone: 'success' | 'warning' }> = {
+  repaired: { key: REPAIR_LINE_KEY.repaired, tone: 'success' },
+  refreshed: { key: REPAIR_LINE_KEY.refreshed, tone: 'success' },
+  // The call succeeded and the source is still stopped: this page's gold 需处理
+  // tone, not a red failure.
+  unresolved: { key: REPAIR_LINE_KEY.unresolved, tone: 'warning' },
+  gaps: { key: 'settings.models.repair.gaps', tone: 'warning' },
+};
+
 // ── 试跑 (dry run) ───────────────────────────────────────────────────────
 
 /**

@@ -811,6 +811,7 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
           "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
         },
         "hubOption": {
@@ -1000,6 +1001,7 @@
         "forceConfirm": "Replace anyway",
         "gapsTitle": "These agents will have no source left:",
         "gapsDone": "These agents now have no source left:",
+        "gaps": "Some agents now have no source left",
         "repaired": "Working again",
         "refreshed": "Updated",
         "unresolved": "Still not working",
