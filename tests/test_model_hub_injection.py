@@ -285,6 +285,27 @@ def test_native_failure_is_forwarded_to_turn_correlation(
         reason="quota_exhausted",
     )
 
+    correlation.fail_native_attempt.reset_mock()
+    unclassified_context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_native_unclassified"}
+    )
+    native_launch = launch_for_context(context)
+    assert native_launch is not None
+    bind_launch(unclassified_context, native_launch)
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                unclassified_context,
+                "provider rejected the local request",
+            )
+        )
+        is False
+    )
+    correlation.fail_native_attempt.assert_called_once_with(
+        "turn_native_unclassified",
+        reason="unclassified_error",
+    )
+
 
 def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
     first = _source(

@@ -179,8 +179,9 @@ The acceptance suite contains separate fixtures for:
   every matching attempt `via_mapping: true`; an unexpected request model
   makes the record absent;
 - user Stop, dropped connection, and successful control settlements;
-- native CLI terminal failures classified before settlement, so a failed turn
-  cannot be recorded as served;
+- every observed native CLI terminal failure classified before settlement
+  (unknown diagnostics use `unclassified_error` without mutating source
+  health), so a failed turn cannot be recorded as served;
 - Direct, ambiguous-known, and unknown provenance route absences;
 - source chain order and model-scoped supply state;
 - probe usable-completion and latency partition;

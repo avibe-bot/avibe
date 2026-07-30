@@ -915,6 +915,7 @@ class ModelHubRuntimeRouter:
             return False
         if getattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False):
             return False
+        decision: ResolutionDecision | None
         if _NATIVE_QUOTA_RE.search(diagnostic):
             decision = ResolutionDecision("fallback", reason="quota_exhausted", cooldown_seconds=300)
         elif _NATIVE_RATE_RE.search(diagnostic):
@@ -924,7 +925,7 @@ class ModelHubRuntimeRouter:
         elif _NETWORK_ERROR_RE.search(diagnostic):
             decision = ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
         else:
-            return False
+            decision = None
         if launch.channel == "native_cli" and self.turn_gateway is not None:
             turn_id = str(
                 (getattr(context, "platform_specific", None) or {}).get(
@@ -932,11 +933,16 @@ class ModelHubRuntimeRouter:
                 )
                 or ""
             ).strip()
-            assert decision.reason is not None
             self.turn_gateway.correlation.fail_native_attempt(
                 turn_id,
-                reason=decision.reason,
+                reason=(
+                    decision.reason
+                    if decision is not None and decision.reason is not None
+                    else "unclassified_error"
+                ),
             )
+        if decision is None:
+            return False
         config = self.service.store.load()
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:
