@@ -29,6 +29,17 @@ export const MODELS_API_MODE: 'mock' | 'live' = 'live';
 export const MODEL_MENUS_ENABLED = true;
 
 /**
+ * Offers 试跑 in the 来源顺序 drawer — one real turn through the chain.
+ *
+ * OFF because the route it calls, `POST /api/models/agents/<backend>/probe`, is
+ * not on master yet: it ships with the provenance/channel-aware-probe lane. A
+ * button that 404s is worse than no button, and this is a one-line flip in the
+ * rebase that brings the route in — the same way MODEL_MENUS_ENABLED above waited
+ * for the drawers it opens.
+ */
+export const DRY_RUN_ENABLED = false;
+
+/**
  * Offers the consent-gated hub-held subscription option (`subscription_hub_
  * experimental`, spec §4.1/§7) inside the connect-subscription dialog. OFF by
  * default: subscriptions connect via the sanctioned native_cli channel only.

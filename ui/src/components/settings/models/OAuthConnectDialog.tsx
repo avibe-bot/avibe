@@ -5,6 +5,14 @@
 // / OAuthSubmitRow) so it matches the Backends OAuth panel. State machine
 // mirrors BackendOAuthPanel: start → 2s poll → verifying → success, 15-min
 // timeout, cancel.
+//
+// It runs the RE-AUTH journey too (`reauth` prop, AC-2/AC-13). api.md gives both
+// intents one flow and one terminal envelope — only the tail beside it differs
+// (`adopted_by` for a create, `recovered`/`interrupted_pairs` for a repair) — so
+// they share this machine rather than getting a second copy of the poll, the
+// deadline, the paste submit and the cancel-on-unmount. A duplicate is precisely
+// how one of the two ends up reading a different half of the envelope, which is
+// the bug `settle` below was written to fix.
 import * as React from 'react';
 import { CheckCircle2, Sparkles, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -25,10 +33,12 @@ import {
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi, type OAuthResult } from './modelsApi';
+import { repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { serverText } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
+import { SupplyGapNote } from './SupplyGapNote';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
-import type { AdoptedBy, SupplyChannel } from './types';
+import type { AdoptedBy, Source, SupplyChannel } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
@@ -61,9 +71,16 @@ export const OAuthConnectDialog: React.FC<{
   open: boolean;
   /** 'anthropic' (Claude) | 'openai' (ChatGPT) | any future subscription vendor. */
   vendor: string;
+  /**
+   * Present ⇒ this is a RE-AUTH of that existing source, not a new connect. A
+   * SNAPSHOT on purpose: a native re-auth writes 需处理 on the row before the login
+   * even starts, so re-reading the live row would rewrite this dialog's own
+   * subject mid-flow.
+   */
+  reauth?: Source | null;
   onClose: () => void;
   onConnected: () => void;
-}> = ({ open, vendor, onClose, onConnected }) => {
+}> = ({ open, vendor, reauth = null, onClose, onConnected }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -79,6 +96,9 @@ export const OAuthConnectDialog: React.FC<{
   // `null` means the terminal response did not report a creation — which is not
   // 「没有 Agent 采用」 and must not be rendered as it.
   const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[] | null>(null);
+  // The reauth counterpart of `adoptedBy`, read through the same owner the key
+  // replacement uses so 「did that fix it?」 has one answer on the page.
+  const [repair, setRepair] = React.useState<RepairOutcome | null>(null);
   const [, tick] = React.useReducer((x) => x + 1, 0);
 
   // Set by the flow effect so `submit` lands through the very same owners as a
@@ -93,6 +113,10 @@ export const OAuthConnectDialog: React.FC<{
   onCloseRef.current = onClose;
 
   const accent = vendor === 'openai' ? 'gold' : 'mint';
+  // One derivation for 「which journey is this」, read by the start call, the
+  // terminal handler and the title alike.
+  const reauthId = reauth?.id ?? null;
+  const isReauth = reauthId !== null;
 
   const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -136,7 +160,25 @@ export const OAuthConnectDialog: React.FC<{
     const settle = (result: OAuthResult): boolean => {
       const { created } = result;
       const step = transition({ kind: 'response', flow: result.flow });
-      if (step.action === 'succeed') {
+      if (step.action === 'succeed' && isReauth) {
+        // A reauth terminates on the SAME source it started from; what the server
+        // adds is whether that cleared the blocker and what is still stranded.
+        const verdict = result.repaired ? repairOutcome(result.repaired) : null;
+        setRepair(verdict);
+        onConnectedRef.current();
+        showToast(
+          (verdict && verdict.kind !== 'gaps'
+            ? t(`settings.models.repair.${verdict.kind}`)
+            : t('settings.models.oauth.status.success')) as string,
+          'success',
+        );
+        // Unlike the adoption auto-close below this one is PROVABLE: 「nothing was
+        // stranded」 is a field the server sends, so a clean repair may dismiss
+        // itself while a gap report stays on screen to be read. An absent tail
+        // says nothing to read either, so it closes too.
+        if (!verdict || repairSettles(verdict))
+          successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
+      } else if (step.action === 'succeed') {
         // The Source already exists. The status/submit call that first reports
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
@@ -186,12 +228,17 @@ export const OAuthConnectDialog: React.FC<{
     setCode('');
     setSubmitting(false);
     setAdoptedBy(null);
+    setRepair(null);
     void (async () => {
       try {
-        // A hub-held subscription connect (channel === 'hub' only when the user
-        // has confirmed the experimental consent below) must carry consent, or
-        // the server returns consent_required.
-        const started = await modelsApi.startOAuth(vendor, channel, channel === 'hub');
+        // Two ways in, one flow out. The reauth route opens the flow ON the
+        // existing source and acknowledges the irreversibility server-side (the
+        // page has already asked); a create opens a fresh one, and a hub-held
+        // connect (channel === 'hub' only after the experimental consent below)
+        // must carry consent or the server returns consent_required.
+        const started = reauthId
+          ? await modelsApi.reauthSource(reauthId)
+          : await modelsApi.startOAuth(vendor, channel, channel === 'hub');
         if (cancelled) return;
         transition({ kind: 'response', flow: started });
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
@@ -219,7 +266,7 @@ export const OAuthConnectDialog: React.FC<{
       if (flowAuthorityRef.current === authority) flowAuthorityRef.current = null;
       if (cur && !TERMINAL.includes(cur.state)) modelsApi.cancelOAuth(cur.flow_id).catch(() => {});
     };
-  }, [open, vendor, channel, t, showToast]);
+  }, [open, vendor, channel, reauthId, t, showToast]);
 
   // 1-second ticker so the paste-flow countdown updates.
   React.useEffect(() => {
@@ -296,9 +343,11 @@ export const OAuthConnectDialog: React.FC<{
               <span className={cn('grid size-8 shrink-0 place-items-center rounded-lg', ACCENT_TILE[accent])}>
                 <Sparkles className={cn('size-4', ACCENT_ICON[accent])} />
               </span>
-              {t(`settings.models.oauth.title.${vendor}`, {
-                defaultValue: t('settings.models.oauth.title.generic') as string,
-              })}
+              {isReauth
+                ? t('settings.models.oauth.title.reauth', { name: reauth?.display_name ?? '' })
+                : t(`settings.models.oauth.title.${vendor}`, {
+                    defaultValue: t('settings.models.oauth.title.generic') as string,
+                  })}
             </DialogTitle>
           </DialogHeader>
 
@@ -311,7 +360,27 @@ export const OAuthConnectDialog: React.FC<{
             </div>
           )}
 
-          {success ? (
+          {success && isReauth ? (
+            // A repair reports on the source it repaired, not on a new connection:
+            // 「已恢复可用」 when the login cleared the blocker, 「已更新」 when there
+            // was nothing to clear, and the stranded pairs when something is still
+            // without a source — the one case that stays on screen.
+            repair?.kind === 'gaps' ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
+                <span className="text-[12.5px] font-semibold leading-relaxed text-gold">
+                  {t('settings.models.repair.gapsDone')}
+                </span>
+                <SupplyGapNote gaps={repair.gaps} />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+                <CheckCircle2 className="size-4 shrink-0" />
+                {repair
+                  ? t(`settings.models.repair.${repair.kind}`)
+                  : t('settings.models.oauth.connected')}
+              </div>
+            )
+          ) : success ? (
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
                 <CheckCircle2 className="size-4 shrink-0" />
@@ -366,7 +435,11 @@ export const OAuthConnectDialog: React.FC<{
                   )}
                 </Step>
 
-                {SUBSCRIPTION_HUB_EXPERIMENTAL && (
+                {/* Withheld on a re-auth: where a subscription is HELD is a
+                    property of the existing source, and this flow is signing back
+                    into it — offering to move it here would be a different
+                    operation wearing this one's clothes. */}
+                {SUBSCRIPTION_HUB_EXPERIMENTAL && !isReauth && (
                   <button
                     type="button"
                     onClick={() => (channel === 'hub' ? setChannel('native_cli') : setConsentOpen(true))}

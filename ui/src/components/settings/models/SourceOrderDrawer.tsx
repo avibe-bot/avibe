@@ -20,8 +20,20 @@
 // Reachable in Hub mode only (AC-7): a Direct backend has no Hub order, no chain
 // and no probe, so the affordance is withdrawn rather than shown empty.
 import * as React from 'react';
+import type { TFunction } from 'i18next';
 import { Reorder, useDragControls } from 'framer-motion';
-import { ChevronRight, CirclePlus, GripVertical, List, WandSparkles, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronRight,
+  CirclePlus,
+  GripVertical,
+  List,
+  Loader2,
+  TriangleAlert,
+  WandSparkles,
+  X,
+  Zap,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -32,10 +44,13 @@ import { useToast } from '@/context/ToastContext';
 import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
 import { eligibilityOf } from './eligibility';
+import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
-import { modelsApi } from './modelsApi';
+import { apiFailure, modelsApi } from './modelsApi';
+import { dryRunOutcome, dryRunPlan, type DryRunOutcome } from './repair';
 import { movedOrder, sameIds } from './reorder';
+import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
 import { isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
@@ -448,6 +463,8 @@ export const SourceOrderDrawer: React.FC<{
           </>
         )}
 
+        {DRY_RUN_ENABLED && <DryRunRow agent={agent} sources={sources} />}
+
         {/* The phone's home for 模型菜单与映射. A frame that doesn't draw a control
             at 390px is saying where to move it, not that a phone user may not
             have it — the two configuration surfaces answer adjacent questions
@@ -468,6 +485,117 @@ export const SourceOrderDrawer: React.FC<{
         )}
       </div>
     </MenuDrawer>
+  );
+};
+
+/** 「<name> 没跑通」, with the server's reason when it gave one. */
+const failedLine = (t: TFunction, name: string, detail: string | null): string =>
+  detail
+    ? (t('settings.models.dryRun.failed', { name, detail }) as string)
+    : (t('settings.models.dryRun.failedUnknown', { name }) as string);
+
+/**
+ * 试跑 — one real turn through this Agent's chain, and its answer.
+ *
+ * Full-width at every breakpoint, at the end of the list. No V6 or M02 frame
+ * draws it, so it takes the geometry of the phone's 模型菜单与映射 row rather than
+ * inventing one, and it is a row instead of a third footer button because the
+ * answer belongs UNDER the question: 「这条链现在能不能跑通」 is about the list
+ * above it, and a footer control would report on it from the wrong end of the
+ * sheet, with nowhere to put the result line.
+ *
+ * It reports the head the SERVER picked, never one this drawer chose: the probe
+ * takes no model, the reply names the source it reached, and a null latency is a
+ * head the Hub does not carry the request for (a native CLI login) — which is
+ * `可用` without a number, not a zero.
+ */
+const DryRunRow: React.FC<{ agent: AgentSupply; sources: Source[] }> = ({ agent, sources }) => {
+  const { t } = useTranslation();
+  const plan = dryRunPlan(agent);
+  const [running, setRunning] = React.useState(false);
+  const [outcome, setOutcome] = React.useState<DryRunOutcome | null>(null);
+  // The already-resolved sentence, not the key: a thrown failure may carry no key
+  // at all, and `null` then has to mean 「nothing ran yet」 rather than 「it failed
+  // for a reason nobody named」.
+  const [errorText, setErrorText] = React.useState<string | null>(null);
+  const seq = React.useRef(0);
+
+  // A result describes ONE chain head. Reorder the list, move the head, and the
+  // line above stops being about anything — so it goes, rather than sitting there
+  // naming a source this Agent no longer starts from.
+  const head = `${agent.current?.source_id ?? ''}·${agent.current?.model_id ?? ''}`;
+  React.useEffect(() => {
+    seq.current += 1;
+    setRunning(false);
+    setOutcome(null);
+    setErrorText(null);
+  }, [head]);
+
+  // No head, or Direct mode: the route answers `direct_mode` / has nothing
+  // runnable to reach, and the page says why one level up with the remedy
+  // attached. A disabled 试跑 would only repeat it.
+  if (plan.kind === 'none') return null;
+
+  const run = async () => {
+    const mine = ++seq.current;
+    setRunning(true);
+    setOutcome(null);
+    setErrorText(null);
+    try {
+      const probe = await modelsApi.probeAgent(plan.backend);
+      if (seq.current !== mine) return;
+      setOutcome(dryRunOutcome(probe, sources));
+    } catch (err) {
+      if (seq.current !== mine) return;
+      // The server's own reason when it named one (`probe_no_candidate` carries a
+      // detail key), the generic line when it didn't — the same degradation the
+      // rest of the page gives a server-chosen key.
+      setErrorText(serverText(t, apiFailure(err)?.detail, 'settings.models.dryRun.error'));
+    } finally {
+      if (seq.current === mine) setRunning(false);
+    }
+  };
+
+  const ok = outcome?.kind === 'ok';
+  const line = !outcome
+    ? errorText
+    : outcome.kind === 'ok'
+      ? outcome.latencyMs !== null
+        ? (t('settings.models.dryRun.ok', { name: outcome.sourceName, ms: outcome.latencyMs }) as string)
+        : (t('settings.models.dryRun.okNoLatency', { name: outcome.sourceName }) as string)
+      : // The detail is the server's key; with none, the name alone is the honest
+        // sentence rather than a machine code appended to it.
+        failedLine(t, outcome.sourceName, serverText(t, outcome.detailKey));
+
+  return (
+    <div className="mt-1 flex flex-col gap-2">
+      <Button
+        variant="outline"
+        className="h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold"
+        onClick={() => void run()}
+        disabled={running}
+      >
+        <span className="flex items-center gap-2">
+          {running ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+          {t(running ? 'settings.models.dryRun.running' : 'settings.models.dryRun.action')}
+        </span>
+      </Button>
+      {line && (
+        <p
+          className={cn(
+            'flex items-start gap-1.5 px-1 text-[12px] leading-relaxed',
+            ok ? 'text-mint' : 'text-gold',
+          )}
+        >
+          {ok ? (
+            <CheckCircle2 className="mt-[2px] size-3.5 shrink-0" />
+          ) : (
+            <TriangleAlert className="mt-[2px] size-3.5 shrink-0" />
+          )}
+          {line}
+        </p>
+      )}
+    </div>
   );
 };
 

@@ -423,6 +423,18 @@ export type ApiErr = {
   contract_version: typeof CONTRACT_VERSION;
   error: string;
   detail?: string;
+  /** Present on `source_last_supplier`: the (backend, model) pairs the refused
+   *  write would have left with no source, and the named Agents that run them. */
+  would_interrupt?: SupplyGap[];
+};
+
+/** api.md supply guard — one (backend, model) pair the write would strand, plus
+ *  the named Agents affected. `agents` is what the confirm copy names, because
+ *  「删除后 pm 将没有可用来源」 is actionable where a bare pair is not. */
+export type SupplyGap = {
+  backend: AgentBackend;
+  model_id: string;
+  agents: string[];
 };
 
 /** POST /api/models/sources — api_key create validates + discovers models. */
@@ -463,6 +475,36 @@ export type SourcePatch = {
  *  order back to the server, `custom` freezes exactly the ids sent. The route
  *  rejects unknown keys, so `contract_version` is deliberately NOT part of it. */
 export type AgentSourcesPut = { policy: 'follow' } | { policy: 'custom'; order: string[] };
+
+/**
+ * PUT /api/models/sources/<id>/credential — hub-channel api_key sources only.
+ * Also a TOTAL body that rejects unknown keys (`contract_version` included), so
+ * `force` is omitted rather than sent false on the unguarded first attempt.
+ */
+export type CredentialReplace = { key: string; force?: boolean };
+
+/**
+ * POST /api/models/sources/<id>/reauth. The acknowledgement is server-enforced
+ * and unconditional for native sources — pre-login, before anything is
+ * destroyed — so the client always confirms and always sends it. Same
+ * closed-body rule: nothing else may appear.
+ */
+export type ReauthRequest = { acknowledge_irreversible: true };
+
+/**
+ * The shared tail of both repair routes (api.md "recovery symmetry"), and of a
+ * terminal `reauth` OAuth flow.
+ *
+ * `recovered` is the server's own judgement that the prior state was
+ * needs_action/error — the client never re-derives it, and it is also the reason
+ * a repair is exempt from the supply guard: `interrupted_pairs` on a recovering
+ * write is a report of what is still stranded, not a refusal.
+ */
+export type SourceRepaired = {
+  source: Source;
+  recovered: boolean;
+  interrupted_pairs: SupplyGap[];
+};
 
 /** POST /api/models/custom-models — appends a manual-provenance model entry to
  *  a source's supply list (frame 08). */

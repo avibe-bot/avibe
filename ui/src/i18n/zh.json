@@ -782,7 +782,8 @@
         "title": {
           "anthropic": "连接 Claude 订阅",
           "openai": "连接 ChatGPT 订阅",
-          "generic": "连接订阅"
+          "generic": "连接订阅",
+          "reauth": "重新登录「{{name}}」"
         },
         "starting": "正在准备…",
         "connected": "连接成功，已加入来源列表",
@@ -955,6 +956,8 @@
         "more": "更多操作",
         "rename": "重命名",
         "rediscover": "重新发现模型",
+        "reauth": "重新登录",
+        "replaceKey": "更换 API Key",
         "delete": "删除来源",
         "renameTitle": "重命名来源",
         "renameLabel": "显示名",
@@ -973,7 +976,39 @@
         "deleteFailed": "删除失败，请重试",
         "renameHint": "只改显示名，不动凭证",
         "rediscoverHint": "重新拉取这个来源能供给的模型",
-        "deleteHint": "删除前会再确认一次"
+        "deleteHint": "删除前会再确认一次",
+        "reauthHint": "旧登录立即失效",
+        "replaceKeyHint": "填入新 Key，地址与显示名不变"
+      },
+      "repair": {
+        "reauth": "重新登录",
+        "replaceKey": "更换 Key",
+        "retest": "重试",
+        "reauthTitle": "重新登录「{{name}}」？",
+        "reauthBody": "开始后旧的登录立即失效，完成前用它登录的来源都不可用。",
+        "reauthConfirm": "开始登录",
+        "replaceTitle": "更换「{{name}}」的 API Key",
+        "replaceBody": "填入新的 Key，其他设置不变。",
+        "replaceLabel": "新的 API Key",
+        "replaceSubmit": "更换",
+        "replacing": "更换中…",
+        "replaceFailed": "更换失败，请重试",
+        "forceTitle": "仍要更换？",
+        "forceConfirm": "强制更换",
+        "gapsTitle": "继续后这些 Agent 将没有来源可用：",
+        "gapsDone": "这些 Agent 现在没有来源可用：",
+        "repaired": "已恢复可用",
+        "refreshed": "已更新",
+        "failed": "没能处理，请重试"
+      },
+      "dryRun": {
+        "action": "试跑一次",
+        "running": "试跑中…",
+        "ok": "{{name}} 可用 · {{ms}} ms",
+        "okNoLatency": "{{name}} 可用",
+        "failed": "{{name}} 没跑通 · {{detail}}",
+        "failedUnknown": "{{name}} 没跑通",
+        "error": "试跑没能进行，请重试"
       },
       "migrationBanner": {
         "title": "发现可导入中枢的原生配置",
@@ -1035,8 +1070,8 @@
       "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
       "consent_required": "需要先同意实验性中枢供给"
     },
-    "probe": {
-      "native_cli_unavailable": "当前进程无法使用 CLI 登录"
+    "oauth": {
+      "binding_failed": "该账号已被另一来源使用"
     },
     "source": {
       "cooldown": {
@@ -1047,7 +1082,7 @@
         "server_error": "上游服务异常"
       },
       "needs_action": {
-        "oauth_expired": "登录已过期，需要重新授权",
+        "oauth_expired": "需要重新登录",
         "balance_exhausted": "余额不足，需要充值",
         "credential_revoked": "凭据已失效，需要重新填写",
         "account_banned": "账号被限制使用"

@@ -17,37 +17,14 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { cn } from '@/lib/utils';
 import { modelsApi } from './modelsApi';
 import { AdoptionNote } from './AdoptionNote';
+import { FieldLabel, IconField } from './dialogFields';
 import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
 import type { AdoptedBy, Source } from './types';
 
 type Phase = 'edit' | 'submitting' | 'done' | 'error';
-
-const FieldLabel: React.FC<{ mono?: boolean; children: React.ReactNode }> = ({ mono, children }) => (
-  <label
-    className={cn(
-      'text-muted',
-      mono
-        ? 'font-mono text-[11px] font-medium uppercase tracking-wide'
-        : 'text-[12px] font-semibold text-foreground',
-    )}
-  >
-    {children}
-  </label>
-);
-
-const IconField: React.FC<{
-  icon: React.ComponentType<{ className?: string }>;
-  children: React.ReactNode;
-}> = ({ icon: Icon, children }) => (
-  <div className="relative">
-    <Icon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" />
-    {children}
-  </div>
-);
 
 export const AddApiKeyDialog: React.FC<{
   open: boolean;

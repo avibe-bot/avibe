@@ -19,6 +19,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
+import { RepairJourney, type RepairTarget } from './RepairJourney';
 import { createLatestAsyncAuthority } from './asyncLifetime';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
@@ -96,6 +97,10 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
+  // The row + remedy a repair journey is running for. Holds the SOURCE OBJECT, not
+  // its id, on purpose: a re-auth's first act is to change that row, so a live
+  // lookup would rewrite the dialog's own subject mid-flow (RepairJourney.tsx).
+  const [repairTarget, setRepairTarget] = React.useState<RepairTarget | null>(null);
   // Which backend's 模型菜单 / 来源顺序 drawer is open. Tracked by backend id (not
   // the agent object) so a background refresh keeps feeding the drawer the
   // freshest agent.
@@ -241,6 +246,7 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
+            onRepair={(source, kind) => setRepairTarget({ source, kind })}
           />
           <AgentCard
             agents={agents}
@@ -266,6 +272,11 @@ export const SettingsModelsPage: React.FC = () => {
         vendor={oauthVendor ?? 'anthropic'}
         onClose={() => setOauthVendor(null)}
         onConnected={() => void refreshSourcesAgents()}
+      />
+      <RepairJourney
+        target={repairTarget}
+        onClose={() => setRepairTarget(null)}
+        onChanged={() => void refreshSourcesAgents()}
       />
 
       {orderAgent && (

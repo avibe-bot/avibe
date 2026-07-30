@@ -30,7 +30,7 @@ const adopted: AdoptedBy[] = [{ backend: 'claude', policy: 'follow', position: 1
 describe('oauthResult', () => {
   it('keeps the creation the terminal response reports', () => {
     const r = { flow: flow(), source, adopted_by: adopted } as OAuthResultResponse;
-    expect(oauthResult(r)).toEqual({ flow: r.flow, created: { source, adopted_by: adopted } });
+    expect(oauthResult(r)).toEqual({ flow: r.flow, created: { source, adopted_by: adopted }, repaired: null });
   });
 
   it('reads an absent adopted_by beside a source as nothing adopted it', () => {
@@ -51,6 +51,48 @@ describe('oauthResult', () => {
     // something about this connect that the server never said.
     const r = { flow: flow({ intent: 'reauth' }), source } as OAuthResultResponse;
     expect(oauthResult(r).created).toBeNull();
+  });
+
+  it('keeps the repair tail a terminal reauth reports', () => {
+    // The other half of the same discrimination: dropping this is the L5 version
+    // of the bug above — the user re-authorizes, the server reports which Agents
+    // are still stranded, and the dialog would close saying nothing about them.
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['pm'] }];
+    const r = {
+      flow: flow({ intent: 'reauth' }),
+      source,
+      recovered: true,
+      interrupted_pairs: gaps,
+    } as OAuthResultResponse;
+    expect(oauthResult(r).repaired).toEqual({ source, recovered: true, interrupted_pairs: gaps });
+  });
+
+  it('reads an absent recovered as "the server did not say so"', () => {
+    // Never as a client guess that it did: `recovered` drives 「已恢复」 copy, and
+    // claiming a recovery the server never reported is the one lie this tail can
+    // tell. An absent `interrupted_pairs` normalizes to [], which is the same
+    // statement the server makes by sending an empty array.
+    const r = { flow: flow({ intent: 'reauth' }), source } as OAuthResultResponse;
+    expect(oauthResult(r).repaired).toEqual({ source, recovered: false, interrupted_pairs: [] });
+  });
+
+  it('fills a gap missing its agents rather than dropping the gap', () => {
+    // A gap with no nameable Agent is still a stranded model, and the confirm
+    // dialog was opened to report it. `agents: []` renders as 「无」; a dropped
+    // entry renders as 「nothing was stranded」, which is the opposite.
+    const r = {
+      flow: flow({ intent: 'reauth' }),
+      source,
+      interrupted_pairs: [{ backend: 'codex', model_id: 'gpt-5.6' }],
+    } as unknown as OAuthResultResponse;
+    expect(oauthResult(r).repaired?.interrupted_pairs).toEqual([
+      { backend: 'codex', model_id: 'gpt-5.6', agents: [] },
+    ]);
+  });
+
+  it('reports no repair while a reauth flow is still running', () => {
+    const r = { flow: flow({ intent: 'reauth', state: 'awaiting_action' }) } as OAuthResultResponse;
+    expect(oauthResult(r).repaired).toBeNull();
   });
 
   it('treats a flow without `intent` as a create flow', () => {

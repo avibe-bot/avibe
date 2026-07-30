@@ -782,7 +782,8 @@
         "title": {
           "anthropic": "Connect Claude subscription",
           "openai": "Connect ChatGPT subscription",
-          "generic": "Connect subscription"
+          "generic": "Connect subscription",
+          "reauth": "Sign in to “{{name}}” again"
         },
         "starting": "Preparing…",
         "connected": "Connected — added to your sources",
@@ -955,6 +956,8 @@
         "more": "More actions",
         "rename": "Rename",
         "rediscover": "Re-discover models",
+        "reauth": "Sign in again",
+        "replaceKey": "Replace API key",
         "delete": "Delete source",
         "renameTitle": "Rename source",
         "renameLabel": "Display name",
@@ -973,7 +976,39 @@
         "deleteFailed": "Couldn't delete, please retry",
         "renameHint": "Changes the display name only — the credential is untouched",
         "rediscoverHint": "Re-fetch the models this source can supply",
-        "deleteHint": "You'll be asked to confirm first"
+        "deleteHint": "You'll be asked to confirm first",
+        "reauthHint": "The old sign-in stops working right away",
+        "replaceKeyHint": "Enter a new key — the endpoint and name stay"
+      },
+      "repair": {
+        "reauth": "Sign in",
+        "replaceKey": "Replace key",
+        "retest": "Retry",
+        "reauthTitle": "Sign in to “{{name}}” again?",
+        "reauthBody": "The old sign-in stops working as soon as you start, and sources using it are unavailable until you finish.",
+        "reauthConfirm": "Start sign-in",
+        "replaceTitle": "Replace the API key for “{{name}}”",
+        "replaceBody": "Enter a new key — everything else stays the same.",
+        "replaceLabel": "New API key",
+        "replaceSubmit": "Replace",
+        "replacing": "Replacing…",
+        "replaceFailed": "Couldn't replace the key, please retry",
+        "forceTitle": "Replace it anyway?",
+        "forceConfirm": "Replace anyway",
+        "gapsTitle": "These agents will have no source left:",
+        "gapsDone": "These agents now have no source left:",
+        "repaired": "Working again",
+        "refreshed": "Updated",
+        "failed": "Couldn't do that, please retry"
+      },
+      "dryRun": {
+        "action": "Run a test turn",
+        "running": "Testing…",
+        "ok": "{{name}} is reachable · {{ms}} ms",
+        "okNoLatency": "{{name}} is reachable",
+        "failed": "{{name}} didn't go through · {{detail}}",
+        "failedUnknown": "{{name}} didn't go through",
+        "error": "Couldn't run the test, please retry"
       },
       "migrationBanner": {
         "title": "Native configs ready to import",
@@ -1035,8 +1070,8 @@
       "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
       "consent_required": "Needs your consent for experimental hub supply first"
     },
-    "probe": {
-      "native_cli_unavailable": "CLI login is not available in this process"
+    "oauth": {
+      "binding_failed": "That account is already used by another source"
     },
     "source": {
       "cooldown": {
@@ -1047,7 +1082,7 @@
         "server_error": "Upstream server error"
       },
       "needs_action": {
-        "oauth_expired": "Sign-in expired — reauthorize it",
+        "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",
         "credential_revoked": "Credential revoked — enter a new one",
         "account_banned": "Account is restricted"
