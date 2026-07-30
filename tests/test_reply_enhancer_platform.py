@@ -360,6 +360,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
+    def test_silent_parser_retains_list_state_across_lazy_continuation(self):
+        text = (
+            "- item\n"
+            "lazy continuation\n"
+            "    ```text\n"
+            "    <silent>lazy list literal</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
     def test_silent_parser_tracks_nested_list_context_across_lines(self):
         text = (
             "- Outer\n"
@@ -451,6 +462,24 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "  \n"
             "    ```\n"
             "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_uses_list_relative_indented_code_threshold(self):
+        text = (
+            "- item\n"
+            "\n"
+            "    <silent>remove list paragraph content</silent>\n"
+            "\n"
+            "      <silent>preserve list indented code</silent>"
+        )
+        expected = (
+            "- item\n"
+            "\n"
+            "    \n"
+            "\n"
+            "      <silent>preserve list indented code</silent>"
         )
 
         self.assertEqual(strip_silent_blocks(text), expected)
@@ -552,6 +581,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             '<a title="`">x</a>  `tail',
         )
 
+    def test_silent_parser_rejects_invalid_raw_html_tag_grammar(self):
+        text = '<a? title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
     def test_silent_parser_parses_html_as_text_inside_open_code_span(self):
         text = (
             '`prefix <a title="`"> '
@@ -606,6 +643,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         expected = "".join(f"visible-{index}" for index in range(2_000))
 
         self.assertEqual(strip_silent_blocks(blocks), expected)
+
+    def test_silent_parser_handles_many_malformed_html_prefixes_linearly(self):
+        text = "<a" * 8_000 + " `<silent>literal</silent>`"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_reply_enhancer_treats_unicode_digits_as_plain_text(self):
+        text = "². item\n①. item"
+
+        self.assertEqual(process_reply(text).text, text)
 
     def test_silent_parser_does_not_pair_inline_spans_across_cr_lines(self):
         text = "    ```\r<silent>remove outside code</silent>\r    ```\rTail remains."

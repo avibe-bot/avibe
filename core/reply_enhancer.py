@@ -117,6 +117,15 @@ _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+
 # opener is found outside code, its contents are opaque until the closing tag.
 _SILENT_OPEN_RE = re.compile(r"<silent\b[^>]*>", re.IGNORECASE)
 _SILENT_CLOSE_RE = re.compile(r"</silent\s*>", re.IGNORECASE)
+_RAW_HTML_TAG_RE = re.compile(
+    r"""</?[A-Za-z][A-Za-z0-9-]*"""
+    r"""(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"""
+    r"""(?:[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*"""
+    r"""[ \t]*/?>"""
+)
+_RAW_HTML_SPECIAL_RE = re.compile(
+    r"(?:<!--.*?-->|<\?.*?\?>|<![A-Z][^>]*>|<!\[CDATA\[.*?\]\]>)"
+)
 
 # Dynamic secret-ask markers: ``$<openAiKey>`` (case-preserving shell name). Matched only
 # outside fenced/inline code so a marker shown in an example isn't treated as a real
@@ -412,11 +421,14 @@ def _opening_fence_delimiter(
     column = 0
     quote_after_list = False
     saw_list_marker = False
+    carried_list_indents = list(list_indents)
+    popped_list_context = False
 
     while True:
         cursor, column = _consume_indentation(line, cursor, column)
         while list_indents and column < list_indents[-1]:
             list_indents.pop()
+            popped_list_context = True
 
         marker = _list_marker(line, cursor)
         if marker is None:
@@ -472,13 +484,19 @@ def _opening_fence_delimiter(
     delimiter = _fence_run(line, cursor)
     if delimiter is None:
         indented_code = not list_indents and column >= 4
+        opens_paragraph = _line_opens_paragraph(line[cursor:], paragraph_open)
+        if (
+            popped_list_context
+            and paragraph_open
+            and not saw_list_marker
+            and opens_paragraph
+        ):
+            list_indents = carried_list_indents
         return (
             None,
             quote_depth,
             list_indents,
-            False
-            if saw_list_marker or indented_code
-            else _line_opens_paragraph(line[cursor:], paragraph_open),
+            False if indented_code else opens_paragraph,
         )
 
     minimum_column = (
@@ -595,7 +613,11 @@ def _list_marker(line: str, start: int) -> Tuple[int, int | None] | None:
         return start + 1, None
 
     cursor = start
-    while cursor < len(line) and line[cursor].isdigit() and cursor - start < 9:
+    while (
+        cursor < len(line)
+        and "0" <= line[cursor] <= "9"
+        and cursor - start < 9
+    ):
         cursor += 1
     if cursor == start or cursor == len(line) or line[cursor] not in {".", ")"}:
         return None
@@ -647,6 +669,7 @@ def _indented_code_ranges(
     ranges: List[Tuple[int, int]] = []
     active_start: int | None = None
     paragraph_open = False
+    list_indent: int | None = None
     fence_index = 0
     offset = 0
 
@@ -675,7 +698,20 @@ def _indented_code_ranges(
             continue
 
         _, indent = _consume_indentation(content, 0, 0)
-        if indent >= 4 and (active_start is not None or not paragraph_open):
+        marker_indent = _list_content_indent(content)
+        if marker_indent is not None:
+            list_indent = marker_indent
+        elif (
+            list_indent is not None
+            and indent < list_indent
+            and not paragraph_open
+        ):
+            list_indent = None
+
+        code_indent = (list_indent or 0) + 4
+        if indent >= code_indent and (
+            active_start is not None or not paragraph_open
+        ):
             if active_start is None:
                 active_start = offset
             paragraph_open = False
@@ -691,6 +727,28 @@ def _indented_code_ranges(
     if active_start is not None:
         ranges.append((active_start, len(text)))
     return ranges
+
+
+def _list_content_indent(line: str) -> int | None:
+    """Return a top-level list item's content column, if present."""
+    cursor, column = _consume_indentation(line, 0, 0)
+    if column > 3:
+        return None
+    marker = _list_marker(line, cursor)
+    if marker is None:
+        return None
+    marker_end, _ = marker
+    column += marker_end - cursor
+    cursor = marker_end
+    whitespace_start = cursor
+    padding_start = column
+    cursor, column = _consume_indentation(line, cursor, column)
+    padding = column - padding_start
+    if cursor == whitespace_start and cursor == len(line):
+        return column + 1
+    if cursor == whitespace_start or padding > 4:
+        return None
+    return column
 
 
 def _inline_code_ranges(
@@ -796,26 +854,10 @@ def _inline_code_ranges_in_line(
 
 def _raw_html_token_end(text: str, start: int, end: int) -> int | None:
     """Return the end of a raw inline HTML token beginning at *start*."""
-    cursor = start + 1
-    if cursor >= end:
-        return None
-    if text[cursor] == "/":
-        cursor += 1
-    if cursor >= end or not (text[cursor].isalpha() or text[cursor] in {"!", "?"}):
-        return None
-
-    quote: str | None = None
-    while cursor < end:
-        char = text[cursor]
-        if quote is not None:
-            if char == quote:
-                quote = None
-        elif char in {'"', "'"}:
-            quote = char
-        elif char == ">":
-            return cursor + 1
-        cursor += 1
-    return None
+    tag = _RAW_HTML_TAG_RE.match(text, start, end)
+    special = _RAW_HTML_SPECIAL_RE.match(text, start, end)
+    matches = [match for match in (tag, special) if match is not None]
+    return max(match.end() for match in matches) if matches else None
 
 
 def _raw_html_ranges_in_line(
@@ -842,6 +884,8 @@ def _raw_html_ranges_in_line(
 def _line_opens_paragraph(content: str, prior_paragraph_open: bool) -> bool:
     """Return whether a non-container Markdown line starts paragraph text."""
     stripped = content.lstrip(" \t")
+    if not stripped:
+        return False
     if re.match(r"#{1,6}(?:[ \t]+|$)", stripped):
         return False
     if prior_paragraph_open and re.fullmatch(r"={3,}[ \t]*", stripped):
