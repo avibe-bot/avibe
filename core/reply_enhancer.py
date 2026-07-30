@@ -35,6 +35,7 @@ _BLOCK_MARKDOWN = MarkdownIt("commonmark")
 _INLINE_MARKDOWN = MarkdownIt("commonmark")
 _INLINE_CODE_RANGES_KEY = "avibe_inline_code_ranges"
 _INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
+_INLINE_SILENT_RANGES_KEY = "avibe_inline_silent_ranges"
 
 
 def _track_inline_code(state: StateInline, silent: bool) -> bool:
@@ -66,11 +67,9 @@ def _skip_inline_angle_token(state: StateInline, silent: bool) -> bool:
 
 def _skip_silent_control(state: StateInline, silent: bool) -> bool:
     """Keep real control contents from influencing inline Markdown parsing."""
-    opener = _SILENT_OPEN_RE.match(state.src, state.pos, state.posMax)
-    if opener is None:
+    token_end = state.env.get(_INLINE_SILENT_RANGES_KEY, {}).get(state.pos)
+    if token_end is None or token_end > state.posMax:
         return False
-    closing = _SILENT_CLOSE_RE.search(state.src, opener.end(), state.posMax)
-    token_end = closing.end() if closing is not None else state.posMax
     if not silent:
         state.pending += state.src[state.pos:token_end]
     state.pos = token_end
@@ -180,7 +179,7 @@ _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.
-_SILENT_OPEN_RE = re.compile(r"<silent\b[^>]*>", re.IGNORECASE)
+_SILENT_OPEN_PREFIX_RE = re.compile(r"<silent\b", re.IGNORECASE)
 _SILENT_CLOSE_RE = re.compile(r"</silent\s*>", re.IGNORECASE)
 _RAW_HTML_OPEN_TAG_RE = re.compile(
     r"""<[A-Za-z][A-Za-z0-9-]*"""
@@ -379,14 +378,16 @@ def _mask_markdown_code(text: str) -> str:
 def _markdown_code_ranges(
     text: str,
 ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
-    """Return all Markdown code ranges and the block-code subset."""
+    """Return code ranges and block ranges that can suppress later parsing."""
     if not any(marker in text for marker in ("`", "~~~", "    ", "\t")):
         return [], []
-    block_ranges, inline_source_ranges = _markdown_block_ranges(text)
+    block_ranges, inline_source_ranges, blocking_ranges = (
+        _markdown_block_ranges(text)
+    )
     ranges = sorted(
         [*block_ranges, *_inline_code_ranges(text, inline_source_ranges)]
     )
-    return ranges, block_ranges
+    return ranges, blocking_ranges
 
 
 def _mask_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
@@ -404,9 +405,39 @@ def _mask_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _neutralize_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
+    """Replace ranges with plain text while preserving newlines and offsets."""
+    parts: List[str] = []
+    cursor = 0
+    for start, end in ranges:
+        if start < cursor:
+            continue
+        parts.append(text[cursor:start])
+        parts.append(re.sub(r"[^\r\n]", "x", text[start:end]))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _silent_control_candidates(text: str) -> List[Tuple[int, int]]:
     """Return every lexical opener before applying Markdown eligibility."""
-    return [match.span() for match in _SILENT_OPEN_RE.finditer(text)]
+    candidates: List[Tuple[int, int]] = []
+    cursor = 0
+    for prefix in _SILENT_OPEN_PREFIX_RE.finditer(text):
+        if prefix.start() < cursor:
+            continue
+        closing_angle = text.find(">", prefix.end())
+        if closing_angle < 0:
+            break
+        token_end = closing_angle + 1
+        candidates.append((prefix.start(), token_end))
+        cursor = token_end
+    return candidates
+
+
+def _silent_closing_candidates(text: str) -> List[Tuple[int, int]]:
+    """Return every lexical closing tag in source order."""
+    return [match.span() for match in _SILENT_CLOSE_RE.finditer(text)]
 
 
 def _silent_ranges_for_openers(
@@ -415,15 +446,26 @@ def _silent_ranges_for_openers(
 ) -> List[Tuple[int, int]]:
     """Pair confirmed openers while treating each real control as opaque."""
     ranges: List[Tuple[int, int]] = []
+    closers = _silent_closing_candidates(text)
+    closer_index = 0
     covered_until = 0
     for start, opener_end in openers:
         if start < covered_until:
             continue
-        closing = _SILENT_CLOSE_RE.search(text, opener_end)
-        end = closing.end() if closing is not None else len(text)
+        while (
+            closer_index < len(closers)
+            and closers[closer_index][0] < opener_end
+        ):
+            closer_index += 1
+        has_closing = closer_index < len(closers)
+        if has_closing:
+            end = closers[closer_index][1]
+            closer_index += 1
+        else:
+            end = len(text)
         ranges.append((start, end))
         covered_until = end
-        if closing is None:
+        if not has_closing:
             break
     return ranges
 
@@ -434,10 +476,10 @@ def _silent_control_ranges_and_mask(
 ) -> Tuple[List[Tuple[int, int]], str]:
     """Resolve controls with hidden contents opaque to block Markdown.
 
-    A real control can contain a fence that makes later controls look like code.
-    First reparse a same-length source with confirmed controls hidden; this
-    preserves genuine code literals after the control. A final batch refinement
-    caps the work for adversarial chains of hidden, unmatched fences.
+    A real control can start an HTML block or contain a fence that suppresses
+    later code parsing. Reparse a same-length source with confirmed controls
+    hidden and uncertain tags neutralized, preserving code delimiters and source
+    offsets. A final batch refinement bounds adversarial unmatched-fence chains.
     """
     code_ranges, block_ranges = _markdown_code_ranges(text)
     controls, _ = _partition_ranges_by_start(candidates, code_ranges)
@@ -452,12 +494,46 @@ def _silent_control_ranges_and_mask(
         if not invalid_blocks:
             break
 
-        opaque_source = _mask_ranges(text, control_ranges)
+        stable_controls, uncertain_controls = _partition_ranges_by_start(
+            controls,
+            invalid_blocks,
+        )
+        trigger_starts = _container_starts_for_range_starts(
+            control_ranges,
+            invalid_blocks,
+        )
+        confirmed_controls = sorted(
+            [
+                *stable_controls,
+                *(
+                    control
+                    for control in uncertain_controls
+                    if control[0] in trigger_starts
+                ),
+            ]
+        )
+        _, provisional_openers = _partition_ranges_by_start(
+            candidates,
+            invalid_blocks,
+        )
+        _, provisional_closers = _partition_ranges_by_start(
+            _silent_closing_candidates(text),
+            invalid_blocks,
+        )
+        confirmed_ranges = _silent_ranges_for_openers(
+            text,
+            confirmed_controls,
+        )
+        provisional_tags, _ = _partition_ranges_by_start(
+            sorted({*provisional_openers, *provisional_closers}),
+            confirmed_ranges,
+        )
+        opaque_source = _mask_ranges(text, confirmed_ranges)
+        opaque_source = _neutralize_ranges(opaque_source, provisional_tags)
         code_ranges, block_ranges = _markdown_code_ranges(opaque_source)
-        parsed_controls = controls
+        parsed_controls = confirmed_controls
         discovered, _ = _partition_ranges_by_start(candidates, code_ranges)
-        expanded = sorted({*controls, *discovered})
-        controls = expanded
+        controls = sorted({*confirmed_controls, *discovered})
 
     control_ranges = _silent_ranges_for_openers(text, controls)
     _, invalid_blocks = _partition_ranges_by_start(
@@ -490,6 +566,29 @@ def _silent_control_ranges_and_mask(
         text,
         code_ranges,
     )
+
+
+def _container_starts_for_range_starts(
+    containers: List[Tuple[int, int]],
+    ranges: List[Tuple[int, int]],
+) -> set[int]:
+    """Return starts of sorted containers covering any sorted range start."""
+    starts: set[int] = set()
+    container_index = 0
+    for source_range in ranges:
+        position = source_range[0]
+        while (
+            container_index < len(containers)
+            and containers[container_index][1] <= position
+        ):
+            container_index += 1
+        if (
+            container_index < len(containers)
+            and containers[container_index][0] <= position
+            and position < containers[container_index][1]
+        ):
+            starts.add(containers[container_index][0])
+    return starts
 
 
 def _partition_ranges_by_start(
@@ -546,14 +645,19 @@ def _trim_blank_boundary_lines_with_mask(text: str, mask: str) -> Tuple[str, str
 
 def _markdown_block_ranges(
     text: str,
-) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, str]]]:
-    """Return code-block ranges and source ranges eligible for inline parsing."""
+) -> Tuple[
+    List[Tuple[int, int]],
+    List[Tuple[int, int, str]],
+    List[Tuple[int, int]],
+]:
+    """Return code, inline-capable, and parser-blocking source ranges."""
     line_offsets = [0]
     line_offsets.extend(
         match.end() for match in re.finditer(r"\r\n|\r|\n", text)
     )
     code_ranges: List[Tuple[int, int]] = []
     inline_ranges: List[Tuple[int, int, str]] = []
+    blocking_ranges: List[Tuple[int, int]] = []
     for token in _BLOCK_MARKDOWN.parse(text):
         if token.map is None:
             continue
@@ -562,9 +666,20 @@ def _markdown_block_ranges(
         end = line_offsets[end_line] if end_line < len(line_offsets) else len(text)
         if token.type in {"fence", "code_block"}:
             code_ranges.append((start, end))
+            blocking_ranges.append((start, end))
+        elif token.type == "html_block":
+            first_line_end = (
+                line_offsets[start_line + 1]
+                if start_line + 1 < len(line_offsets)
+                else len(text)
+            )
+            html_start = text.find("<", start, first_line_end)
+            blocking_ranges.append(
+                (html_start if html_start >= 0 else start, end)
+            )
         elif token.type == "inline":
             inline_ranges.append((start, end, token.content))
-    return code_ranges, inline_ranges
+    return code_ranges, inline_ranges, blocking_ranges
 
 
 def _inline_code_ranges(
@@ -596,6 +711,14 @@ def _inline_code_ranges_in_block(
         return []
     env: dict = {
         _INLINE_ANGLE_RANGES_KEY: dict(_inline_angle_token_ranges(content)),
+    }
+    silent_candidates = _silent_control_candidates(content)
+    env[_INLINE_SILENT_RANGES_KEY] = {
+        start: end
+        for start, end in _silent_ranges_for_openers(
+            content,
+            silent_candidates,
+        )
     }
     _INLINE_MARKDOWN.inline.parse(
         content,

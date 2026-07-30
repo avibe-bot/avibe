@@ -877,6 +877,69 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), expected)
 
+    def test_process_reply_reparses_after_multiline_control_html_block(self):
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>inline literal</silent>`\n"
+            "```text\n"
+            "<silent>[literal](file:///tmp/secret.txt)</silent>\n"
+            "```\n"
+            "Tail remains."
+        )
+        expected = (
+            "`<silent>inline literal</silent>`\n"
+            "```text\n"
+            "<silent>[literal](file:///tmp/secret.txt)</silent>\n"
+            "```\n"
+            "Tail remains."
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, expected)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_reparses_unmatched_literal_after_html_block(self):
+        tail = "\n".join(f"substantial trailing line {index}" for index in range(50))
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>unmatched literal opener`\n"
+            f"{tail}"
+        )
+        expected = "`<silent>unmatched literal opener`\n" + tail
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_does_not_cross_pair_provisional_code_literal(self):
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>unmatched literal opener`\n"
+            "<silent>remove later control</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "`<silent>unmatched literal opener`\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_reparses_html_block_inside_quote(self):
+        text = (
+            "> <silent>\n"
+            "> internal\n"
+            "> </silent>\n"
+            "> `<silent>literal</silent>`\n"
+            "> Tail remains."
+        )
+        expected = (
+            "> \n"
+            "> `<silent>literal</silent>`\n"
+            "> Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
     def test_silent_parser_does_not_pair_code_opener_with_real_closer(self):
         text = (
             "```text\n"
@@ -955,6 +1018,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             CountingPosition.comparisons,
             8 * (len(ranges) + len(containers)),
         )
+
+    def test_silent_parser_scans_malformed_openers_without_unbounded_regex(self):
+        text = "<silent" * 16_000 + "\nTail remains."
+
+        with patch.object(
+            reply_enhancer,
+            "_SILENT_OPEN_RE",
+            None,
+            create=True,
+        ):
+            self.assertEqual(strip_silent_blocks(text), text)
 
     def test_process_reply_keeps_original_enhancement_eligibility(self):
         text = (
