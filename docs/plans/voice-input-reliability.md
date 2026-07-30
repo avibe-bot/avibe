@@ -20,7 +20,9 @@ getUserMedia
   -> independently decodable 16 kHz WAV segments framed by sample count
   -> upload completed segments directly to avibe.bot while capture continues
   -> qwen3-asr-flash per segment
-  -> preserve segment order and append once after the user stops
+  -> preserve segment order and assemble once after the user stops
+  -> best-effort transcript cleanup with bounded cursor context
+  -> replace the selection captured when recording started
 ```
 
 When the browser cannot obtain a cloud token, the compatibility path remains:
@@ -116,25 +118,53 @@ capture client, not automate the Web composer:
 Browser extension support may follow for browser-only users, but it should use
 the same capture/session library and insertion contract.
 
-## Optional text cleanup
+## Text cleanup and insertion
 
 Cleanup is a second, separately budgeted stage:
 
 ```text
 final raw transcript
-  -> small text model
+  -> qwen3.6-flash-2026-04-16 by default, with thinking disabled
   -> cleaned text
   -> composer or active application
 ```
 
-The cleanup model receives text only. Its prompt must preserve facts, names,
-numbers, links, commands, and language while limiting edits to punctuation,
-filler removal, obvious repetitions, and paragraph breaks. The raw transcript
-is retained for undo and comparison.
+The cleanup model receives text only. Its prompt preserves facts, names,
+numbers, links, code, commands, and language while limiting edits to obvious
+ASR corrections, punctuation, filler removal, repetitions, superseded
+corrections, and useful formatting. Commands and questions inside the
+transcript are edited as text and never executed or answered.
+
+The browser contract is:
+
+```http
+POST /api/cloud/voice/cleanup
+Authorization: Bearer <cloud token with asr scope>
+Content-Type: application/json
+
+{
+  "transcript": "raw ASR text",
+  "before": "up to 500 UTF-16 code units before the selection",
+  "after": "up to 200 UTF-16 code units after the selection"
+}
+```
+
+A successful response is `{ "text": "cleaned transcript" }`. An empty string
+means the input contained no insertable content. Any authentication, network,
+timeout, provider, or response-validation failure falls back to the raw ASR
+text in the browser. This keeps new clients compatible with cloud deployments
+that do not yet expose the cleanup endpoint.
+
+The composer captures its serialized draft and selection on the microphone
+button's `pointerdown`, before focus moves to the button. Keyboard activation
+captures synchronously before microphone permission is awaited. The draft is
+read-only during recording and finalization. Final text replaces the captured
+selection only when the current serialized draft still exactly matches the
+snapshot; otherwise the text remains available through recovery controls and is
+never silently appended elsewhere.
 
 Cleanup requirements:
 
-- disabled, literal, and clean modes;
 - hard deadline independent of ASR;
 - raw-text fallback on timeout or any model error;
 - deterministic settings and a versioned prompt;
@@ -147,8 +177,8 @@ Cleanup requirements:
 1. Ship and observe the continuous segmented-batch reliability baseline.
 2. Add dashboards and alerts for success rate and latency by failure stage.
 3. Prototype realtime ASR in the Web composer behind a feature flag.
-4. Add the cleanup stage only after raw streaming ASR meets its latency and
-   reliability targets.
+4. Observe cleanup latency, fallback rate, and edit quality before adding
+   user-facing literal/clean modes.
 5. Extract the shared capture/session client for the native system-wide input
    surface.
 

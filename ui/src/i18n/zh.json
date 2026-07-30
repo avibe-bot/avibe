@@ -3035,6 +3035,7 @@
       "voiceEmpty": "这段录音中没有检测到语音。",
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
+      "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加"
     },
