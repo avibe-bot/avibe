@@ -333,6 +333,19 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  *   cooldown gating decide which one wins, so there it is a health-derived pick and
  *   `checked` is the honest stand-in for what the user chose.
  *
+ * That last exclusion is coarser than the truth, and knowingly so: an OpenCode
+ * request that IS explicit comes back normalized but otherwise untouched, so it is
+ * a selection this key drops. The payload has no way to tell the two apart — the
+ * agent config carries no model at all, and every projected model on it is the same
+ * resolver output — and both client-side approximations are worse than the gap.
+ * Keying on the value erases a failure report on any single-source setup, because
+ * the probe that failed cools the only source the head model had and the pick moves.
+ * Gating the member on `supply_status` (sound: the loop only ever returns a
+ * candidate WITH a source, so `waiting`/`interrupted` proves the request was
+ * explicit) does the same thing through the guard instead of the value. The fix is
+ * a server-side discriminator — explicitness beside `selected_model_id` — and this
+ * stays as it is until there is one.
+ *
  * Excluded on purpose: `agent.current` and everything else about head health. The
  * head moving is what a failing report is FOR.
  */
