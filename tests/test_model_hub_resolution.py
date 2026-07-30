@@ -830,6 +830,47 @@ def test_probe_flips_from_no_candidate_to_reachable_after_discovered_alias_arriv
     assert probe["model_id"] == "claude-opus-4-5-20251101"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_kind"),
+    [
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+            "cooldown",
+        ),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403),
+            "needs_action",
+        ),
+    ],
+)
+def test_probe_alias_failure_events_use_requested_menu_id(
+    tmp_path,
+    outcome,
+    expected_kind,
+):
+    adapter = FakeAdapter([outcome])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    config.sources[1].models = []
+
+    probe = asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
+
+    assert probe["reachable"] is False
+    assert probe["model_id"] == "claude-opus-4-5-20251101"
+    event = next(
+        item
+        for item in service.events.list(limit=20)
+        if item["kind"] == expected_kind
+    )
+    assert event["model_id"] == "claude-opus-4-5"
+
+
 def test_failover_uses_each_sources_effective_native_alias(tmp_path):
     adapter = FakeAdapter(
         [

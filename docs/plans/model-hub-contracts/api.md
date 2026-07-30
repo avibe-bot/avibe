@@ -139,6 +139,12 @@ which is a list of bare names inside a mutation result.
 user's explicit configuration request. FALSE means no explicit model selection,
 including a resolver-picked value or no selected model.
 
+For a fixed native menu, `current.model_id` is the effective upstream id for the
+selected source. It may therefore differ from `selected_model_id` without an
+explicit mapping when built-in native alias resolution chooses a discovered dated
+model. Chain and probe inputs remain the caller-facing `selected_model_id`; each
+candidate derives its own effective upstream id.
+
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
 

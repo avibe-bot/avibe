@@ -110,6 +110,14 @@ class GatewayTurnTerminalizer:
             self.turn_id = None
         return self.turn_id
 
+    def resolution_model(self, gateway_model_id: str) -> str:
+        """Return the caller model retained before the CLI rewrote its request."""
+
+        turn_id = self.bind_request_model(gateway_model_id)
+        if turn_id is None:
+            return gateway_model_id
+        return self._registry.gateway_requested_model(turn_id) or gateway_model_id
+
     def fail(
         self,
         reason: Literal["invalid_parameter", "protocol_error"],
@@ -434,6 +442,13 @@ class TurnCorrelationRegistry:
             trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
             trace.gateway_via_mapping = via_mapping
+
+    def gateway_requested_model(self, turn_id: str) -> Optional[str]:
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.ambiguous:
+                return None
+            return trace.requested_model_id
 
     def gateway_terminalizer(
         self,

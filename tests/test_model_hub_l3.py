@@ -138,13 +138,16 @@ def _source(
     channel: str = "hub",
     status: str = "standby",
     retry_at: str | None = None,
+    vendor: str = "openai",
+    protocol: str = "openai_responses",
+    model_id: str = "shared-model",
 ) -> ModelHubSourceConfig:
     return ModelHubSourceConfig(
         id=source_id,
         kind="subscription" if channel == "native_cli" else "api_key",
-        vendor="openai",
+        vendor=vendor,
         display_name=label,
-        protocol="openai_responses",
+        protocol=protocol,
         supply_channel=channel,
         billing="monthly" if channel == "native_cli" else "metered",
         state=ModelHubSourceStateConfig(
@@ -158,7 +161,7 @@ def _source(
         ),
         models=[
             ModelHubModelConfig(
-                id="shared-model",
+                id=model_id,
                 provenance="discovered",
             )
         ],
@@ -579,6 +582,98 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
         "via_mapping": True,
     }
     _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_gateway_preserves_native_alias_for_per_source_failover(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        requested_model = "claude-opus-4-5"
+        primary_model = "claude-opus-4-5-20251101"
+        backup_model = "claude-opus-4-5-20250929"
+        primary = _source(
+            "src_primary01",
+            "Primary",
+            vendor="anthropic",
+            protocol="anthropic",
+            model_id=primary_model,
+        )
+        backup = _source(
+            "src_backup001",
+            "Backup",
+            vendor="anthropic",
+            protocol="anthropic",
+            model_id=backup_model,
+        )
+        service = _service(
+            tmp_path,
+            sources=[primary, backup],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    source_id=primary.id,
+                ),
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    source_id=backup.id,
+                ),
+            ],
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "claude",
+            process_scope="/repo",
+            turn_id="turn_native_alias",
+            requested_model_id=requested_model,
+            resolved_model_id=primary_model,
+            source_id=primary.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/messages",
+                    json={
+                        "model": primary_model,
+                        "max_tokens": 1,
+                        "messages": [
+                            {"role": "user", "content": "ping"}
+                        ],
+                        "stream": False,
+                    },
+                    headers={"x-api-key": token},
+                )
+                assert response.status == 200
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [
+            (primary.id, primary_model, "claude"),
+            (backup.id, backup_model, "claude"),
+        ]
+        failover_events = [
+            event
+            for event in service.events.list(limit=20)
+            if event["kind"] in {"cooldown", "switch"}
+        ]
+        assert {event["model_id"] for event in failover_events} == {
+            requested_model
+        }
+
+        gateway.correlation.settle(
+            "turn_native_alias",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_native_alias")
+        assert record is not None
+        assert record["requested_model_id"] == requested_model
+        assert record["served"]["source_id"] == backup.id
+        assert record["served"]["resolved_model_id"] == backup_model
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
 
 
 def test_gateway_model_outside_prepared_turn_fails_closed(

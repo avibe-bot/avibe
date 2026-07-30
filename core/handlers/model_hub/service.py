@@ -2644,14 +2644,14 @@ class ModelHubService:
                     source,
                     decision,
                     agent=cast(EventAgent, backend),
-                    model_id=resolved_model,
+                    model_id=chain_payload["model_id"],
                     detail_key=error_key,
                 )
             elif event_reason is not None:
                 await self._set_source_blocker(
                     source.id,
                     backend=cast(BackendName, backend),
-                    model_id=resolved_model,
+                    model_id=chain_payload["model_id"],
                     detail_key=error_key,
                     reason=event_reason,
                 )
