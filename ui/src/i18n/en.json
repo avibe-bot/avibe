@@ -999,6 +999,7 @@
         "gapsDone": "These agents now have no source left:",
         "repaired": "Working again",
         "refreshed": "Updated",
+        "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
       },
       "dryRun": {

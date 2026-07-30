@@ -161,7 +161,15 @@ export const SourceRowMenu: React.FC<{
       onChanged();
       showToast(t('settings.models.sourceActions.rediscovered', { count }) as string, 'success');
     } catch {
-      if (aliveRef.current) showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
+      if (!aliveRef.current) return;
+      // A failed test is NOT read-only: `test_source` persists the source as
+      // error/unclassified and only then raises `discovery_failed`. Refreshing on
+      // success alone would leave the row showing the cause it had before the
+      // server replaced it — and for the inline repair, the remedy that cause
+      // implied. Re-read either way; the toast reports the attempt, the row
+      // reports the state.
+      onChanged();
+      showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setTesting(false);
     }

@@ -97,38 +97,59 @@ export function repairAction(source: Source): RepairKind | null {
  * The verdict over a repair tail — the single owner of 「did that fix it?」, so
  * the toast, the dialog's closing behaviour and the gap report cannot disagree.
  *
- * Both inputs are the server's own: `recovered` is its judgement that the source
- * had been blocked, and `interrupted_pairs` is the output of the very guard that
- * would have refused the write. Neither is re-derived here — a client that
- * recomputed 「is anything stranded?」 from `/agents` would be answering a
- * different question (today's supply) than the one it renders.
+ * All three inputs are the server's own: `interrupted_pairs` is the output of the
+ * very guard that would have refused the write, `source.state` is where the write
+ * left the source, and `recovered` is its judgement that the source HAD been
+ * blocked. Nothing is re-derived here — a client that recomputed 「is anything
+ * stranded?」 from `/agents` would be answering a different question (today's
+ * supply) than the one it renders.
  *
- * `gaps` outranks `repaired` on purpose: a forced replacement that fixed this
- * source while stranding another Agent's model is not a success story, and the
- * report is the whole reason the user was asked to confirm.
+ * The order is the point:
+ *
+ *  1. `gaps` outranks everything. A forced replacement that fixed this source
+ *     while stranding another Agent's model is not a success story, and the
+ *     report is the whole reason the user was asked to confirm.
+ *  2. Then the RETURNED STATE, because `recovered` is a statement about the past
+ *     — 「it was blocked when this started」 — and cannot claim the source works
+ *     now. A native reauth reaches exactly that case: `_materialize_reauth`
+ *     commits `needs_action`/`oauth_expired` when the CLI still reports itself
+ *     signed out, and answers 200 with `recovered: true` beside it. Reading
+ *     `recovered` alone would put 「已恢复可用」 on a row that is still stopped and
+ *     dismiss the dialog over it.
+ *  3. Only then 「was it broken before?」, which separates a repair from the
+ *     elective rotation of a working credential.
  */
 export type RepairOutcome =
   | { kind: 'repaired' }
   | { kind: 'refreshed' }
+  | { kind: 'unresolved' }
   | { kind: 'gaps'; gaps: SupplyGap[] };
 
 export const repairOutcome = (tail: SourceRepaired): RepairOutcome =>
   tail.interrupted_pairs.length > 0
     ? { kind: 'gaps', gaps: tail.interrupted_pairs }
-    : tail.recovered
-      ? { kind: 'repaired' }
-      : { kind: 'refreshed' };
+    : wasBlocked(tail.source.state)
+      ? { kind: 'unresolved' }
+      : tail.recovered
+        ? { kind: 'repaired' }
+        : { kind: 'refreshed' };
 
 /**
  * Whether the journey may close itself.
  *
  * Provable from the tail alone, unlike the adoption auto-close next door: that
  * one stays dormant because `covered` needs a `skipped_by` the contract does not
- * carry yet, whereas 「nothing was stranded」 is a field the server sends. So this
- * closes on a clean repair and holds the dialog open on `gaps`, which is a
- * report the user has to read.
+ * carry yet, whereas 「nothing was stranded, and the source came back working」 is
+ * two fields the server sends.
+ *
+ * An allowlist rather than `!== 'gaps'`: L4's rule is that the 1.4s dismissal is
+ * for a plain success and 「every other verdict leaves an instruction on screen
+ * that 1.4s is not long enough to read」. Written as an exclusion, the next verdict
+ * added would inherit the auto-close silently, which is the wrong default for a
+ * verdict that exists because something did not work.
  */
-export const repairSettles = (outcome: RepairOutcome): boolean => outcome.kind !== 'gaps';
+export const repairSettles = (outcome: RepairOutcome): boolean =>
+  outcome.kind === 'repaired' || outcome.kind === 'refreshed';
 
 // ── 试跑 (dry run) ───────────────────────────────────────────────────────
 

@@ -32,13 +32,13 @@ import {
 } from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
-import { modelsApi, type OAuthResult } from './modelsApi';
+import { apiFailure, modelsApi, type OAuthResult } from './modelsApi';
 import { repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { serverText } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
 import { SupplyGapNote } from './SupplyGapNote';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
-import type { AdoptedBy, Source, SupplyChannel } from './types';
+import type { AdoptedBy, Source, SupplyChannel, SupplyGap } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
@@ -99,6 +99,11 @@ export const OAuthConnectDialog: React.FC<{
   // The reauth counterpart of `adoptedBy`, read through the same owner the key
   // replacement uses so 「did that fix it?」 has one answer on the page.
   const [repair, setRepair] = React.useState<RepairOutcome | null>(null);
+  // What a FAILED reauth stranded on its way down. Not the same thing as
+  // `repair`'s gap report: that one describes a write that landed, this one
+  // describes the irreversible half of a journey that then broke, and it exists
+  // only on the error the server threw.
+  const [stranded, setStranded] = React.useState<SupplyGap[]>([]);
   const [, tick] = React.useReducer((x) => x + 1, 0);
 
   // Set by the flow effect so `submit` lands through the very same owners as a
@@ -117,6 +122,27 @@ export const OAuthConnectDialog: React.FC<{
   // terminal handler and the title alike.
   const reauthId = reauth?.id ?? null;
   const isReauth = reauthId !== null;
+
+  /**
+   * One owner for 「this reauth failed」, reached from all three failure paths.
+   *
+   * A failed reauth is not a no-op the way a failed connect is. The row was
+   * already rewritten before the login page opened — `mark_native_irreversible_start`
+   * writes 需处理 across that vendor's native sources and only rolls it back when
+   * the login fails to SPAWN — and `_materialize_reauth` clears the source and
+   * marks it unavailable before answering `discovery_failed`. So the list the page
+   * is showing is stale from here on and gets re-read.
+   *
+   * The pairs travel on the error for the same reason `adopted_by` travels with a
+   * creation: no later read of `/agents` reproduces them. They name who the
+   * irreversible half left without a source, which is the one thing the user
+   * cannot find out anywhere else on the page.
+   */
+  const reauthFailed = (failure: ReturnType<typeof apiFailure>) => {
+    if (!isReauth) return;
+    setStranded(failure?.interrupted ?? []);
+    onConnectedRef.current();
+  };
 
   const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -170,7 +196,10 @@ export const OAuthConnectDialog: React.FC<{
           (verdict && verdict.kind !== 'gaps'
             ? t(`settings.models.repair.${verdict.kind}`)
             : t('settings.models.oauth.status.success')) as string,
-          'success',
+          // 「仍然不可用」 in a green toast would contradict its own text. The call
+          // succeeded and the source is still stopped, which is this page's gold
+          // 需处理 tone, not a red failure.
+          verdict?.kind === 'unresolved' ? 'warning' : 'success',
         );
         // Unlike the adoption auto-close below this one is PROVABLE: 「nothing was
         // stranded」 is a field the server sends, so a clean repair may dismiss
@@ -218,7 +247,9 @@ export const OAuthConnectDialog: React.FC<{
         // (consent_required / discovery_failed / engine_down): the vendor said
         // yes and the Source still doesn't exist. Naming that separately is the
         // difference between 「重试授权」 and 「授权成功但没能建立来源」.
-        transition({ kind: 'error', errorKey: errorKeyFor((err as { code?: string } | null)?.code) });
+        const failure = apiFailure(err);
+        reauthFailed(failure);
+        transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
       }
     };
 
@@ -229,6 +260,7 @@ export const OAuthConnectDialog: React.FC<{
     setSubmitting(false);
     setAdoptedBy(null);
     setRepair(null);
+    setStranded([]);
     void (async () => {
       try {
         // Two ways in, one flow out. The reauth route opens the flow ON the
@@ -239,13 +271,27 @@ export const OAuthConnectDialog: React.FC<{
         const started = reauthId
           ? await modelsApi.reauthSource(reauthId)
           : await modelsApi.startOAuth(vendor, channel, channel === 'hub');
-        if (cancelled) return;
+        if (cancelled) {
+          // The dialog closed while this request was in flight, so the cleanup
+          // below found no flow to cancel — the flow id exists nowhere but here.
+          // Returning without it would leave a live login running against a
+          // source whose old sign-in the server has ALREADY invalidated, and the
+          // next reauth would find that flow still pending. Cancel it where it is
+          // known instead of dropping it.
+          modelsApi.cancelOAuth(started.flow_id).catch(() => {});
+          return;
+        }
         transition({ kind: 'response', flow: started });
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
       } catch (err) {
         if (cancelled) return;
-        const code = (err as { code?: string } | null)?.code;
+        const failure = apiFailure(err);
+        // A reauth that fails to START can still have written the row: the
+        // irreversible marking is rolled back only for a login that fails to
+        // spawn, not for the flow-binding failures after it.
+        reauthFailed(failure);
+        const code = failure?.code;
         transition({
           kind: 'error',
           errorKey:
@@ -300,7 +346,11 @@ export const OAuthConnectDialog: React.FC<{
       settleRef.current?.(result);
     } catch (err) {
       if (!isCurrent()) return;
-      authority.transition({ kind: 'error', errorKey: errorKeyFor((err as { code?: string } | null)?.code) });
+      // Submit reaches the same materialization as the poll, so it can fail the
+      // same way — including after the credential change has committed.
+      const failure = apiFailure(err);
+      reauthFailed(failure);
+      authority.transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
     } finally {
       if (isCurrent()) setSubmitting(false);
     }
@@ -352,25 +402,42 @@ export const OAuthConnectDialog: React.FC<{
           </DialogHeader>
 
           {failed && (
-            <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive">
-              <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-              {/* errorKey may be the flow's own runtime-declared `error_key`, so
-                  an unknown one degrades to 连接失败 rather than rendering itself. */}
-              <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive">
+                <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                {/* errorKey may be the flow's own runtime-declared `error_key`, so
+                    an unknown one degrades to 连接失败 rather than rendering itself. */}
+                <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
+              </div>
+              {/* Past tense (`gapsDone`), because this is not a confirm: the
+                  credential change these pairs are the cost of has already
+                  happened. Self-hides when the failure stranded nobody. */}
+              <SupplyGapNote gaps={stranded} title={t('settings.models.repair.gapsDone') as string} />
             </div>
           )}
 
           {success && isReauth ? (
             // A repair reports on the source it repaired, not on a new connection:
             // 「已恢复可用」 when the login cleared the blocker, 「已更新」 when there
-            // was nothing to clear, and the stranded pairs when something is still
-            // without a source — the one case that stays on screen.
+            // was nothing to clear, 「仍然不可用」 when the flow finished and the
+            // source came back stopped anyway, and the stranded pairs when
+            // something is still without a source. Only the last stays on screen.
             repair?.kind === 'gaps' ? (
               <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
                 <span className="text-[12.5px] font-semibold leading-relaxed text-gold">
                   {t('settings.models.repair.gapsDone')}
                 </span>
                 <SupplyGapNote gaps={repair.gaps} />
+              </div>
+            ) : repair?.kind === 'unresolved' ? (
+              // Gold, not destructive, and not a green check: nothing failed —
+              // the login completed and the source is still stopped (a native CLI
+              // that reports itself signed out lands here). A 「已恢复可用」 over
+              // that is the dead end §4.5 forbids; the row keeps its remedy and
+              // this line is why it is still there.
+              <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium text-gold">
+                <TriangleAlert className="size-4 shrink-0" />
+                {t('settings.models.repair.unresolved')}
               </div>
             ) : (
               <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">

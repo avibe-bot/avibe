@@ -154,6 +154,14 @@ export const ReplaceKeyDialog: React.FC<{
               </span>
               <SupplyGapNote gaps={outcome.gaps} />
             </div>
+          ) : outcome.kind === 'unresolved' ? (
+            // The key was accepted and the source came back stopped anyway. Same
+            // rule as the reauth dialog: no green check over a row that is still
+            // 需处理, and no auto-close over it either.
+            <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium text-gold">
+              <TriangleAlert className="size-4 shrink-0" />
+              <span>{t('settings.models.repair.unresolved')}</span>
+            </div>
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
               <CheckCircle2 className="size-4 shrink-0" />

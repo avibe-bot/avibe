@@ -999,6 +999,7 @@
         "gapsDone": "这些 Agent 现在没有来源可用：",
         "repaired": "已恢复可用",
         "refreshed": "已更新",
+        "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
       },
       "dryRun": {

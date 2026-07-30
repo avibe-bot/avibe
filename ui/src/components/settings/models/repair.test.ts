@@ -11,7 +11,10 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import en from '../../../i18n/en.json';
+import zh from '../../../i18n/zh.json';
 import { dryRunOutcome, dryRunPlan, repairAction, repairOutcome, repairSettles } from './repair';
+import type { RepairOutcome } from './repair';
 import { CONTRACT_VERSION } from './types';
 import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SupplyGap } from './types';
 
@@ -124,11 +127,75 @@ describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog, ReplaceK
     ).toEqual({ kind: 'gaps', gaps: [gap('codex', 'gpt-5.6')] });
   });
 
-  it('lets a clean repair close itself and holds a gap report open', () => {
+  it('refuses to call a still-blocked source repaired', () => {
+    // The case that makes this more than a passthrough: a native reauth commits
+    // `needs_action`/`oauth_expired` when the CLI still reports itself signed out
+    // and answers 200 with `recovered: true` beside it, because `recovered` is a
+    // statement about the state BEFORE the attempt. Reading it alone would put
+    // 「已恢复可用」 on a row that is still stopped — and dismiss the dialog over it.
+    expect(
+      repairOutcome({
+        source: blocked('models.source.needs_action.oauth_expired'),
+        recovered: true,
+        interrupted_pairs: [],
+      }),
+    ).toEqual({ kind: 'unresolved' });
+  });
+
+  it('reports an unclassified error state as unresolved too', () => {
+    // The other half of `wasBlocked`: a discovery that came back empty leaves the
+    // source on `error`, which is no more 「已更新」 than `needs_action` is.
+    expect(
+      repairOutcome({
+        source: source({ state: { status: 'error', detail_key: 'models.source.error.unclassified' } }),
+        recovered: false,
+        interrupted_pairs: [],
+      }),
+    ).toEqual({ kind: 'unresolved' });
+  });
+
+  it('still ranks the gap report above a source that came back blocked', () => {
+    expect(
+      repairOutcome({
+        source: blocked('models.source.needs_action.oauth_expired'),
+        recovered: true,
+        interrupted_pairs: [gap('claude', 'claude-opus-4-6')],
+      }),
+    ).toEqual({ kind: 'gaps', gaps: [gap('claude', 'claude-opus-4-6')] });
+  });
+
+  it('lets a clean repair close itself and holds every other verdict open', () => {
     expect(repairSettles({ kind: 'repaired' })).toBe(true);
     expect(repairSettles({ kind: 'refreshed' })).toBe(true);
+    expect(repairSettles({ kind: 'unresolved' })).toBe(false);
     expect(repairSettles({ kind: 'gaps', gaps: [gap('codex', 'gpt-5.6')] })).toBe(false);
   });
+
+  /**
+   * Both dialogs render this verdict through an INTERPOLATED key
+   * (`settings.models.repair.${kind}`), which has no compile-time link to the
+   * bundles — a fourth kind could ship with no string and print its own key at the
+   * user. This record must be exhaustive over the union, so a new kind fails the
+   * typecheck here first, and the assertion then proves the copy exists in both
+   * locales.
+   */
+  const RENDERED: Record<RepairOutcome['kind'], string | null> = {
+    repaired: 'repaired',
+    refreshed: 'refreshed',
+    unresolved: 'unresolved',
+    // Not interpolated: a gap report renders `gapsDone` above the pair list.
+    gaps: null,
+  };
+
+  const repairCopy = (bundle: unknown) =>
+    (bundle as { settings: { models: { repair: Record<string, string | undefined> } } }).settings.models.repair;
+
+  it.each(Object.entries(RENDERED).filter(([, key]) => key !== null))(
+    'has copy in both locales for the %s verdict',
+    (_kind, key) => {
+      for (const bundle of [en, zh]) expect(typeof repairCopy(bundle)[key as string]).toBe('string');
+    },
+  );
 });
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({

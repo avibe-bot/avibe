@@ -152,12 +152,29 @@ class ApiCallError extends Error {
    * first proving which error it has.
    */
   wouldInterrupt: SupplyGap[];
-  constructor(code: string, detail?: string, wouldInterrupt: SupplyGap[] = []) {
+  /**
+   * The OTHER half, and deliberately not the same field: `would_interrupt` names
+   * what a REFUSED write would have stranded (nothing changed, the copy is future
+   * tense), while `interrupted_pairs` on an error names what a write that already
+   * COMMITTED did strand. A native reauth is where that difference is not
+   * academic — `_materialize_reauth` clears the source, marks it unavailable, and
+   * only then answers `discovery_failed` with the pairs beside it, so these gaps
+   * are a report about the past, not a confirm about the future. Collapsed into
+   * one field, the caller would have no way to pick the right tense.
+   */
+  interrupted: SupplyGap[];
+  constructor(
+    code: string,
+    detail?: string,
+    wouldInterrupt: SupplyGap[] = [],
+    interrupted: SupplyGap[] = [],
+  ) {
     super(detail || code);
     this.name = 'ApiCallError';
     this.code = code;
     this.detail = detail;
     this.wouldInterrupt = wouldInterrupt;
+    this.interrupted = interrupted;
   }
 }
 
@@ -186,9 +203,14 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
  */
 export const apiFailure = (
   err: unknown,
-): { code: string; detail?: string; wouldInterrupt: SupplyGap[] } | null =>
+): { code: string; detail?: string; wouldInterrupt: SupplyGap[]; interrupted: SupplyGap[] } | null =>
   err instanceof ApiCallError
-    ? { code: err.code, detail: err.detail, wouldInterrupt: err.wouldInterrupt }
+    ? {
+        code: err.code,
+        detail: err.detail,
+        wouldInterrupt: err.wouldInterrupt,
+        interrupted: err.interrupted,
+      }
     : null;
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -204,6 +226,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       payload?.error || `http_${res.status}`,
       payload?.detail,
       supplyGaps(payload?.would_interrupt),
+      supplyGaps(payload?.interrupted_pairs),
     );
   }
   return payload as T;
