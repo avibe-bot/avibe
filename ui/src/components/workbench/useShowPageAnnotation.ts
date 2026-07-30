@@ -56,37 +56,56 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     setState(null);
   }
 
-  useEffect(() => {
-    if (!src) return;
-    const onMessage = (event: MessageEvent) => {
-      // Same-origin iframe only: ignore other origins, and other windows (the
-      // Show Page is same-origin and may talk to the parent for other reasons —
-      // match by both source window and message type).
-      if (event.origin !== window.location.origin) return;
-      const frame = iframeRef.current;
-      if (!frame || event.source !== frame.contentWindow) return;
-      const data = event.data as
-        | { type?: unknown; enabled?: unknown; mode?: unknown; available?: unknown }
-        | null;
-      if (!data || data.type !== 'avibe:annotation:state') return;
-      setState({
-        enabled: data.enabled === true,
-        mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
-        available: data.available === true,
-      });
-    };
+  const onMessage = useCallback((event: MessageEvent) => {
+    // Same-origin iframe only: ignore other origins, and other windows (the
+    // Show Page is same-origin and may talk to the parent for other reasons —
+    // match by both source window and message type).
+    if (event.origin !== window.location.origin) return;
+    const frame = iframeRef.current;
+    if (!frame || event.source !== frame.contentWindow) return;
+    const data = event.data as
+      | { type?: unknown; enabled?: unknown; mode?: unknown; available?: unknown }
+      | null;
+    if (!data || data.type !== 'avibe:annotation:state') return;
+    setState({
+      enabled: data.enabled === true,
+      mode: data.mode === 'screenshot' ? 'screenshot' : 'smart',
+      available: data.available === true,
+    });
+  }, []);
+
+  const listeningRef = useRef(false);
+  const startListening = useCallback(() => {
+    if (listeningRef.current) return;
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [src]);
+    listeningRef.current = true;
+  }, [onMessage]);
+  const stopListening = useCallback(() => {
+    if (!listeningRef.current) return;
+    window.removeEventListener('message', onMessage);
+    listeningRef.current = false;
+  }, [onMessage]);
+
+  // Keep the listener alive even while `src` is null. A restored/cached iframe
+  // can report during its commit, before passive effects run; the callback ref
+  // below attaches synchronously before that frame can finish loading.
+  useEffect(() => {
+    startListening();
+    return stopListening;
+  }, [startListening, stopListening]);
 
   const post = useCallback((message: ControlMessage) => {
     const win = iframeRef.current?.contentWindow;
     if (win) win.postMessage(message, window.location.origin);
   }, []);
 
-  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>((iframe) => {
-    iframeRef.current = iframe;
-  }, []);
+  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>(
+    (iframe) => {
+      iframeRef.current = iframe;
+      if (iframe) startListening();
+    },
+    [startListening],
+  );
 
   const enable = useCallback(
     (mode?: AnnotationMode) =>

@@ -10,7 +10,7 @@ import { useShowPageInventory } from '../useShowPages';
 import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { AppWindow } from './AppWindow';
 import { showPageWindowSource, type ShowPageWindowStatus } from './showPageWindowState';
-import { inTerminalSurface, inTextEntrySurface } from './windowChords';
+import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
 
 const ShowPageWindow: React.FC<{
@@ -107,10 +107,8 @@ export const WindowLayer: React.FC = () => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
-      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
-      if (!winEl || !ref.current?.contains(winEl)) return;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
-      const targetId = winEl.getAttribute('data-window-id');
+      const targetId = windowIdForKeyboardTarget(active, ref.current);
       if (!targetId) return;
       const key = e.key.toLowerCase();
       if (key === 'w') {
@@ -135,9 +133,7 @@ export const WindowLayer: React.FC = () => {
       if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
       const active = document.activeElement;
       if (inTextEntrySurface(active)) return;
-      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
-      if (!winEl || !ref.current?.contains(winEl)) return;
-      const targetId = winEl.getAttribute('data-window-id');
+      const targetId = windowIdForKeyboardTarget(active, ref.current);
       if (!targetId) return;
       e.preventDefault();
       if (confirmClose(targetId)) close(targetId);

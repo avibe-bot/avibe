@@ -61,6 +61,8 @@ interface ShowPageAnnotateControlProps {
   onPopoverOpenChange?: (open: boolean) => void;
   /** Keep a single icon trigger at every viewport size (window title bars). */
   compact?: boolean;
+  /** Associate portalled popover focus with its owning app window. */
+  ownerWindowId?: string;
 }
 
 export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = ({
@@ -70,6 +72,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   onSetMode,
   onPopoverOpenChange,
   compact = false,
+  ownerWindowId,
 }) => {
   const { t } = useTranslation();
   const ready = state !== null;
@@ -211,7 +214,11 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
               <MessageSquarePlus className="size-3.5" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="w-64 p-1.5">
+          <PopoverContent
+            align="end"
+            className="w-64 p-1.5"
+            data-window-owner-id={ownerWindowId}
+          >
             <div className="flex items-center justify-between px-2 pb-1.5 pt-1">
               <span className="text-[13px] font-medium text-foreground">{t('chat.showPage.annotate.modeTitle')}</span>
               <span className="text-[11px] text-muted">{t('chat.showPage.annotate.rememberHint')}</span>

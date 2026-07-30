@@ -27,3 +27,23 @@ export function inTextEntrySurface(el: Element | null): boolean {
     'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], .monaco-editor, .xterm',
   );
 }
+
+/** Resolve focused window chrome, including controls rendered in a body portal. */
+export function windowIdForKeyboardTarget(target: Element | null, layer: Element | null): string | null {
+  if (!target || !layer) return null;
+
+  const windowRoot = target.closest?.('[data-window-id]');
+  if (windowRoot && layer.contains(windowRoot)) {
+    return windowRoot.getAttribute('data-window-id');
+  }
+
+  const portalledRoot = target.closest?.('[data-window-owner-id]');
+  const ownerId = portalledRoot?.getAttribute('data-window-owner-id');
+  if (!ownerId) return null;
+
+  // A data attribute outside this layer cannot nominate an arbitrary window.
+  for (const candidate of layer.querySelectorAll('[data-window-id]')) {
+    if (candidate.getAttribute('data-window-id') === ownerId) return ownerId;
+  }
+  return null;
+}
