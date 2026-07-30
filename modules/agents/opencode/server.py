@@ -59,6 +59,15 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
+class OpenCodePromptRejectedError(RuntimeError):
+    """Definitive HTTP rejection from OpenCode's async prompt endpoint."""
+
+    def __init__(self, status: int, response_text: str) -> None:
+        self.status = status
+        self.response_text = response_text
+        super().__init__(f"Failed to start async prompt: {status} {response_text}")
+
+
 class OpenCodeServerManager:
     """Manages a singleton OpenCode server process shared across all working directories."""
 
@@ -1532,7 +1541,7 @@ class OpenCodeServerManager:
                 # OpenCode returns 204 when accepted.
                 if resp.status not in (200, 204):
                     error_text = await resp.text()
-                    raise RuntimeError(f"Failed to start async prompt: {resp.status} {error_text}")
+                    raise OpenCodePromptRejectedError(resp.status, error_text)
             self._last_prompt_started_at[session_id] = started_at
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:

@@ -14,6 +14,13 @@ from core.message_output import (
     terminal_turn_output,
 )
 from core.reply_enhancer import strip_silent_blocks
+from core.services.agent_steering import (
+    ActiveSteerTarget,
+    SteerOutcome,
+    SteerRequest,
+    SteerResult,
+    result as steer_result,
+)
 from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
@@ -509,6 +516,118 @@ class ClaudeAgent(BaseAgent):
                     exc_info=True,
                 )
                 self._release_service_runtime_turn(context)
+
+    def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
+        composite_key = target.runtime_key
+        client = self.claude_sessions.get(composite_key)
+        receiver_task = self.receiver_tasks.get(composite_key)
+        active_sessions = getattr(self.session_handler, "active_sessions", set())
+        if (
+            client is None
+            or receiver_task is None
+            or receiver_task.done()
+            or composite_key not in active_sessions
+        ):
+            return None
+        return f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+
+    async def steer_active_turn(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        composite_key = target.runtime_key
+        client = self.claude_sessions.get(composite_key)
+        receiver_task = self.receiver_tasks.get(composite_key)
+        active_sessions = getattr(self.session_handler, "active_sessions", set())
+        if (
+            client is None
+            or receiver_task is None
+            or receiver_task.done()
+            or composite_key not in active_sessions
+        ):
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+
+        native_turn_id = f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+        if native_turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
+
+        primary_requests = self._pending_requests.get(composite_key)
+        if not primary_requests or primary_requests[0] is not target.agent_request:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="primary_turn_changed", backend=self.name)
+        primary_request_count = len(primary_requests)
+
+        try:
+            await client.query(request.text, session_id=composite_key)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK transports expose several concrete types
+            diagnostic = str(exc)
+            lowered = diagnostic.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "failed to write",
+                    "broken pipe",
+                    "connection reset",
+                    "timed out",
+                    "timeout",
+                    "disconnected",
+                    "connection lost",
+                    "unexpected eof",
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="acknowledgement_ambiguous",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            if any(
+                marker in lowered
+                for marker in (
+                    "not connected",
+                    "not ready for writing",
+                    "terminated process",
+                    "process that exited with error",
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="runtime_unavailable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="unclassified_transport_failure",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+
+        if (
+            self.claude_sessions.get(composite_key) is not client
+            or self.receiver_tasks.get(composite_key) is not receiver_task
+            or receiver_task.done()
+            or self._pending_requests.get(composite_key) is not primary_requests
+            or len(primary_requests) != primary_request_count
+            or primary_requests[0] is not target.agent_request
+        ):
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="receiver_generation_changed",
+                backend=self.name,
+            )
+        return steer_result(
+            SteerOutcome.ACCEPTED,
+            backend=self.name,
+            receiver_generation=native_turn_id,
+        )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id

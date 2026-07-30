@@ -14,10 +14,19 @@ import os
 import time
 from typing import Dict, Optional
 
+import aiohttp
+
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
 from core.resource_governance import governor_from_controller
+from core.services.agent_steering import (
+    ActiveSteerTarget,
+    SteerOutcome,
+    SteerRequest,
+    SteerResult,
+    result as steer_result,
+)
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
@@ -34,7 +43,7 @@ from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, restored_session_key_from_poll_info
-from .server import OpenCodeServerManager
+from .server import OpenCodePromptRejectedError, OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
@@ -523,6 +532,96 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         finally:
             if run_registered:
                 await server.mark_run_inactive(session_id)
+
+    def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
+        active_request = target.agent_request
+        if active_request is None:
+            return None
+        base_session_id = active_request.base_session_id
+        task = self._active_requests.get(base_session_id)
+        request_session = self._session_manager.get_request_session(base_session_id)
+        if task is None or task.done() or request_session is None:
+            return None
+        return f"opencode:{request_session[0]}:{id(task)}"
+
+    async def steer_active_turn(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        active_request = target.agent_request
+        if active_request is None:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_primary_request", backend=self.name)
+
+        base_session_id = active_request.base_session_id
+        task = self._active_requests.get(base_session_id)
+        request_session = self._session_manager.get_request_session(base_session_id)
+        if task is None or task.done() or request_session is None:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="no_active_native_run", backend=self.name)
+
+        native_session_id, directory, _session_key = request_session
+        native_turn_id = f"opencode:{native_session_id}:{id(task)}"
+        if native_turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
+
+        server = self._client_manager._server_manager
+        if server is None:
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+
+        try:
+            await server.prompt_async(
+                session_id=native_session_id,
+                directory=directory,
+                text=request.text,
+            )
+        except OpenCodePromptRejectedError as exc:
+            outcome = SteerOutcome.NOT_ACTIVE if exc.status == 404 else SteerOutcome.REFUSED
+            reason = "native_session_missing" if exc.status == 404 else "backend_refused"
+            return steer_result(
+                outcome,
+                reason=reason,
+                backend=self.name,
+                status=exc.status,
+                diagnostic=exc.response_text,
+            )
+        except aiohttp.ClientConnectorError as exc:
+            return steer_result(
+                SteerOutcome.REFUSED,
+                reason="runtime_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError) as exc:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - a response is a definitive rejection
+            return steer_result(
+                SteerOutcome.REFUSED,
+                reason="backend_refused",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        if (
+            self._active_requests.get(base_session_id) is not task
+            or task.done()
+            or self._session_manager.get_request_session(base_session_id) != request_session
+        ):
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="runner_generation_changed",
+                backend=self.name,
+            )
+        return steer_result(
+            SteerOutcome.ACCEPTED,
+            backend=self.name,
+            native_session_id=native_session_id,
+            runner_generation=native_turn_id,
+        )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         task = self._active_requests.get(request.base_session_id)
