@@ -126,6 +126,10 @@ _RAW_HTML_TAG_RE = re.compile(
 _RAW_HTML_SPECIAL_RE = re.compile(
     r"(?:<!--.*?-->|<\?.*?\?>|<![A-Z][^>]*>|<!\[CDATA\[.*?\]\]>)"
 )
+_RAW_HTML_BLOCK_OPEN_RE = re.compile(
+    r"^[ \t]{0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t>]|$)",
+    re.IGNORECASE,
+)
 
 # Dynamic secret-ask markers: ``$<openAiKey>`` (case-preserving shell name). Matched only
 # outside fenced/inline code so a marker shown in an example isn't treated as a real
@@ -320,11 +324,34 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
     list_quote_depth: int | None = None
     list_indents: List[int] = []
     paragraph_open = False
+    raw_html_block_tag: str | None = None
     offset = 0
 
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         if active is None:
+            if raw_html_block_tag is not None:
+                if re.search(
+                    rf"</{re.escape(raw_html_block_tag)}[ \t]*>",
+                    content,
+                    re.IGNORECASE,
+                ):
+                    raw_html_block_tag = None
+                paragraph_open = False
+                offset += len(line)
+                continue
+            html_block = _RAW_HTML_BLOCK_OPEN_RE.match(content)
+            if html_block is not None:
+                tag = html_block.group("tag")
+                if not re.search(
+                    rf"</{re.escape(tag)}[ \t]*>",
+                    content[html_block.end() :],
+                    re.IGNORECASE,
+                ):
+                    raw_html_block_tag = tag
+                paragraph_open = False
+                offset += len(line)
+                continue
             (
                 delimiter,
                 list_quote_depth,
@@ -670,6 +697,7 @@ def _indented_code_ranges(
     active_start: int | None = None
     paragraph_open = False
     list_indent: int | None = None
+    list_quote_depth: int | None = None
     fence_index = 0
     offset = 0
 
@@ -697,8 +725,12 @@ def _indented_code_ranges(
             offset += len(line)
             continue
 
-        _, indent = _consume_indentation(content, 0, 0)
-        marker_indent = _list_content_indent(content)
+        quote_depth, prefix_end = _quote_prefix(content)
+        if list_quote_depth != quote_depth:
+            list_indent = None
+            list_quote_depth = quote_depth
+        _, indent = _consume_indentation(content, prefix_end, 0)
+        marker_indent = _list_content_indent(content[prefix_end:])
         if marker_indent is not None:
             list_indent = marker_indent
         elif (

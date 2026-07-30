@@ -627,6 +627,24 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
+    def test_silent_parser_preserves_quoted_indented_code_literal(self):
+        text = ">     <silent>quoted indented literal</silent>"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_ignores_fences_inside_raw_html_blocks(self):
+        text = (
+            "<pre>\n"
+            "```\n"
+            "<silent>remove real directive</silent>\n"
+            "```\n"
+            "</pre>\n"
+            "Tail remains."
+        )
+        expected = "<pre>\n```\n\n```\n</pre>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
     def test_process_reply_keeps_fence_newline_before_quick_replies(self):
         text = "```text\nexample\n```\n---\n[Yes] | [No]"
 
