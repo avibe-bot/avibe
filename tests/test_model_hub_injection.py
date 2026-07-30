@@ -512,6 +512,66 @@ def test_runtime_launch_uses_discovered_native_alias_target(tmp_path: Path) -> N
     assert launch.runtime_model == "route-alias/claude-opus-4-5-20251101"
 
 
+def test_runtime_alias_failover_correlates_by_requested_menu_id(tmp_path: Path) -> None:
+    requested_model = "claude-opus-4-5"
+    primary = _source(
+        "src_alias_primary",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20251101",),
+    )
+    backup = _source(
+        "src_alias_backup",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20250929",),
+    )
+    config = _hub_config(
+        sources=[primary, backup],
+        order=[primary.id, backup.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter(
+            {
+                primary.id: "route-primary",
+                backup.id: "route-backup",
+            }
+        ),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    router = _router(service)
+
+    primary_launch = asyncio.run(router.resolve("claude", requested_model))
+    context = SimpleNamespace()
+    bind_launch(context, primary_launch)
+    assert asyncio.run(router.record_native_failure(context, "429 rate limit")) is True
+
+    backup_launch = asyncio.run(router.resolve("claude", requested_model))
+
+    assert primary_launch.target_model == "claude-opus-4-5-20251101"
+    assert backup_launch.target_model == "claude-opus-4-5-20250929"
+    assert backup_launch.source_id == backup.id
+    transition_events = [
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] in {"cooldown", "switch"}
+    ]
+    assert [event["kind"] for event in transition_events] == [
+        "switch",
+        "cooldown",
+    ]
+    assert {event["model_id"] for event in transition_events} == {
+        requested_model
+    }
+
+
 def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
     service = _service(
         tmp_path,

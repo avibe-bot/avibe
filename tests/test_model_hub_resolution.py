@@ -866,6 +866,14 @@ def test_failover_uses_each_sources_effective_native_alias(tmp_path):
         ("src_primary01", "claude-opus-4-5-20251101", "claude"),
         ("src_backup001", "claude-opus-4-5-20250929", "claude"),
     ]
+    failover_events = [
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] in {"cooldown", "switch"}
+    ]
+    assert {event["model_id"] for event in failover_events} == {
+        "claude-opus-4-5"
+    }
 
 
 def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tmp_path):

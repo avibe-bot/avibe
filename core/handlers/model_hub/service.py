@@ -3132,7 +3132,7 @@ class ModelHubService:
                 self._record_event(
                     agent=cast(EventAgent, resolution.backend),
                     kind="recover",
-                    model_id=resolution.target_model,
+                    model_id=resolution.requested_model,
                     reason="recovery",
                     to_source=source.id,
                     to_label=source.display_name,
@@ -3301,7 +3301,7 @@ class ModelHubService:
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3334,7 +3334,7 @@ class ModelHubService:
             if outcome is None:
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3354,7 +3354,7 @@ class ModelHubService:
                 if outcome is None:
                     self._emit_switch(
                         agent=event_agent,
-                        model_id=target_model,
+                        model_id=model_id,
                         failed_source=failed_source,
                         failed_reason=failed_reason,
                         source=source,
@@ -3373,7 +3373,7 @@ class ModelHubService:
             if decision.action == "return":
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3400,7 +3400,7 @@ class ModelHubService:
                         source,
                         decision,
                         agent=event_agent,
-                        model_id=target_model,
+                        model_id=model_id,
                     )
                 elif event_reason != "permission_denied":
                     detail_key = {
