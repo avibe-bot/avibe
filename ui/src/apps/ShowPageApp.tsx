@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MonitorX, PinOff } from 'lucide-react';
 
 import { inTextEntrySurface } from '../components/apps/windowChords';
 import { useRequiredShowPageAnnotationHost } from '../components/workbench/ShowPageAnnotationHostContext';
-import { useApi } from '../context/ApiContext';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 
@@ -19,12 +18,7 @@ import { useWindowManager } from '../context/WindowManagerContext';
 
 export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
-  const api = useApi();
-  // Destructure the STABLE window-manager callbacks (useCallback-memoized) rather
-  // than the whole context value: the value object changes identity on every
-  // window focus/minimize/drag tick, and depending on it here would re-run this
-  // "read once" effect and re-hit /api/sessions on every such change (Codex).
-  const { setTitle, close, confirmClose } = useWindowManager();
+  const { close, confirmClose } = useWindowManager();
   const { unpin } = useDock();
   const { annotation, src } = useRequiredShowPageAnnotationHost();
   const { setIframe: setAnnotationIframe, handleIframeLoad } = annotation;
@@ -38,37 +32,6 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
   );
 
   const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : '';
-  // 'loading' optimistically frames the page (the common case: it exists);
-  // 'missing' swaps to the placeholder once we learn the session is gone/archived.
-  const [state, setState] = useState<'loading' | 'ready' | 'missing'>(sessionId ? 'loading' : 'missing');
-
-  // Read the session once (error-suppressed — a gone session must NOT toast) to
-  // upgrade the window title to the LIVE title and to detect missing/archived.
-  useEffect(() => {
-    if (!sessionId) return;
-    let cancelled = false;
-    api
-      .getSession(sessionId, { cache: true, handleError: false })
-      .then((session) => {
-        if (cancelled) return;
-        // handleError:false resolves (does not throw) on a 404, returning the raw
-        // error body — so a response without a real session id, or an archived
-        // session, is the "missing" signal, same as a rejection.
-        if (!session || typeof session.id !== 'string' || session.status === 'archived') {
-          setState('missing');
-          return;
-        }
-        setState('ready');
-        const live = (session.title ?? '').trim();
-        if (live) setTitle(windowId, live);
-      })
-      .catch(() => {
-        if (!cancelled) setState('missing');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, api, setTitle, windowId]);
 
   // Bridge ⌥W (close window) into the same-origin Show Page iframe: a keydown
   // inside the iframe dispatches to ITS document and never bubbles to the parent
@@ -115,7 +78,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
     };
   }, [close, confirmClose, iframeRef, windowId]);
 
-  if (!sessionId || state === 'missing') {
+  if (!sessionId || !src) {
     return (
       <div className="grid h-full w-full place-items-center bg-surface px-6 text-center">
         <div className="flex max-w-[320px] flex-col items-center gap-3">
@@ -153,7 +116,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
       ref={setIframe}
       onLoad={handleIframeLoad}
       title={t('chat.showPage.title')}
-      src={src ?? undefined}
+      src={src}
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
       allow="clipboard-write"
       className="h-full w-full border-0 bg-background"

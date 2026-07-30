@@ -299,7 +299,7 @@ export const AppWindow: React.FC<{
         {/* Mirror the left cluster so the title stays centered. Show Page windows
             add a compact annotation control before chat + open-in-new-tab. */}
         <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-20' : 'w-[52px]')}>
-          {showpageSid && annotationHost && !win.minimized && exitKind === null && (
+          {showpageSid && annotationHost?.src && !win.minimized && exitKind === null && (
             <div
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
@@ -367,7 +367,9 @@ export const AppWindow: React.FC<{
             transparent overlay so a gesture's pointer can't be stolen by the iframe and the
             cursor doesn't flicker over it — belt-and-braces with the gesture's pointer capture. */}
         <WindowBodyGestureShield active={shouldShieldWindowBody(wm.gestureActive, win.minimized)} />
-        {annotateOpen && <div aria-hidden data-annotation-shield className="absolute inset-0 z-20" />}
+        {annotateOpen && annotationHost?.src && (
+          <div aria-hidden data-annotation-shield className="absolute inset-0 z-20" />
+        )}
       </div>
 
       {!win.maximized &&
