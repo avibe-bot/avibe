@@ -75,6 +75,8 @@ class ClaudeAgent(BaseAgent):
         # the list shape remains for defensive cleanup of older queued state.
         self._pending_reactions: dict[str, list[tuple[str, str]]] = {}
         self._pending_requests: dict[str, list[AgentRequest]] = {}
+        self._steering_locks: dict[str, asyncio.Lock] = {}
+        self._steering_generations: dict[str, int] = {}
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
         self._detached_assistant_text: dict[str, str] = {}
         self._detached_unsolicited_outputs: set[str] = set()
@@ -531,106 +533,135 @@ class ClaudeAgent(BaseAgent):
             return None
         return f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
 
+    def _steering_lock(self, composite_key: str) -> asyncio.Lock:
+        locks = getattr(self, "_steering_locks", None)
+        if locks is None:
+            locks = {}
+            self._steering_locks = locks
+        return locks.setdefault(composite_key, asyncio.Lock())
+
+    def _steering_generation(self, composite_key: str) -> int:
+        generations = getattr(self, "_steering_generations", None)
+        if generations is None:
+            generations = {}
+            self._steering_generations = generations
+        return generations.get(composite_key, 0)
+
     async def steer_active_turn(
         self,
         request: SteerRequest,
         target: ActiveSteerTarget,
     ) -> SteerResult:
         composite_key = target.runtime_key
-        client = self.claude_sessions.get(composite_key)
-        receiver_task = self.receiver_tasks.get(composite_key)
-        active_sessions = getattr(self.session_handler, "active_sessions", set())
-        if (
-            client is None
-            or receiver_task is None
-            or receiver_task.done()
-            or composite_key not in active_sessions
-        ):
-            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
-
-        native_turn_id = f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
-        if native_turn_id != request.expected_native_turn_id:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
-
-        primary_requests = self._pending_requests.get(composite_key)
-        if not primary_requests or primary_requests[0] is not target.agent_request:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="primary_turn_changed", backend=self.name)
-        primary_request_count = len(primary_requests)
-
-        try:
-            await client.query(request.text, session_id=composite_key)
-        except (asyncio.TimeoutError, TimeoutError) as exc:
-            return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="acknowledgement_ambiguous",
-                backend=self.name,
-                diagnostic=str(exc),
-            )
-        except Exception as exc:  # noqa: BLE001 - SDK transports expose several concrete types
-            diagnostic = str(exc)
-            lowered = diagnostic.lower()
-            if any(
-                marker in lowered
-                for marker in (
-                    "failed to write",
-                    "broken pipe",
-                    "connection reset",
-                    "timed out",
-                    "timeout",
-                    "disconnected",
-                    "connection lost",
-                    "unexpected eof",
-                )
-            ):
-                return steer_result(
-                    SteerOutcome.UNKNOWN,
-                    reason="acknowledgement_ambiguous",
-                    backend=self.name,
-                    diagnostic=diagnostic,
-                )
-            if any(
-                marker in lowered
-                for marker in (
-                    "not connected",
-                    "not ready for writing",
-                    "terminated process",
-                    "process that exited with error",
-                )
+        async with self._steering_lock(composite_key):
+            client = self.claude_sessions.get(composite_key)
+            receiver_task = self.receiver_tasks.get(composite_key)
+            active_sessions = getattr(self.session_handler, "active_sessions", set())
+            if (
+                client is None
+                or receiver_task is None
+                or receiver_task.done()
+                or composite_key not in active_sessions
             ):
                 return steer_result(
                     SteerOutcome.REFUSED,
                     reason="runtime_unavailable",
                     backend=self.name,
+                )
+
+            native_turn_id = f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            if native_turn_id != request.expected_native_turn_id:
+                return steer_result(
+                    SteerOutcome.NOT_ACTIVE,
+                    reason="stale_native_turn",
+                    backend=self.name,
+                )
+
+            primary_requests = self._pending_requests.get(composite_key)
+            if not primary_requests or primary_requests[0] is not target.agent_request:
+                return steer_result(
+                    SteerOutcome.NOT_ACTIVE,
+                    reason="primary_turn_changed",
+                    backend=self.name,
+                )
+            primary_request_count = len(primary_requests)
+
+            try:
+                await client.query(request.text, session_id=composite_key)
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="acknowledgement_ambiguous",
+                    backend=self.name,
+                    diagnostic=str(exc),
+                )
+            except Exception as exc:  # noqa: BLE001 - SDK transports expose several concrete types
+                diagnostic = str(exc)
+                lowered = diagnostic.lower()
+                if any(
+                    marker in lowered
+                    for marker in (
+                        "failed to write",
+                        "broken pipe",
+                        "connection reset",
+                        "timed out",
+                        "timeout",
+                        "disconnected",
+                        "connection lost",
+                        "unexpected eof",
+                    )
+                ):
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="acknowledgement_ambiguous",
+                        backend=self.name,
+                        diagnostic=diagnostic,
+                    )
+                if any(
+                    marker in lowered
+                    for marker in (
+                        "not connected",
+                        "not ready for writing",
+                        "terminated process",
+                        "process that exited with error",
+                    )
+                ):
+                    return steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="runtime_unavailable",
+                        backend=self.name,
+                        diagnostic=diagnostic,
+                    )
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="unclassified_transport_failure",
+                    backend=self.name,
                     diagnostic=diagnostic,
                 )
-            return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="unclassified_transport_failure",
-                backend=self.name,
-                diagnostic=diagnostic,
-            )
 
-        touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
-        if callable(touch_session_activity):
-            touch_session_activity(composite_key)
-        if (
-            self.claude_sessions.get(composite_key) is not client
-            or self.receiver_tasks.get(composite_key) is not receiver_task
-            or receiver_task.done()
-            or self._pending_requests.get(composite_key) is not primary_requests
-            or len(primary_requests) != primary_request_count
-            or primary_requests[0] is not target.agent_request
-        ):
+            current_generation = self._steering_generation(composite_key)
+            self._steering_generations[composite_key] = current_generation + 1
+            touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
+            if callable(touch_session_activity):
+                touch_session_activity(composite_key)
+            if (
+                self.claude_sessions.get(composite_key) is not client
+                or self.receiver_tasks.get(composite_key) is not receiver_task
+                or receiver_task.done()
+                or self._pending_requests.get(composite_key) is not primary_requests
+                or len(primary_requests) != primary_request_count
+                or primary_requests[0] is not target.agent_request
+            ):
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="receiver_generation_changed",
+                    backend=self.name,
+                )
             return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="receiver_generation_changed",
+                SteerOutcome.ACCEPTED,
                 backend=self.name,
+                receiver_generation=native_turn_id,
             )
-        return steer_result(
-            SteerOutcome.ACCEPTED,
-            backend=self.name,
-            receiver_generation=native_turn_id,
-        )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id
@@ -766,6 +797,11 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     message_type = self._detect_message_type(message)
+                    result_steering_generation = (
+                        self._steering_generation(composite_key)
+                        if message_type == "result"
+                        else None
+                    )
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
                     model_refusal_fallback_notice = (
@@ -1032,45 +1068,52 @@ class ClaudeAgent(BaseAgent):
                                 )
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
-                        self._pending_assistant_message.pop(composite_key, None)
-                        if self._consume_suppressed_synthetic_result(
-                            composite_key,
-                            message,
-                            raw_result_text,
-                        ):
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
-                            continue
+                        async with self._steering_lock(composite_key):
+                            if result_steering_generation != self._steering_generation(
+                                composite_key
+                            ):
+                                logger.info(
+                                    "Ignoring Claude terminal result superseded by steering for %s",
+                                    composite_key,
+                                )
+                                continue
 
-                        failure_disposition = await self._handle_terminal_failure_result(
-                            context,
-                            composite_key,
-                            message,
-                            raw_result_text
-                            or self._last_assistant_text.get(composite_key),
-                        )
-                        if failure_disposition == "auth":
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
-                            return
-                        if failure_disposition:
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
-                            continue
+                            self._pending_assistant_message.pop(composite_key, None)
+                            if self._consume_suppressed_synthetic_result(
+                                composite_key,
+                                message,
+                                raw_result_text,
+                            ):
+                                self._last_assistant_text.pop(composite_key, None)
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                continue
 
-                        # NOTE: The pending assistant message is intentionally
-                        # NOT emitted here.  ResultMessage.result already
-                        # contains the same text as the last AssistantMessage,
-                        # so sending both would duplicate the content.
+                            failure_disposition = await self._handle_terminal_failure_result(
+                                context,
+                                composite_key,
+                                message,
+                                raw_result_text
+                                or self._last_assistant_text.get(composite_key),
+                            )
+                            if failure_disposition == "auth":
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                return
+                            if failure_disposition:
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                continue
 
-                        pending_request = self._pop_pending_request(composite_key)
-                        output_activities = self._request_activities(pending_request)
-                        output_activity = output_activities[-1] if output_activities else None
-                        result_text = self._select_terminal_text(
-                            composite_key,
-                            raw_result_text,
-                        )
+                            # ResultMessage.result already contains the last
+                            # AssistantMessage, so only the terminal owner emits it.
+                            pending_request = self._pop_pending_request(composite_key)
+                            output_activities = self._request_activities(pending_request)
+                            output_activity = output_activities[-1] if output_activities else None
+                            result_text = self._select_terminal_text(
+                                composite_key,
+                                raw_result_text,
+                            )
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's

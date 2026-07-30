@@ -13,6 +13,7 @@ eviction) until the next service restart. The mark-idle now runs in a
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 
@@ -76,6 +78,90 @@ def _build_agent(mark_idle_calls):
 
 
 class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_steer_supersedes_a_concurrent_primary_result(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-steer:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        first_result_ready = asyncio.Event()
+        first_result_yielded = asyncio.Event()
+        second_result_ready = asyncio.Event()
+
+        class _SteeringClient:
+            async def query(self, text, *, session_id):
+                self.query_call = (text, session_id)
+                query_started.set()
+                await release_query.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await first_result_ready.wait()
+                    first_result_yielded.set()
+                    first = _ResultMessage()
+                    first.result = "primary result"
+                    yield first
+                    await second_result_ready.wait()
+                    second = _ResultMessage()
+                    second.result = "steered result"
+                    yield second
+
+                return _iterate()
+
+        client = _SteeringClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-steer",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-steer",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="补充：`exact`",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        first_result_ready.set()
+        await first_result_yielded.wait()
+        await asyncio.sleep(0)
+        release_query.set()
+
+        receipt = await steer_task
+        await asyncio.sleep(0)
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertEqual(client.query_call, ("补充：`exact`", composite_key))
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        second_result_ready.set()
+        await receiver_task
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "steered result")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+
     async def test_emit_failure_still_marks_session_idle(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
