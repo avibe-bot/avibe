@@ -525,6 +525,99 @@ def test_the_row_accepts_no_turn_by_identity_or_by_projection(monkeypatch, tmp_p
         assert session_is_runtime_owned(session_id=ordinary, visibility=visibility) is False
 
 
+def test_the_shared_target_resolver_refuses_the_reserved_row(monkeypatch, tmp_path: Path) -> None:
+    """The composer is one door; ``resolve_session_id_target`` is all the others.
+
+    Round-16 review thread 3678900318. The previous round refused the send inside
+    ``POST /api/sessions/<id>/messages``, which is the door a HUMAN finds. Every other
+    turn entry point reaches the runtime through the shared resolver instead —
+    ``vibe agent run --session-id ses-workspace-notices`` (``cmd_agent_run`` resolves
+    the pin on its ``session_policy in {"existing", "fork"}`` branch),
+    ``vibe task/watch add --session-id``, and ``enqueue_session_callback`` — and that
+    resolver refused only ARCHIVED rows. The reserved row is deliberately kept ACTIVE
+    (``archive_session`` refuses its id), so it sailed straight through and one CLI line
+    could enqueue a real turn into the machine's row, whose ``agent_backend`` is empty.
+
+    ``reason="reserved"``, a NEW value rather than a reuse of ``archived`` or
+    ``missing``: the row exists and is healthy, so nothing about the destination is
+    dead. ``missing`` in particular is the one reason ``_execute_claimed_request``
+    classifies as ``delivery_target_missing``, which here would send a reader hunting
+    for a session sitting in their own inbox.
+
+    Both halves of ``session_is_runtime_owned`` again, for the same two directions the
+    composer guard needed them in — the IDENTITY half covers the window before the lazy
+    heal, the ``system`` PROJECTION generalizes to a future runtime-owned row — and an
+    ordinary session must still resolve, or the guard breaks every pinned definition.
+    """
+    from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+
+    db_path = _migrated_db(monkeypatch, tmp_path)
+    engine = _reserved_with_one_notice(db_path)
+
+    with pytest.raises(UnresolvableSessionTarget) as exc:
+        resolve_session_id_target(WORKSPACE_NOTICE_SESSION_ID, db_path=db_path)
+    assert exc.value.session_id == WORKSPACE_NOTICE_SESSION_ID
+    assert exc.value.reason == "reserved", (
+        "a distinct reason, so no consumer of the other two mistakes this for one of "
+        f"them: {exc.value.reason}"
+    )
+    assert exc.value.reason != "missing", (
+        "``missing`` is the ``delivery_target_missing`` classifier — this row is right "
+        "there in the inbox, so that label would be a lie"
+    )
+    assert WORKSPACE_NOTICE_SESSION_ID in str(exc.value), (
+        f"the message a failed run settles with has to name the session: {exc.value}"
+    )
+    # Still a ValueError, so every pre-existing ``except ValueError`` caller (CLI, API,
+    # watches) keeps refusing rather than crashing.
+    assert isinstance(exc.value, ValueError)
+
+    # The IDENTITY half: a drifted ``visibility`` the lazy heal has not reached yet.
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agent_sessions SET visibility = 'foreground' WHERE id = :sid"),
+            {"sid": WORKSPACE_NOTICE_SESSION_ID},
+        )
+    with pytest.raises(UnresolvableSessionTarget) as drifted:
+        resolve_session_id_target(WORKSPACE_NOTICE_SESSION_ID, db_path=db_path)
+    assert drifted.value.reason == "reserved"
+
+    # An ordinary session is untouched — the resolver's whole job still works.
+    ordinary, _scope_id = _ordinary_session(db_path, channel="C704")
+    resolved = resolve_session_id_target(ordinary, db_path=db_path)
+    assert resolved.session_id == ordinary
+    assert resolved.session_key.to_key() == "slack::channel::C704"
+
+    # The PROJECTION half: a hypothetical second runtime-owned row inherits the refusal
+    # by visibility alone, with no second line here. Written by raw SQL because
+    # ``system`` is not in ``ASSIGNABLE_SESSION_VISIBILITIES``.
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agent_sessions SET visibility = 'system' WHERE id = :sid"),
+            {"sid": ordinary},
+        )
+    with pytest.raises(UnresolvableSessionTarget) as projected:
+        resolve_session_id_target(ordinary, db_path=db_path)
+    assert projected.value.reason == "reserved"
+
+
+def test_an_absent_row_still_reads_as_missing_not_reserved(monkeypatch, tmp_path: Path) -> None:
+    """Existence is decided FIRST, so the reserved id does not shadow ``missing``.
+
+    ``session_is_runtime_owned`` answers on the id alone, so a check placed before the
+    existence test would relabel "the reserved row has been deleted and no notice has
+    recreated it yet" as ``reserved`` — and ``missing`` is the reason the delivery
+    classification and the binding recovery are both written against. Ordering, not a
+    special case.
+    """
+    from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+
+    db_path = _migrated_db(monkeypatch, tmp_path)
+    with pytest.raises(UnresolvableSessionTarget) as exc:
+        resolve_session_id_target(WORKSPACE_NOTICE_SESSION_ID, db_path=db_path)
+    assert exc.value.reason == "missing"
+
+
 def test_a_scoped_clear_cannot_reach_the_reserved_row(monkeypatch, tmp_path: Path) -> None:
     """``scope_id IS NULL`` is what keeps ``/new`` and per-scope teardown off this row.
 

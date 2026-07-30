@@ -48,7 +48,7 @@ from core.run_settlement import (
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
-from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, session_is_runtime_owned
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
@@ -591,6 +591,42 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
     if row is None:
         raise UnresolvableSessionTarget(
             f"agent session id not found: {raw}", session_id=raw, reason="missing"
+        )
+    # A RUNTIME-OWNED session accepts no turn from anybody, so it is not a target.
+    #
+    # THE ROUTE-LOCAL GUARD WAS NOT ENOUGH (review thread 3678900318). Refusing the
+    # send in ``POST /api/sessions/<id>/messages`` closed the composer, which is the
+    # door a human finds; it left every OTHER turn entry point open, because they all
+    # come through HERE instead. ``vibe agent run --session-id ses-workspace-notices``
+    # (``cmd_agent_run`` resolves the pin at ``vibe/cli.py``'s ``session_policy in
+    # {"existing", "fork"}`` branch), a task or watch pinned with ``--session-id``, and
+    # ``enqueue_session_callback`` all resolve first and enqueue a real turn second. So
+    # the ownership check belongs in the SHARED resolver: one line, and every present
+    # and future backend entry point inherits the no-turn contract instead of having to
+    # remember it. Same reasoning as ``archive_session`` / ``update_session`` owning the
+    # write refusals rather than each caller.
+    #
+    # BEFORE the archived check, deliberately, even though the two barely overlap. The
+    # reserved row may not be archived at all (``archive_session`` refuses its id) and
+    # ``resolve_workspace_notice_session`` heals a corrupted ``archived`` status on the
+    # next notice, so the ordering only decides which refusal a CORRUPTED row reports
+    # in that window — and "reserved for the runtime" is both the more specific fact
+    # and the one that stays true after the heal. Existence still wins over both: a
+    # missing row is ``missing``, whatever its id claimed to be.
+    #
+    # ``reason="reserved"`` IS A NEW VALUE, not a reuse of the two above, and it is
+    # deliberately left OUT of the ``delivery_target_missing`` classification in
+    # ``_execute_claimed_request`` (which keys on ``missing`` alone). This row exists
+    # and is healthy; nothing about the DESTINATION is dead. Pointing a definition at
+    # it is a CONFIGURATION error, and labelling it as a vanished delivery target would
+    # send the reader looking for a session that is sitting right there in their inbox.
+    # The run still settles ``failed`` naming the reserved session, which is the
+    # visible outcome that matters.
+    if session_is_runtime_owned(session_id=raw, visibility=row["visibility"]):
+        raise UnresolvableSessionTarget(
+            f"agent session is reserved for the runtime and accepts no turn: {raw}",
+            session_id=raw,
+            reason="reserved",
         )
     # Archived sessions are terminal + inert. A task/watch/run that still targets
     # one by id must NOT fire into it — treat it as an unresolvable target so the
@@ -5441,9 +5477,16 @@ class ScheduledTaskService:
             task_id=task.id,
             reason=exc.reason,
             previous_session_id=previous,
+            # The middle sentence is REASON-AGNOSTIC on purpose. It used to assert "the
+            # bound agent session no longer exists", which was already only true for
+            # ``reason == "missing"`` and is flatly contradicted by the ``reserved``
+            # refusal this same paragraph now carries ("…is reserved for the runtime and
+            # accepts no turn: … The bound agent session no longer exists"). ``{exc}``
+            # already states the specific reason first, so generalising the clause loses
+            # no information and removes the contradiction rather than adding a branch.
             detail=(
-                f"paused: {exc}. The bound agent session no longer exists, so this "
-                "definition would fail on every run. Re-point it with "
+                f"paused: {exc}. That binding cannot be resolved, so this definition "
+                "would fail on every run. Re-point it with "
                 f"`vibe task update {task.id} --session-id <id>` and resume it with "
                 f"`vibe task resume {task.id}`."
             ),

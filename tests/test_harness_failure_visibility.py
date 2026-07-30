@@ -8845,6 +8845,224 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert "agent session id not found" in body, f"the real cause has to be there: {body!r}"
 
 
+# --- the reserved session is not a run target either -------------------------
+#
+# Round-16 review thread 3678900318, and the same class as the two cases above one
+# session row over: a definition whose ``--session-id`` names a row that CANNOT take a
+# turn must fail VISIBLY instead of dispatching one.
+#
+# The previous round closed the composer (``POST /api/sessions/<id>/messages``). That is
+# the door a human finds; the backend entry points come through
+# ``resolve_session_id_target`` instead, and it refused only ARCHIVED rows while the
+# reserved workspace-notifications row is deliberately kept ACTIVE. The two tests below
+# consume the resolver's new ``reason="reserved"`` from the two lanes that dispatch
+# differently, because their handlers are different code:
+#
+#   * ``agent_run`` — the ``vibe agent run --session-id`` lane named in the finding —
+#     lands in ``_execute_claimed_request``'s ``UnresolvableSessionTarget`` handler;
+#   * ``task_run`` — a definition pinned with ``vibe task add --session-id`` — is caught
+#     one level lower by ``_execute_task``, which runs the BINDING RECOVERY. That lane is
+#     the one that could do real damage on a new reason (a rebind would silently
+#     re-point a user's definition), so it is pinned rather than assumed.
+#
+# No new scenario id: both are subordinate coverage under HFR-094, like the #1060 cases
+# above them.
+
+
+def _reserved_notice_session() -> str:
+    """The reserved row in the DEFAULT-HOME workbench DB, with one notice in it.
+
+    The notice matters: it makes the transcript NON-EMPTY, so "no turn was dispatched"
+    is asserted as "the transcript is unchanged and still notices-only" rather than as
+    "there is nothing there", which an empty table would satisfy for the wrong reason.
+    """
+
+    from storage import messages_service
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().begin() as conn:
+        session_id = resolve_workspace_notice_session(conn, title="Workspace notifications")
+        messages_service.append(
+            conn,
+            scope_id=None,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="notify",
+            text="Scheduled task 'nightly' failed: backend exploded",
+        )
+    assert session_id == WORKSPACE_NOTICE_SESSION_ID
+    return session_id
+
+
+def _session_transcript(session_id: str) -> list[tuple[str, str]]:
+    """``(author, type)`` for every persisted row in one session, in order."""
+
+    return [
+        (str(row["author"]), str(row["type"]))
+        for row in _persisted_messages()
+        if str(row["session_id"] or "") == session_id
+    ]
+
+
+def test_an_agent_run_pinned_to_the_reserved_session_dispatches_no_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-094, subordinate — the CLI lane the composer guard could not reach.
+
+    ``vibe agent run --session-id ses-workspace-notices --agent <enabled> --message …``
+    resolves the pin through ``resolve_session_id_target`` and enqueues an ``agent_run``.
+    Before the resolver owned the ownership check, that resolve SUCCEEDED — the row is
+    active, so only the archived branch could have stopped it — and the run went on to
+    dispatch a real turn into a machine-owned row with an empty ``agent_backend``,
+    mixing conversation into the failure-notice transcript.
+
+    Everything real: the migrated workbench DB the resolver actually reads, the real
+    request store, the real claimed-request executor and the real settlement writer.
+
+    Three outcomes:
+
+    * the run settles ``failed`` NAMING the reserved session — the visible result, and
+      the reason a run failure is the right disposal rather than a silent skip;
+    * the notice is NOT classified ``delivery_target_missing``. The row exists and is
+      healthy; this is a configuration error, and that label would send the reader
+      hunting for a session sitting in their own inbox;
+    * the reserved transcript is UNCHANGED and still notices-only — no ``user`` turn,
+      no assistant reply.
+    """
+
+    _no_background_web_push(monkeypatch)
+    _migrated_state_db()
+    reserved = _reserved_notice_session()
+    before = _session_transcript(reserved)
+    assert before == [("agent", "notify")], f"the premise: one notice, no turns: {before}"
+
+    sqlite, requests = _default_home_store_pair()
+    queued = requests.enqueue_agent_run(
+        message="summarise today's failures",
+        session_id=reserved,
+        session_policy="existing",
+        source_kind="cli",
+        source_actor="cli",
+    )
+    claimed = requests.claim(queued.id)
+    assert claimed is not None
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(executor._execute_claimed_request(claimed))
+
+    run = sqlite.get_run(claimed.id)
+    assert run["status"] == "failed", f"a turn that may not be dispatched is a failure: {run}"
+    error = str(run.get("error") or "")
+    assert reserved in error and "reserved" in error, (
+        f"and the recorded cause has to name the reserved session: {error!r}"
+    )
+
+    notice = sqlite.owed_failure_notice(claimed.id)
+    assert notice is not None, "a failed run owes a notice"
+    assert notice["interrupt_reason"] != "delivery_target_missing", (
+        "``delivery_target_missing`` means the destination CEASED TO EXIST. This one is "
+        f"alive and in the inbox — a wrong class is worse than no class: {notice}"
+    )
+
+    assert _session_transcript(reserved) == before, (
+        "NO turn may be dispatched into the runtime's own row: its transcript has to be "
+        f"byte-identical to the notices it held before the run: {_session_transcript(reserved)}"
+    )
+
+
+def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-094, subordinate — the binding-recovery lane must not "repair" this one.
+
+    ``task_run`` does not reach ``_execute_claimed_request``'s handler: ``_execute_task``
+    catches ``UnresolvableSessionTarget`` first and runs ``_recover_pinned_session_binding``,
+    which for some definitions RESERVES A REPLACEMENT SESSION and re-points the
+    definition at it. Auditing the new reason meant proving that cannot happen here,
+    because a silent rebind would answer "you pointed this at a row that takes no turns"
+    by pointing it somewhere it does — and then dispatching the turn.
+
+    It cannot, and the reason is structural rather than a reason check: only
+    ``create_once`` is ever rebound, and a ``create_once`` definition reserved its own
+    session from ``SESSION_ID_ALPHABET``, which contains no ``-`` and therefore can
+    never mint ``ses-workspace-notices``. Reaching the reserved id at all takes a
+    user-pinned ``existing`` binding, and ``existing`` is never rebound — it is PAUSED,
+    which is the correct disposal: the condition is permanent until somebody re-points
+    the definition, so every future fire would fail identically.
+
+    Pinned here so the structural argument has a test behind it: paused, no replacement
+    session, and no turn handed to the message handler.
+    """
+
+    from core.scheduled_tasks import ScheduledTaskStore
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    from tests.test_scheduled_tasks import _binding_env, _binding_service
+
+    _no_background_web_push(monkeypatch)
+    _binding_env(tmp_path, monkeypatch)
+    _migrated_state_db()
+    reserved = _reserved_notice_session()
+    before = _session_transcript(reserved)
+    assert before == [("agent", "notify")], f"the premise: one notice, no turns: {before}"
+
+    sqlite, requests = _store(tmp_path)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    task = store.add_task(
+        name="daily digest",
+        session_key="",
+        session_id=reserved,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    dispatched: list = []
+    service = _binding_service(tmp_path, store, dispatched)
+    service.request_store = requests
+
+    queued = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = requests.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    saved = store.get_task(task.id)
+    assert saved is not None
+    assert saved.enabled is False, (
+        f"a definition that can never fire again must not keep firing: {saved}"
+    )
+    assert saved.session_id == WORKSPACE_NOTICE_SESSION_ID, (
+        "and the user's own pin must still be there to re-point — a rebind here would "
+        f"silently answer a configuration error with a different session: {saved}"
+    )
+    assert dispatched == [], (
+        f"no prompt may reach the message handler on this fire: {dispatched}"
+    )
+
+    run = sqlite.get_run(claimed.id)
+    assert run["status"] == "failed", f"the fire that could not run is a failure: {run}"
+    assert "paused" in str(run.get("error") or ""), (
+        f"and its recorded detail is the recovery's own verdict: {run}"
+    )
+    assert reserved in str(run.get("error") or ""), (
+        f"which still names the session the user pinned: {run}"
+    )
+    assert _session_transcript(reserved) == before, (
+        f"the runtime's own row stays notices-only: {_session_transcript(reserved)}"
+    )
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
     tmp_path: Path,
