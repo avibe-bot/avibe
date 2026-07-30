@@ -3145,6 +3145,7 @@ def _model_hub_error(exc):
     body = {"ok": False, "contract_version": CONTRACT_VERSION, "error": exc.code}
     if exc.detail:
         body["detail"] = exc.detail
+    body.update(exc.data)
     return jsonify(body), exc.status
 
 
@@ -3185,6 +3186,34 @@ async def model_hub_sources_patch(source_id):
     try:
         source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
         return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>/credential", methods=["PUT"])
+async def model_hub_source_credential_put(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().replace_credential(
+            source_id,
+            _model_hub_json_object(),
+        )
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>/reauth", methods=["POST"])
+async def model_hub_source_reauth_post(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().reauth_source(
+            source_id,
+            _model_hub_json_object(),
+        )
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
