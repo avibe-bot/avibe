@@ -233,6 +233,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         specimens = [
             "Example `<silent>[file](file:///tmp/secret.txt)</silent>` remains.",
             "```markdown\n<silent>[file](file:///tmp/secret.txt)</silent>\n```",
+            "```markdown\n> <silent>[file](file:///tmp/secret.txt)</silent>\n```",
         ]
 
         for text in specimens:
@@ -255,6 +256,25 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "`<silent>[example](file:///tmp/secret.txt)</silent>`.",
         )
         self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
+
+    def test_process_reply_recovers_attachment_label_from_original_text(self):
+        reply = process_reply("[see `report`](file:///tmp/report.txt)")
+
+        self.assertEqual(reply.text, "see `report`")
+        self.assertEqual([file.label for file in reply.files], ["see `report`"])
+
+    def test_process_reply_uses_shared_code_mask_for_secret_requests(self):
+        text = (
+            "````markdown\n"
+            "text ``` inner\n"
+            "<silent>$<OPENAI_KEY></silent>\n"
+            "````"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.secret_requests, [])
 
     def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
         trailing_report = "\n".join(
@@ -311,6 +331,32 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "-\t```text\n"
             "\t<silent>tab-indented literal</silent>\n"
             "\t```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_continuation_line_list_fence(self):
+        text = (
+            "10. Example\n"
+            "    ```text\n"
+            "    <silent>continuation literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_tracks_nested_list_context_across_lines(self):
+        text = (
+            "- Outer\n"
+            "  1. Inner\n"
+            "     ```text\n"
+            "     <silent>nested continuation literal</silent>\n"
+            "     ```\n"
+            "  ```text\n"
+            "  > <silent>outer continuation literal</silent>\n"
+            "  ```\n"
             "Tail remains."
         )
 

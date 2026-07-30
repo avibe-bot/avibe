@@ -123,7 +123,6 @@ _UNTERMINATED_SILENT_RE = re.compile(r"<silent\b[^>]*>.*\Z", re.IGNORECASE | re.
 # outside fenced/inline code so a marker shown in an example isn't treated as a real
 # request — code spans are masked first.
 _SECRET_REQUEST_RE = re.compile(r"\$<([A-Za-z_][A-Za-z0-9_]*)>")
-_CODE_SPAN_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -195,8 +194,8 @@ def strip_silent_blocks(text: str) -> str:
 def _extract_file_links(text: str) -> List[FileLink]:
     """Return ``FileLink`` instances found outside Markdown code."""
     results: List[FileLink] = []
-    masked = _mask_markdown_code(text)
-    for bang, label, url in _FILE_LINK_RE.findall(masked):
+    for match in _file_link_matches(text):
+        bang, label, url = match.groups()
         parsed = urlparse(url)
         if parsed.scheme != "file":
             continue
@@ -223,7 +222,7 @@ def _file_uri_to_local_path(parsed) -> str:
 
 def _strip_file_links(text: str) -> str:
     """Replace file links outside Markdown code with their labels."""
-    matches = list(_FILE_LINK_RE.finditer(_mask_markdown_code(text)))
+    matches = _file_link_matches(text)
     if not matches:
         return text
 
@@ -237,11 +236,25 @@ def _strip_file_links(text: str) -> str:
     return "".join(parts)
 
 
+def _file_link_matches(text: str) -> List[re.Match]:
+    """Find eligible link ranges using a mask, then recover original groups."""
+    matches: List[re.Match] = []
+    for masked_match in _FILE_LINK_RE.finditer(_mask_markdown_code(text)):
+        original_match = _FILE_LINK_RE.fullmatch(
+            text,
+            masked_match.start(),
+            masked_match.end(),
+        )
+        if original_match is not None:
+            matches.append(original_match)
+    return matches
+
+
 def _extract_secret_requests(text: str) -> List[SecretRequest]:
     """Return ordered, de-duplicated ``$<NAME>`` markers found outside code spans."""
     if not text or "$<" not in text:
         return []
-    masked = _CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), text)
+    masked = _mask_markdown_code(text)
     out: List[SecretRequest] = []
     seen: set[str] = set()
     for match in _SECRET_REQUEST_RE.finditer(masked):
@@ -286,39 +299,29 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
     """Return CommonMark-style backtick and tilde fence ranges."""
     ranges: List[Tuple[int, int]] = []
     active: Tuple[int, str, int, int, int | None] | None = None
+    list_quote_depth: int | None = None
+    list_indents: List[int] = []
     offset = 0
 
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
-        delimiter = _opening_fence_delimiter(content)
         if active is None:
-            if delimiter is not None:
-                marker, length, remainder, quote_depth, list_indent = delimiter
-                # A backtick fence cannot contain another backtick in its info
-                # string. Tilde info strings have no equivalent restriction.
-                if marker != "`" or "`" not in remainder:
-                    active = (offset, marker, length, quote_depth, list_indent)
+            delimiter, list_quote_depth, list_indents = _opening_fence_delimiter(
+                content,
+                list_quote_depth,
+                list_indents,
+            )
+            active = _new_fence_state(offset, delimiter)
         else:
             start, marker, opening_length, quote_depth, list_indent = active
             if _line_leaves_fence_container(content, quote_depth, list_indent):
                 ranges.append((start, offset))
-                active = None
-                if delimiter is not None:
-                    (
-                        opening_marker,
-                        opening_length,
-                        remainder,
-                        opening_quote_depth,
-                        opening_list_indent,
-                    ) = delimiter
-                    if opening_marker != "`" or "`" not in remainder:
-                        active = (
-                            offset,
-                            opening_marker,
-                            opening_length,
-                            opening_quote_depth,
-                            opening_list_indent,
-                        )
+                delimiter, list_quote_depth, list_indents = _opening_fence_delimiter(
+                    content,
+                    list_quote_depth,
+                    list_indents,
+                )
+                active = _new_fence_state(offset, delimiter)
             else:
                 closing = _closing_fence_delimiter(content, quote_depth, list_indent)
                 if closing is None:
@@ -339,39 +342,86 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
     return ranges
 
 
+def _new_fence_state(
+    offset: int,
+    delimiter: Tuple[str, int, str, int, int | None] | None,
+) -> Tuple[int, str, int, int, int | None] | None:
+    """Build active fence state when an eligible delimiter is an opener."""
+    if delimiter is None:
+        return None
+    marker, length, remainder, quote_depth, list_indent = delimiter
+    # A backtick fence cannot contain another backtick in its info string.
+    if marker == "`" and "`" in remainder:
+        return None
+    return offset, marker, length, quote_depth, list_indent
+
+
 def _opening_fence_delimiter(
     line: str,
-) -> Tuple[str, int, str, int, int | None] | None:
-    """Parse a fence opener and its block quote/list container context."""
+    prior_quote_depth: int | None,
+    prior_list_indents: List[int],
+) -> Tuple[
+    Tuple[str, int, str, int, int | None] | None,
+    int,
+    List[int],
+]:
+    """Parse a fence opener while carrying list context across lines."""
     quote_depth, prefix_end = _quote_prefix(line)
+    list_indents = (
+        list(prior_list_indents)
+        if prior_quote_depth == quote_depth
+        else []
+    )
+    if not line[prefix_end:].strip():
+        return None, quote_depth, list_indents
+
     cursor = prefix_end
     column = 0
-    list_indent: int | None = None
 
     while True:
-        indent_start_column = column
         cursor, column = _consume_indentation(line, cursor, column)
-        if column - indent_start_column > 3:
-            return None
+        while list_indents and column < list_indents[-1]:
+            list_indents.pop()
 
         marker_end = _list_marker_end(line, cursor)
         if marker_end is None:
             break
-        column += marker_end - cursor
+
+        minimum_column = list_indents[-1] if list_indents else 0
+        maximum_column = minimum_column + 3 if list_indents else 3
+        if column < minimum_column or column > maximum_column:
+            break
+
+        marker_start = cursor
+        marker_column = column
+        column += marker_end - marker_start
         cursor = marker_end
         whitespace_start = cursor
         padding_start_column = column
         cursor, column = _consume_indentation(line, cursor, column)
         padding = column - padding_start_column
         if cursor == whitespace_start or padding > 4:
-            return None
-        list_indent = column
+            cursor = marker_start
+            column = marker_column
+            break
+        list_indents.append(column)
 
     delimiter = _fence_run(line, cursor)
     if delimiter is None:
-        return None
+        return None, quote_depth, list_indents
+
+    minimum_column = list_indents[-1] if list_indents else 0
+    maximum_column = minimum_column + 3 if list_indents else 3
+    if column < minimum_column or column > maximum_column:
+        return None, quote_depth, list_indents
+
     marker, length, remainder = delimiter
-    return marker, length, remainder, quote_depth, list_indent
+    list_indent = list_indents[-1] if list_indents else None
+    return (
+        (marker, length, remainder, quote_depth, list_indent),
+        quote_depth,
+        list_indents,
+    )
 
 
 def _closing_fence_delimiter(
@@ -380,8 +430,8 @@ def _closing_fence_delimiter(
     list_indent: int | None,
 ) -> Tuple[str, int, str] | None:
     """Parse a closing fence that remains inside the opening container."""
-    line_quote_depth, prefix_end = _quote_prefix(line)
-    if line_quote_depth != quote_depth:
+    prefix_end = _required_quote_prefix(line, quote_depth)
+    if prefix_end is None:
         return None
 
     cursor, indent = _consume_indentation(line, prefix_end, 0)
@@ -425,6 +475,22 @@ def _quote_prefix(line: str) -> Tuple[int, int]:
             cursor += 1
 
 
+def _required_quote_prefix(line: str, quote_depth: int) -> int | None:
+    """Consume exactly the quote container depth established by an opener."""
+    cursor = 0
+    for _ in range(quote_depth):
+        spaces = 0
+        while cursor < len(line) and line[cursor] == " " and spaces < 4:
+            cursor += 1
+            spaces += 1
+        if spaces > 3 or cursor == len(line) or line[cursor] != ">":
+            return None
+        cursor += 1
+        if cursor < len(line) and line[cursor] in {" ", "\t"}:
+            cursor += 1
+    return cursor
+
+
 def _list_marker_end(line: str, start: int) -> int | None:
     """Return the end of a CommonMark bullet or ordered-list marker."""
     if start >= len(line):
@@ -464,8 +530,8 @@ def _line_leaves_fence_container(
     """Return whether a nonblank line exits the opening fence container."""
     if not line.strip():
         return False
-    line_quote_depth, prefix_end = _quote_prefix(line)
-    if line_quote_depth != quote_depth:
+    prefix_end = _required_quote_prefix(line, quote_depth)
+    if prefix_end is None:
         return True
     if list_indent is None:
         return False
