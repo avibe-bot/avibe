@@ -577,7 +577,13 @@ const DryRunRow: React.FC<{
       if (arrival.reread) reread();
     } catch (err) {
       const failure = apiFailure(err);
-      const arrival = probeArrival({ kind: 'thrown', serverNamed: failure !== null }, seq.current === mine);
+      // `serverNamed` is the error's to state, not this site's to infer from
+      // 「is it one of ours?」: a response that would not parse is one of ours and
+      // names nothing, and that is the case the reread below exists for.
+      const arrival = probeArrival(
+        { kind: 'thrown', serverNamed: failure?.serverNamed ?? false },
+        seq.current === mine,
+      );
       // The server's own reason when it named one (`probe_no_candidate` carries a
       // detail key), the generic line when it didn't — the same degradation the
       // rest of the page gives a server-chosen key.

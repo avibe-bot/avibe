@@ -187,6 +187,25 @@ export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthori
 export const isDone = (action: FlowAction): boolean => action !== 'continue';
 
 /**
+ * Whether a terminal ARRIVAL moved the rows the page behind the dialog draws.
+ *
+ * Both terminals the server reported are writes, and asking 「did it succeed?」 is
+ * what left one of them re-reading nothing. A success materializes the source (or
+ * the repair) inside the very call that first reports it. A `failed` hub reauth
+ * has already run `_fail_closed_hub_reauth` on its way to answering — the
+ * discovered models are stripped and the source is persisted as 需处理 — so the
+ * dialog explains a failure while the page behind it still draws that source as
+ * healthy, still supplying the ● 当前 it no longer can.
+ *
+ * `timeout` is not one of them, and that is the line this draws: it is the
+ * dialog's OWN verdict, with nothing arrived that could have written. What
+ * corrects the rows there is the close path, whose cancel can BE the write
+ * (`releaseFlow` below) and which re-reads unconditionally for that reason.
+ */
+export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
+  action === 'succeed' || action === 'fail';
+
+/**
  * Whether a FAILED status poll may speak for the journey.
  *
  * A poll is a reader; the paste submit is the writer of record. `GET …/status`
@@ -225,6 +244,15 @@ export const pollFailureSettles = (submitOutstanding: boolean): boolean => !subm
  * 「a successor is about to」 from here. What gets left behind is a pending login
  * the server itself times out, and that the next start adopts.
  *
+ * All of which is true only of a flow a successor CAN be handed, which is why
+ * `reusable` is asked separately rather than read off the ownership: `oauth_start`
+ * mints a fresh pending source id on every call and never looks for a pending
+ * flow, so a create's flow belongs to the one journey that opened it. There, an
+ * absent owner is not a handoff in progress — it is nobody, and letting go leaves
+ * an authorization and its registry binding live until the server expires them.
+ * Ownership answers 「is it still mine to cancel?」; `reusable` answers 「could it
+ * ever have become someone else's?」, and only the second one is about the route.
+ *
  * Rereading is unconditional, and this function is not given the flow so that no
  * caller can argue otherwise from it. `POST /oauth/cancel` is not always a
  * cancel — `oauth_cancel` routes a `success` flow, and a failed hub reauth, into
@@ -240,9 +268,14 @@ export const pollFailureSettles = (submitOutstanding: boolean): boolean => !subm
 export const releaseFlow = async (
   journey: FlowAuthority,
   owner: FlowAuthority | null,
-  ops: { cancel: (() => Promise<unknown>) | null; reread: () => void },
+  ops: {
+    cancel: (() => Promise<unknown>) | null;
+    reread: () => void;
+    /** Whether the ROUTE can hand this same flow to a successor journey. */
+    reusable: boolean;
+  },
 ): Promise<void> => {
-  if (ops.cancel && owner === journey) {
+  if (ops.cancel && (owner === journey || !ops.reusable)) {
     try {
       await ops.cancel();
     } catch {

@@ -30,6 +30,7 @@ import {
   pollFailureSettles,
   releaseFlow,
   startNeedsStatusRead,
+  terminalArrivalMovedRows,
   type FlowAuthority,
   type FlowView,
 } from './asyncLifetime';
@@ -121,27 +122,31 @@ export const OAuthConnectDialog: React.FC<{
   const journey: OAuthJourney = isReauth ? 'reauth' : 'connect';
 
   /**
-   * One owner for 「this reauth already reached the server」, reached from EVERY
-   * path that ends the journey without a terminal success.
+   * One owner for 「the server moved the rows the page behind this dialog draws」,
+   * reached from EVERY path where that can have happened.
    *
-   * The question at each call site is deliberately that one, not 「did it fail?」.
-   * A reauth is not a no-op the way a connect is: the row is rewritten as the flow
-   * starts — `mark_native_irreversible_start` writes 需要处理 across that vendor's
-   * native sources and rolls it back only when the login fails to SPAWN — and
-   * `_materialize_reauth` clears the source and marks it unavailable before
-   * answering `discovery_failed`. So the list the page is showing is stale from
-   * the start call onward, whether the journey then failed, or was simply
-   * abandoned. Asking 「did it fail?」 is what left the abandoned case behind.
+   * The question at each call site is deliberately that one — not 「did it fail?」,
+   * and not 「is this a reauth?」. A reauth makes the difference impossible to miss,
+   * because its row is rewritten as the flow starts: `mark_native_irreversible_start`
+   * writes 需要处理 across that vendor's native sources and rolls it back only when
+   * the login fails to SPAWN, and `_materialize_reauth` clears the source and marks
+   * it unavailable before answering `discovery_failed`. But a create writes too, at
+   * the other end — `_materialize_completed_oauth` persists the new source, and
+   * `oauth_cancel` routes a `success` flow into it, so the call that was meant to
+   * throw the journey away is the one that commits it. Scoping the refetch to the
+   * journey is what left that page showing no source over a credential the server
+   * had already taken.
    *
-   * The pairs travel on the error for the same reason `adopted_by` travels with a
-   * creation: no later read of `/agents` reproduces them. They name who the
-   * irreversible half left without a source, which is the one thing the user
-   * cannot find out anywhere else on the page. A path with no error carries none,
-   * and passing nothing is how it says so.
+   * A refetch of rows that did not move is inert, which is what makes it the wrong
+   * thing to be clever about. The pairs are not: they travel on the error for the
+   * same reason `adopted_by` travels with a creation — no later read of `/agents`
+   * reproduces them — and they name who the REAUTH's irreversible half left
+   * without a source. That half is what a create does not have, so that is the one
+   * part still asking about the journey. A path with no error carries no pairs, and
+   * passing nothing is how it says so.
    */
-  const reauthLeftRowsStale = (failure?: ReturnType<typeof apiFailure>) => {
-    if (!isReauth) return;
-    setStranded(failure?.interrupted ?? []);
+  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>) => {
+    if (isReauth) setStranded(failure?.interrupted ?? []);
     onConnectedRef.current();
   };
 
@@ -192,7 +197,6 @@ export const OAuthConnectDialog: React.FC<{
         // adds is whether that cleared the blocker and what is still stranded.
         const verdict = result.repaired ? repairOutcome(result.repaired) : null;
         setRepair(verdict);
-        onConnectedRef.current();
         // Line AND tone from the verdict's own owner (`REPAIR_TOAST`), because
         // choosing them separately here is what put a green 「连接成功」 over a gap
         // report. An absent tail is the only arrival with no verdict to speak for
@@ -215,7 +219,6 @@ export const OAuthConnectDialog: React.FC<{
         // is refused as `flow_not_found` on a connect that in fact succeeded.
         setAdoptedBy(created ? created.adopted_by : null);
         showToast(t('settings.models.oauth.status.success') as string, 'success');
-        onConnectedRef.current();
         // Same rule as the API-key dialog, through the same owner: 1.4s auto-dismiss
         // is for a pure 「连接成功」, and every other verdict leaves an instruction on
         // screen that 1.4s is not long enough to read. The old `!== 0` also read an
@@ -224,6 +227,13 @@ export const OAuthConnectDialog: React.FC<{
         if (adoptionVerdict(created?.adopted_by ?? null).kind === 'covered')
           successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
       }
+      // Both branches above end with the same fact about the page behind them, and
+      // so does the failure neither of them handles: `terminalArrivalMovedRows`
+      // says which arrivals moved the rows, in one place, for all of them. A
+      // `failed` hub reauth has already been persisted as 需处理 with its models
+      // stripped by the time this reads it — the two branches asked 「did it
+      // succeed?」, and that is the one terminal the answer left behind.
+      if (terminalArrivalMovedRows(step.action)) rowsBehindAreStale();
       // A paste submit can terminate the flow while a poll timer is still armed;
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
@@ -247,7 +257,7 @@ export const OAuthConnectDialog: React.FC<{
      * attempt has already cleared them — handing it the old journey's would put
      * one attempt's casualties under another's.
      */
-    const resolvedAfterClose = () => reauthLeftRowsStale();
+    const resolvedAfterClose = () => rowsBehindAreStale();
 
     const poll = async (flowId: string) => {
       // Nothing has been requested yet on this tick, so there is nothing that
@@ -290,7 +300,7 @@ export const OAuthConnectDialog: React.FC<{
         // and the codes that only exist after it are the only ones that may
         // claim completion. `engine_down` is not one of them.
         const failure = apiFailure(err);
-        reauthLeftRowsStale(failure);
+        rowsBehindAreStale(failure);
         transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
       }
     };
@@ -322,11 +332,17 @@ export const OAuthConnectDialog: React.FC<{
           //
           // Through `releaseFlow`, which decides whether this journey may still
           // cancel: by the time we resume, our own cleanup has already released
-          // the ref, so a replacement dialog may own the source's flow — and it
-          // would own THIS one, since a start reuses a live pending flow. The
-          // refetch happens either way, and only after the call settles.
+          // the ref, so a replacement dialog may own the source's flow — and on a
+          // reauth it would own THIS one, since `POST …/reauth` hands a successor
+          // the live pending flow. `oauth_start` never does: it mints a fresh
+          // pending source id per call, so a create's flow has no successor to
+          // protect and the released ref means nobody is coming for it. Which is
+          // the difference `reusable` carries, because ownership alone cannot: the
+          // two are indistinguishable at this line. The refetch happens either
+          // way, and only after the call settles.
           await releaseFlow(authority, flowAuthorityRef.current, {
             cancel: () => modelsApi.cancelOAuth(started.flow_id),
+            reusable: isReauth,
             // The close path refetches too, but while this request is still in
             // flight: that read can return the row as it was before
             // `mark_native_irreversible_start` committed, and nothing afterwards
@@ -360,7 +376,7 @@ export const OAuthConnectDialog: React.FC<{
           resolvedAfterClose();
           return;
         }
-        reauthLeftRowsStale(failure);
+        rowsBehindAreStale(failure);
         const code = failure?.code;
         transition({
           kind: 'error',
@@ -394,7 +410,8 @@ export const OAuthConnectDialog: React.FC<{
       // supplies the flow id and nothing else.
       void releaseFlow(authority, owner, {
         cancel: cur ? () => modelsApi.cancelOAuth(cur.flow_id) : null,
-        reread: () => reauthLeftRowsStale(),
+        reusable: isReauth,
+        reread: () => rowsBehindAreStale(),
       });
     };
   }, [open, vendor, channel, reauthId, t, showToast]);
@@ -434,7 +451,7 @@ export const OAuthConnectDialog: React.FC<{
       // Submit reaches the same materialization as the poll, so it can fail the
       // same way — including after the credential change has committed.
       const failure = apiFailure(err);
-      reauthLeftRowsStale(failure);
+      rowsBehindAreStale(failure);
       authority.transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
     } finally {
       if (isCurrent()) setSubmitting(false);

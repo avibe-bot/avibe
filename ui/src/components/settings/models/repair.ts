@@ -378,8 +378,12 @@ export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable
  */
 export type ProbeAnswer =
   | { kind: 'result'; probe: ProbeResult }
-  /** `serverNamed` is `apiFailure(err) !== null` — the route said which failure
-   *  this is, which is exactly what makes it one of the checked outcomes. */
+  /** `serverNamed` is the error's OWN account of where its code came from
+   *  (`ApiCallError.serverNamed`), which is what makes it one of the checked
+   *  outcomes. Not 「is it one of ours?」: the transport mints `bad_response` and
+   *  `http_<n>` itself for a response that never said what happened, and those
+   *  are the exact answers this exists for — a probe that ran, wrote, and lost
+   *  its reply on the way back throws one of ours with nothing named in it. */
   | { kind: 'thrown'; serverNamed: boolean };
 
 export type ProbeArrival = {

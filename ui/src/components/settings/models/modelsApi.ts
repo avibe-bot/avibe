@@ -163,9 +163,26 @@ class ApiCallError extends Error {
    * one field, the caller would have no way to pick the right tense.
    */
   interrupted: SupplyGap[];
+  /**
+   * Whether the ROUTE named this failure, i.e. whether `code` came off the wire.
+   *
+   * Two of the codes here are this client's own summary of a response that never
+   * said what happened: `bad_response` when the body would not parse, `http_<n>`
+   * when it parsed and carried no `error`. They are not outcomes — a route that
+   * names a failure has already decided what it did, while these say only that
+   * the answer did not arrive intact, which the server having written first is
+   * entirely consistent with. Anything downstream that skips a corrective re-read
+   * because 「the route said so」 has to ask this rather than 「is it one of ours?」.
+   *
+   * `true` by default because every other throw in this module IS an outcome: the
+   * local mock raises the same codes the routes do. Only `call` invents any, and
+   * it says so at both sites.
+   */
+  serverNamed: boolean;
   constructor(
     code: string,
     detail?: string,
+    serverNamed = true,
     wouldInterrupt: SupplyGap[] = [],
     interrupted: SupplyGap[] = [],
   ) {
@@ -173,6 +190,7 @@ class ApiCallError extends Error {
     this.name = 'ApiCallError';
     this.code = code;
     this.detail = detail;
+    this.serverNamed = serverNamed;
     this.wouldInterrupt = wouldInterrupt;
     this.interrupted = interrupted;
   }
@@ -203,11 +221,18 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
  */
 export const apiFailure = (
   err: unknown,
-): { code: string; detail?: string; wouldInterrupt: SupplyGap[]; interrupted: SupplyGap[] } | null =>
+): {
+  code: string;
+  detail?: string;
+  serverNamed: boolean;
+  wouldInterrupt: SupplyGap[];
+  interrupted: SupplyGap[];
+} | null =>
   err instanceof ApiCallError
     ? {
         code: err.code,
         detail: err.detail,
+        serverNamed: err.serverNamed,
         wouldInterrupt: err.wouldInterrupt,
         interrupted: err.interrupted,
       }
@@ -219,12 +244,18 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     payload = await res.json();
   } catch {
-    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`);
+    // Invented here, not read off the wire: the request may well have been
+    // carried out and its answer lost coming back.
+    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false);
   }
   if (!res.ok || payload?.ok === false) {
     throw new ApiCallError(
       payload?.error || `http_${res.status}`,
       payload?.detail,
+      // `payload.error` is the only thing that carries a route's own verdict, so
+      // its presence IS the answer. `http_502` is this client summarizing a
+      // response that never gave one.
+      Boolean(payload?.error),
       supplyGaps(payload?.would_interrupt),
       supplyGaps(payload?.interrupted_pairs),
     );
@@ -529,7 +560,8 @@ class MockStore {
     // `mode_switch_blocked` belongs to the mode route, and a client written
     // against it retried nothing on a real refusal.
     const gaps = this.wouldInterrupt(remaining);
-    if (gaps.length > 0 && !force) throw new ApiCallError('source_last_supplier', undefined, gaps);
+    if (gaps.length > 0 && !force)
+      throw new ApiCallError('source_last_supplier', undefined, true, gaps);
     this.sources = remaining;
     // Orders and the rollup are recomputed on the next read (syncAgents).
     return delay(undefined);
@@ -557,7 +589,7 @@ class MockStore {
     if (interrupted.length > 0 && !recovered && !body.force) {
       source.masked_credential = previousMask;
       source.state = previousState;
-      throw new ApiCallError('source_last_supplier', undefined, interrupted);
+      throw new ApiCallError('source_last_supplier', undefined, true, interrupted);
     }
     this.syncAgents();
     return delay(

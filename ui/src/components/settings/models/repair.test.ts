@@ -502,6 +502,11 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     expect(drawer).not.toMatch(/if \(seq\.current !== mine\) return;/);
     expect((drawer.match(/probeArrival\(/g) ?? []).length).toBe(2);
     expect(drawer).toMatch(/if \(arrival\.reread\) reread\(\);/);
+    // And takes `serverNamed` from the error rather than inferring it from 「is it
+    // one of ours?」 — `bad_response` is one of ours and names nothing, so that
+    // inference skipped the reread in the one case it was added for.
+    expect(drawer).toMatch(/serverNamed: failure\?\.serverNamed \?\? false/);
+    expect(drawer).not.toMatch(/serverNamed: failure !== null/);
   });
 });
 

@@ -56,6 +56,7 @@ import {
   savedSourcesKey,
   seedStep,
   startNeedsStatusRead,
+  terminalArrivalMovedRows,
   type FlowView,
 } from './asyncLifetime';
 import type { AgentSupply, OAuthFlow } from './types';
@@ -367,6 +368,49 @@ describe('startNeedsStatusRead — a start response that is already terminal', (
   });
 });
 
+describe('terminalArrivalMovedRows — which terminal is also a write', () => {
+  it('counts a success, which materializes what it reports', () => {
+    expect(terminalArrivalMovedRows('succeed')).toBe(true);
+  });
+
+  it('counts a FAILURE, which a hub reauth has already been persisted by', () => {
+    // The finding this pins: `_fail_closed_hub_reauth` runs inside the status read
+    // that answers `failed` — the discovered models are stripped and the source is
+    // saved as 需处理 before the response is written. A dialog that refreshes only
+    // on success explains the failure over a page still drawing that source as
+    // healthy, and still crediting it with the ● 当前 it can no longer supply.
+    expect(terminalArrivalMovedRows('fail')).toBe(true);
+  });
+
+  it('does not count the dialog’s own timeout, where nothing arrived', () => {
+    // The line between the two: `succeed` and `fail` are the server's verdicts,
+    // `timeout` is this dialog's. Nothing arrived that could have written, and the
+    // close path — whose cancel can BE the write — is what re-reads there.
+    expect(terminalArrivalMovedRows('timeout')).toBe(false);
+  });
+
+  it('does not count an arrival the latch already ignored, or a pending one', () => {
+    // `ignore` means the terminal it would report was already handled by whichever
+    // arrival got there first, and that one re-read.
+    expect(terminalArrivalMovedRows('ignore')).toBe(false);
+    expect(terminalArrivalMovedRows('continue')).toBe(false);
+  });
+
+  it('leaves the dialog one place that says the rows behind it moved', () => {
+    // Structural, and the point of the extraction: the two success branches used
+    // to refetch inline, which is why the failure between them refetched nowhere.
+    // One predicate decides for all three, and one owner carries it out — so the
+    // parent's callback is reached from exactly one line.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/if \(terminalArrivalMovedRows\(step\.action\)\) rowsBehindAreStale\(\);/);
+    expect((dialog.match(/onConnectedRef\.current\(\)/g) ?? []).length).toBe(1);
+    // And that owner no longer asks which journey it is before re-reading: a
+    // create's `oauth_cancel` commits the source it was told to throw away.
+    expect(dialog).not.toMatch(/if \(!isReauth\) return;/);
+  });
+});
+
 describe('releaseFlow — what a teardown does with the flow it opened', () => {
   /** A journey, plus a recorder for the two things a teardown can do. */
   const teardown = () => {
@@ -374,9 +418,12 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     return {
       log,
       journey: createFlowAuthority(() => {}),
-      ops: (cancel: (() => Promise<unknown>) | null) => ({
+      // `reusable` defaults to the reauth journey, which is the one the ownership
+      // rule was written for; the create cases below say so explicitly.
+      ops: (cancel: (() => Promise<unknown>) | null, reusable = true) => ({
         cancel: cancel && (() => (log.push('cancel'), cancel())),
         reread: () => log.push('reread'),
+        reusable,
       }),
     };
   };
@@ -426,6 +473,40 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     const { log, journey, ops } = teardown();
     await releaseFlow(journey, null, ops(() => Promise.resolve()));
     expect(log).toEqual(['reread']);
+  });
+
+  it('cancels an abandoned CREATE flow even with its ownership already gone', async () => {
+    // The same interleaving as the two above, on the journey where the reasoning
+    // behind them does not hold: `oauth_start` mints a fresh pending source id
+    // every call and never adopts a pending flow, so no successor can be handed
+    // this one. 「Nobody owns it」 is then nobody, and letting go leaves the
+    // authorization and its registry binding live until the server expires them.
+    const { log, journey, ops } = teardown();
+    await releaseFlow(journey, null, ops(() => Promise.resolve(), false));
+    expect(log).toEqual(['cancel', 'reread']);
+  });
+
+  it('still asks ownership first for a reusable flow', async () => {
+    // The pair of the above, stated so neither can be simplified into the other:
+    // ownership answers 「is it still mine to cancel?」 and `reusable` answers
+    // 「could it ever have become someone else's?」. Only a `false` second answer
+    // makes the first one moot.
+    const { log, journey, ops } = teardown();
+    const successor = createFlowAuthority(() => {});
+    await releaseFlow(journey, successor, ops(() => Promise.resolve(), true));
+    expect(log).toEqual(['reread']);
+  });
+
+  it('takes the journey each teardown is releasing from the dialog', () => {
+    // Structural, because the rule above is only as good as its wiring: both
+    // release sites state which journey they are in rather than letting
+    // `releaseFlow` infer it from an ownership that cannot tell the two apart.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const releases = dialog.match(/releaseFlow\(/g) ?? [];
+    const declared = dialog.match(/reusable: isReauth/g) ?? [];
+
+    expect(releases.length).toBe(2);
+    expect(declared.length).toBe(releases.length);
   });
 
   it('still rereads when there was no flow to release', async () => {
