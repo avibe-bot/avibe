@@ -1,7 +1,7 @@
 // Async ownership rules extracted from the Models components so interleavings can
 // be exercised directly: which request may land, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
-import type { AgentMenu, AgentSupply, OAuthFlow } from './types';
+import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
 /**
@@ -103,6 +103,17 @@ export type FlowView = { flow: OAuthFlow | null; errorKey: string | null; settle
 
 export const initialFlowView: FlowView = { flow: null, errorKey: null, settled: false };
 
+/**
+ * The states in which the SERVER has reported a flow finished — one list, because
+ * two places asking 「is this over?」 with two enumerations is how they drift.
+ *
+ * `timeout` is deliberately absent: it is the dialog's own verdict about a flow
+ * the server still considers live, which is why it arrives as a `tick` and not as
+ * a state at all.
+ */
+export const flowStateTerminal = (state: OAuthFlowState): boolean =>
+  state === 'success' || state === 'failed' || state === 'cancelled';
+
 export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; action: FlowAction } => {
   if (event.kind === 'reset') return { view: { ...initialFlowView }, action: 'continue' };
   // Nothing gets to change a finished flow — checked before the event is read, so
@@ -128,8 +139,10 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   const flow = event.flow;
   if (flow.state === 'success') return { view: { flow, errorKey: null, settled: true }, action: 'succeed' };
   // `settled` means terminal, not successful: a failed flow is just as finished,
-  // and a later arrival has just as little business reopening it.
-  if (flow.state === 'failed' || flow.state === 'cancelled') {
+  // and a later arrival has just as little business reopening it. Which states
+  // those are is `flowStateTerminal`'s to say — success has already returned, so
+  // this is「terminal」and not a second, driftable list of the unsuccessful ones.
+  if (flowStateTerminal(flow.state)) {
     return {
       view: {
         flow,
@@ -142,9 +155,50 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   return { view: { flow, errorKey: null, settled: false }, action: 'continue' };
 };
 
+/**
+ * Whether a START response has to be re-read through the status route before it
+ * may settle the dialog — which EVERY terminal start does.
+ *
+ * `POST …/reauth` REUSES a live pending flow — it only opens a new one once the
+ * old one failed or was cancelled — so a start can come back already terminal,
+ * and the start envelope carries the flow alone.
+ *
+ * This used to ask whether that envelope was RICH ENOUGH: a success needs the
+ * `{source, recovered, interrupted_pairs}` tail only status carries, while a
+ * failure's `error_key` is the whole message, so a failure could latch. But
+ * 「enough to DISPLAY」 is not 「enough to SETTLE」. Settling stops the poll — the
+ * next tick exits on the terminal latch — and `oauth_start` hands back the
+ * adapter's flow without materializing it. The materialization lives one route
+ * over: `oauth_status` → `_materialize_completed_oauth`, which is what runs
+ * `_fail_closed_hub_reauth` on an unsuccessful hub terminal, strips the discovered
+ * models and persists the source as 需处理. Latch a failed start and none of it
+ * happens: the dialog explains a failure while the row behind it still draws
+ * healthy and still supplies the ● 当前 it no longer can, the binding stays
+ * pending, and the missing write only lands when the user eventually closes the
+ * dialog and `oauth_cancel` performs it as a side effect of cancelling.
+ *
+ * So this does not try to know WHICH terminals owe server-side work — that is a
+ * fact about the server (`_is_hub_unsuccessful_terminal` is `hub` ×
+ * `{failed, cancelled}`, and a create's orphan cleanup keys off the retained
+ * material) and a guard over the envelope may not decide it. Every terminal start
+ * is read through the one route entitled to report a terminal; the dialog shows
+ * whatever that answers, and `terminalArrivalMovedRows` then re-reads the rows.
+ * A non-terminal start needs nothing: it is polled, as it always was.
+ */
+export const startNeedsStatusRead = (flow: OAuthFlow): boolean => flowStateTerminal(flow.state);
+
 export type FlowAuthority = {
   current: () => FlowView;
   transition: (event: FlowEvent) => ReturnType<typeof flowStep>;
+  /**
+   * WHAT this journey is for: the source id a re-auth is repairing, or `null` for
+   * a create, which has no source yet.
+   *
+   * Carried on the authority because the authority is the journey's identity, and
+   * `flowLetGo` has to ask about the identity of a journey that is not the one
+   * asking — see there for the only question it answers.
+   */
+  subject: string | null;
 };
 
 /**
@@ -152,7 +206,10 @@ export type FlowAuthority = {
  * that may land a new one. Keeping only `flow` at the landing site would let a
  * caller silently drop `settled` and reopen an already terminal flow.
  */
-export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthority => {
+export const createFlowAuthority = (
+  land: (view: FlowView) => void,
+  subject: string | null,
+): FlowAuthority => {
   let current: FlowView = { ...initialFlowView };
 
   return {
@@ -163,8 +220,173 @@ export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthori
       land(current);
       return step;
     },
+    subject,
   };
 };
 
 /** Whether an action ends the flow, so the caller stops polling. */
 export const isDone = (action: FlowAction): boolean => action !== 'continue';
+
+/**
+ * Whether a terminal ARRIVAL moved the rows the page behind the dialog draws.
+ *
+ * Both terminals the server reported are writes, and asking 「did it succeed?」 is
+ * what left one of them re-reading nothing. A success materializes the source (or
+ * the repair) inside the very call that first reports it. A `failed` hub reauth
+ * has already run `_fail_closed_hub_reauth` on its way to answering — the
+ * discovered models are stripped and the source is persisted as 需处理 — so the
+ * dialog explains a failure while the page behind it still draws that source as
+ * healthy, still supplying the ● 当前 it no longer can.
+ *
+ * `timeout` is not one of them, and that is the line this draws: it is the
+ * dialog's OWN verdict, with nothing arrived that could have written. What
+ * corrects the rows there is the close path, whose cancel can BE the write
+ * (`releaseFlow` below) and which re-reads unconditionally for that reason.
+ */
+export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
+  action === 'succeed' || action === 'fail';
+
+/**
+ * Whether a FAILED status poll may speak for the journey.
+ *
+ * A poll is a reader; the paste submit is the writer of record. `GET …/status`
+ * failing while a submit is outstanding says nothing about whether that submit
+ * committed — and the submit's own response is the only arrival that carries the
+ * terminal tail (`repaired` / `created`) at all. Latching the reader's error
+ * settles the view, `flowStep` above then correctly ignores the success that
+ * follows, and the dialog says 授权失败 over a credential the server did replace:
+ * no toast, no refetch, no repair verdict, on a journey that worked.
+ *
+ * Dropping it is safe precisely because the other authority is guaranteed to
+ * answer: the submit settles the view itself, with its success or through its own
+ * catch. So the flow is not left hanging on a poll — and the caller keeps reading
+ * meanwhile, which is what preserves the deadline for a submit that never returns.
+ *
+ * With no submit outstanding a poll IS the only authority — but only when the ROUTE
+ * answered. That same materializing call is the reason: a status read that commits
+ * the create or the repair and then loses its response (a dropped connection, a
+ * proxy's HTML 502, a body that will not parse) throws a failure `call()` minted,
+ * not one the server named. Settling on it declares a terminal nobody reported, over
+ * an operation that may have committed — the dialog says 授权失败 on a source the
+ * server did create, and an ordinary connect retried from there mints a second one.
+ * `serverNamed` is the same discriminator `mayHaveWritten` reads for the refetch,
+ * asked here about speech instead of writes: a refusal that named itself knows the
+ * login went nowhere; a transport failure knows nothing at all.
+ *
+ * Dropping it is bounded either way — the caller keeps polling, and the deadline at
+ * the top of each tick is the dialog's own verdict when nothing ever answers.
+ */
+export const pollFailureSettles = (submitOutstanding: boolean, serverNamed: boolean): boolean =>
+  !submitOutstanding && serverNamed;
+
+/**
+ * Whether the failure that just arrived is the one now ON SCREEN.
+ *
+ * `flowStep` answers `ignore` to everything that reaches a view already settled, so
+ * a paste submit rejecting after the poll latched `discovery_failed` leaves the
+ * sentence the user is reading belonging to the POLL. The stranded pairs render
+ * directly beneath that sentence, as the cost of the failure it names, so they may
+ * only come from the arrival that produced it: the late one's own list is empty —
+ * the write that stranded those rows happened on the other request — and would
+ * erase the gap report rather than restate it.
+ *
+ * Deliberately not `terminalArrivalMovedRows`, which reads the same `action` to
+ * answer a different question. Whether a request may have WRITTEN is independent of
+ * whether it may SPEAK, and the refetch beside these pairs is owed either way.
+ */
+export const failureLanded = (action: FlowAction): boolean => action === 'fail';
+
+/**
+ * Whether a journey may walk away from the flow it opened without cancelling it —
+ * i.e. whether SOMEONE ELSE can still be handed that exact flow.
+ *
+ * Three facts have to agree, and each answers a different question:
+ *
+ * 1. Ownership — 「is it still mine to cancel?」 `POST …/reauth` REUSES a live
+ *    pending flow, so a teardown that cancels after ownership moved does not clean
+ *    up after itself: it ends the login the user is watching in the dialog that
+ *    replaced it. The answer therefore depends on WHEN a path asks. The effect's
+ *    own cleanup asks at the instant ownership transfers and still holds it, while
+ *    a start whose dialog closed mid-request asks after that same cleanup already
+ *    released it. Identical call, right in one place and wrong in the other.
+ * 2. The route — 「could it EVER have become someone else's?」 `oauth_start` mints a
+ *    fresh pending source id on every call and never looks for a pending flow, so
+ *    a create's flow belongs to the one journey that opened it. Ownership alone
+ *    cannot say this, which is why `routeReuses` is asked separately: on a create
+ *    there is no successor coming for that flow at all, so it dies with the journey
+ *    that opened it.
+ * 3. The successor's SUBJECT — 「could this particular one be handed my flow?」
+ *    `pending_reauth(source_id)` filters on `binding.source_id`, so the handover is
+ *    keyed by SOURCE while ownership of this ref is global to the dialog. Close a
+ *    pending re-auth for source A, open one for source B before A's start returns,
+ *    and A finds a live owner that can never adopt its flow: withholding the cancel
+ *    there leaves A's authorization running until it expires. So the route being
+ *    reusable is a claim about a class of successors, not about whoever happens to
+ *    hold the ref.
+ *
+ * A `null` owner is NOT let go, and that is a fact about this dialog rather than a
+ * preference. Every successor takes authority SYNCHRONOUSLY in the effect body —
+ * `flowAuthorityRef.current = authority` in `OAuthConnectDialog.tsx`, before the
+ * start request is awaited — so a successor that exists has already put itself
+ * there by the time any late response reads the ref. `null` therefore cannot mean
+ * 「a successor is about to」; it means the user closed the dialog and did not
+ * reopen it.
+ *
+ * An earlier revision read it the other way and withheld the cancel to protect a
+ * flow some future start might adopt. What that actually left behind was a live
+ * authorization the user had just cancelled: the server holds it until it times
+ * out, and the next re-auth for that source is handed exactly that flow and can
+ * materialize it — a login the user declined, completing later. A start after the
+ * cancel just mints a fresh flow, so the real trade is one extra round trip
+ * against honouring 取消, and only a successor that EXISTS may suppress it.
+ */
+export const flowLetGo = (
+  journey: FlowAuthority,
+  owner: FlowAuthority | null,
+  routeReuses: boolean,
+): boolean =>
+  owner !== null &&
+  owner !== journey &&
+  routeReuses &&
+  owner.subject === journey.subject;
+
+/**
+ * Hands back the flow a journey opened, and is the ONLY authorization for a
+ * teardown cancel.
+ *
+ * Whether the cancel is authorized is `flowLetGo`'s call — see there for the three
+ * separate facts that have to agree before a journey may walk away from a flow.
+ *
+ * Rereading is unconditional, and this function is not given the flow so that no
+ * caller can argue otherwise from it. `POST /oauth/cancel` is not always a
+ * cancel — `oauth_cancel` routes a `success` flow, and a failed hub reauth, into
+ * `_materialize_completed_oauth` — so the call can BE the write. The only state a
+ * caller could branch on is the last POLLED snapshot, which an in-flight poll or
+ * a paste submit can terminalize between that read and the cancel landing. An
+ * earlier revision branched on exactly that, from a list named `TERMINAL`;
+ * naming a snapshot after a fact did not make it one.
+ *
+ * A `null` cancel means the journey never got a flow id — there is no call to
+ * make, which is not the same as deciding not to make one.
+ */
+export const releaseFlow = async (
+  journey: FlowAuthority,
+  owner: FlowAuthority | null,
+  ops: {
+    cancel: (() => Promise<unknown>) | null;
+    reread: () => void;
+    /** Whether the ROUTE can hand this same flow to a successor journey. */
+    reusable: boolean;
+  },
+): Promise<void> => {
+  if (ops.cancel && !flowLetGo(journey, owner, ops.reusable)) {
+    try {
+      await ops.cancel();
+    } catch {
+      // Nothing to show — the dialog this belonged to is already gone. The reread
+      // below still has to run: the writes upstream of this call do not depend on
+      // it succeeding.
+    }
+  }
+  ops.reread();
+};

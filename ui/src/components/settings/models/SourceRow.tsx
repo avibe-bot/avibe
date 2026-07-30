@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
-import { SourceRowMenu } from './SourceRowMenu';
+import { SourceRowMenu, type RaisedRepair } from './SourceRowMenu';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
 import { cooldownEtaMinutes, formatSpend } from './format';
 import { isUnhealthy, needsAttention } from './supply';
@@ -119,7 +119,9 @@ export const SourceRow: React.FC<{
   source: Source;
   /** Re-fetch after a row action (rename / re-discover / delete). */
   onChanged: () => void;
-}> = ({ source, onChanged }) => {
+  /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
+  onRepair?: (source: Source, kind: RaisedRepair) => void;
+}> = ({ source, onChanged, onRepair }) => {
   const { Icon, accent } = sourceVisual(source);
   const subline = useSubline(source);
   const isExperimental = source.kind === 'subscription' && source.supply_channel === 'hub';
@@ -176,9 +178,11 @@ export const SourceRow: React.FC<{
       </div>
 
       {/* Thumb-reachable on the identity line on phones (design.pen M01 m01More,
-          36×36), trailing the desktop row on sm+. */}
-      <div className="order-2 shrink-0 sm:order-3">
-        <SourceRowMenu source={source} onChanged={onChanged} />
+          36×36), trailing the desktop row on sm+. A flex line rather than a bare
+          slot because a stopped row puts its one-tap remedy beside the ⋯ — both
+          come from the menu component, which owns the actions. */}
+      <div className="order-2 flex shrink-0 items-center gap-1.5 sm:order-3">
+        <SourceRowMenu source={source} onChanged={onChanged} onRepair={onRepair} />
       </div>
     </div>
   );

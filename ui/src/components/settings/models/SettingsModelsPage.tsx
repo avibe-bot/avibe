@@ -19,7 +19,15 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
+import { RepairJourney, type RepairTarget } from './RepairJourney';
 import { createLatestAsyncAuthority } from './asyncLifetime';
+import {
+  emptyFeed,
+  feedAfterHeadRead,
+  feedAfterTailRead,
+  feedTailCursor,
+  type EventFeed,
+} from './eventFeed';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
@@ -84,10 +92,9 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [sources, setSources] = React.useState<Source[]>([]);
   const [agents, setAgents] = React.useState<AgentSupply[]>([]);
-  const [events, setEvents] = React.useState<ResolutionEvent[]>([]);
-  // A short page is the end of the feed — the only end-of-list signal the
-  // endpoint gives (there is no total).
-  const [eventsExhausted, setEventsExhausted] = React.useState(true);
+  // Rows and end-of-feed as ONE value: every read moves both, and the transition
+  // that moved only the rows is what made 加载更早 lie. `EventFeed` owns the rules.
+  const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -96,6 +103,10 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
+  // The row + remedy a repair journey is running for. Holds the SOURCE OBJECT, not
+  // its id, on purpose: a re-auth's first act is to change that row, so a live
+  // lookup would rewrite the dialog's own subject mid-flow (RepairJourney.tsx).
+  const [repairTarget, setRepairTarget] = React.useState<RepairTarget | null>(null);
   // Which backend's 模型菜单 / 来源顺序 drawer is open. Tracked by backend id (not
   // the agent object) so a background refresh keeps feeding the drawer the
   // freshest agent.
@@ -118,12 +129,30 @@ export const SettingsModelsPage: React.FC = () => {
     };
   }, []);
 
+  // 最近切换 is re-read here with the rows, because the writes this refresh exists
+  // for are the writes that FILE events: a failing 试跑 cools its head down through
+  // `_cooldown`, which records the `cooldown` row that explains the state change
+  // the user is about to see. Fetched only at mount, the row changed and the line
+  // explaining it appeared nowhere until the page was reloaded — the explanation
+  // arriving later than the thing it explains.
+  // It rides along as an ANCILLARY leg, though — `null` when that one read failed.
+  // The feed explains the rows; it is not the rows. Letting it reject the whole
+  // `Promise.all` would mean a slow or broken `/events` holds back the repaired
+  // source state and the ● 当前 the user just changed, which is the opposite of
+  // this refresh's job. A feed left one write behind is not wrong, only not newer,
+  // and the next mutation or reload catches it up.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[]]>(([nextSources, nextAgents]) => {
-      if (!aliveRef.current) return;
-      setSources(nextSources);
-      setAgents(nextAgents);
-    }),
+    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null]>(
+      ([nextSources, nextAgents, headEvents]) => {
+        if (!aliveRef.current) return;
+        setSources(nextSources);
+        setAgents(nextAgents);
+        // Merged, not replaced: 加载更早 pages tail-ward, and a head re-read must
+        // not silently drop the rows it never asked for. See `feedAfterHeadRead`
+        // for the one case merging is wrong, and for what that costs 加载更早.
+        if (headEvents) setFeed((prev) => feedAfterHeadRead(prev, headEvents));
+      },
+    ),
   );
 
   React.useEffect(() => {
@@ -139,8 +168,11 @@ export const SettingsModelsPage: React.FC = () => {
         if (cancelled) return;
         setSources(s);
         setAgents(a);
-        setEvents(e);
-        setEventsExhausted(e.length < EVENT_PAGE);
+        // The first page is a tail read as much as a head one: it reaches the end
+        // of the feed exactly when it comes back short, and its cursor is `null`
+        // because it asked for the top. Applied to `prev` rather than to
+        // `emptyFeed` so the same 「still the feed I asked about?」 rule covers it.
+        setFeed((prev) => feedAfterTailRead(prev, e, EVENT_PAGE, null));
         setRuntime(r);
         setLoading(false);
       })
@@ -156,7 +188,13 @@ export const SettingsModelsPage: React.FC = () => {
 
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
-      await refreshAuthority.run(() => Promise.all([modelsApi.listSources(), modelsApi.listAgents()]));
+      await refreshAuthority.run(() =>
+        Promise.all([
+          modelsApi.listSources(),
+          modelsApi.listAgents(),
+          modelsApi.listEvents(EVENT_PAGE).catch(() => null),
+        ]),
+      );
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
       // the user the view might be stale rather than silently swallowing it.
@@ -165,25 +203,27 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refreshAuthority, showToast, t]);
 
   const loadOlderEvents = React.useCallback(async () => {
-    const oldest = events[events.length - 1]?.id;
+    const oldest = feedTailCursor(feed);
     if (!oldest) return;
     setLoadingEvents(true);
     try {
       const page = await modelsApi.listEvents(EVENT_PAGE, oldest);
       if (!aliveRef.current) return;
       // Merged by id rather than concatenated: the feed grows at the head while
-      // we page from the tail, so an overlapping row is normal, not a bug.
-      setEvents((prev) => {
-        const seen = new Set(prev.map((e) => e.id));
-        return [...prev, ...page.filter((e) => !seen.has(e.id))];
-      });
-      setEventsExhausted(page.length < EVENT_PAGE);
+      // we page from the tail, so an overlapping row is normal, not a bug. Same
+      // owner as the mount read, because reaching the end is the same question
+      // there; the head re-read has its own because merging is not always right.
+      //
+      // The cursor goes back in with the page: this request is a question about
+      // the rows below `oldest`, and a head re-read that REPLACED the feed while
+      // it was in flight left it about a feed that is no longer on screen.
+      setFeed((prev) => feedAfterTailRead(prev, page, EVENT_PAGE, oldest));
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setLoadingEvents(false);
     }
-  }, [events, showToast, t]);
+  }, [feed, showToast, t]);
 
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
@@ -241,6 +281,7 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
+            onRepair={(source, kind) => setRepairTarget({ source, kind })}
           />
           <AgentCard
             agents={agents}
@@ -250,9 +291,9 @@ export const SettingsModelsPage: React.FC = () => {
             connectingBackend={connecting}
           />
           <RecentSwitchesCard
-            events={events}
+            events={feed.events}
             sources={sources}
-            hasMore={!eventsExhausted}
+            hasMore={!feed.exhausted}
             loadingMore={loadingEvents}
             onLoadMore={() => void loadOlderEvents()}
           />
@@ -266,6 +307,11 @@ export const SettingsModelsPage: React.FC = () => {
         vendor={oauthVendor ?? 'anthropic'}
         onClose={() => setOauthVendor(null)}
         onConnected={() => void refreshSourcesAgents()}
+      />
+      <RepairJourney
+        target={repairTarget}
+        onClose={() => setRepairTarget(null)}
+        onChanged={() => void refreshSourcesAgents()}
       />
 
       {orderAgent && (

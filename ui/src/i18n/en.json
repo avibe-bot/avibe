@@ -778,11 +778,16 @@
           "xai": "xAI"
         }
       },
+      "field": {
+        "apiKeyPlaceholder": "sk-…",
+        "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
       "oauth": {
         "title": {
           "anthropic": "Connect Claude subscription",
           "openai": "Connect ChatGPT subscription",
-          "generic": "Connect subscription"
+          "generic": "Connect subscription",
+          "reauth": "Sign in to “{{name}}” again"
         },
         "starting": "Preparing…",
         "connected": "Connected — added to your sources",
@@ -810,6 +815,7 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
           "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
         },
         "hubOption": {
@@ -955,6 +961,8 @@
         "more": "More actions",
         "rename": "Rename",
         "rediscover": "Re-discover models",
+        "reauth": "Sign in again",
+        "replaceKey": "Replace API key",
         "delete": "Delete source",
         "renameTitle": "Rename source",
         "renameLabel": "Display name",
@@ -973,7 +981,44 @@
         "deleteFailed": "Couldn't delete, please retry",
         "renameHint": "Changes the display name only — the credential is untouched",
         "rediscoverHint": "Re-fetch the models this source can supply",
-        "deleteHint": "You'll be asked to confirm first"
+        "deleteHint": "You'll be asked to confirm first",
+        "reauthHint": "The old sign-in stops working right away",
+        "replaceKeyHint": "Enter a new key — the endpoint and name stay"
+      },
+      "repair": {
+        "reauth": "Sign in",
+        "replaceKey": "Replace key",
+        "retest": "Retry",
+        "reauthTitle": "Sign in to “{{name}}” again?",
+        "reauthBody": {
+          "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
+          "onFailure": "If this sign-in doesn’t go through, the source needs attention until you sign in again."
+        },
+        "reauthConfirm": "Start sign-in",
+        "replaceTitle": "Replace the API key for “{{name}}”",
+        "replaceBody": "Enter a new key — everything else stays the same.",
+        "replaceLabel": "New API key",
+        "replaceSubmit": "Replace",
+        "replacing": "Replacing…",
+        "replaceFailed": "Couldn't replace the key, please retry",
+        "forceTitle": "Replace it anyway?",
+        "forceConfirm": "Replace anyway",
+        "gapsTitle": "These agents will have no source left:",
+        "gapsDone": "These agents now have no source left:",
+        "gaps": "Some agents now have no source left",
+        "repaired": "Working again",
+        "refreshed": "Updated",
+        "unresolved": "Still not working",
+        "failed": "Couldn't do that, please retry"
+      },
+      "dryRun": {
+        "action": "Run a test turn",
+        "running": "Testing…",
+        "ok": "{{name}} is reachable · {{ms}} ms",
+        "okNoLatency": "{{name}} is reachable",
+        "failed": "{{name}} didn't go through · {{detail}}",
+        "failedUnknown": "{{name}} didn't go through",
+        "error": "Couldn't run the test, please retry"
       },
       "migrationBanner": {
         "title": "Native configs ready to import",
@@ -1035,8 +1080,20 @@
       "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
       "consent_required": "Needs your consent for experimental hub supply first"
     },
+    "oauth": {
+      "upstream_failed": "The vendor didn't complete this sign-in, please retry",
+      "engine_unavailable": "The Hub isn't responding, please retry",
+      "submission_failed": "Couldn't submit what you pasted, please retry",
+      "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
+      "binding_failed": "That account is already used by another source",
+      "expired": "Authorization timed out, please reconnect"
+    },
     "probe": {
-      "native_cli_unavailable": "CLI login is not available in this process"
+      "native_cli_unavailable": "Can't use the CLI's sign-in",
+      "no_candidate": {
+        "waiting": "Every source is cooling down",
+        "interrupted": "No source can serve this model right now"
+      }
     },
     "source": {
       "cooldown": {
@@ -1047,7 +1104,7 @@
         "server_error": "Upstream server error"
       },
       "needs_action": {
-        "oauth_expired": "Sign-in expired — reauthorize it",
+        "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",
         "credential_revoked": "Credential revoked — enter a new one",
         "account_banned": "Account is restricted"

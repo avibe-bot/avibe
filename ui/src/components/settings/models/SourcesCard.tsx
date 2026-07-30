@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 
 import { AddSourceMenu } from './AddSourceMenu';
 import { SourceRow } from './SourceRow';
+import type { RaisedRepair } from './SourceRowMenu';
 import type { Source } from './types';
 
 export const SourcesCard: React.FC<{
@@ -26,7 +27,9 @@ export const SourcesCard: React.FC<{
   onAddApiKey: () => void;
   /** Re-fetch after a per-row action (rename / re-discover / delete). */
   onSourceChanged: () => void;
-}> = ({ sources, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged }) => {
+  /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
+  onRepair?: (source: Source, kind: RaisedRepair) => void;
+}> = ({ sources, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged, onRepair }) => {
   const { t } = useTranslation();
 
   return (
@@ -49,7 +52,7 @@ export const SourcesCard: React.FC<{
       ) : (
         <div className="flex flex-col">
           {sources.map((source) => (
-            <SourceRow key={source.id} source={source} onChanged={onSourceChanged} />
+            <SourceRow key={source.id} source={source} onChanged={onSourceChanged} onRepair={onRepair} />
           ))}
         </div>
       )}

@@ -117,6 +117,87 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             "interrupted",
         )
 
+    async def test_native_reauth_reuses_a_pending_flow_and_cancel_commits_a_finished_one(self):
+        """Scenario: AUTH-SETUP-107
+
+        Pins the three server-side rules the 模型 page's re-auth dialog is built
+        on, in the order a single abandoned journey meets them: a start REUSES a
+        live pending flow, cancelling a pending flow destroys the very flow a
+        successor would have reused, and the same cancel against a FINISHED flow
+        materializes the re-auth instead of cancelling it.
+
+        This is also the closed-loop evidence for the client-side ownership rules
+        in `ui/src/components/settings/models/asyncLifetime.ts` (`releaseFlow`):
+        the dialog only skips a teardown cancel when it no longer owns the source's
+        flow, and never skips the refetch, and both of those are conclusions about
+        the sequence asserted here. The dialog itself cannot be driven from this
+        harness — it is React, and this is an asyncio TestCase with no DOM — so the
+        UI-side interleavings are exercised in `asyncLifetime.test.ts` against the
+        same rules.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+        ack = {"acknowledge_irreversible": True}
+
+        # 1. A second start for the same source is handed the SAME flow, and the
+        #    irreversible half is not paid twice: one spawn, one marking.
+        first = await harness.service.reauth_source(source.id, ack)
+        flow_id = first["flow"]["flow_id"]
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        reused = await harness.service.reauth_source(source.id, ack)
+        self.assertEqual(reused["flow"]["flow_id"], flow_id)
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        # A start answers with the flow ALONE — no repair tail — which is why the
+        # page has to re-read a start that comes back already finished.
+        self.assertEqual(set(reused), {"flow"})
+
+        # 2. Cancelling a still-pending flow destroys it, so the next start has to
+        #    open a new one — and pay the irreversible half again.
+        await harness.service.oauth_cancel(flow_id)
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+
+        restarted = await harness.service.reauth_source(source.id, ack)
+        successor_flow_id = restarted["flow"]["flow_id"]
+        self.assertNotEqual(successor_flow_id, flow_id)
+        self.assertEqual(
+            harness.agent_auth.start_calls,
+            [("claude", True), ("claude", True)],
+        )
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        # 3. The same call against a FINISHED flow is not a cancel at all: it
+        #    materializes the re-auth. Nothing polls the status first, so this call
+        #    is the only thing that could have written the row.
+        harness.agent_auth.complete(successor_flow_id)
+        await harness.service.oauth_cancel(successor_flow_id)
+
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+        repaired = harness.store.config.sources[0]
+        self.assertEqual(repaired.state.status, "standby")
+        self.assertIn("claude-opus-4-6", [model.id for model in repaired.models])
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "ok",
+        )
+
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
         harness = AuthSetupScenarioHarness()

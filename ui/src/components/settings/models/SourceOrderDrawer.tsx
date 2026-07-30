@@ -20,8 +20,20 @@
 // Reachable in Hub mode only (AC-7): a Direct backend has no Hub order, no chain
 // and no probe, so the affordance is withdrawn rather than shown empty.
 import * as React from 'react';
+import type { TFunction } from 'i18next';
 import { Reorder, useDragControls } from 'framer-motion';
-import { ChevronRight, CirclePlus, GripVertical, List, WandSparkles, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronRight,
+  CirclePlus,
+  GripVertical,
+  List,
+  Loader2,
+  TriangleAlert,
+  WandSparkles,
+  X,
+  Zap,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -32,14 +44,24 @@ import { useToast } from '@/context/ToastContext';
 import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
 import { eligibilityOf } from './eligibility';
+import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
-import { modelsApi } from './modelsApi';
+import { apiFailure, modelsApi } from './modelsApi';
+import {
+  dryRunChainKey,
+  dryRunOutcome,
+  dryRunPlan,
+  dryRunRowView,
+  probeArrival,
+  type DryRunOutcome,
+} from './repair';
 import { movedOrder, sameIds } from './reorder';
+import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
 import { isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
-import type { AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
+import type { AgentBackend, AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
 
 // ── Row parts ───────────────────────────────────────────────────────────
 //
@@ -448,6 +470,16 @@ export const SourceOrderDrawer: React.FC<{
           </>
         )}
 
+        {DRY_RUN_ENABLED && (
+          <DryRunRow
+            agent={agent}
+            sources={sources}
+            chainKey={dryRunChainKey(agent, policy, order, sources)}
+            saving={saving}
+            reread={onSaved}
+          />
+        )}
+
         {/* The phone's home for 模型菜单与映射. A frame that doesn't draw a control
             at 390px is saying where to move it, not that a phone user may not
             have it — the two configuration surfaces answer adjacent questions
@@ -468,6 +500,174 @@ export const SourceOrderDrawer: React.FC<{
         )}
       </div>
     </MenuDrawer>
+  );
+};
+
+/** 「<name> 没跑通」, with the server's reason when it gave one. */
+const failedLine = (t: TFunction, name: string, detail: string | null): string =>
+  detail
+    ? (t('settings.models.dryRun.failed', { name, detail }) as string)
+    : (t('settings.models.dryRun.failedUnknown', { name }) as string);
+
+/**
+ * 试跑 — one real turn through this Agent's chain, and its answer.
+ *
+ * Full-width at every breakpoint, at the end of the list. No V6 or M02 frame
+ * draws it, so it takes the geometry of the phone's 模型菜单与映射 row rather than
+ * inventing one, and it is a row instead of a third footer button because the
+ * answer belongs UNDER the question: 「这条链现在能不能跑通」 is about the list
+ * above it, and a footer control would report on it from the wrong end of the
+ * sheet, with nowhere to put the result line.
+ *
+ * It reports the head the SERVER picked, never one this drawer chose: the probe
+ * takes no model, the reply names the source it reached, and a null latency is a
+ * head the Hub does not carry the request for (a native CLI login) — which is
+ * `可用` without a number, not a zero.
+ */
+const DryRunRow: React.FC<{
+  agent: AgentSupply;
+  sources: Source[];
+  /** Everything the USER selects the probed turn with — order, policy, and the
+   *  model surface, from `dryRunChainKey`. Deliberately not the head the server
+   *  computes from it; see that owner and the reset effect below. */
+  chainKey: string;
+  /** The drawer's order PUT is in flight. A probe started now would answer for the
+   *  chain the server still holds, filed under the one the user already sees —
+   *  `dryRunRowView` owns that rule. */
+  saving: boolean;
+  /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
+   *  write, so the page it sits on is stale until this runs — and `probeArrival`
+   *  owns the part that is easy to get wrong, that this is owed even for an answer
+   *  the row will not draw. */
+  reread: () => void;
+}> = ({ agent, sources, chainKey, saving, reread }) => {
+  const { t } = useTranslation();
+  const plan = dryRunPlan(agent);
+  const [running, setRunning] = React.useState(false);
+  const [outcome, setOutcome] = React.useState<DryRunOutcome | null>(null);
+  // The REASON, not the sentence built from it: a stored sentence keeps the
+  // language it was built in, and a language switch re-renders this row without
+  // re-running the probe. Wrapped rather than a bare `string | null`, because a
+  // thrown failure may carry no key at all and `null` has to keep meaning 「nothing
+  // ran yet」 — `{ key: null }` is the third state, 「it failed and nobody named
+  // why」, whose sentence is the generic line below.
+  const [errorReason, setErrorReason] = React.useState<{ key: string | null } | null>(null);
+  const seq = React.useRef(0);
+
+  // A result describes ONE chain, and editing the chain stops it being about
+  // anything — so it goes, rather than sitting there under a list it no longer
+  // answers for.
+  //
+  // Keyed on the chain the USER edits, not on `agent.current`, because the head
+  // is where the two diverge: a failing 试跑 cools its own head down, so the
+  // re-read below moves `agent.current` almost every time the report is a
+  // failure. Keyed on the head, the refresh would erase the sentence the click
+  // produced — and the line names its source, so after a self-inflicted move it
+  // is the EXPLANATION for the new head rather than a claim about it.
+  React.useEffect(() => {
+    seq.current += 1;
+    setRunning(false);
+    setOutcome(null);
+    setErrorReason(null);
+  }, [chainKey]);
+
+  const run = async (backend: AgentBackend) => {
+    const mine = ++seq.current;
+    setRunning(true);
+    setOutcome(null);
+    setErrorReason(null);
+    try {
+      const probe = await modelsApi.probeAgent(backend);
+      // `seq` guards the REPORT, not the refetch. An edit to the chain while this
+      // was in flight makes the answer moot, but not the cooldown it wrote — and
+      // that edit's own refetch went out before this returned, so it cannot have
+      // seen it. `probeArrival` owns the split; the verdict is stored first, then
+      // the page behind this sheet is corrected.
+      const arrival = probeArrival({ kind: 'result', probe }, seq.current === mine);
+      if (arrival.report) setOutcome(dryRunOutcome(probe, sources));
+      if (arrival.reread) reread();
+    } catch (err) {
+      const failure = apiFailure(err);
+      // `serverNamed` is the error's to state, not this site's to infer from
+      // 「is it one of ours?」: a response that would not parse is one of ours and
+      // names nothing, and that is the case the reread below exists for. The code
+      // rides along for the opposite case — a refusal that named itself and, in
+      // naming itself, disproved the head this button was drawn from.
+      const arrival = probeArrival(
+        {
+          kind: 'thrown',
+          serverNamed: failure?.serverNamed ?? false,
+          code: failure?.code ?? null,
+        },
+        seq.current === mine,
+      );
+      // The server's own reason when it named one (`probe_no_candidate` carries a
+      // detail key), and the absence of one when it didn't. Which sentence either
+      // becomes is the render's call — the same degradation the rest of the page
+      // gives a server-chosen key, applied with the `t` that is current when it is
+      // READ rather than the one that happened to be in scope when it arrived.
+      if (arrival.report) setErrorReason({ key: failure?.detail ?? null });
+      // Either because the probe may have run and written with the answer lost on
+      // the way back, or because the refusal that came back contradicts the chain
+      // this row is drawn from — `probeArrival` keeps those two apart.
+      if (arrival.reread) reread();
+    } finally {
+      if (seq.current === mine) setRunning(false);
+    }
+  };
+
+  const ok = outcome?.kind === 'ok';
+  const line = !outcome
+    ? errorReason && serverText(t, errorReason.key, 'settings.models.dryRun.error')
+    : outcome.kind === 'ok'
+      ? outcome.latencyMs !== null
+        ? (t('settings.models.dryRun.ok', { name: outcome.sourceName, ms: outcome.latencyMs }) as string)
+        : (t('settings.models.dryRun.okNoLatency', { name: outcome.sourceName }) as string)
+      : // The detail is the server's key; with none, the name alone is the honest
+        // sentence rather than a machine code appended to it.
+        failedLine(t, outcome.sourceName, serverText(t, outcome.detailKey));
+
+  // What this row IS right now, which the plan alone cannot say: no head means no
+  // control (Direct mode, or waiting/interrupted — the page states that one level
+  // up with the remedy attached, so a disabled 试跑 would only repeat it), and yet
+  // this very row is how a chain LOSES its head, because a failing probe cools its
+  // own head down. The answer therefore outlives the chain it was about; only the
+  // control goes with it. `saving` is in there for the mirror-image reason — see
+  // `dryRunRowView`.
+  const { backend, enabled, report } = dryRunRowView(plan, { line, saving, running });
+  if (backend === null && !report) return null;
+
+  return (
+    <div className="mt-1 flex flex-col gap-2">
+      {backend !== null && (
+        <Button
+          variant="outline"
+          className="h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold"
+          onClick={() => void run(backend)}
+          disabled={!enabled}
+        >
+          <span className="flex items-center gap-2">
+            {running ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+            {t(running ? 'settings.models.dryRun.running' : 'settings.models.dryRun.action')}
+          </span>
+        </Button>
+      )}
+      {report && (
+        <p
+          className={cn(
+            'flex items-start gap-1.5 px-1 text-[12px] leading-relaxed',
+            ok ? 'text-mint' : 'text-gold',
+          )}
+        >
+          {ok ? (
+            <CheckCircle2 className="mt-[2px] size-3.5 shrink-0" />
+          ) : (
+            <TriangleAlert className="mt-[2px] size-3.5 shrink-0" />
+          )}
+          {line}
+        </p>
+      )}
+    </div>
   );
 };
 

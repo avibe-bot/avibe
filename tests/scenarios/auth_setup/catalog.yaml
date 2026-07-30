@@ -78,6 +78,13 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_native_model_hub_reauth_confirms_before_honest_failure
+  - id: AUTH-SETUP-107
+    name: Abandoned native re-auth reuses its pending flow, and cancelling a finished one commits it
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_native_reauth_reuses_a_pending_flow_and_cancel_commits_a_finished_one
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
