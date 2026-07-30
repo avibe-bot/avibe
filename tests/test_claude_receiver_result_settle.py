@@ -99,6 +99,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message = AsyncMock(return_value=None)
         agent.controller.emit_agent_message = AsyncMock(return_value=None)
         result_ready = asyncio.Event()
+        result_processed = asyncio.Event()
+        end_stream = asyncio.Event()
 
         class _Client:
             async def interrupt(self):
@@ -111,6 +113,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                 async def _iterate():
                     await result_ready.wait()
                     yield _ResultMessage()
+                    result_processed.set()
+                    await end_stream.wait()
 
                 return _iterate()
 
@@ -145,11 +149,15 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(agent.steering_native_turn_id(target))
 
         result_ready.set()
-        await receiver_task
+        await asyncio.wait_for(result_processed.wait(), timeout=1)
 
         agent.emit_result_message.assert_awaited_once()
         self.assertFalse(agent._has_pending_requests(composite_key))
         self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
+        self.assertFalse(receiver_task.done())
+
+        end_stream.set()
+        await receiver_task
 
     async def test_successful_steer_supersedes_a_concurrent_primary_result(self):
         mark_idle_calls: list[str] = []

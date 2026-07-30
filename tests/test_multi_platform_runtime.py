@@ -1469,7 +1469,9 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     class _Controller:
         agent_auth_service = _AuthSvc()
 
-        def _t(self, key):
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
             return f"translated:{key}"
 
         async def emit_agent_message(
@@ -1822,7 +1824,7 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
 
         def __init__(self):
             self.config = type(
-                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"}
+                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "zh"}
             )()
             self.processing_indicator = ProcessingIndicatorService(self)
 
@@ -1855,7 +1857,10 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
                         "id": "msg-restored-error",
                         "role": "assistant",
                         "time": {"completed": 1},
-                        "error": {"name": "ProviderError", "data": {"message": "quota exceeded"}},
+                        "error": {
+                            "name": "NativeSessionEndedBeforeResult",
+                            "data": {"message": "OpenCode 已结束，但没有产出模型回复。"},
+                        },
                     },
                     "parts": [],
                 }
@@ -1911,9 +1916,19 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
 
     asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
-    assert model_hub_failures == [("hub", "src_hub_restore", "ProviderError - quota exceeded")]
+    assert model_hub_failures == [
+        (
+            "hub",
+            "src_hub_restore",
+            "NativeSessionEndedBeforeResult - OpenCode 已结束，但没有产出模型回复。",
+        )
+    ]
     assert removed == ["oc-restored-error"]
     assert [item[0] for item in emitted] == ["notify", "notify", "result"]
+    assert emitted[1][1] == (
+        "OpenCode 错误：NativeSessionEndedBeforeResult - "
+        "OpenCode 已结束，但没有产出模型回复。"
+    )
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

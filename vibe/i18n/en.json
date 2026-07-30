@@ -148,7 +148,8 @@
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
-    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}"
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
+    "opencodeBackendError": "OpenCode error: {error}"
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",

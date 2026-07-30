@@ -1428,6 +1428,7 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 continue
 
+                            self._ambiguous_interrupt_keys().discard(composite_key)
                             failure_disposition = await self._handle_terminal_failure_result(
                                 context,
                                 composite_key,

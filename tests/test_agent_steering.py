@@ -1231,7 +1231,7 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
         status_error=ConnectionError("status unavailable"),
     )
     agent = _opencode_agent(primary, gate_task, server)
-    agent.controller = SimpleNamespace()
+    agent.controller = SimpleNamespace(config=SimpleNamespace(language="zh"))
     agent.opencode_config = SimpleNamespace(error_retry_limit=1)
     agent.record_model_hub_native_failure = AsyncMock()
     emit_failure = AsyncMock()
@@ -1264,6 +1264,9 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
         assert server.prompt_calls == []
         emit_failure.assert_awaited_once()
         assert emit_failure.await_args.kwargs["failure_id"].endswith(":1")
+        assert emit_failure.await_args.kwargs["display_text"] == (
+            "OpenCode 错误：StatusReconciliationError - status unavailable"
+        )
     finally:
         await _cancel_tasks(gate_task)
 

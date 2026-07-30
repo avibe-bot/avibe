@@ -351,7 +351,7 @@ class OpenCodePollLoop:
                                 )
 
                         await self._record_model_hub_failure(request.context, diagnostic)
-                        message = f"OpenCode error: {diagnostic}"
+                        message = self._t("error.opencodeBackendError", error=diagnostic)
                         await emit_backend_failure(
                             self._agent.controller,
                             request.context,
@@ -547,7 +547,7 @@ class OpenCodePollLoop:
                                 error_retry_count += 1
                                 if error_retry_count > error_retry_limit:
                                     await self._record_model_hub_failure(context, error_text)
-                                    message = f"OpenCode error: {error_text}"
+                                    message = self._t("error.opencodeBackendError", error=error_text)
                                     await emit_backend_failure(
                                         self._agent.controller,
                                         context,
