@@ -87,6 +87,22 @@ class AudioAsrRuntimeConfig:
     device_secret: str
 
 
+class AudioAsrTimeoutError(TimeoutError):
+    """Raised when the upstream ASR request exhausts its total deadline."""
+
+
+class AudioAsrEmptyTranscriptError(ValueError):
+    """Raised when upstream accepts the audio but returns no transcript text."""
+
+
+class AudioAsrProtocolError(ValueError):
+    """Raised when upstream returns a success response with an invalid schema."""
+
+
+class AudioAsrUnavailableError(ConnectionError):
+    """Raised when the configured upstream ASR service is unavailable."""
+
+
 class AudioAsrService:
     """Transcribe downloaded audio attachments through AVIBE ASR."""
 
@@ -152,7 +168,15 @@ class AudioAsrService:
             eligible.append(attachment)
         return eligible
 
-    async def transcribe_attachments(self, attachments: list[FileAttachment]) -> list[AudioTranscript]:
+    async def transcribe_attachments(
+        self,
+        attachments: list[FileAttachment],
+        *,
+        raise_on_empty: bool = False,
+        raise_on_timeout: bool = False,
+        raise_on_unavailable: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> list[AudioTranscript]:
         asr_config = self._get_audio_asr_config()
         if not asr_config.enabled:
             return []
@@ -164,9 +188,16 @@ class AudioAsrService:
         if not eligible:
             return []
 
-        timeout_seconds = max(0.1, float(asr_config.timeout_seconds or 60.0))
-        deadline = time.monotonic() + timeout_seconds
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        request_timeout_seconds = max(
+            0.1,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else asr_config.timeout_seconds or 60.0
+            ),
+        )
+        deadline = time.monotonic() + request_timeout_seconds
+        timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [self._transcribe_one(session, runtime, attachment, deadline) for attachment in eligible]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -175,6 +206,13 @@ class AudioAsrService:
         for result in results:
             if isinstance(result, AudioTranscript):
                 transcripts.append(result)
+            elif isinstance(result, AudioAsrEmptyTranscriptError):
+                if raise_on_empty:
+                    raise result
+            elif isinstance(result, AudioAsrTimeoutError) and raise_on_timeout:
+                raise result
+            elif isinstance(result, AudioAsrUnavailableError) and raise_on_unavailable:
+                raise result
             elif isinstance(result, Exception):
                 logger.warning("Audio ASR skipped after error: %s", result)
         return transcripts
@@ -188,7 +226,7 @@ class AudioAsrService:
     ) -> AudioTranscript | None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None
+            raise AudioAsrTimeoutError("audio ASR deadline exhausted")
 
         path = Path(attachment.local_path or "")
         if not path.is_file():
@@ -232,12 +270,13 @@ class AudioAsrService:
                     },
                     timeout=aiohttp.ClientTimeout(total=max(0.1, remaining)),
                 ) as response:
-                    payload: dict[str, Any] = {}
+                    payload: Any = None
                     try:
                         payload = await response.json(content_type=None)
                     except Exception:
                         text = await response.text()
-                        payload = {"error": text[:200]}
+                        if response.status < 200 or response.status >= 300:
+                            payload = {"error": text[:200]}
                     duration_ms = int((time.monotonic() - start) * 1000)
                     if response.status < 200 or response.status >= 300:
                         logger.warning(
@@ -247,18 +286,38 @@ class AudioAsrService:
                             mimetype,
                             duration_ms,
                         )
+                        upstream_error = (
+                            payload.get("error")
+                            if isinstance(payload, dict)
+                            else None
+                        )
+                        if response.status == 504 or upstream_error == "transcription_timeout":
+                            raise AudioAsrTimeoutError("audio ASR upstream timed out")
+                        if response.status == 503 or upstream_error in {
+                            "asr_not_configured",
+                            "asr_unavailable",
+                        }:
+                            raise AudioAsrUnavailableError("audio ASR upstream unavailable")
                         return None
+            except (AudioAsrTimeoutError, AudioAsrUnavailableError):
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Audio ASR timed out for %s", attachment.name)
-                return None
+                raise AudioAsrTimeoutError("audio ASR request timed out") from None
+            except aiohttp.ClientError as exc:
+                logger.warning("Audio ASR request unavailable for %s: %s", attachment.name, exc)
+                raise AudioAsrUnavailableError("audio ASR request unavailable") from exc
             except Exception as exc:
                 logger.warning("Audio ASR request failed for %s: %s", attachment.name, exc)
                 return None
 
-        text = str(payload.get("text") or "").strip()
-        if not text:
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            logger.warning("Audio ASR returned a malformed success response for %s", attachment.name)
+            raise AudioAsrProtocolError("audio ASR returned a malformed success response")
+        text = payload["text"]
+        if not text.strip():
             logger.warning("Audio ASR returned empty transcript for %s", attachment.name)
-            return None
+            raise AudioAsrEmptyTranscriptError("audio ASR returned an empty transcript")
         return AudioTranscript(
             attachment_name=attachment.name or path.name,
             local_path=str(path),

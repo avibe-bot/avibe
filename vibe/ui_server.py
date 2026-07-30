@@ -7718,7 +7718,12 @@ async def asr_transcribe():
     import tempfile
     import uuid
 
-    from core.audio_asr import AudioAsrService
+    from core.audio_asr import (
+        AudioAsrEmptyTranscriptError,
+        AudioAsrService,
+        AudioAsrTimeoutError,
+        AudioAsrUnavailableError,
+    )
     from core.services import settings as settings_service
     from modules.im.base import FileAttachment
 
@@ -7735,7 +7740,7 @@ async def asr_transcribe():
     if not raw:
         return jsonify({"error": "empty audio"}), 400
     if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
+        return jsonify({"error": "file_too_large"}), 413
 
     name = (payload.get("name") or "voice.webm").strip() or "voice.webm"
     mime = (payload.get("mime") or "audio/webm").strip()
@@ -7748,13 +7753,30 @@ async def asr_transcribe():
     service = AudioAsrService(config)
     if not service.is_available():
         return jsonify({"error": "asr_unavailable"}), 400
+    audio_asr_config = getattr(config, "audio_asr", None)
+    max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+    if max_file_bytes is not None and len(raw) > max_file_bytes:
+        return jsonify({"error": "file_too_large"}), 413
 
     suffix = Path(name).suffix or ".webm"
     tmp_path = Path(tempfile.gettempdir()) / f"vibe_asr_{uuid.uuid4().hex[:8]}{suffix}"
     tmp_path.write_bytes(raw)
     try:
         attachment = FileAttachment(name=name, mimetype=mime, local_path=str(tmp_path), size=len(raw))
-        transcripts = await service.transcribe_attachments([attachment])
+        try:
+            transcripts = await service.transcribe_attachments(
+                [attachment],
+                raise_on_empty=True,
+                raise_on_timeout=True,
+                raise_on_unavailable=True,
+                timeout_seconds=120.0,
+            )
+        except AudioAsrEmptyTranscriptError:
+            return jsonify({"error": "transcription_empty"}), 422
+        except AudioAsrTimeoutError:
+            return jsonify({"error": "transcription_timeout"}), 504
+        except AudioAsrUnavailableError:
+            return jsonify({"error": "asr_unavailable"}), 503
     finally:
         try:
             tmp_path.unlink()
@@ -7763,6 +7785,116 @@ async def asr_transcribe():
     if not transcripts:
         return jsonify({"error": "transcription_failed"}), 502
     return jsonify({"text": transcripts[0].text})
+
+
+@app.route("/api/asr/telemetry", methods=["POST"])
+def asr_telemetry():
+    """Persist privacy-safe browser voice metrics in the normal service log."""
+    from vibe import __version__
+
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_payload"}), 400
+
+    event = payload.get("event")
+    if not isinstance(event, str) or event not in {
+        "segment_transcription",
+        "dictation_finalized",
+        "dictation_inserted",
+    }:
+        return jsonify({"error": "invalid_event"}), 400
+
+    enum_fields = {
+        "outcome": {
+            "success",
+            "fallback",
+            "cancelled",
+            "empty",
+            "failed",
+            "timeout",
+            "too_large",
+            "unavailable",
+        },
+        "path": {"cloud", "local"},
+        "providerStage": {"token", "upload", "refresh", "response", "finalization"},
+        "browserFamily": {"chrome", "firefox", "edge", "safari", "other", "unknown"},
+    }
+    outcome = payload.get("outcome")
+    if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
+        return jsonify({"error": "invalid_outcome"}), 400
+
+    sanitized: dict[str, Any] = {
+        "release": __version__,
+        "event": event,
+        "outcome": outcome,
+    }
+    dictation_id = payload.get("dictationId")
+    if dictation_id is not None:
+        if not isinstance(dictation_id, str) or not re.fullmatch(
+            r"[a-z0-9_-]{1,80}",
+            dictation_id,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "dictationId"}), 400
+        sanitized["dictationId"] = dictation_id
+
+    for key, allowed_values in enum_fields.items():
+        if key == "outcome" or key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, str) or value not in allowed_values:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    mime_type = payload.get("mimeType")
+    if mime_type is not None:
+        if not isinstance(mime_type, str) or not re.fullmatch(
+            r"(?:audio|video)/[a-z0-9][a-z0-9.+_-]{0,63}",
+            mime_type,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "mimeType"}), 400
+        sanitized["mimeType"] = mime_type.lower()
+
+    integer_fields = {
+        "sizeBytes",
+        "durationMs",
+        "elapsedMs",
+        "attemptCount",
+        "segmentCount",
+        "failedSegmentCount",
+        "backlogAtStop",
+        "totalDurationMs",
+        "stopToInsertionMs",
+    }
+    for key in integer_fields:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10**12:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    if "httpStatus" in payload:
+        http_status = payload["httpStatus"]
+        if (
+            not isinstance(http_status, int)
+            or isinstance(http_status, bool)
+            or not 100 <= http_status <= 599
+        ):
+            return jsonify({"error": "invalid_field", "field": "httpStatus"}), 400
+        sanitized["httpStatus"] = http_status
+
+    if "retry" in payload:
+        if not isinstance(payload["retry"], bool):
+            return jsonify({"error": "invalid_field", "field": "retry"}), 400
+        sanitized["retry"] = payload["retry"]
+
+    logger.info(
+        "voice_reliability %s",
+        json.dumps(sanitized, sort_keys=True, separators=(",", ":")),
+    )
+    return jsonify({"ok": True})
 
 
 @app.route("/api/asr/status", methods=["GET"])
@@ -7774,9 +7906,24 @@ def asr_status():
 
     try:
         config = settings_service.load_config()
-        return jsonify({"available": bool(AudioAsrService(config).is_available())})
+        audio_asr_config = getattr(config, "audio_asr", None)
+        max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+        if not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+            max_file_bytes = None
+        available = bool(AudioAsrService(config).is_available())
+        # Browser capture uses 16 kHz mono 16-bit PCM. Smaller limits would
+        # create sub-five-second segments and an impractical ASR request rate.
+        min_browser_wav_bytes = 44 + (16_000 * 2 * 5)
+        if max_file_bytes is not None and max_file_bytes < min_browser_wav_bytes:
+            available = False
+        return jsonify(
+            {
+                "available": available,
+                "max_file_bytes": max_file_bytes,
+            }
+        )
     except Exception:
-        return jsonify({"available": False})
+        return jsonify({"available": False, "max_file_bytes": None})
 
 
 def _publish_visible_input_message(
