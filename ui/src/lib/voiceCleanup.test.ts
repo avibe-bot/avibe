@@ -116,6 +116,16 @@ describe('voice cleanup', () => {
     );
   });
 
+  it('preserves adjacency around code and path delimiters', () => {
+    const memberCall = voiceInsertionSnapshot('object.()', 7, 7);
+    const pathSegment = voiceInsertionSnapshot('/usr/bin', 5, 5);
+    const sentence = voiceInsertionSnapshot('Done.today', 5, 5);
+
+    expect(applyVoiceInsertion(memberCall.text, memberCall, 'method')).toBe('object.method()');
+    expect(applyVoiceInsertion(pathSegment.text, pathSegment, 'local/')).toBe('/usr/local/bin');
+    expect(applyVoiceInsertion(sentence.text, sentence, 'again')).toBe('Done. again today');
+  });
+
   it('replaces selected token text without introducing spaces', () => {
     const snapshot = voiceInsertionSnapshot('v12beta', 1, 3);
 

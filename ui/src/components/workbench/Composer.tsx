@@ -125,6 +125,10 @@ type VoiceRecordingSession = {
 // audio outside the component; successful finalization retains transcript only.
 const voiceSessionsById = new Map<string, VoiceRecordingSession>();
 
+const voiceSessionLocksDraft = (session?: VoiceRecordingSession): boolean => (
+  session != null && ['recording', 'transcribing', 'ready'].includes(session.status)
+);
+
 const newVoiceDictationId = (): string => (
   globalThis.crypto?.randomUUID?.()
   ?? `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`
@@ -373,8 +377,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [restoringRecording, setRestoringRecording] = useState(() => (
-    sessionId != null
-    && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? '')
+    sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
@@ -503,8 +506,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setAttachments([]);
     setVoiceRetainedSession(null);
     setRestoringRecording(
-      sessionId != null
-      && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? ''),
+      sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
     );
   }, [sessionId]);
 
@@ -589,7 +591,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     || transcribingRef.current
     || (
       sessionId != null
-      && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? '')
+      && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
     )
   );
   useImperativeHandle(ref, () => ({

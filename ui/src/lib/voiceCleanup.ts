@@ -71,6 +71,8 @@ const LEADING_WORD_GRAPHEME = /^[\p{L}\p{N}_]\p{M}*/u;
 const TRAILING_WORD_GRAPHEME = /[\p{L}\p{N}_]\p{M}*$/u;
 const OPENING_DELIMITER = /^[\p{Ps}\p{Pi}]$/u;
 const SYMMETRIC_DELIMITER = /^["'`]$/u;
+const TRAILING_TOKEN_JOINER = /(?:[/\\]|::|->|\?\.)$/u;
+const LEADING_CALL_DELIMITER = /^[([{]/u;
 
 const edgeCharacter = (text: string, side: 'start' | 'end'): string => {
   const wordGrapheme = side === 'start'
@@ -87,6 +89,12 @@ const endsWithOpeningDelimiter = (text: string): boolean => {
   if (OPENING_DELIMITER.test(delimiter)) return true;
   if (!SYMMETRIC_DELIMITER.test(delimiter)) return false;
   return !TRAILING_WORD_GRAPHEME.test(characters.slice(0, -1).join(''));
+};
+
+const joiningBoundaryCharacter = (text: string, followingText: string): string | undefined => {
+  if (TRAILING_TOKEN_JOINER.test(text)) return edgeCharacter(text, 'end');
+  if (text.endsWith('.') && LEADING_CALL_DELIMITER.test(followingText)) return '.';
+  return undefined;
 };
 
 const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
@@ -130,8 +138,11 @@ export const voiceInsertionText = (
   if (snapshot.start !== snapshot.end) return normalized;
   const left = currentText.slice(0, snapshot.start);
   const right = currentText.slice(snapshot.end);
-  return `${needsBoundarySpace(left, normalized, snapshot.leftBoundary) ? ' ' : ''}${normalized}${
-    needsBoundarySpace(normalized, right, undefined, snapshot.rightBoundary) ? ' ' : ''
+  const leftBoundary = snapshot.leftBoundary
+    ?? joiningBoundaryCharacter(left, right);
+  const transcriptBoundary = joiningBoundaryCharacter(normalized, right);
+  return `${needsBoundarySpace(left, normalized, leftBoundary) ? ' ' : ''}${normalized}${
+    needsBoundarySpace(normalized, right, transcriptBoundary, snapshot.rightBoundary) ? ' ' : ''
   }`;
 };
 
