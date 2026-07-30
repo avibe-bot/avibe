@@ -29,36 +29,31 @@ routing rule.
 
 ## Goal
 
-> The design below is the one that shipped. It converged through six review
-> rounds — the earliest draft made proactive capture unconditional and touched
-> only the prompt, which the review rounds recorded at the end of this document
-> replaced. Read this section, not that history, when changing the behavior.
+> This section describes the shipped end state. An interim release (#1092)
+> gated the behavior behind a `memory.proactive_capture` opt-in; that design
+> was removed after a product re-evaluation and survives only as history in
+> the review-round sections and the removal follow-up at the end of this
+> document. Read this section when changing the behavior.
 
-Give the Agent a proactive Memory-write habit that an owner switches on
-deliberately, with enough noise control that what it records stays useful.
+Give the Agent a proactive Memory-write habit with enough noise control that
+what it records stays useful.
 
-1. Add `memory.proactive_capture`, a persisted flag that **defaults to false**
-   and is opted into separately from `memory.enabled`. Enabling Memory consents
-   to capturing the user's own messages; letting the Agent decide what else to
-   persist is a wider grant and must not arrive with an upgrade.
-2. Inject one of two Memory prompt variants per turn. Without the opt-in the
-   Agent sees the original requested-only contract; with it, the Agent is told
-   to call `vibe memory remember` on its own initiative when a turn produces a
-   durable signal.
-3. Name the signals worth recording: a preference or identity detail that
+1. With Memory enabled, the injected guidance tells the Agent to call
+   `vibe memory remember` on its own initiative when a turn produces a durable
+   signal. There is no separate opt-in: the Memory enable disclosure states
+   Agent-recorded durable facts as part of what enabling Memory means.
+2. Name the signals worth recording: a preference or identity detail that
    emerged across several turns, a correction of Agent behavior, a decision the
    conversation reached, and a durable user- or machine-specific environment
    fact. Project conventions, architecture, and workflows stay on the
    `AGENTS.md` surface.
-4. Give explicit noise controls so proactive capture does not degrade into
+3. Give explicit noise controls so proactive capture does not degrade into
    logging: one self-contained distilled fact per call, no paraphrase of a plain
    text message automatic capture already holds, no one-off task detail, nothing
    derivable from code or git, no secrets, a small per-turn budget, and silence
    when in doubt.
-5. Keep the shared preferences file an explicit-request surface, and have the
+4. Keep the shared preferences file an explicit-request surface, and have the
    two sections route to each other instead of competing.
-6. Make the opt-in behave correctly at its edges: disabling Memory revokes it,
-   and revoking it never waits on provider health.
 
 ## Non-goals
 
@@ -75,95 +70,70 @@ deliberately, with enough noise control that what it records stays useful.
 
 ## Solution
 
-The change spans the persisted config, the settings surface, the config-to-
-runtime seam, and the injection layer.
+The behavior lives entirely in the injection layer plus the enable disclosure;
+there is no new persisted config.
 
 ### Config and settings surface
 
-`MemoryConfig.proactive_capture` (default false, validated as a bool) persists
-through `memory_config_to_payload` and `V2Config.from_payload`, so a config file
-written before this change simply reads as false. The Memory settings route
-accepts and returns it, and Settings -> Memory exposes a "Proactive capture"
-switch that requires Memory to be enabled.
+`memory.enabled` is the only Memory switch. A config written by the interim
+opt-in release still loads: the stored `proactive_capture` flag is dropped on
+read and no longer serialized. The settings PATCH whitelist is
+`{enabled, processing}`, so a stale client sending the retired field gets
+`memory_invalid_input` instead of a silent merge. `Controller.reconcile_memory`
+has no prompt-only classification: every accepted save runs the full runtime
+reconciliation.
 
-Two properties are enforced by the API rather than by the browser, because an
-older client, a cached page, or a direct call must not be able to skip them:
+The Settings -> Memory disclosure, subtitle, and enable hint state
+unconditionally that durable facts the Agent records while working for the user
+are part of Memory.
 
-- **Disabling Memory revokes the opt-in.** Settings PATCH is a merge, so
-  `_memory_settings_patch` clears `proactive_capture` whenever the merged result
-  is disabled. Otherwise a request carrying only `{"enabled": false}` would
-  leave a stored opt-in armed for the next enable.
-- **Toggling the flag never reconciles the runtime.**
-  `Controller.reconcile_memory` compares a projection of the runtime-relevant
-  settings (`enabled`, both processing endpoints, `embedding_change_pending` —
-  deliberately not `proactive_capture`) and, when only the flag differs, adopts
-  the new config without touching `memory_runtime`. Reconciliation probes the
-  provider and swaps the sidecar, and a failed probe rolls the save back, so
-  without this an owner could not revoke Agent-initiated writes while their
-  endpoint was down. The comparison is fail-safe: any runtime-relevant
-  difference, and any config that cannot be projected, runs the full path.
+### Injected prompt
 
-Because a full reconciliation awaits the sidecar, a prompt-only save can be
-requested and published while one is in flight — Avibe's startup reconciliation,
-which captures the config as it was at boot, is the common case. A finished
-reconciliation therefore publishes its own runtime fields but defers the
-prompt-only fields to the newest request, so it cannot resurrect an opt-in the
-owner revoked while it was waiting.
+`_MEMORY_CLI_PROMPT` is the single Memory section: the four `vibe memory` CLI
+examples and the read guidance, plus a trigger list, a signal-quality block, a
+silent-recording posture, and a surface-routing paragraph. Its no-paraphrase
+rule is scoped to plain text messages on purpose: automatic capture drops IM
+turns carrying files while the prompt gate does not, so a durable fact stated
+only alongside an attachment is still the Agent's to record. The exception is
+phrased in terms the Agent can observe — whether the message arrived with a
+file — rather than internal admission state.
 
-### Prompt variants
-
-`_MEMORY_CLI_PROMPT` is the requested-only contract: the four `vibe memory` CLI
-examples plus the read guidance, with `remember` described as queuing durable
-context the user explicitly asked for.
-
-`_MEMORY_CLI_PROACTIVE_PROMPT` adds, on top of the same examples and read
-guidance, a trigger list, a signal-quality block, a silent-recording posture, and
-a surface-routing paragraph. Its no-paraphrase rule is scoped to plain text
-messages on purpose: automatic capture drops IM turns carrying files while the
-prompt gate does not, so a durable fact stated only alongside an attachment is
-still the Agent's to record. The exception is phrased in terms the Agent can
-observe — whether the message arrived with a file — rather than internal
-admission state.
-
-`build_system_prompt_injection` selects between them with
-`include_memory_proactive`, which is combined with `include_memory_cli` so the
-new parameter can only narrow injection. The three backends resolve
-`memory_cli_prompt_admitted` once per turn — it associates or clears the Memory
-CLI session scope as a side effect — and combine it with the fail-closed
-`memory_proactive_capture_enabled`.
+`build_system_prompt_injection` injects it whenever `include_memory_cli` is
+true. The three backends resolve `memory_cli_prompt_admitted` once per turn —
+it associates or clears the Memory CLI session scope as a side effect — and
+pass the result straight through.
 
 ### `_USER_PREFERENCES_PROMPT`
 
 The file stays an explicit-request surface on every turn. The only variation is
-a routing rule, injected only when proactive capture is actually on, pointing
-anything the Agent decides to record on its own at `vibe memory remember`.
+a routing rule, injected whenever Memory is admitted, pointing anything the
+Agent decides to record on its own at `vibe memory remember`.
 
 ### Test coverage
 
 Prompt assertions anchor on semantic keywords rather than whole-paragraph
-equality, and cover both variants. The injected-command contract test builds the
-prompt with and without the opt-in so every `vibe memory` example in either
-variant stays under the parser-backed live-caller check. Config, settings-route,
-and controller-seam behavior each have their own cases, including a gated
-runtime stub that reproduces the startup-reconciliation race.
+equality. The injected-command contract test keeps every `vibe memory` example
+in the single prompt under the parser-backed live-caller check. Config-load
+tolerance and settings-PATCH rejection of the retired flag each have their own
+cases.
 
 ## Todo
 
-- [x] Add `MemoryConfig.proactive_capture` with validation and persistence, and
-      accept/return it on the Memory settings route.
-- [x] Clear the flag server-side whenever the merged settings patch is disabled.
-- [x] Skip runtime reconciliation when only the flag differs, and keep a
-      superseded reconciliation from republishing a stale value for it.
-- [x] Split the injected Memory guidance into requested-only and proactive
-      variants, selected by `include_memory_proactive`.
-- [x] Keep the preferences file explicit-request, adding only a routing rule on
-      proactive turns.
-- [x] Add the Settings -> Memory toggle, its i18n strings, and the conditional
-      disclosure bullet.
-- [x] Cover both variants in the prompt and live-caller CLI contract tests; add
-      config, settings-route, and controller-seam cases.
+- [x] Inject the proactive contract whenever Memory is admitted, as the single
+      Memory prompt.
+- [x] Keep the preferences file explicit-request, with the routing rule on
+      Memory-admitted turns.
+- [x] Drop the retired `proactive_capture` flag on config load and reject it in
+      the settings PATCH whitelist.
+- [x] Describe Agent-recorded facts unconditionally in the Settings disclosure,
+      subtitle, and enable hint (en/zh).
+- [x] Update the prompt, live-caller CLI contract, config, and settings-route
+      tests to the single-prompt contract.
 - [x] Update `docs/plans/memory-plugin-system.md` and the CLI references.
 - [x] Run the focused tests and `ruff check` on changed Python files.
+
+The review-round sections below record the interim opt-in design (#1092) as
+history; they are not normative.
 
 ## Review follow-ups (Codex review of 72a09153)
 
