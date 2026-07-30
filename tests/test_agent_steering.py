@@ -32,6 +32,11 @@ def test_steer_outcomes_are_exhaustive() -> None:
     }
 
 
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
 class _CodexTurnRegistry:
     def __init__(self, base_session_id: str, turn_id: str) -> None:
         self.active_turns = {base_session_id: turn_id}
@@ -164,7 +169,7 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_codex_steers_expected_active_turn_without_starting_another_turn() -> None:
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
@@ -197,7 +202,7 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -224,7 +229,7 @@ async def test_codex_maps_native_failures_without_turn_start(error: Exception, e
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_codex_rejects_stale_native_turn_and_unavailable_runtime() -> None:
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
@@ -247,7 +252,7 @@ async def test_codex_rejects_stale_native_turn_and_unavailable_runtime() -> None
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
@@ -278,7 +283,7 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         await _cancel_tasks(gate_task, receiver_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -313,7 +318,7 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
         await _cancel_tasks(gate_task, receiver_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_claude_rejects_stale_receiver_generation_and_unavailable_runtime() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
@@ -350,7 +355,7 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
     return agent
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
@@ -378,7 +383,7 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -405,7 +410,7 @@ async def test_opencode_maps_async_prompt_failures(error: Exception, expected: S
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_opencode_rejects_stale_runner_and_unavailable_runtime() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
@@ -428,7 +433,7 @@ async def test_opencode_rejects_stale_runner_and_unavailable_runtime() -> None:
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_shared_guard_rejects_stale_logical_or_missing_active_turn() -> None:
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
@@ -454,7 +459,7 @@ async def test_shared_guard_rejects_stale_logical_or_missing_active_turn() -> No
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_shared_guard_requires_the_avibe_session_identity() -> None:
     primary = _primary_request(session_id="avibe-session", backend="codex")
     primary.base_session_id = "backend-anchor"
@@ -480,7 +485,7 @@ async def test_shared_guard_requires_the_avibe_session_identity() -> None:
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_shared_service_uses_the_active_runtime_generation_after_registry_refresh() -> None:
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
@@ -514,7 +519,7 @@ async def test_shared_service_uses_the_active_runtime_generation_after_registry_
         await _cancel_tasks(gate_task)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_shared_service_refuses_an_unavailable_backend() -> None:
     controller = SimpleNamespace(agent_service=SimpleNamespace(agents={}, _turn_gates={}))
     receipt = await steer_active_turn(controller, "claude", _steer_request("native-turn"))
