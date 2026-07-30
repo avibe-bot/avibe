@@ -41,7 +41,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
-import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
+import { initialSeedState, savedSourcesKey, seedStep, type PendingWrite } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
 import { eligibilityOf, processAvailabilityOf } from './eligibility';
 import { DRY_RUN_ENABLED } from './featureFlags';
@@ -124,12 +124,16 @@ export const SourceOrderDrawer: React.FC<{
   sources: Source[];
   onClose: () => void;
   /** Re-read sources + agents: an order change moves ● 当前 on the page too.
-   *  Returning the read's promise lets `saving` span it — see `persist`. */
+   *  Returning the read's promise lets the pending mark span it — see `persist`. */
   onSaved: () => void | Promise<void>;
+  /** This backend's slot in the page's pending-write registry. Held by the page
+   *  because every close path stays live during a write and closing unmounts this
+   *  drawer — see `createPendingWrites` in asyncLifetime.ts. */
+  orderWrite: PendingWrite;
   /** Desktop footer 模型菜单与映射 — hand off to this backend's menu drawer.
    *  Omitted while the menus are flagged off. */
   onOpenMenu?: () => void;
-}> = ({ open, agent, agents, sources, onClose, onSaved, onOpenMenu }) => {
+}> = ({ open, agent, agents, sources, onClose, onSaved, orderWrite, onOpenMenu }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(agent.backend);
@@ -145,7 +149,9 @@ export const SourceOrderDrawer: React.FC<{
 
   const [policy, setPolicy] = React.useState<SourcePolicy>(agent.sources?.policy ?? 'follow');
   const [order, setOrder] = React.useState<string[]>(agent.sources?.order ?? []);
-  const [saving, setSaving] = React.useState(false);
+  // Deliberately not this component's state: the user can close this drawer —
+  // which unmounts it — and reopen it while the write is still outstanding.
+  const saving = orderWrite.pending;
   /** Last state the server confirmed — the revert target and the no-op test.
    *  `order` alone can serve neither: a drag has already moved it by the time
    *  the commit fires. */
@@ -292,46 +298,51 @@ export const SourceOrderDrawer: React.FC<{
    * every PUT carries the whole list rather than a delta.
    *
    * Runs to completion even if the drawer closes mid-flight, and deliberately so.
-   * Both of the things this does on the way out belong to components that stay
-   * mounted — `onSaved()` re-reads the page whose ● 当前 the write just moved, and
-   * the failure toast lives at the app root — so a mounted-ref guard here would
-   * not be protecting anything, it would be dropping the only report that a
-   * rejected reorder ever gets. (The setState calls need no guard either: since
-   * React 18 they are a no-op on an unmounted component, not a warning.)
+   * Everything this does on the way out belongs to something that outlives the
+   * drawer — the pending mark to the page, `onSaved()` to the page whose ● 当前 the
+   * write just moved, the failure toast to the app root — so a mounted-ref guard
+   * here would not be protecting anything, it would be dropping the only report
+   * that a rejected reorder ever gets. (The setState calls need no guard either:
+   * since React 18 they are a no-op on an unmounted component, not a warning.)
+   *
+   * Which is also why `orderWrite.track` and not a local flag. The drawer is not
+   * alive for the whole of its own write: 完成, the X, Escape and the overlay all
+   * stay live while this runs, and closing UNMOUNTS this component. A flag in here
+   * would then be re-created reading 「idle」 by the reopen, over a write still
+   * outstanding, and the gate below would be off for exactly the user who closed
+   * and reopened. The page holds it instead — see `createPendingWrites`.
    */
-  const persist = async (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) => {
-    const previous = saved.current;
-    setPolicy(next.policy);
-    setOrder(next.order);
-    setSaving(true);
-    try {
-      // No `contract_version` in the body — the route rejects unknown keys.
-      const echoed = await modelsApi.putAgentSources(agent.backend, body);
-      const adopted = {
-        policy: echoed.sources?.policy ?? next.policy,
-        order: echoed.sources?.order ?? next.order,
-      };
-      saved.current = adopted;
-      setPolicy(adopted.policy);
-      setOrder(adopted.order);
-      // Stay `saving` until the page has RE-READ the order this write moved, not
-      // merely until the PUT returns. `saving` gates the hand-off to 模型菜单与映射,
-      // and the drawer it hands off to reads its enrollment baseline out of the
-      // page's Agent list — so a hand-off in the gap between 「the server has the new
-      // order」 and 「the page knows it」 would let the menu's own save echo an append
-      // THIS write made and report it as the menu's own. A failed re-read belongs to
-      // the page that made it and is not this write's to roll back: the server
-      // accepted the order either way.
-      await Promise.resolve(onSaved()).catch(() => {});
-    } catch {
-      saved.current = previous;
-      setPolicy(previous.policy);
-      setOrder([...previous.order]);
-      showToast(t('settings.models.toast.reorderFailed') as string, 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const persist = (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) =>
+    // Marked pending until the page has RE-READ the order this write moved, not
+    // merely until the PUT returns. The mark gates the hand-off to 模型菜单与映射,
+    // and the drawer it hands off to reads its enrollment baseline out of the
+    // page's Agent list — so a hand-off in the gap between 「the server has the new
+    // order」 and 「the page knows it」 would let the menu's own save echo an append
+    // THIS write made and report it as the menu's own.
+    orderWrite.track(async () => {
+      const previous = saved.current;
+      setPolicy(next.policy);
+      setOrder(next.order);
+      try {
+        // No `contract_version` in the body — the route rejects unknown keys.
+        const echoed = await modelsApi.putAgentSources(agent.backend, body);
+        const adopted = {
+          policy: echoed.sources?.policy ?? next.policy,
+          order: echoed.sources?.order ?? next.order,
+        };
+        saved.current = adopted;
+        setPolicy(adopted.policy);
+        setOrder(adopted.order);
+        // A failed re-read belongs to the page that made it and is not this write's
+        // to roll back: the server accepted the order either way.
+        await Promise.resolve(onSaved()).catch(() => {});
+      } catch {
+        saved.current = previous;
+        setPolicy(previous.policy);
+        setOrder([...previous.order]);
+        showToast(t('settings.models.toast.reorderFailed') as string, 'error');
+      }
+    });
 
   // Any manual edit is a fork to `custom`: the user just said which sources, in
   // which order — that is the definition of a user-owned subset.

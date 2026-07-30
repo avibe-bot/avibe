@@ -20,7 +20,7 @@ import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
-import { createLatestAsyncAuthority } from './asyncLifetime';
+import { createLatestAsyncAuthority, createPendingWrites } from './asyncLifetime';
 import {
   emptyFeed,
   feedAfterHeadRead,
@@ -112,6 +112,15 @@ export const SettingsModelsPage: React.FC = () => {
   // freshest agent.
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
+
+  // Which backends have a 来源顺序 write outstanding. Held HERE and not in the
+  // drawer that issues it, because the drawer does not outlive its own write:
+  // 完成, the close X, Escape and the overlay all stay live while the PUT and its
+  // read-back are in flight, and closing unmounts the drawer, so a flag inside it
+  // is re-created reading 「idle」 by the reopen — which is exactly when the
+  // hand-off below must still be shut. See `createPendingWrites`.
+  const [orderWrites, setOrderWrites] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [orderWriteRegistry] = React.useState(() => createPendingWrites(setOrderWrites));
 
   // Guards event-handler async writes (refresh / connect) from landing after
   // the page unmounts — the whole class of stale-async writes the review flagged.
@@ -321,10 +330,14 @@ export const SettingsModelsPage: React.FC = () => {
           agents={agents}
           sources={sources}
           onClose={() => setOrderBackend(null)}
-          // Returned, not discarded: the drawer keeps its own controls disabled
-          // until this read lands, so the hand-off to the menu drawer can never
-          // leave on an order the page has not caught up with.
+          // Returned, not discarded: the write stays marked pending until this read
+          // lands, so the hand-off to the menu drawer can never leave on an order
+          // the page has not caught up with.
           onSaved={() => refreshSourcesAgents()}
+          orderWrite={{
+            pending: orderWrites.has(orderAgent.backend),
+            track: (work) => orderWriteRegistry.track(orderAgent.backend, work),
+          }}
           // 模型菜单与映射 hands off to the menu drawer: the two answer adjacent
           // questions (which sources, which models), and V6 02's footer is the only
           // way into the menu now that the row's action is 来源顺序. Withheld while

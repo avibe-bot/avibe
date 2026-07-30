@@ -1,6 +1,7 @@
 // Async ownership rules extracted from the Models components so interleavings can
-// be exercised directly: which request may land, when a drawer re-seeds, and
-// whether a connect-flow transition may change an already terminal view.
+// be exercised directly: which request may land, how long a write counts as
+// outstanding, when a drawer re-seeds, and whether a connect-flow transition may
+// change an already terminal view.
 import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
@@ -25,6 +26,65 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
       }
     },
   };
+};
+
+// ── A write that outlives the drawer that issued it ────────────────────────
+/**
+ * Which keys have a write outstanding, where 「outstanding」 spans the read-back
+ * and not merely the request.
+ *
+ * It lives above the drawers rather than inside one because a drawer is not
+ * alive for the whole of its own write. 完成, the close X, Escape and the overlay
+ * all stay live while a PUT is in flight, the page unmounts the drawer when it
+ * closes, and reopening mints a fresh component whose local flag reads 「idle」
+ * over a write that is still outstanding. A flag with that lifetime is not a
+ * guard — it can be false while the fact is true — so everything it gates is
+ * ungated for exactly the user who closed and reopened, which for the order
+ * drawer means a hand-off to 模型菜单与映射 leaving on a baseline the page has not
+ * read back. `seedStep` below is the same lifetime fact met from the other side:
+ * the drawer's seed has to survive that reopen too, and does it by re-deriving
+ * from props instead of by remembering.
+ *
+ * Counted rather than a flag per key, because 「pending」 is a property of the SET
+ * of outstanding writes: two edits can overlap (last-write-wins is fine — each
+ * PUT carries the whole list), and the first to finish would otherwise clear the
+ * key while the second is still running.
+ *
+ * Keyed by backend because that is the write's own grain: `PUT
+ * /agents/<backend>/sources` moves one backend's order, so a claude write says
+ * nothing about codex and has no business gating it.
+ */
+export const createPendingWrites = (land: (keys: ReadonlySet<string>) => void) => {
+  const outstanding = new Map<string, number>();
+  const publish = () => land(new Set(outstanding.keys()));
+
+  return {
+    /**
+     * Marks `key` pending for the whole of `work`, including whatever `work`
+     * awaits after its own request returns. Pairing is not the caller's to get
+     * right: there is no way to begin one without ending it.
+     */
+    track: async (key: string, work: () => Promise<void>): Promise<void> => {
+      outstanding.set(key, (outstanding.get(key) ?? 0) + 1);
+      publish();
+      try {
+        await work();
+      } finally {
+        const left = (outstanding.get(key) ?? 1) - 1;
+        if (left > 0) outstanding.set(key, left);
+        else outstanding.delete(key);
+        publish();
+      }
+    },
+  };
+};
+
+/** One key's slot in the registry above, as the component issuing writes sees it. */
+export type PendingWrite = {
+  /** Whether a write on this key is outstanding — possibly one this component
+   *  never issued, because the component that did may already be gone. */
+  pending: boolean;
+  track: (work: () => Promise<void>) => Promise<void>;
 };
 
 // ── The drawers' seed ──────────────────────────────────────────────────────

@@ -41,6 +41,14 @@
 //      the rows, but it did so while that request was still in flight, so it can
 //      have read them before the write — and the rejection path returned without a
 //      second read, leaving healthy rows on a page whose source is 需处理.
+//
+//   7. reopen-clears-the-guard. Interleaving 1's other half. The order drawer marks
+//      itself busy for the span of its write, which shuts the hand-off to 模型菜单与
+//      映射 — whose enrollment notice diffs against the page's copy of that order. But
+//      every way out of the drawer stays live while the write runs, and closing
+//      unmounts it, so the reopen re-creates the mark reading 「idle」 over a write
+//      still outstanding. The user then walks into the menu on a stale baseline and
+//      the menu's own save reports the ORDER write's append as its own.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -49,6 +57,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createFlowAuthority,
   createLatestAsyncAuthority,
+  createPendingWrites,
   failureLanded,
   flowLetGo,
   flowStateTerminal,
@@ -107,6 +116,123 @@ describe('latest async authority', () => {
     await olderRun;
 
     expect(landed).toEqual(['server order: b,a']);
+  });
+});
+
+describe('createPendingWrites — a write that outlives the drawer that issued it', () => {
+  /** The published set, as the page would hold it in state. */
+  const registry = () => {
+    let keys: ReadonlySet<string> = new Set();
+    const writes = createPendingWrites((next) => {
+      keys = next;
+    });
+    return { writes, pending: (key: string) => keys.has(key) };
+  };
+
+  it('holds the mark for the whole of the work, not just its request', async () => {
+    const put = deferred<void>();
+    const reread = deferred<void>();
+    const { writes, pending } = registry();
+
+    const run = writes.track('claude', async () => {
+      await put.promise;
+      await reread.promise;
+    });
+
+    expect(pending('claude')).toBe(true);
+    put.resolve();
+    await Promise.resolve();
+    // The PUT has returned and the page has NOT read it back yet — the gap the
+    // hand-off may not leave through.
+    expect(pending('claude')).toBe(true);
+    reread.resolve();
+    await run;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('survives the drawer that issued the write', async () => {
+    // Interleaving 7. Nothing here is the drawer: the write is issued, the drawer
+    // that issued it is gone (closed → unmounted), a fresh one opens and asks
+    // whether a write is outstanding. It gets the truth, because the fact was
+    // never the drawer's to hold.
+    const put = deferred<void>();
+    const { writes, pending } = registry();
+
+    const run = writes.track('claude', () => put.promise);
+    const reopened = pending('claude');
+
+    put.resolve();
+    await run;
+
+    expect(reopened).toBe(true);
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('stays pending until the LAST of two overlapping writes finishes', async () => {
+    // Two drags in quick succession. Last-write-wins is fine — each PUT carries the
+    // whole list — but the first to return must not report the second one finished.
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const { writes, pending } = registry();
+
+    const runFirst = writes.track('claude', () => first.promise);
+    const runSecond = writes.track('claude', () => second.promise);
+
+    first.resolve();
+    await runFirst;
+    expect(pending('claude')).toBe(true);
+
+    second.resolve();
+    await runSecond;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('does not let one backend’s write gate another', async () => {
+    // `PUT /agents/<backend>/sources` moves one backend's order, so this is the
+    // write's own grain: a claude order edit says nothing about codex's menu.
+    const claude = deferred<void>();
+    const { writes, pending } = registry();
+
+    const run = writes.track('claude', () => claude.promise);
+    expect(pending('claude')).toBe(true);
+    expect(pending('codex')).toBe(false);
+
+    claude.resolve();
+    await run;
+  });
+
+  it('clears the mark when the work throws', async () => {
+    const { writes, pending } = registry();
+
+    await expect(
+      writes.track('claude', async () => {
+        throw new Error('put rejected');
+      }),
+    ).rejects.toThrow('put rejected');
+
+    // A rejected write is a finished one. Leaving it marked would disable the
+    // drawer's controls for the rest of the session.
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('is where the order drawer’s busy flag actually lives', () => {
+    // The guard the round-1 fix put in the drawer was real and still incomplete:
+    // it was component state, and 完成 / the X / Escape / the overlay all stay live
+    // while the write runs. So the assertion is not 「the drawer disables things」
+    // but 「the drawer does not OWN the fact it disables them on」.
+    const drawer = readFileSync(join(__dirname, 'SourceOrderDrawer.tsx'), 'utf8');
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(drawer).toMatch(/const saving = orderWrite\.pending;/);
+    expect(drawer).not.toMatch(/setSaving/);
+    // And the mark spans the whole of `persist`, read-back included, because
+    // `track` is what opens and closes it.
+    expect(drawer).toMatch(/orderWrite\.track\(async \(\) => \{/);
+    expect(drawer).toMatch(/await Promise\.resolve\(onSaved\(\)\)\.catch\(\(\) => \{\}\);/);
+
+    expect(page).toMatch(/createPendingWrites\(setOrderWrites\)/);
+    expect(page).toMatch(/pending: orderWrites\.has\(orderAgent\.backend\)/);
+    expect(page).toMatch(/track: \(work\) => orderWriteRegistry\.track\(orderAgent\.backend, work\)/);
   });
 });
 
