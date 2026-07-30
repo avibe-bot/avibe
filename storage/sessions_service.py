@@ -1277,10 +1277,36 @@ class SQLiteSessionsService:
                             existing_native_session_id = observed_native_session_id.strip()
                             existing_is_owned = _is_owned_backend(existing_backend)
                             existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
+                            # Prefer a legacy mapping for the reserved owner when one
+                            # exists; otherwise an unbound cross-backend reservation is
+                            # provisional and may be adopted by the imported session.
+                            existing_owner_keys = {
+                                _normalize_agent_name_key(value)
+                                for value in (existing_backend, existing_variant, existing_agent_name)
+                                if value
+                            }
+                            has_existing_owner_mapping = any(
+                                isinstance(candidate_thread_map, dict)
+                                and _normalize_agent_name_key(str(candidate_name)) in existing_owner_keys
+                                and any(
+                                    _base_session_anchor(str(candidate_thread_id)) == base_anchor
+                                    for candidate_thread_id in candidate_thread_map
+                                )
+                                for candidate_name, candidate_thread_map in agent_maps.items()
+                            )
+                            adopts_unbound_route = (
+                                not existing_native_session_id
+                                and imported_backend != "unknown"
+                                and existing_backend != imported_backend
+                                and not has_existing_owner_mapping
+                            )
                             existing_identity_is_durable = (
                                 existing_is_owned
                                 or existing_variant_is_owned
                                 or bool(existing_native_session_id)
+                            )
+                            preserves_existing_identity = (
+                                existing_identity_is_durable and not adopts_unbound_route
                             )
                             sentinel_variant_compatible = (
                                 existing_is_owned
@@ -1311,8 +1337,9 @@ class SQLiteSessionsService:
                                 and not same_agent_identity
                                 and not same_agent_name
                             )
-                            if (existing_variant_is_owned and variant_conflicts) or (
-                                existing_is_owned and backend_conflicts
+                            if not adopts_unbound_route and (
+                                (existing_variant_is_owned and variant_conflicts)
+                                or (existing_is_owned and backend_conflicts)
                             ):
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row to a different owner "
@@ -1328,20 +1355,20 @@ class SQLiteSessionsService:
                                 skip_mapping = True
                                 break
                             identity_conflicts = (
-                                existing_identity_is_durable
+                                preserves_existing_identity
                                 and imported_backend == "unknown"
                                 and imported_agent_id is None
                                 and imported_agent_name is None
                                 and (existing_agent_id is not None or existing_agent_name is not None)
                                 and not imported_variant_matches_existing_agent
                             )
-                            if existing_identity_is_durable and imported_agent_id is not None and existing_agent_id not in {
+                            if preserves_existing_identity and imported_agent_id is not None and existing_agent_id not in {
                                 None,
                                 imported_agent_id,
                             }:
                                 identity_conflicts = True
                             if (
-                                existing_identity_is_durable
+                                preserves_existing_identity
                                 and imported_agent_name is not None
                                 and not same_agent_identity
                                 and not same_agent_name
@@ -1368,7 +1395,7 @@ class SQLiteSessionsService:
                             backfills_agent_id = imported_agent_id is not None and existing_agent_id is None
                             backfills_agent_name = imported_agent_name is not None and existing_agent_name is None
                             update_values: dict[str, Any] = {"updated_at": now}
-                            if not existing_is_owned:
+                            if not existing_is_owned or adopts_unbound_route:
                                 update_values["agent_variant"] = imported_variant
                                 update_values["agent_backend"] = (
                                     imported_backend if imported_backend != "unknown" else existing_backend or "default"
@@ -1384,7 +1411,7 @@ class SQLiteSessionsService:
                                         separators=(",", ":"),
                                         ensure_ascii=False,
                                     )
-                            if not existing_identity_is_durable:
+                            if not preserves_existing_identity:
                                 update_values["agent_id"] = imported_agent_id
                                 update_values["agent_name"] = imported_agent_name
                             if sentinel_variant_compatible and existing_variant != imported_variant:
@@ -1434,6 +1461,21 @@ class SQLiteSessionsService:
                             refreshed_native_session_id = str(
                                 refreshed_anchor_row["native_session_id"] or ""
                             )
+                            refreshed_route = tuple(
+                                str(refreshed_anchor_row[column] or "")
+                                for column in ("agent_backend", "agent_variant")
+                            )
+                            if refreshed_route != (observed_backend, observed_variant):
+                                logger.warning(
+                                    "Skipping legacy session import after losing a concurrent route claim "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
                             if (
                                 refreshed_native_session_id != observed_native_session_id
                                 and refreshed_native_session_id != encoded_session_id

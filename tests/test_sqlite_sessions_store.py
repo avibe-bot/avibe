@@ -341,6 +341,58 @@ def test_save_state_allows_legacy_default_anchor_row_to_adopt_imported_backend(t
         service.close()
 
 
+def test_save_state_adopts_unbound_reservation_across_backends(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                agent_id="agent-codex",
+                agent_name="codex-reviewer",
+                model="gpt-5-old",
+                reasoning_effort="high",
+                metadata={
+                    "legacy_scope_key": "slack::C123",
+                    "explicit_setting_overrides": ["model", "reasoning_effort"],
+                },
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "claude": {
+                            "slack_171717.123": "claude-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "claude"
+        assert row["agent_variant"] == "claude"
+        assert row["agent_id"] is None
+        assert row["agent_name"] is None
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+        assert "explicit_setting_overrides" not in json.loads(row["metadata_json"] or "{}")
+        assert row["native_session_id"] == "claude-native"
+    finally:
+        service.close()
+
+
 def test_save_state_keeps_default_sentinel_for_default_import(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
