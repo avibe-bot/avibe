@@ -540,22 +540,28 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     expect(log).toEqual(['cancel', 'reread']);
   });
 
-  it('lets go when nobody owns the flow yet', async () => {
-    // The same handoff one beat earlier: the replacement's start request is in
-    // flight and the server has not handed it this flow yet. 「Nobody owns it」 and
-    // 「a successor is about to」 are indistinguishable from here, so this path does
-    // not get to guess — and guessing wrong kills a live login.
+  it('CANCELS when nobody owns the flow, because an existing successor would be there', async () => {
+    // The handoff one beat earlier — a replacement whose own start is still in
+    // flight. That beat is not observable from here, and does not need to be: a
+    // successor takes the ref SYNCHRONOUSLY as its effect body runs, before its
+    // start request is awaited, so any successor that EXISTS has already put
+    // itself there by the time this late response reads the ref. `null` is
+    // therefore the user closing the dialog and not reopening it, and letting go
+    // leaves the authorization they just cancelled live until the server expires
+    // it — where the next re-auth for the row is handed exactly that flow and can
+    // materialize a login they declined. Only a successor that exists may suppress
+    // the cancel.
     const { log, journey, ops } = teardown();
     await releaseFlow(journey, null, ops(() => Promise.resolve()));
-    expect(log).toEqual(['reread']);
+    expect(log).toEqual(['cancel', 'reread']);
   });
 
-  it('cancels an abandoned CREATE flow even with its ownership already gone', async () => {
-    // The same interleaving as the two above, on the journey where the reasoning
-    // behind them does not hold: `oauth_start` mints a fresh pending source id
-    // every call and never adopts a pending flow, so no successor can be handed
-    // this one. 「Nobody owns it」 is then nobody, and letting go leaves the
-    // authorization and its registry binding live until the server expires them.
+  it('cancels an abandoned CREATE flow for its own second reason', async () => {
+    // Same ownership, other route, and the answer may not depend on the one above:
+    // `oauth_start` mints a fresh pending source id every call and never adopts a
+    // pending flow, so no successor could be handed this one whatever the ref
+    // holds. Read the route wrong and the abandoned authorization plus its
+    // registry binding stay live until the server expires them.
     const { log, journey, ops } = teardown();
     await releaseFlow(journey, null, ops(() => Promise.resolve(), false));
     expect(log).toEqual(['cancel', 'reread']);
@@ -584,10 +590,26 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     expect(flowLetGo(mine, sameRow, false)).toBe(false); // route never hands it over
     expect(flowLetGo(mine, otherRow, true)).toBe(false); // successor cannot adopt it
     expect(flowLetGo(mine, sameRow, true)).toBe(true); // all three agree
-    // No owner: no subject to compare, and the conservative direction is not
-    // killing a flow the user's next start for this row would be handed.
-    expect(flowLetGo(mine, null, true)).toBe(true);
+    // No owner: nothing to hand it to. A successor is in the ref before it awaits
+    // anything, so an absent one is absent rather than pending.
+    expect(flowLetGo(mine, null, true)).toBe(false);
     expect(flowLetGo(mine, null, false)).toBe(false);
+  });
+
+  it('has the successor in the ref before it awaits anything', () => {
+    // Structural, because the rule above is a claim about the dialog rather than a
+    // preference: `flowLetGo` may read an absent owner as 「no successor exists」
+    // only while every successor publishes itself before its first suspension
+    // point. Move that write below the start request and a real successor becomes
+    // invisible for a round trip, which is the interleaving the cancel above would
+    // then break.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const claims = dialog.indexOf('const authority = createFlowAuthority(');
+    const takes = dialog.indexOf('flowAuthorityRef.current = authority;', claims);
+
+    expect(claims).toBeGreaterThan(-1);
+    expect(takes).toBeGreaterThan(claims);
+    expect(dialog.slice(0, takes)).not.toMatch(/\bawait\b/);
   });
 
   it('takes the journey each teardown is releasing from the dialog', () => {

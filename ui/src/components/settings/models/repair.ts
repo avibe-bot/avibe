@@ -15,6 +15,7 @@ import type {
   ProbeResult,
   Source,
   SourceDetailKey,
+  SourcePolicy,
   SourceRepaired,
   SourceState,
   SupplyGap,
@@ -298,6 +299,58 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
   if (!agent.current) return { kind: 'none' };
   return { kind: 'probe', backend: agent.backend };
 }
+
+/**
+ * The identity of the chain a 试跑 report is ABOUT, so that a report outlives every
+ * refresh except the ones that make it answer for something else.
+ *
+ * The rule this obeys, and the reason it is not just 「everything on `agent`」: key
+ * on the surface the USER selects with, never on the pick the server RESOLVES from
+ * it. The probe deliberately sends no model, so the server resolves whichever
+ * selection is live at request time — which makes the selection part of the chain
+ * the report describes, not context around it. But resolution outputs move for a
+ * second reason: a failing probe cools its own head down, and keying on anything
+ * that moves for THAT reason erases the sentence the click just produced (the
+ * mistake this key was already once rebuilt to escape — see the reset effect in
+ * `SourceOrderDrawer.tsx`).
+ *
+ * So the members are the config-level ones, verified against the server rather than
+ * assumed:
+ *
+ * - `policy` / `order` as the USER currently has them, not as `agent.sources` holds
+ *   them: a drag has already moved them before any PUT lands.
+ * - `mappings` — pruned only by `_available_model_ids`, which is
+ *   `source_eligible_for_backend` over the inventory and reads no `state.status`
+ *   and no cooldown. An inventory change is a real chain change; a cooldown cannot
+ *   fake one.
+ * - `menu.checked` — same pruning via `_available_opencode_identifiers`, and for
+ *   opencode this IS the selection surface.
+ * - `selected_model_id` for every backend EXCEPT opencode. On the fixed-menu
+ *   backends the hub path echoes `requested_model` back verbatim in every return
+ *   (only `target_model` takes the mapping), so it is the configured request. On
+ *   opencode with no explicit request the resolver loops `menu.checked` and returns
+ *   the first identifier whose source is runnable — `unavailable_source_ids` and
+ *   cooldown gating decide which one wins, so there it is a health-derived pick and
+ *   `checked` is the honest stand-in for what the user chose.
+ *
+ * Excluded on purpose: `agent.current` and everything else about head health. The
+ * head moving is what a failing report is FOR.
+ */
+export const dryRunChainKey = (
+  agent: AgentSupply,
+  policy: SourcePolicy,
+  order: string[],
+): string =>
+  [
+    policy,
+    order.join('>'),
+    agent.backend === 'opencode' ? '' : (agent.selected_model_id ?? ''),
+    (agent.mappings ?? [])
+      .map((m) => `${m.builtin_id}>${m.target_model_id}:${m.enabled ? 'on' : 'off'}`)
+      .sort()
+      .join(','),
+    [...(agent.menu?.checked ?? [])].sort().join(','),
+  ].join('|');
 
 /**
  * The probe's own verdict, named for copy. `reachable` is the discriminator the

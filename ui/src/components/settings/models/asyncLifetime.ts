@@ -284,9 +284,9 @@ export const pollFailureSettles = (submitOutstanding: boolean): boolean => !subm
  * 2. The route — 「could it EVER have become someone else's?」 `oauth_start` mints a
  *    fresh pending source id on every call and never looks for a pending flow, so
  *    a create's flow belongs to the one journey that opened it. Ownership alone
- *    cannot say this, which is why `routeReuses` is asked separately: with the ref
- *    released, 「nobody owns it」 and 「a successor is about to」 are indistinguishable
- *    from here, and on a create there is no successor coming for it at all.
+ *    cannot say this, which is why `routeReuses` is asked separately: on a create
+ *    there is no successor coming for that flow at all, so it dies with the journey
+ *    that opened it.
  * 3. The successor's SUBJECT — 「could this particular one be handed my flow?」
  *    `pending_reauth(source_id)` filters on `binding.source_id`, so the handover is
  *    keyed by SOURCE while ownership of this ref is global to the dialog. Close a
@@ -296,20 +296,31 @@ export const pollFailureSettles = (submitOutstanding: boolean): boolean => !subm
  *    reusable is a claim about a class of successors, not about whoever happens to
  *    hold the ref.
  *
- * A `null` owner is let go whenever the route reuses, and deliberately: nobody
- * holds it now, but the user's next start for the same source will be handed it,
- * and what is left behind meanwhile is a pending login the server itself times out.
- * That is the one case where no subject exists to compare, and the conservative
- * direction is not cancelling a flow a successor may adopt.
+ * A `null` owner is NOT let go, and that is a fact about this dialog rather than a
+ * preference. Every successor takes authority SYNCHRONOUSLY in the effect body —
+ * `flowAuthorityRef.current = authority` in `OAuthConnectDialog.tsx`, before the
+ * start request is awaited — so a successor that exists has already put itself
+ * there by the time any late response reads the ref. `null` therefore cannot mean
+ * 「a successor is about to」; it means the user closed the dialog and did not
+ * reopen it.
+ *
+ * An earlier revision read it the other way and withheld the cancel to protect a
+ * flow some future start might adopt. What that actually left behind was a live
+ * authorization the user had just cancelled: the server holds it until it times
+ * out, and the next re-auth for that source is handed exactly that flow and can
+ * materialize it — a login the user declined, completing later. A start after the
+ * cancel just mints a fresh flow, so the real trade is one extra round trip
+ * against honouring 取消, and only a successor that EXISTS may suppress it.
  */
 export const flowLetGo = (
   journey: FlowAuthority,
   owner: FlowAuthority | null,
   routeReuses: boolean,
 ): boolean =>
+  owner !== null &&
   owner !== journey &&
   routeReuses &&
-  (owner === null || owner.subject === journey.subject);
+  owner.subject === journey.subject;
 
 /**
  * Hands back the flow a journey opened, and is the ONLY authorization for a

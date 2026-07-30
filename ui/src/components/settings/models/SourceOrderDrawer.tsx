@@ -48,7 +48,14 @@ import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { apiFailure, modelsApi } from './modelsApi';
-import { dryRunOutcome, dryRunPlan, dryRunRowView, probeArrival, type DryRunOutcome } from './repair';
+import {
+  dryRunChainKey,
+  dryRunOutcome,
+  dryRunPlan,
+  dryRunRowView,
+  probeArrival,
+  type DryRunOutcome,
+} from './repair';
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
@@ -467,7 +474,7 @@ export const SourceOrderDrawer: React.FC<{
           <DryRunRow
             agent={agent}
             sources={sources}
-            chainKey={`${policy}|${order.join('>')}`}
+            chainKey={dryRunChainKey(agent, policy, order)}
             saving={saving}
             reread={onSaved}
           />
@@ -520,8 +527,9 @@ const failedLine = (t: TFunction, name: string, detail: string | null): string =
 const DryRunRow: React.FC<{
   agent: AgentSupply;
   sources: Source[];
-  /** The chain as the USER has it — see the reset effect for why the report is
-   *  keyed on this and not on the head the server computes from it. */
+  /** Everything the USER selects the probed turn with — order, policy, and the
+   *  model surface, from `dryRunChainKey`. Deliberately not the head the server
+   *  computes from it; see that owner and the reset effect below. */
   chainKey: string;
   /** The drawer's order PUT is in flight. A probe started now would answer for the
    *  chain the server still holds, filed under the one the user already sees —

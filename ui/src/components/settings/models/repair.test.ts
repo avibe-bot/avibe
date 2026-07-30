@@ -15,6 +15,7 @@ import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import {
   disprovedDrawnHead,
+  dryRunChainKey,
   dryRunOutcome,
   dryRunPlan,
   dryRunRowView,
@@ -32,7 +33,7 @@ import {
 } from './repair';
 import type { RepairOutcome } from './repair';
 import { PROBE_RESULT_CONTRACT_VERSION } from './types';
-import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SupplyGap } from './types';
+import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SourcePolicy, SupplyGap } from './types';
 
 /** A healthy hub api_key with a credential to replace — the base every case
  *  below narrows, so each test names only what it is actually about. */
@@ -351,6 +352,87 @@ describe('dryRunPlan — whether 试跑 has anything to run (SourceOrderDrawer)'
     // remedy attached; a probe would only re-report it as a failure the user has
     // to re-read.
     expect(dryRunPlan(agent({ current: null, supply_status: 'interrupted' }))).toEqual({ kind: 'none' });
+  });
+});
+
+describe('dryRunChainKey — which edits make a 试跑 report stop being about anything', () => {
+  const base = agent({
+    selected_model_id: 'claude-opus-4-6',
+    mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: true }],
+    menu: { view: 'featured', checked: ['zhipuai/glm-5.2'] },
+  });
+  const key = (over: Partial<AgentSupply> = {}, policy: SourcePolicy = 'follow', order = ['src_a']) =>
+    dryRunChainKey({ ...base, ...over }, policy, order);
+
+  it('moves for every surface the user selects the probed turn with', () => {
+    // The chain is not only its order: the probe takes no model, so the server
+    // resolves one from the same config the mapping drawer next door edits. Edit
+    // that and the sentence on screen is about a turn the button would no longer
+    // make.
+    const same = key();
+    expect(key()).toBe(same);
+    expect(key({}, 'custom')).not.toBe(same);
+    expect(key({}, 'follow', ['src_b', 'src_a'])).not.toBe(same);
+    expect(key({ selected_model_id: 'claude-sonnet-5' })).not.toBe(same);
+    expect(key({ mappings: [] })).not.toBe(same);
+    expect(key({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: false }] })).not.toBe(
+      same,
+    );
+    expect(key({ menu: { view: 'featured', checked: [] } })).not.toBe(same);
+  });
+
+  it('holds still for everything the server derives from those', () => {
+    // The trap this key exists inside: a failing 试跑 cools its own head down and
+    // the re-read it owes then moves `agent.current`, the rollup, and the source
+    // health behind it. Key on any of those and the failing run is the one whose
+    // answer erases itself. The head moving is what a failing report is FOR.
+    const same = key();
+    expect(key({ current: { model_id: 'glm-5.2', source_id: 'src_b', channel: 'hub' } })).toBe(same);
+    expect(key({ current: null, supply_status: 'interrupted' })).toBe(same);
+    expect(key({ supply_status: 'degraded' })).toBe(same);
+  });
+
+  it('reads opencode by its own selection surface, not by the pick', () => {
+    // `selected_model_id` is config for a fixed menu, but for opencode with an
+    // empty request `resolve_model_hub_turn` walks `menu.checked` and returns the
+    // first identifier whose source is runnable — so a cooldown MOVES it. Keying
+    // on it there would smuggle head health back in through the model field and
+    // re-create the self-erasing report above.
+    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const };
+    expect(key({ ...oc, selected_model_id: 'zhipuai/glm-5.2' })).toBe(key({ ...oc, selected_model_id: 'openai/gpt-6' }));
+    // What the user actually selects with there still counts.
+    expect(key({ ...oc, menu: { view: 'full', checked: ['openai/gpt-6'] } })).not.toBe(key(oc));
+  });
+
+  it('does not move for the order the two lists were written in', () => {
+    // `mappings` and `menu.checked` are sets the user edits by toggling; the API
+    // makes no ordering promise about either, and a re-read that returns the same
+    // configuration in another order would otherwise clear the report.
+    expect(
+      key({
+        mappings: [
+          { builtin_id: 'b', target_model_id: 'y', enabled: true },
+          { builtin_id: 'a', target_model_id: 'x', enabled: true },
+        ],
+        menu: { view: 'featured', checked: ['b', 'a'] },
+      }),
+    ).toBe(
+      key({
+        mappings: [
+          { builtin_id: 'a', target_model_id: 'x', enabled: true },
+          { builtin_id: 'b', target_model_id: 'y', enabled: true },
+        ],
+        menu: { view: 'featured', checked: ['a', 'b'] },
+      }),
+    );
+  });
+
+  it('keeps the parts apart', () => {
+    // A key is only as good as its separators: 「order a, model b」 and 「order a>b,
+    // no model」 are different chains and must not collide.
+    expect(key({ selected_model_id: 'src_b' }, 'follow', ['src_a'])).not.toBe(
+      key({ selected_model_id: '' }, 'follow', ['src_a', 'src_b']),
+    );
   });
 });
 
@@ -715,5 +797,21 @@ describe('the class: no component decides a repair for itself', () => {
 
   it.each(files.filter((f) => f !== 'repair.ts'))('%s looks a repair key up instead of building it', (name) => {
     expect(read(name)).not.toMatch(ASSEMBLED_KEY);
+  });
+
+  /**
+   * A hand-assembled 试跑 chain key. This is the class round 14 caught: the drawer
+   * built `${policy}|${order.join('>')}` inline, which is a complete statement of
+   * the chain only while nothing else selects the probed turn — and the model menu
+   * next door always did. Inline, the omission is invisible; behind
+   * `dryRunChainKey` it is one function's business, and the test above says which
+   * surfaces belong to it.
+   */
+  const INLINE_CHAIN_KEY = /chainKey=\{`/;
+
+  it('leaves the chain key to its owner', () => {
+    const offenders = files.filter((f) => INLINE_CHAIN_KEY.test(read(f)));
+    expect(offenders).toEqual([]);
+    expect(read('SourceOrderDrawer.tsx')).toMatch(/chainKey=\{dryRunChainKey\(agent, policy, order\)\}/);
   });
 });
