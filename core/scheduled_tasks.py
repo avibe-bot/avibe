@@ -1566,28 +1566,6 @@ class TaskExecutionStore:
                 return run
         return None
 
-    def find_explicit_session_delivery(
-        self,
-        *,
-        parent_run_id: str,
-        session_id: str,
-    ) -> Optional[dict[str, Any]]:
-        if self._sqlite is not None:
-            return self._sqlite.find_explicit_session_delivery(
-                parent_run_id=parent_run_id,
-                session_id=session_id,
-            )
-        for run in self._list_file_runs():
-            if (
-                run.get("request_type") == "agent_run"
-                and run.get("source_kind") == "agent"
-                and run.get("parent_run_id") == parent_run_id
-                and run.get("session_id") == session_id
-                and str(run.get("message") or "").strip()
-            ):
-                return run
-        return None
-
     def settle_deferred_run(
         self,
         run_id: str,
@@ -2962,15 +2940,6 @@ class ScheduledTaskService:
         if not callback_session_id:
             return None
         run_id = str(run.get("id") or "")
-        explicit_delivery = self.request_store.find_explicit_session_delivery(
-            parent_run_id=run_id,
-            session_id=callback_session_id,
-        )
-        if explicit_delivery is not None:
-            # A lane may explicitly report to its callback Session before its
-            # terminal result. That accepted child Run is the callback delivery;
-            # do not echo the same final through the automatic fallback too.
-            return TaskExecutionRequest.from_dict(explicit_delivery)
         status = _normalize_requested_run_status(run.get("status")) or str(
             run.get("status") or ""
         )

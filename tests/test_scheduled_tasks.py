@@ -19,7 +19,8 @@ from config import paths
 from config.v2_settings import make_thread_native_id
 from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.message_output import stop_output_for
+from core.message_mirror import mirror_harness_inbound
+from core.message_output import MessageOutput, stop_output_for
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
@@ -47,7 +48,7 @@ from core.scheduled_tasks import (
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
-from storage.models import agent_runs, run_definitions
+from storage.models import agent_events, agent_runs, messages, run_definitions
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
 from storage.agent_session_rows import create_agent_session_row
@@ -4226,6 +4227,121 @@ def test_recovered_coalesced_agent_run_early_failure_settles_children(tmp_path: 
     assert stored[run_ids[1]]["error"] == "target session vanished"
 
 
+def _harness_turn_context(
+    *,
+    session_id: str,
+    run_id: str,
+    backend: str,
+) -> MessageContext:
+    return MessageContext(
+        user_id="harness",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{run_id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "task_execution_id": run_id,
+            "task_trigger_kind": "agent_run",
+            "suppress_delivery": True,
+            "vibe_agent_name": "worker",
+            "vibe_agent_backend": backend,
+        },
+    )
+
+
+def _harness_dispatcher() -> ConsolidatedMessageDispatcher:
+    settings_manager = SimpleNamespace(
+        _canonicalize_message_type=lambda value: value,
+    )
+    im_client = SimpleNamespace(
+        should_use_thread_for_reply=lambda: False,
+        should_use_thread_for_dm_session=lambda: False,
+    )
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            platform="avibe",
+            language="en",
+            reply_enhancements=False,
+        ),
+        get_settings_manager_for_context=lambda _context: settings_manager,
+        get_im_client_for_context=lambda _context: im_client,
+        _get_settings_key=lambda context: context.channel_id,
+        _get_session_key=lambda context: f"avibe::{context.channel_id}",
+        agent_service=SimpleNamespace(
+            emit_matches_runtime_turn=lambda _context: True,
+            release_runtime_turn=lambda _context: None,
+        ),
+        session_turns=SimpleNamespace(
+            on_terminal_result=lambda _context, is_error=False: None,
+        ),
+        mark_turn_complete=lambda _context, **_kwargs: None,
+    )
+    return ConsolidatedMessageDispatcher(controller)
+
+
+async def _persist_harness_turn(
+    *,
+    dispatcher: ConsolidatedMessageDispatcher,
+    context: MessageContext,
+    prompt: str,
+    preamble: str,
+    terminal: str,
+) -> tuple[MessageOutput, MessageOutput, MessageOutput]:
+    mirror_harness_inbound(context, prompt)
+    preamble_output = MessageOutput(
+        completes_turn=False,
+        completes_run=False,
+        idempotency_key="intermediate-preamble",
+    )
+    tool_output = MessageOutput(
+        completes_turn=False,
+        completes_run=False,
+        idempotency_key="tool-boundary",
+    )
+    terminal_output = MessageOutput(
+        completes_turn=True,
+        completes_run=True,
+        idempotency_key="terminal-result",
+    )
+    await dispatcher.emit_agent_message(
+        context,
+        "assistant",
+        preamble,
+        output=preamble_output,
+    )
+    await dispatcher.emit_agent_message(
+        context,
+        "toolcall",
+        "Tool: vibe data query",
+        output=tool_output,
+    )
+    await dispatcher.emit_agent_message(
+        context,
+        "result",
+        terminal,
+        output=terminal_output,
+    )
+    return preamble_output, tool_output, terminal_output
+
+
+def _callback_service(
+    *,
+    tmp_path: Path,
+    request_store: TaskExecutionStore,
+) -> ScheduledTaskService:
+    return ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(
+                submit_scheduled=lambda *_args, **_kwargs: None,
+                in_flight={},
+            ),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
@@ -4276,15 +4392,102 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["message"] == "complete delegated result"
 
 
-def test_agent_run_explicit_delivery_suppresses_automatic_callback(
+def test_historical_conflated_sent_callback_stays_inert_on_startup(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """Startup must not replay a historical directed child as a callback."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    parent = request_store.enqueue_agent_run(
+        session_id="historical-target",
+        message="historical delegated work",
+        agent_name="codex",
+        callback_session_id="historical-caller",
+    )
+    directed = request_store.enqueue_agent_run(
+        session_id="historical-caller",
+        message="historical directed report",
+        agent_name="codex",
+        source_kind="agent",
+        source_actor="historical-target",
+        parent_run_id=parent.id,
+    )
+    sqlite_store = SQLiteBackgroundTaskStore()
+    try:
+        sqlite_store.record_run_message(
+            parent.id,
+            text="stale automatic terminal",
+            terminal_status="succeeded",
+        )
+    finally:
+        sqlite_store.close()
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == parent.id)
+                .values(
+                    callback_status="sent",
+                    callback_error="historical conflation",
+                    callback_run_id=directed.id,
+                    callback_completed_at="2026-07-30T00:00:00Z",
+                )
+            )
+    finally:
+        engine.dispose()
+    assert request_store.sqlite_backend is not None
+    request_store.sqlite_backend.close()
+
+    restarted_store = TaskExecutionStore()
+    service = _callback_service(
+        tmp_path=tmp_path,
+        request_store=restarted_store,
+    )
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    stored_parent = restarted_store.get_run(parent.id)
+    stored_directed = restarted_store.get_run(directed.id)
+    runs = restarted_store.list_runs()
+    assert stored_parent is not None
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_error"] == "historical conflation"
+    assert stored_parent["callback_run_id"] == directed.id
+    assert stored_directed is not None
+    assert stored_directed["source_kind"] == "agent"
+    assert stored_directed["status"] == "queued"
+    assert len(runs) == 2
+    assert not any(run.get("source_kind") == "callback" for run in runs)
+    assert not any(run.get("message") == "stale automatic terminal" for run in runs)
+    assert restarted_store.sqlite_backend is not None
+    restarted_store.sqlite_backend.close()
+
+
+def test_directed_run_and_callback_remain_distinct_while_target_busy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-caller",
+    )
+    target_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-target",
+    )
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
-        session_id="target-session",
+        session_id=target_session_id,
         message="delegated work",
         agent_name="codex",
         callback_session_id=caller_session_id,
@@ -4294,8 +4497,9 @@ def test_agent_run_explicit_delivery_suppresses_automatic_callback(
         message="explicit final report",
         agent_name="codex",
         source_kind="agent",
-        source_actor="target-session",
+        source_actor=target_session_id,
         parent_run_id=request.id,
+        callback_session_id=target_session_id,
     )
     store = SQLiteBackgroundTaskStore()
     try:
@@ -4306,12 +4510,101 @@ def test_agent_run_explicit_delivery_suppresses_automatic_callback(
         )
     finally:
         store.close()
-    service = ScheduledTaskService(
-        controller=_avibe_controller_double(
-            gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
-            handle_scheduled_message=lambda *_args, **_kwargs: None,
-        ),
-        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+    service = _callback_service(
+        tmp_path=tmp_path,
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert original["callback_status"] == "sent"
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert len(callback_runs) == 1
+    callback = callback_runs[0]
+    assert original["callback_run_id"] == callback["id"]
+    assert callback["id"] != explicit.id
+    assert callback["session_id"] == caller_session_id
+    assert callback["status"] == "queued"
+    assert callback["started_at"] is None
+    assert callback["message"] == "automatic terminal result"
+    assert callback["source_actor"] == request.id
+    assert callback["callback_session_id"] is None
+    assert explicit.callback_session_id == target_session_id
+    stored_explicit = request_store.get_run(explicit.id)
+    assert stored_explicit is not None
+    assert stored_explicit["status"] == "queued"
+    assert stored_explicit["started_at"] is None
+    assert stored_explicit["message"] == "explicit final report"
+    assert stored_explicit["source_kind"] == "agent"
+    assert stored_explicit["parent_run_id"] == request.id
+    assert stored_explicit["callback_status"] == "pending"
+    assert stored_explicit["created_at"] <= callback["created_at"]
+    assert [
+        run["id"]
+        for run in request_store.list_runs(status="queued")
+        if run.get("session_id") == caller_session_id
+    ] == [explicit.id, callback["id"]]
+
+
+def test_silent_terminal_skips_callback_and_keeps_directed_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
+    target_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="silent-target",
+        agent_backend="claude",
+    )
+    caller_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="silent-caller",
+        agent_backend="codex",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=target_session_id,
+        message="delegated work",
+        agent_name="worker",
+        agent_backend="claude",
+        callback_session_id=caller_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+    explicit = request_store.enqueue_agent_run(
+        session_id=caller_session_id,
+        message="完整定向裁决：精确内容",
+        agent_name="worker",
+        agent_backend="codex",
+        source_kind="agent",
+        source_actor=target_session_id,
+        parent_run_id=request.id,
+    )
+    context = _harness_turn_context(
+        session_id=target_session_id,
+        run_id=request.id,
+        backend="claude",
+    )
+    preamble_output, _tool_output, _terminal_output = asyncio.run(
+        _persist_harness_turn(
+            dispatcher=_harness_dispatcher(),
+            context=context,
+            prompt="escalation prompt",
+            preamble="裁决如下：",
+            terminal="",
+        )
+    )
+    service = _callback_service(
+        tmp_path=tmp_path,
         request_store=request_store,
     )
 
@@ -4319,14 +4612,228 @@ def test_agent_run_explicit_delivery_suppresses_automatic_callback(
 
     original = request_store.get_run(request.id)
     assert original is not None
+    assert original["status"] == "succeeded"
+    assert original["result_text"] == ""
+    assert original["callback_status"] == "skipped"
+    assert original["callback_run_id"] is None
+    assert [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback"
+        and run.get("parent_run_id") == request.id
+    ] == []
+
+    stored_explicit = request_store.get_run(explicit.id)
+    assert stored_explicit is not None
+    assert stored_explicit["status"] == "queued"
+    assert stored_explicit["started_at"] is None
+    assert stored_explicit["message"] == "完整定向裁决：精确内容"
+    assert stored_explicit["source_kind"] == "agent"
+    assert stored_explicit["parent_run_id"] == request.id
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        target_messages = conn.execute(
+            select(
+                messages.c.author,
+                messages.c.type,
+                messages.c.source,
+                messages.c.native_message_id,
+                messages.c.content_text,
+            )
+            .where(messages.c.session_id == target_session_id)
+            .order_by(messages.c.created_at, messages.c.id)
+        ).mappings().all()
+        tool_events = conn.execute(
+            select(
+                agent_events.c.event_type,
+                agent_events.c.source,
+                agent_events.c.run_id,
+                agent_events.c.content_text,
+            ).where(agent_events.c.session_id == target_session_id)
+        ).mappings().all()
+    assert [row["author"] for row in target_messages] == [
+        "harness",
+        "agent",
+        "agent",
+    ]
+    assert [row["type"] for row in target_messages] == [
+        "harness",
+        "assistant",
+        "silent",
+    ]
+    assert [row["source"] for row in target_messages] == [
+        "harness",
+        "agent",
+        "agent",
+    ]
+    assert [row["native_message_id"] for row in target_messages] == [
+        f"agent_run:{request.id}",
+        preamble_output.native_message_id(context),
+        None,
+    ]
+    assert [row["content_text"] for row in target_messages] == [
+        "escalation prompt",
+        "裁决如下：",
+        "",
+    ]
+    assert all(row["author"] != "user" and row["type"] != "user" for row in target_messages)
+    assert tool_events == [
+        {
+            "event_type": "tool_call",
+            "source": "agent",
+            "run_id": request.id,
+            "content_text": "Tool: vibe data query",
+        }
+    ]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_callback_consumes_only_full_terminal_once_across_backends(
+    tmp_path: Path,
+    monkeypatch,
+    backend: str,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
+    target_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id=f"{backend}-target",
+        agent_backend=backend,
+    )
+    caller_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id=f"{backend}-caller",
+        agent_backend=backend,
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=target_session_id,
+        message="delegated work",
+        agent_name="worker",
+        agent_backend=backend,
+        callback_session_id=caller_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+    context = _harness_turn_context(
+        session_id=target_session_id,
+        run_id=request.id,
+        backend=backend,
+    )
+    preamble_output, _tool_output, terminal_output = asyncio.run(
+        _persist_harness_turn(
+            dispatcher=_harness_dispatcher(),
+            context=context,
+            prompt="delegated work",
+            preamble="The complete ruling follows:",
+            terminal="exact terminal body\nlocale.en=Ready\nlocale.zh=就绪",
+        )
+    )
+    service = _callback_service(
+        tmp_path=tmp_path,
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original is not None
+    assert original["status"] == "succeeded"
+    assert original["result_text"] == "exact terminal body\nlocale.en=Ready\nlocale.zh=就绪"
     assert original["callback_status"] == "sent"
-    assert original["callback_run_id"] == explicit.id
     callback_runs = [
         run
         for run in request_store.list_runs()
-        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+        if run.get("source_kind") == "callback"
+        and run.get("parent_run_id") == request.id
     ]
-    assert callback_runs == []
+    assert len(callback_runs) == 1
+    callback = callback_runs[0]
+    assert callback["id"] == original["callback_run_id"]
+    assert callback["session_id"] == caller_session_id
+    assert callback["source_actor"] == request.id
+    assert callback["message"] == "exact terminal body\nlocale.en=Ready\nlocale.zh=就绪"
+    assert callback["status"] == "queued"
+    assert callback["started_at"] is None
+
+    claimed_callback = request_store.claim(callback["id"])
+    assert claimed_callback is not None
+    callback_context = _harness_turn_context(
+        session_id=caller_session_id,
+        run_id=callback["id"],
+        backend=backend,
+    )
+    mirror_harness_inbound(callback_context, claimed_callback.message)
+    mirror_harness_inbound(callback_context, claimed_callback.message)
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        target_messages = conn.execute(
+            select(
+                messages.c.author,
+                messages.c.type,
+                messages.c.source,
+                messages.c.native_message_id,
+                messages.c.content_text,
+            )
+            .where(messages.c.session_id == target_session_id)
+            .order_by(messages.c.created_at, messages.c.id)
+        ).mappings().all()
+        caller_messages = conn.execute(
+            select(
+                messages.c.author,
+                messages.c.type,
+                messages.c.source,
+                messages.c.native_message_id,
+                messages.c.content_text,
+            )
+            .where(messages.c.session_id == caller_session_id)
+            .order_by(messages.c.created_at, messages.c.id)
+        ).mappings().all()
+        target_events = conn.execute(
+            select(
+                agent_events.c.event_type,
+                agent_events.c.source,
+                agent_events.c.run_id,
+                agent_events.c.content_text,
+            ).where(agent_events.c.session_id == target_session_id)
+        ).mappings().all()
+    assert [row["type"] for row in target_messages] == [
+        "harness",
+        "assistant",
+        "result",
+    ]
+    assert [row["source"] for row in target_messages] == [
+        "harness",
+        "agent",
+        "agent",
+    ]
+    assert [row["native_message_id"] for row in target_messages] == [
+        f"agent_run:{request.id}",
+        preamble_output.native_message_id(context),
+        terminal_output.native_message_id(context),
+    ]
+    assert caller_messages == [
+        {
+            "author": "harness",
+            "type": "harness",
+            "source": "harness",
+            "native_message_id": f"agent_run:{callback['id']}",
+            "content_text": "exact terminal body\nlocale.en=Ready\nlocale.zh=就绪",
+        }
+    ]
+    assert all(row["author"] != "user" and row["type"] != "user" for row in caller_messages)
+    assert target_events == [
+        {
+            "event_type": "tool_call",
+            "source": "agent",
+            "run_id": request.id,
+            "content_text": "Tool: vibe data query",
+        }
+    ]
 
 
 def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
@@ -6795,6 +7302,9 @@ def _make_avibe_session(
     *,
     metadata: dict | None = None,
     visibility: str = "foreground",
+    scope_native_id: str = "proj_gate_exec",
+    agent_backend: str = "claude",
+    agent_name: str = "worker",
 ) -> str:
     """Create a real avibe workbench session so ``resolve_session_id_target``
     resolves it to ``platform='avibe'`` (the gate trigger)."""
@@ -6809,7 +7319,11 @@ def _make_avibe_session(
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = upsert_scope(
-            conn, platform="avibe", scope_type="project", native_id="proj_gate_exec", now="2026-05-31T00:00:00Z"
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id=scope_native_id,
+            now="2026-05-31T00:00:00Z",
         )
         conn.execute(
             scope_settings.insert().values(
@@ -6832,8 +7346,8 @@ def _make_avibe_session(
         session = sessions_service.create_session(
             conn,
             scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
+            agent_backend=agent_backend,
+            agent_name=agent_name,
             visibility=visibility,
             metadata=metadata,
         )
