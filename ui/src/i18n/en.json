@@ -612,9 +612,14 @@
     "openSetup": "Open setup wizard",
     "models": {
       "title": "Models",
-      "subtitle": "Connect a source once and every agent can draw on it; each agent decides which ones it uses and in what order, switching over on failure and back on recovery.",
+      "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
+      "status": {
+        "allHealthy": "All healthy",
+        "needsAction": "{{count}} model(s) need attention",
+        "noIssues": "No models need attention"
+      },
       "statusPill": {
         "ok": "All good · {{count}} on the Hub",
         "none": "No agent is on the Hub yet",
@@ -627,8 +632,12 @@
       },
       "sources": {
         "title": "Sources",
-        "subtitle": "One global account library; who comes first is set per agent below",
-        "empty": "No sources yet — use “Add source” to connect a subscription or API key."
+        "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
+        "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
+        "modelCount": "{{count}} model(s)",
+        "addModel": "Add model",
+        "modelsEmpty": "No supplied models yet. Add one manually.",
+        "modelsEmptySubscription": "No supplied models were discovered."
       },
       "source": {
         "nativeSupply": "Native supply",
@@ -647,40 +656,25 @@
         "groupEnabled": "Enabled · {{count}}",
         "groupDisabled": "Not enabled · {{count}}",
         "groupIneligible": "Not applicable · {{count}}",
-        "following": "Following recommended",
-        "followingLong": "Following recommended · new sources join automatically",
-        "restore": "Restore recommended order",
+        "customized": "Changed manually",
+        "restore": "Restore default",
         "enable": "Enable",
         "enableAria": "Enable {{name}}",
         "disable": "Disable",
-        "openMenu": "Model menu & mapping",
-        "supplies": "Supplies all {{family}} models",
-        "viaMapping": "usable by {{backend}} once rewritten in the model menu",
-        "viaMappingShort": "usable by {{backend}} once mapped",
-        "enabledEmpty": "{{backend}} has no source enabled, so its next turn fails with no supply — the Hub will not fall back to Direct for it. Add one from “Not enabled” below.",
+        "enabledEmpty": "{{backend}} has no source enabled, so its next turn will fail. Enable one from the list below.",
         "ineligibleUnknown": "Cannot supply {{backend}}",
-        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client",
-        "family": {
-          "anthropic": "Claude",
-          "openai": "GPT",
-          "zhipuai": "GLM",
-          "kimi": "Kimi",
-          "xai": "Grok"
-        },
-        "enabledNoneRunnable": "None of {{backend}}’s enabled sources can serve right now, so the next turn fails with no supply. Fix one below, or enable another.",
-        "nativeUnavailable": "{{backend}} CLI sign-in unavailable here"
+        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
       },
       "billing": {
         "monthly": "Monthly",
-        "metered": "Metered",
-        "meteredWithSymbol": "Metered {{symbol}}"
+        "metered": "Metered"
       },
       "state": {
-        "active": "In use",
-        "standby": "Standby",
-        "cooldown": "Cooling down",
+        "active": "Healthy",
+        "standby": "Healthy",
+        "cooldown": "Cooling down (auto-recovers)",
         "needs_action": "Needs attention",
-        "error": "Unavailable"
+        "error": "Needs attention"
       },
       "usage": {
         "monthSpend": "{{amount}} this month"
@@ -705,6 +699,10 @@
         "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
         "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
         "sourceOrder": "Source order",
+        "modelListCount": "{{count}} model(s)",
+        "enableManaged": "Manage centrally",
+        "emptyModels": "This agent has no models yet.",
+        "manageModels": "Manage models",
         "menuKind": {
           "fixed": "Fixed menu",
           "open": "Open menu"
@@ -718,6 +716,57 @@
           "waiting": "Awaiting source recovery for {{names}}",
           "unassigned": "No source can supply {{models}}"
         }
+      },
+      "modelStatus": {
+        "ok": "Healthy",
+        "cooldown": "Cooling down (auto-recovers)",
+        "needsAction": "Needs attention",
+        "checking": "Checking",
+        "direct": "Direct",
+        "noSource": "No available source",
+        "blocked": "Current source unavailable",
+        "currentSwitched": "Currently switched to {{source}}",
+        "currentSource": "Currently served by {{source}}",
+        "source": "Served by {{source}}",
+        "unknown": "Unable to confirm",
+        "retry": "Retry",
+        "runtime": "Model service is not ready",
+        "runtimeAction": "Resolve"
+      },
+      "emptySelection": {
+        "title": "No model selected",
+        "body": "This agent has no current model and needs one before its next run.",
+        "action": "Choose model"
+      },
+      "routes": {
+        "title": "Supply method",
+        "global": "Follow {{backend}}'s source order",
+        "manual": "Set route",
+        "liveSource": "Currently served by {{source}} · {{model}}",
+        "globalPending": "Restoring {{backend}}'s source order…",
+        "globalActual": "{{backend}}'s source order currently resolves to {{source}}.",
+        "globalUnavailable": "No source in {{backend}}'s source order can serve right now.",
+        "chooseTarget": "Choose target model",
+        "searchPlaceholder": "Search sources or models",
+        "empty": "No matching models",
+        "availableCount": "{{count}} available",
+        "manualBadge": "Manual",
+        "addManual": "Enter a model manually",
+        "multipleSources": "{{model}} · sources available: {{count}}",
+        "orderDecidesSource": "Actual source follows {{backend}}'s source order",
+        "compatibility": "Reasoning, cache, and tool semantics may differ from the original model.",
+        "openMenuGlobal": "Open models use {{backend}}'s source order; {{source}} currently serves this one.",
+        "none": "no source",
+        "expand": "Expand supply method"
+      },
+      "probe": {
+        "action": "Try it",
+        "running": "Testing",
+        "nativeReady": "{{source}} is ready and can run directly.",
+        "hubOk": "{{source}} responded successfully · {{ms}} ms",
+        "failed": "{{source}} failed: {{detail}}",
+        "unknown": "Source did not pass the test",
+        "error": "Test failed, please retry"
       },
       "recent": {
         "title": "Recent switches",
@@ -891,8 +940,8 @@
           }
         },
         "custom": {
-          "title": "Add a custom model",
-          "subtitle": "Register a model that discovery missed and add it to the OpenCode menu.",
+          "title": "Add model manually",
+          "subtitle": "Register a model missing from this source so it can be selected or used as a route target.",
           "sourceLabel": "Source (able to supply this model)",
           "modelIdLabel": "Model ID",
           "modelIdPlaceholder": "glm-5.2-air",
@@ -901,7 +950,7 @@
           "previewLabel": "OpenCode identifier · generated",
           "previewEmpty": "Enter a model ID to preview",
           "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
-          "add": "Add to menu",
+          "add": "Add model",
           "failed": "Couldn't add the model, please retry",
           "delete": "Remove model",
           "deleteConfirmTitle": "Remove custom model?",
@@ -3035,6 +3084,7 @@
       "voiceEmpty": "No speech was detected in this recording.",
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
+      "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
       "removeAttachment": "Remove",
       "dropOverlay": "Drop files to attach"
     },

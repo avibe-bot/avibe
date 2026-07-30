@@ -34,6 +34,20 @@ export function buildIdentifier(sourceVendor: string, modelId: string, standardV
   return `${inferProvider(sourceVendor, standardVendors)}/${modelId}`;
 }
 
+/** Identifier shown/returned by the shared manual-model action for its invoking surface. */
+export function manualModelIdentifier(
+  modelId: string,
+  sourceVendor: string | null,
+  standardVendors: StandardVendors,
+  showOpenCodeIdentifier: boolean,
+): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return '';
+  return showOpenCodeIdentifier && sourceVendor
+    ? buildIdentifier(sourceVendor, trimmed, standardVendors)
+    : trimmed;
+}
+
 // `isSourceEligible` lived here and is gone: it mirrored the backend
 // `_eligible_for_agent` predicate, which the UI cannot compute (it depends on the
 // `subscription_hub_experimental` flag and on recorded consent), so it was

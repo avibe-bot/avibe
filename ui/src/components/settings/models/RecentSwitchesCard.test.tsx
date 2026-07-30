@@ -8,7 +8,8 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { RecentSwitchesCard, eventAccent } from './RecentSwitchesCard';
+import { eventAccent } from './eventFeed';
+import { RecentSwitchesCard } from './RecentSwitchesCard';
 import type { ResolutionEvent, Source } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
@@ -48,10 +49,15 @@ const event = (over: Partial<ResolutionEvent> = {}): ResolutionEvent => ({
   ...over,
 });
 
-const render = (events: ResolutionEvent[], sources: Source[], lng: 'en' | 'zh' = 'zh') =>
+const render = (
+  events: ResolutionEvent[],
+  sources: Source[],
+  lng: 'en' | 'zh' = 'zh',
+  hasMore = false,
+) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={instance(lng)}>
-      <RecentSwitchesCard events={events} sources={sources} />
+      <RecentSwitchesCard events={events} sources={sources} hasMore={hasMore} />
     </I18nextProvider>,
   );
 
@@ -95,6 +101,21 @@ describe('RecentSwitchesCard (AC-18)', () => {
     expect(render(three, [source('src_live01')])).not.toContain(zh.settings.models.recent.viewAll);
     const four = [...three, event({ id: 'evt_4' })];
     expect(render(four, [source('src_live01')])).toContain(zh.settings.models.recent.viewAll);
+  });
+
+  it('keeps route configuration out of the user event feed', () => {
+    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
+    const html = render([configured, event({ id: 'evt_2', human_zh: '已自动换到 openai' })], [source('src_live01')]);
+    expect(html).not.toContain(configured.human_zh);
+    expect(html).toContain('已自动换到 openai');
+  });
+
+  it('keeps a paging door open when the fetched page contains only route configuration', () => {
+    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
+    const html = render([configured], [source('src_live01')], 'zh', true);
+    expect(html).not.toContain(configured.human_zh);
+    expect(html).not.toContain(zh.settings.models.recent.empty);
+    expect(html).toContain(zh.settings.models.recent.loadMore);
   });
 });
 

@@ -15,8 +15,11 @@
 // indented to match the frame. The sm+ layout is byte-for-byte the desktop
 // frame, so the fixed-width chip columns still align down the list.
 import * as React from 'react';
+import { LogIn, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
@@ -121,7 +124,10 @@ export const SourceRow: React.FC<{
   onChanged: () => void;
   /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
   onRepair?: (source: Source, kind: RaisedRepair) => void;
-}> = ({ source, onChanged, onRepair }) => {
+  /** Open the shared manual-model action with this source preselected. */
+  onAddModel: (source: Source) => void;
+}> = ({ source, onChanged, onRepair, onAddModel }) => {
+  const { t } = useTranslation();
   const { Icon, accent } = sourceVisual(source);
   const subline = useSubline(source);
   const isExperimental = source.kind === 'subscription' && source.supply_channel === 'hub';
@@ -132,7 +138,8 @@ export const SourceRow: React.FC<{
     // sm+, which no amount of CSS can do if it lives inside one of two sibling
     // containers. So identity / menu / metrics are siblings here and `order`
     // rearranges them per breakpoint — one menu instance, one set of dialogs.
-    <div className="group flex flex-wrap items-center gap-x-2.5 gap-y-2.5 border-b border-border px-4 py-3 last:border-b-0 sm:flex-nowrap sm:gap-x-3.5 sm:px-5 sm:py-3">
+    <div className="group border-b border-border last:border-b-0">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2.5 px-4 py-3 sm:flex-nowrap sm:gap-x-3.5 sm:px-5 sm:py-3">
       {/* Identity — the leading segment on both breakpoints. */}
       <div className="order-1 flex min-w-0 flex-1 items-center gap-2.5 sm:gap-3.5">
         <SupplyTooltip models={source.models} className="flex min-w-0 flex-1 items-center gap-2.5 sm:gap-3.5">
@@ -173,7 +180,7 @@ export const SourceRow: React.FC<{
           it in its wider column spent as an sm:ml-1.5 on the pill. */}
       <div className="order-3 flex w-full flex-wrap items-center gap-x-2 gap-y-2 pl-[26px] sm:order-2 sm:w-auto sm:shrink-0 sm:flex-nowrap sm:gap-3.5 sm:pl-0">
         <UsageCell source={source} />
-        <BillingChip billing={source.billing} currency={source.usage?.currency} className="sm:ml-1.5" />
+        <BillingChip billing={source.billing} className="sm:ml-1.5" />
         <StateCell source={source} />
       </div>
 
@@ -183,6 +190,59 @@ export const SourceRow: React.FC<{
           come from the menu component, which owns the actions. */}
       <div className="order-2 flex shrink-0 items-center gap-1.5 sm:order-3">
         <SourceRowMenu source={source} onChanged={onChanged} onRepair={onRepair} />
+      </div>
+      </div>
+
+      <div className="flex flex-col gap-2 border-t border-border/70 bg-foreground/[0.012] px-4 py-3 sm:px-5">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] font-semibold text-muted">
+            {t('settings.models.sources.modelCount', { count: source.models.length })}
+          </span>
+          {source.kind === 'api_key' && (
+            <button
+              type="button"
+              onClick={() => onAddModel(source)}
+              className="inline-flex min-h-8 shrink-0 items-center gap-1 text-[11.5px] font-semibold text-mint transition-colors hover:text-mint/80"
+            >
+              <Plus className="size-3.5" />
+              {t('settings.models.sources.addModel')}
+            </button>
+          )}
+        </div>
+        {source.models.length === 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11.5px] text-muted">
+              {t(
+                source.kind === 'subscription'
+                  ? 'settings.models.sources.modelsEmptySubscription'
+                  : 'settings.models.sources.modelsEmpty',
+              )}
+            </p>
+            {source.kind === 'subscription' && onRepair && (
+              <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={() => onRepair(source, 'reauth')}>
+                <LogIn />
+                {t('settings.models.sourceActions.reauth')}
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto pr-1">
+            {source.models.map((model) => (
+              <span
+                key={model.id}
+                title={model.display_name || model.id}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1"
+              >
+                <span className="truncate font-mono text-[10.5px] text-foreground">{model.id}</span>
+                {model.provenance === 'manual' && (
+                  <Badge variant="secondary" className="shrink-0 px-1 py-0 text-[8.5px]">
+                    {t('settings.models.routes.manualBadge')}
+                  </Badge>
+                )}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

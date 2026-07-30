@@ -1,12 +1,5 @@
-// The 来源 band (design.pen 「产品改造 V6 01」): header (asset sub-line + 添加来源
-// menu) over a plain inventory list. Fully controlled — `sources` comes from the
-// page and this card holds no derived state.
-//
-// V6 turned this card into a pure asset inventory: identity · usage · billing ·
-// health, and nothing else. Ordering is no longer a property of a source, it is a
-// property of an Agent (a per-backend ordered subset), so the drag handle, the
-// priority number and the one-step move actions moved into the per-Agent 来源顺序
-// drawer. The list order here is whatever the server returns.
+// Demoted account-management section. Each source keeps its repair journeys and
+// exposes the server-provided model inventory plus the shared manual-model action.
 //
 // Mobile header (design.pen M01 m01SrcHead): the title block and 添加来源 stack
 // instead of competing for one line, with 添加来源 as a full-width primary
@@ -29,7 +22,8 @@ export const SourcesCard: React.FC<{
   onSourceChanged: () => void;
   /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
   onRepair?: (source: Source, kind: RaisedRepair) => void;
-}> = ({ sources, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged, onRepair }) => {
+  onAddModel: (source: Source) => void;
+}> = ({ sources, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged, onRepair, onAddModel }) => {
   const { t } = useTranslation();
 
   return (
@@ -52,7 +46,13 @@ export const SourcesCard: React.FC<{
       ) : (
         <div className="flex flex-col">
           {sources.map((source) => (
-            <SourceRow key={source.id} source={source} onChanged={onSourceChanged} onRepair={onRepair} />
+            <SourceRow
+              key={source.id}
+              source={source}
+              onChanged={onSourceChanged}
+              onRepair={onRepair}
+              onAddModel={onAddModel}
+            />
           ))}
         </div>
       )}

@@ -17,6 +17,14 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
+  applyVoiceInsertion,
+  cleanupVoiceTranscript,
+  voiceInsertionSnapshot,
+  voiceInsertionText,
+  type VoiceCleanupResult,
+  type VoiceInsertionSnapshot,
+} from '../../lib/voiceCleanup';
+import {
   transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
   VOICE_TRANSCRIPTION_CONCURRENCY,
@@ -108,24 +116,39 @@ type VoiceRecordingSession = {
   captureError?: unknown;
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
+  insertion: VoiceInsertionSnapshot;
+  cleanupOutcome?: VoiceCleanupResult['outcome'];
+  cleanupElapsedMs?: number;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
 // audio outside the component; successful finalization retains transcript only.
 const voiceSessionsById = new Map<string, VoiceRecordingSession>();
 
+const voiceSessionLocksDraft = (session?: VoiceRecordingSession): boolean => (
+  session != null && ['recording', 'transcribing', 'ready'].includes(session.status)
+);
+
 const newVoiceDictationId = (): string => (
   globalThis.crypto?.randomUUID?.()
   ?? `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`
 );
 
-const settleVoiceSession = (session: VoiceRecordingSession) => {
+const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void> => {
   try {
-    session.transcript = voiceTranscriptFromSegments(session.segments);
+    const rawTranscript = voiceTranscriptFromSegments(session.segments);
     session.finalizedSegmentCount = session.segments.length;
     session.finalizedFailedSegmentCount = session.segments.filter(
       (segment) => segment.error,
     ).length;
+    const cleanup = await cleanupVoiceTranscript(rawTranscript, session.insertion, {
+      signal: session.abortController.signal,
+    });
+    if (session.abortController.signal.aborted) return;
+    session.cleanupOutcome = cleanup.outcome;
+    session.cleanupElapsedMs = cleanup.elapsedMs;
+    if (!cleanup.text.trim()) throw new VoiceTranscriptionError('empty');
+    session.transcript = cleanup.text;
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
@@ -151,7 +174,10 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
       session.status = 'failed';
       return;
     }
-    settleVoiceSession(session);
+    await settleVoiceSession(session);
+    if (session.abortController.signal.aborted) {
+      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+    }
   })();
   return session.finalization;
 };
@@ -171,7 +197,10 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
       deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
       return;
     }
-    settleVoiceSession(session);
+    await settleVoiceSession(session);
+    if (session.abortController.signal.aborted) {
+      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+    }
   })();
   return session.finalization;
 };
@@ -212,6 +241,7 @@ const reportVoiceFinalization = (
       session.finalizedFailedSegmentCount
       ?? session.segments.filter((segment) => segment.error).length
     ),
+    elapsedMs: session.cleanupElapsedMs,
     backlogAtStop: session.backlogAtStop,
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
@@ -344,7 +374,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
   const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
+  const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [restoringRecording, setRestoringRecording] = useState(() => (
+    sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
+  ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
@@ -352,6 +386,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const recorderRef = useRef<VoiceRecordingPipeline | null>(null);
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
+  const pendingVoiceInsertionRef = useRef<VoiceInsertionSnapshot | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
   const disabledRef = useRef(disabled);
@@ -359,6 +394,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
+  const voiceDraftReadOnly = recordingStarting || recording || restoringRecording || transcribing;
 
   useLayoutEffect(() => {
     disabledRef.current = disabled;
@@ -469,6 +505,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     setAttachments([]);
     setVoiceRetainedSession(null);
+    setRestoringRecording(
+      sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
+    );
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -546,27 +585,57 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Expose file staging so a chat-page-wide drop zone (ChatPage) can hand off
   // files dropped onto the transcript — the picker + chips still live here. No
   // deps array → always runs the latest uploadFiles closure for this session.
+  const voiceDraftLocked = () => (
+    recordingStartRef.current
+    || recordingSessionRef.current !== null
+    || transcribingRef.current
+    || (
+      sessionId != null
+      && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
+    )
+  );
   useImperativeHandle(ref, () => ({
     addFiles: (files: File[]) => void uploadFiles(files),
     insertSessionReference: (refSessionId: string, title?: string | null) => {
+      if (voiceDraftLocked()) return;
       // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
       // carries the stable sessionId → serializes to `#<id>` + a session ref.
       mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
     },
-    appendText: (text: string) => mentionRef.current?.append(text),
+    appendText: (text: string) => {
+      if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
   }));
 
-  const appendVoiceTranscript = useCallback((text: string) => {
-    // Voice input fills the draft and never sends it. Keeping the whole recording
-    // as one append also prevents an intermediate segment from being sent before
-    // the user has finished speaking.
+  const captureVoiceInsertion = useCallback((): VoiceInsertionSnapshot => {
     if (useMentions) {
-      mentionRef.current?.append(text);
-    } else {
-      const next = valueRef.current ? `${valueRef.current} ${text}` : text;
-      setValue(next);
-      onDraftChange?.(next);
+      return mentionRef.current?.captureSelection()
+        ?? voiceInsertionSnapshot(valueRef.current, valueRef.current.length, valueRef.current.length);
     }
+    const editor = textareaRef.current;
+    return voiceInsertionSnapshot(
+      valueRef.current,
+      editor?.selectionStart ?? valueRef.current.length,
+      editor?.selectionEnd ?? valueRef.current.length,
+    );
+  }, [useMentions]);
+
+  const insertVoiceTranscript = useCallback((session: VoiceRecordingSession): boolean => {
+    // Insert the finalized transcript as one atomic replacement. Segment-level
+    // results never touch the draft while the user is still speaking.
+    if (useMentions) {
+      return mentionRef.current?.replaceSelection(session.insertion, session.transcript ?? '') ?? false;
+    }
+    const current = valueRef.current;
+    const insertion = voiceInsertionText(current, session.insertion, session.transcript ?? '');
+    const next = applyVoiceInsertion(current, session.insertion, session.transcript ?? '');
+    if (insertion === null || next === null) return false;
+    valueRef.current = next;
+    setValue(next);
+    onDraftChange?.(next);
+    const caret = session.insertion.start + insertion.length;
+    requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
+    return true;
   }, [onDraftChange, useMentions]);
 
   const queueVoiceSegment = (
@@ -592,7 +661,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       && voiceSessionsById.get(session.sessionId) === session
     );
     if (session.status === 'ready' && session.transcript) {
-      reportVoiceFinalization(session, 'success');
+      reportVoiceFinalization(session, session.cleanupOutcome ?? 'success');
     } else if (session.status === 'failed') {
       reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
     }
@@ -603,9 +672,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setVoiceRetainedSession(session);
         return;
       }
+      if (!insertVoiceTranscript(session)) {
+        setVoiceRetainedSession(session);
+        showToast(t('chat.compose.voiceDraftChanged'), 'error');
+        return;
+      }
       voiceSessionsById.delete(session.sessionId);
       setVoiceRetainedSession(null);
-      appendVoiceTranscript(session.transcript);
       reportVoiceInsertion(session);
       return;
     }
@@ -613,7 +686,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       setVoiceRetainedSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [appendVoiceTranscript, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
     const activeHere = !unmountedRef.current && sessionId === session.sessionId;
@@ -667,11 +740,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const restore = () => {
       if (!alive) return;
       const session = voiceSessionsById.get(sessionId);
-      if (!session) return;
+      if (!session) {
+        setRestoringRecording(false);
+        return;
+      }
       if (session.status === 'recording') {
+        setRestoringRecording(true);
         timer = setTimeout(restore, 50);
         return;
       }
+      setRestoringRecording(false);
       if (session.status === 'transcribing' && session.finalization) {
         transcribingRef.current = true;
         setTranscribing(true);
@@ -693,7 +771,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [presentVoiceSession, sessionId]);
 
-  const startRecording = async () => {
+  const startRecording = async (capturedInsertion?: VoiceInsertionSnapshot) => {
     if (
       !sessionId
       || recordingStartRef.current
@@ -701,7 +779,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     ) {
       return;
     }
+    const insertion = capturedInsertion ?? captureVoiceInsertion();
     recordingStartRef.current = true;
+    setRecordingStarting(true);
     let stream: MediaStream | null = null;
     let startingPipeline: VoiceRecordingPipeline | null = null;
     let startingSession: VoiceRecordingSession | null = null;
@@ -721,6 +801,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         segments: [],
         status: 'recording',
         retryCount: 0,
+        insertion,
         transcriptionQueue: new VoiceTranscriptionQueue({
           concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
           signal: abortController.signal,
@@ -817,6 +898,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     } finally {
       recordingStartRef.current = false;
+      if (!unmountedRef.current) setRecordingStarting(false);
     }
   };
 
@@ -827,9 +909,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     recordingSessionRef.current?.abortController.abort();
     recorderRef.current?.abort();
   }, []);
-  const toggleRecording = () => {
+  const toggleRecording = (pointerActivation: boolean) => {
+    const pointerInsertion = pointerActivation ? pendingVoiceInsertionRef.current : null;
+    pendingVoiceInsertionRef.current = null;
     if (recording) stopRecording();
-    else void startRecording();
+    else void startRecording(pointerInsertion ?? captureVoiceInsertion());
   };
 
   // ESC aborts an in-progress recording (discard, no transcribe).
@@ -859,8 +943,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     (hasComposerText || readyAttachments.length > 0)
     && !uploading
     && !disabled
-    && !recording
-    && !transcribing;
+    && !voiceDraftReadOnly;
   // ``busy && disabled`` is an incoherent pair for ANY caller: ``disabled`` means
   // this composer may not act on the session, yet the busy branch renders an
   // ENABLED Stop button (it never consulted ``disabled``) and its "working"
@@ -971,7 +1054,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               ref={fileInputRef}
               type="file"
               multiple
-              disabled={disabled || recording}
+              disabled={disabled || voiceDraftReadOnly}
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
@@ -988,7 +1071,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // A disabled composer cannot send, so staging attachments is a
               // dead end. Opening a native picker can also hide the page, so
               // keep it unavailable until an active recording has stopped.
-              disabled={disabled || recording}
+              disabled={disabled || voiceDraftReadOnly}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
             >
@@ -1002,17 +1085,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   type="button"
                   variant={recording ? 'secondary' : 'ghost'}
                   size="icon"
-                  onClick={toggleRecording}
+                  onPointerDown={() => {
+                    if (!recording) pendingVoiceInsertionRef.current = captureVoiceInsertion();
+                  }}
+                  onPointerCancel={() => {
+                    pendingVoiceInsertionRef.current = null;
+                  }}
+                  onContextMenu={() => {
+                    pendingVoiceInsertionRef.current = null;
+                  }}
+                  onClick={(event) => toggleRecording(event.detail > 0)}
                   disabled={isVoiceControlDisabled(
                     disabled,
                     recording,
-                    transcribing,
+                    transcribing || recordingStarting || restoringRecording,
                     Boolean(voiceRetainedSession),
                   )}
                   aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                   className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
                 >
-                  {transcribing ? (
+                  {transcribing || recordingStarting || restoringRecording ? (
                     <Loader2 className="size-4 animate-spin" />
                   ) : recording ? (
                     <Square className="size-4" />
@@ -1080,7 +1172,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ref={mentionRef}
             className="flex-1"
             placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
-            disabled={disabled}
+            disabled={disabled || voiceDraftReadOnly}
             autoFocus={autoFocus}
             initialText={initialDraft}
             onSearchAgents={onSearchAgents!}
@@ -1094,7 +1186,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // editor is also set non-editable while disabled, which should keep
             // the paste event from reaching Lexical at all — this is the
             // explicit gate rather than a reliance on that.
-            onPasteFiles={mediaEnabled && !disabled ? (files) => void uploadFiles(files) : undefined}
+            onPasteFiles={mediaEnabled && !disabled && !voiceDraftReadOnly
+              ? (files) => void uploadFiles(files)
+              : undefined}
             onChange={(text, references, isDraftSeed) => {
               // The editor owns the text; keep the live copy in a ref (no
               // re-render) so a fast IME isn't interrupted mid-insert, and only
@@ -1131,6 +1225,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // did, so a disabled composer still accepted typing (only the Send
             // button was inert). Fixed here so every caller inherits it.
             disabled={disabled}
+            readOnly={voiceDraftReadOnly}
             placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />

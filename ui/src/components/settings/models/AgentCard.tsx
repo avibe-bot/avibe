@@ -1,343 +1,702 @@
-// The Agent band (design.pen 「产品改造 V6 01」 / 「V6 04」, mobile 「V6 M01」): one
-// row per backend — identity + menu-kind badge, then the whole of this backend's
-// supply on one line (the model it runs · the numbered source chain it walks ·
-// whether that chain is recommended or hand-picked), the supply-mode pill, and
-// 来源顺序 / 接入中枢.
-//
-// V6 replaced the old `model ｜ ● source` composite pill with the chain, because
-// the pill could only ever say what is serving RIGHT NOW — the question the page
-// actually has to answer is what happens when that stops working. The chain shows
-// the fallback path, marks the position the resolver is on, and dims what it has
-// already walked past, so the V6 04 failover moment reads off the row directly.
-//
-// Ordering itself is not editable here: it belongs to the 来源顺序 drawer, which
-// only exists for Hub-mode backends (AC-7 — a Direct backend gets no chain and no
-// drawer, since the Hub supplies nothing for it).
 import * as React from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowDownUp, ArrowRight, ChevronRight, Download, TriangleAlert, Zap } from 'lucide-react';
+import {
+  ArrowDownUp,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Loader2,
+  Plus,
+  Settings2,
+  TriangleAlert,
+  Zap,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { SegmentedRadio } from '@/components/ui/segmented';
 import { cn } from '@/lib/utils';
-import { ModeChip } from './chips';
+import { apiFailure, modelsApi } from './modelsApi';
+import {
+  dryRunOutcome,
+  probeArrival,
+  repairAction,
+  REPAIR_LABEL_KEY,
+  type DryRunOutcome,
+  type RepairKind,
+} from './repair';
+import { serverText } from './serverCopy';
+import { ModelRoutePicker } from './ModelRoutePicker';
+import { useAnnounceEnrollment } from './menus/enrollment';
+import {
+  agentNeedsModelSelection,
+  listedModelIds,
+  modelChainKey,
+  modelHasOffOrderSupplier,
+  modelNeedsAttention,
+  type ModelChainIndex,
+  type ModelChainRead,
+} from './modelRows';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import { formatNameList, friendlyModelName } from './format';
-import { attribution, chainChips, hasAttribution, type ChainChip } from './supply';
-import type { AgentSupply, Source } from './types';
+import type { RaisedRepair } from './SourceRowMenu';
+import type { AgentBackend, AgentChainLink, AgentSupply, RuntimeDependency, Source } from './types';
 
-/** 菜单固定 / 菜单开放 — desktop only (M01 drops it: at 360px the badge and the
- *  mode pill fought over the name line, and menu shape is a detail you go looking
- *  for, not something you scan a phone list for). */
-const MenuKindBadge: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
-  const { t } = useTranslation();
-  return (
-    <Badge
-      variant="secondary"
-      className="hidden shrink-0 rounded-md bg-foreground/[0.02] px-[7px] py-0.5 text-[10.5px] font-medium sm:inline-flex"
-    >
-      {t(`settings.models.agents.menuKind.${agent.menu_kind === 'open' ? 'open' : 'fixed'}`)}
-    </Badge>
-  );
+type ModelTone = 'ok' | 'cooldown' | 'attention' | 'neutral';
+
+const TONE_DOT: Record<ModelTone, string> = {
+  ok: 'bg-mint',
+  cooldown: 'bg-muted',
+  attention: 'bg-destructive',
+  neutral: 'bg-muted/60',
 };
 
-/**
- * The model the next turn asks for. Border + inner tint are one element here: the
- * frame's inner fill spans the box exactly, so a second node would only add a
- * rounding seam.
- *
- * An open-menu backend has no single model — its named Agents each pick their own
- * — so the box counts the ticked menu instead of inventing a headline model.
- */
-const ModelBox: React.FC<{ agent: AgentSupply; sources: Source[] }> = ({ agent, sources }) => {
-  const { t } = useTranslation();
-  const label =
-    agent.menu_kind === 'open' && agent.menu
-      ? (t('settings.models.agents.modelCount', { count: agent.menu.checked.length }) as string)
-      : friendlyModelName(agent, sources);
-  if (!label) return null;
-  return (
-    <span className="inline-flex min-w-0 shrink-0 rounded-lg border border-border bg-foreground/[0.03] px-[9px] py-1">
-      <span className="truncate font-mono text-[11.5px] font-semibold text-foreground">{label}</span>
-    </span>
-  );
-};
+const sourceName = (sources: Source[], sourceId: string): string =>
+  sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
 
-const CHIP_TONE: Record<ChainChip['tone'], string> = {
-  // 当前 — the position the resolver is on.
-  current: 'border-mint/40 bg-mint-soft',
-  // Already walked past, and unhealthy: the reason the resolver moved on.
-  skipped: 'border-border bg-foreground/[0.02] opacity-75',
-  neutral: 'border-border bg-foreground/[0.02]',
-};
+const runnableHead = (read: ModelChainRead | undefined): AgentChainLink | null =>
+  read?.kind === 'ready' ? read.chain.chain.find((link) => link.runnable) ?? null : null;
 
-const Chip: React.FC<{ chip: ChainChip }> = ({ chip }) => (
-  <span
-    className={cn(
-      'inline-flex min-w-0 items-center gap-[3px] rounded-md border px-1.5 py-0.5 sm:gap-[5px] sm:px-2 sm:py-[3px]',
-      CHIP_TONE[chip.tone],
-    )}
-  >
-    <span
-      className={cn(
-        'font-mono text-[10px] font-bold sm:text-[10.5px]',
-        chip.tone === 'current' ? 'text-mint' : 'text-muted',
-      )}
-    >
-      {chip.position}
-    </span>
-    <span
-      className={cn(
-        'truncate text-[10px] font-semibold sm:text-[11px]',
-        chip.tone === 'current' ? 'text-mint' : chip.tone === 'skipped' ? 'text-muted' : 'text-foreground',
-      )}
-    >
-      {chip.label}
-    </span>
-    {/* Gold dot = this source cannot serve right now. It rides the chip even when
-        the resolver has not reached it yet, which is the row's early warning: the
-        next failover will skip this position too.
-
-        Muted dot = the same skip for a reason nobody can act on from this page: the
-        source is healthy and on the route, this process just cannot sign the
-        backend's CLI in with it. A second HUE on the one dot, not a second dot — a
-        position is stepped over for one reason at a time, and 10px of chip has no
-        room to argue. Which is also why neither dot carries its own label: the gold
-        one is named by the source row's state chip and the muted one by
-        `order.nativeUnavailable` in the order drawer, the two places the user goes
-        to do something about it. */}
-    {(chip.unhealthy || chip.unavailable) && (
-      <span
-        className={cn('size-1 shrink-0 rounded-full sm:size-[5px]', chip.unhealthy ? 'bg-gold' : 'bg-muted')}
-        aria-hidden
-      />
-    )}
-  </span>
-);
-
-/** The numbered fallback path: 1 → 2 → 3, in this backend's own order. Wraps on a
- *  phone (M01 gives it its own full-width line); one line on desktop, where the
- *  frame reads left-to-right as a single path and a mid-chain break would suggest
- *  two of them — long names truncate inside their chip instead. */
-const SupplyChain: React.FC<{ chips: ChainChip[] }> = ({ chips }) => (
-  <span className="flex min-w-0 flex-wrap items-center gap-[3px] sm:flex-nowrap sm:gap-2">
-    {chips.map((chip, i) => (
-      <React.Fragment key={chip.sourceId}>
-        {i > 0 && <ChevronRight className="size-[9px] shrink-0 text-muted opacity-50 sm:size-[11px]" aria-hidden />}
-        <Chip chip={chip} />
-      </React.Fragment>
-    ))}
-  </span>
-);
-
-/** 跟随推荐 (cyan) / 自定义 (neutral) — whether the chain above is the server's
- *  recommendation, which absorbs newly added sources, or a frozen hand-picked
- *  subset the server will never touch. */
-const PolicyBadge: React.FC<{ agent: AgentSupply; className?: string }> = ({ agent, className }) => {
-  const { t } = useTranslation();
-  const follow = agent.sources?.policy === 'follow';
-  return (
-    <Badge
-      variant={follow ? 'info' : 'secondary'}
-      className={cn(
-        'shrink-0 px-2 py-[3px] text-[10px] font-semibold sm:px-[9px] sm:text-[10.5px]',
-        !follow && 'bg-foreground/[0.02]',
-        className,
-      )}
-    >
-      {t(`settings.models.agents.policy.${follow ? 'follow' : 'custom'}`)}
-    </Badge>
-  );
-};
-
-/**
- * AC-9: name WHO a supply problem is about, from the server's per-Agent
- * projection.
- *
- * Deliberately one line under the chain rather than a badge on it: a failure can
- * hit a named Agent, or only a ticked-but-unassigned menu model, and those two
- * cannot share a slot. A ticked model nobody runs is named WITHOUT an Agent —
- * saying 「Agent X 受影响」 there would be false, which is exactly the half of
- * AC-9 that a per-backend rollup gets wrong.
- */
-const AttributionLine: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
-  const { t, i18n } = useTranslation();
-  const a = attribution(agent);
-  if (!hasAttribution(a)) return null;
-  // Names come from the payload, so the punctuation between them has to come from
-  // the reader's locale rather than from this file — see `formatNameList`.
-  const list = (names: string[]) => formatNameList(names, i18n.language);
-  const parts: string[] = [];
-  if (a.interrupted.length > 0) {
-    parts.push(t('settings.models.agents.attribution.interrupted', { names: list(a.interrupted) }) as string);
+const blockedRepair = (
+  read: ModelChainRead | undefined,
+  sources: Source[],
+): { source: Source; kind: RepairKind } | null => {
+  if (read?.kind !== 'ready') return null;
+  for (const link of read.chain.chain) {
+    const source = sources.find((candidate) => candidate.id === link.source_id);
+    if (!source) continue;
+    const kind = repairAction(source);
+    if (kind) return { source, kind };
   }
-  if (a.waiting.length > 0) {
-    parts.push(t('settings.models.agents.attribution.waiting', { names: list(a.waiting) }) as string);
-  }
-  if (a.unassignedModels.length > 0) {
-    parts.push(t('settings.models.agents.attribution.unassigned', { models: list(a.unassignedModels) }) as string);
-  }
-  return <span className="text-[11px] leading-relaxed text-gold sm:text-[11.5px]">{parts.join(' · ')}</span>;
+  return null;
 };
 
-const AgentRow: React.FC<{
+const isRaisedRepair = (kind: RepairKind): kind is RaisedRepair => kind !== 'retest';
+
+const ModelProbe: React.FC<{
   agent: AgentSupply;
+  modelId: string;
   sources: Source[];
-  onConnectHub: (agent: AgentSupply) => void;
-  onOpenOrder: (agent: AgentSupply) => void;
-  connecting: boolean;
-}> = ({ agent, sources, onConnectHub, onOpenOrder, connecting }) => {
+  disabled?: boolean;
+  onSettled: () => void;
+}> = ({ agent, modelId, sources, disabled, onSettled }) => {
   const { t } = useTranslation();
-  const { Icon, accent } = backendVisual(agent.backend);
-  const hub = agent.mode === 'hub';
-  const chips = chainChips(agent, sources);
+  const [running, setRunning] = React.useState(false);
+  const [outcome, setOutcome] = React.useState<DryRunOutcome | null>(null);
+  const [errorReason, setErrorReason] = React.useState<{ key: string | null } | null>(null);
+  const seq = React.useRef(0);
 
-  const action = hub ? (
-    <Button
-      variant="secondary"
-      className="h-[41px] w-full gap-1.5 rounded-[10px] bg-foreground/[0.02] text-[13px] font-semibold text-foreground sm:h-[31px] sm:w-28 sm:gap-[5px] sm:text-[12px]"
-      onClick={() => onOpenOrder(agent)}
-    >
-      <ArrowDownUp className="size-[15px] text-muted sm:hidden" />
-      {t('settings.models.agents.sourceOrder')}
-      <ChevronRight className="hidden size-[13px] text-muted sm:inline-block" />
-    </Button>
-  ) : (
-    <Button
-      variant="secondary"
-      className="h-[41px] w-full gap-1.5 rounded-[10px] border-mint/40 bg-mint-soft text-[13px] font-semibold text-mint hover:bg-mint-soft/70 sm:h-[31px] sm:w-28 sm:gap-[5px] sm:text-[12px]"
-      onClick={() => onConnectHub(agent)}
-      disabled={connecting}
-    >
-      {/* The frames use two glyphs for one action: `zap` on mobile, where it
-          echoes the 中枢 Hub pill it is offering to become, and `download` on
-          desktop, where the pill is already visible in its own column. */}
-      <Zap className="size-[15px] sm:hidden" />
-      <Download className="hidden size-[13px] sm:inline-block" />
-      {t('settings.models.agents.connectHub')}
-    </Button>
-  );
+  React.useEffect(() => {
+    seq.current += 1;
+    setRunning(false);
+    setOutcome(null);
+    setErrorReason(null);
+  }, [agent.backend, modelId, agent.sources?.policy, agent.sources?.order, agent.mappings]);
+
+  const run = async () => {
+    if (agent.mode !== 'hub' || running || disabled) return;
+    const mine = ++seq.current;
+    setRunning(true);
+    setOutcome(null);
+    setErrorReason(null);
+    try {
+      const probe = await modelsApi.probeAgent(agent.backend, modelId);
+      const arrival = probeArrival({ kind: 'result', probe }, seq.current === mine);
+      if (arrival.report) setOutcome(dryRunOutcome(probe, sources));
+      if (arrival.reread) onSettled();
+    } catch (error) {
+      const failure = apiFailure(error);
+      const arrival = probeArrival(
+        {
+          kind: 'thrown',
+          code: failure?.code ?? null,
+          serverNamed: failure?.serverNamed ?? false,
+        },
+        seq.current === mine,
+      );
+      if (arrival.report) setErrorReason({ key: failure?.detail ?? null });
+      if (arrival.reread) onSettled();
+    } finally {
+      if (seq.current === mine) setRunning(false);
+    }
+  };
+
+  const result = outcome
+    ? outcome.kind === 'ok'
+      ? outcome.channel === 'native_cli'
+        ? t('settings.models.probe.nativeReady', { source: outcome.sourceName }) as string
+        : t('settings.models.probe.hubOk', {
+            source: outcome.sourceName,
+            ms: outcome.latencyMs,
+          }) as string
+      : t('settings.models.probe.failed', {
+          source: outcome.sourceName,
+          detail: serverText(t, outcome.detailKey, 'settings.models.probe.unknown'),
+        }) as string
+    : errorReason
+      ? serverText(t, errorReason.key, 'settings.models.probe.error')
+      : null;
 
   return (
-    // A grid, not nested flex rows: the frames disagree about the supply block's
-    // parent — desktop nests it under the name (indented past the icon tile),
-    // mobile spans it across the full row width — and flex cannot re-parent
-    // between breakpoints. Grid places the same single element in both, so there
-    // is no double mount and no duplicated a11y tree.
-    //
-    //   mobile   [tile] [name ......] [mode]     desktop  [tile] [name .....] [mode] [action]
-    //            [supply ...........  ......]             [tile] [supply ...] [mode] [action]
-    //            [action ...........  ......]
-    <div
-      className={cn(
-        'grid grid-cols-[34px_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-2.5 border-b border-border px-3.5 py-3.5 last:border-b-0',
-        'sm:grid-cols-[34px_minmax(0,1fr)_auto_auto] sm:gap-x-3.5 sm:gap-y-1.5 sm:px-5 sm:py-[13px]',
-      )}
-    >
-      <span
-        className={cn(
-          'col-start-1 row-start-1 flex size-[34px] items-center justify-center rounded-[10px] sm:row-span-2 sm:self-center',
-          ACCENT_TILE[accent],
-        )}
+    <div className="flex flex-col items-start gap-2 sm:items-end">
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-9"
+        onClick={() => void run()}
+        disabled={agent.mode !== 'hub' || disabled || running}
       >
-        <Icon className={cn('size-4', ACCENT_ICON[accent])} />
-      </span>
+        {running ? <Loader2 className="animate-spin" /> : <Zap />}
+        {t(running ? 'settings.models.probe.running' : 'settings.models.probe.action')}
+      </Button>
+      {result && (
+        <p className={cn('max-w-sm text-[11.5px] leading-relaxed', outcome?.kind === 'ok' ? 'text-mint' : 'text-gold')}>
+          {result}
+        </p>
+      )}
+    </div>
+  );
+};
 
-      <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-2">
-        <span className="truncate text-[14px] font-bold text-foreground sm:text-[13.5px] sm:font-semibold">
-          {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
-        </span>
-        <MenuKindBadge agent={agent} />
-      </span>
+const RoutePanel: React.FC<{
+  agent: AgentSupply;
+  modelId: string;
+  sources: Source[];
+  read: ModelChainRead | undefined;
+  pending: boolean;
+  onSetRoute: (backend: AgentBackend, modelId: string, targetModelId: string | null) => void;
+  onAddModel: () => void;
+  onProbeSettled: () => void;
+}> = ({ agent, modelId, sources, read, pending, onSetRoute, onAddModel, onProbeSettled }) => {
+  const { t } = useTranslation();
+  const stored = agent.mappings?.find((mapping) => mapping.builtin_id === modelId && mapping.enabled);
+  const storedTarget = stored?.target_model_id ?? null;
+  const [choice, setChoice] = React.useState<'global' | 'manual'>(stored ? 'manual' : 'global');
+  React.useEffect(() => setChoice(storedTarget ? 'manual' : 'global'), [storedTarget]);
+  const backendName = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
 
-      <span className="col-start-3 row-start-1 justify-self-end sm:row-span-2 sm:ml-2 sm:self-center">
-        <ModeChip mode={agent.mode} />
-      </span>
+  const head = runnableHead(read);
+  const actualSource = head ? sourceName(sources, head.source_id) : null;
+  const actualTarget = head?.resolved_model_id && head.resolved_model_id !== modelId ? head.resolved_model_id : null;
 
-      {/* Supply — row 2, full-width on mobile, under the name on desktop. Direct
-          mode has no chain to draw, so it says why instead (mobile only: the
-          desktop row is a single line in the frame, where a sentence has nowhere
-          to sit beside the 接入中枢 button). */}
-      <span className="col-span-3 row-start-2 flex min-w-0 flex-col gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-2 sm:gap-1">
-        {hub ? (
-          <>
-            {/* One line in the frame: 模型 · 链路 · 策略. Mobile (M01) breaks it
-                after 策略 and gives the chain its own line, so the badge takes an
-                explicit order rather than trailing the chain into the wrap. */}
-            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 sm:flex-nowrap">
-              <ModelBox agent={agent} sources={sources} />
-              <PolicyBadge agent={agent} className="order-2 sm:order-3" />
-              {chips.length > 0 ? (
-                <span className="order-3 flex w-full min-w-0 items-center sm:order-2 sm:w-auto">
-                  <SupplyChain chips={chips} />
-                </span>
-              ) : (
-                // Hub is selected but this backend has no enabled source at all.
-                // There is no silent Direct fallback to reassure anyone with:
-                // `model_hub.resolve()` only returns a Direct launch when the
-                // backend's own `mode` is direct, so here it hits `source is None`
-                // and raises `mapping_target_unavailable` — the turn fails. Say
-                // that, in the same word the rollup uses (供给中断 / interrupted).
-                <span className="order-3 flex w-full items-center gap-1.5 text-[11.5px] font-medium text-gold sm:order-2 sm:w-auto">
-                  <TriangleAlert className="size-3.5 shrink-0" />
-                  {t('settings.models.agents.hubNoSupply')}
-                </span>
-              )}
+  return (
+    <div className="grid gap-4 border-t border-border bg-foreground/[0.015] px-4 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:px-5">
+      <div className="min-w-0 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[12px] font-semibold text-foreground">{t('settings.models.routes.title')}</span>
+          {actualSource && (
+            <span className="truncate text-[11.5px] text-muted">
+              {t('settings.models.routes.liveSource', {
+                source: actualSource,
+                model: actualTarget ?? modelId,
+              })}
             </span>
-            <AttributionLine agent={agent} />
+          )}
+        </div>
+
+        {agent.menu_kind === 'fixed' ? (
+          <>
+            <SegmentedRadio
+              value={choice}
+              onChange={(next) => {
+                if (next === 'global' && stored) onSetRoute(agent.backend, modelId, null);
+                else setChoice(next);
+              }}
+              options={[
+                { id: 'global', label: t('settings.models.routes.global', { backend: backendName }) as string },
+                { id: 'manual', label: t('settings.models.routes.manual') as string },
+              ]}
+              ariaLabel={t('settings.models.routes.title') as string}
+              disabled={pending}
+            />
+            {choice === 'global' ? (
+              <p className="text-[11.5px] leading-relaxed text-muted">
+                {stored
+                  ? t('settings.models.routes.globalPending', { backend: backendName })
+                  : actualSource
+                    ? t('settings.models.routes.globalActual', { backend: backendName, source: actualSource })
+                    : t('settings.models.routes.globalUnavailable', { backend: backendName })}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <ModelRoutePicker
+                  agent={agent}
+                  sources={sources}
+                  value={stored?.target_model_id ?? ''}
+                  servedBy={actualSource}
+                  disabled={pending}
+                  onChange={(targetModelId) => onSetRoute(agent.backend, modelId, targetModelId)}
+                  onAddModel={onAddModel}
+                />
+                <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-gold">
+                  <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+                  {t('settings.models.routes.compatibility')}
+                </p>
+              </div>
+            )}
           </>
         ) : (
-          <span className="text-[11.5px] leading-relaxed text-muted sm:hidden">
-            {t('settings.models.agents.directNote')}
-          </span>
+          <p className="rounded-lg border border-border bg-background px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
+            {t('settings.models.routes.openMenuGlobal', {
+              backend: backendName,
+              source: actualSource ?? t('settings.models.routes.none'),
+            })}
+          </p>
         )}
-      </span>
+      </div>
 
-      <span className="col-span-3 row-start-3 sm:col-span-1 sm:col-start-4 sm:row-start-1 sm:row-span-2 sm:self-center">
-        {action}
-      </span>
+      <ModelProbe
+        agent={agent}
+        modelId={modelId}
+        sources={sources}
+        disabled={pending}
+        onSettled={onProbeSettled}
+      />
     </div>
+  );
+};
+
+const ModelRow: React.FC<{
+  agent: AgentSupply;
+  modelId: string;
+  sources: Source[];
+  read: ModelChainRead | undefined;
+  runtime: RuntimeDependency | null;
+  pending: boolean;
+  onSetRoute: (backend: AgentBackend, modelId: string, targetModelId: string | null) => void;
+  onAddModel: () => void;
+  onOpenOrder: () => void;
+  onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
+  onProbeSettled: () => void;
+}> = ({
+  agent,
+  modelId,
+  sources,
+  read,
+  runtime,
+  pending,
+  onSetRoute,
+  onAddModel,
+  onOpenOrder,
+  onRepair,
+  onRetest,
+  retestingSourceId,
+  onProbeSettled,
+}) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = React.useState(false);
+  const configurable = agent.mode === 'hub';
+  const current = agent.selected_model_id === modelId;
+  const head = runnableHead(read);
+  const headIndex = read?.kind === 'ready' && head ? read.chain.chain.indexOf(head) : -1;
+  const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
+  const needsAttention = modelNeedsAttention(agent, modelId, read, runtime);
+  const recoversAutomatically = read?.kind === 'ready' && read.chain.supply_state === 'waiting';
+  const needsAction = needsAttention && !recoversAutomatically;
+  const nativeProcessBlock = read?.kind === 'ready' && read.chain.supply_state === 'interrupted'
+    ? read.chain.chain.find((link) => link.reason === 'native_cli_unavailable') ?? null
+    : null;
+  const needsOrderEnrollment = agent.menu_kind === 'open'
+    && read?.kind === 'ready'
+    && read.chain.supply_state === 'interrupted'
+    && modelHasOffOrderSupplier(agent, sources, modelId);
+  const repair = blockedRepair(read, sources);
+  const raisedRepair = repair && isRaisedRepair(repair.kind)
+    ? { source: repair.source, kind: repair.kind }
+    : null;
+  const structuralEmpty =
+    read?.kind === 'ready'
+      ? read.chain.chain.length === 0
+      : agent.model_supply?.find((model) => model.model_id === modelId)?.chain_length === 0;
+
+  let tone: ModelTone = 'neutral';
+  let status = t('settings.models.modelStatus.checking') as string;
+  let detail = '';
+  if (agent.mode === 'direct') {
+    status = t('settings.models.modelStatus.direct') as string;
+  } else if (read?.kind === 'ready' && read.chain.supply_state === 'waiting') {
+    tone = 'cooldown';
+    status = t('settings.models.modelStatus.cooldown') as string;
+    const waiting = read.chain.chain[0];
+    if (waiting) detail = sourceName(sources, waiting.source_id);
+  } else if (runtimeBlocked) {
+    tone = 'attention';
+    status = t('settings.models.modelStatus.needsAction') as string;
+    detail = t('settings.models.modelStatus.runtime') as string;
+  } else if (nativeProcessBlock) {
+    tone = 'attention';
+    status = t('settings.models.modelStatus.needsAction') as string;
+    detail = t('models.probe.native_cli_unavailable') as string;
+  } else if (needsAction) {
+    tone = 'attention';
+    status = t('settings.models.modelStatus.needsAction') as string;
+    detail = read?.kind === 'error'
+      ? t('settings.models.modelStatus.unknown') as string
+      : structuralEmpty
+        ? t('settings.models.modelStatus.noSource') as string
+        : t('settings.models.modelStatus.blocked') as string;
+  } else if (head) {
+    tone = 'ok';
+    status = t('settings.models.modelStatus.ok') as string;
+    const serving = sourceName(sources, head.source_id);
+    detail = t(
+      current
+        ? headIndex > 0
+          ? 'settings.models.modelStatus.currentSwitched'
+          : 'settings.models.modelStatus.currentSource'
+        : 'settings.models.modelStatus.source',
+      { source: serving },
+    ) as string;
+  } else if (read?.kind === 'error') {
+    status = t('settings.models.modelStatus.unknown') as string;
+  }
+
+  const action = needsAction ? (
+    read?.kind === 'error' ? (
+      <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onProbeSettled}>
+        {t('settings.models.modelStatus.retry')}
+      </Button>
+    ) : runtimeBlocked ? (
+      <Button asChild variant="outline" size="xs" className="h-7 shrink-0">
+        <Link to="/admin/settings/dependencies">{t('settings.models.modelStatus.runtimeAction')}</Link>
+      </Button>
+    ) : nativeProcessBlock ? (
+      <Button asChild variant="outline" size="xs" className="h-7 shrink-0">
+        <Link to={`/admin/settings/backends/${agent.backend}`}>{t('settings.models.modelStatus.runtimeAction')}</Link>
+      </Button>
+    ) : repair?.kind === 'retest' ? (
+      <Button
+        variant="outline"
+        size="xs"
+        className="h-7 shrink-0"
+        onClick={() => onRetest(repair.source)}
+        disabled={retestingSourceId !== null}
+      >
+        {retestingSourceId === repair.source.id && <Loader2 className="animate-spin" />}
+        {t(REPAIR_LABEL_KEY.retest)}
+      </Button>
+    ) : raisedRepair ? (
+      <Button
+        variant="outline"
+        size="xs"
+        className="h-7 shrink-0"
+        onClick={() => onRepair(raisedRepair.source, raisedRepair.kind)}
+      >
+        {t(REPAIR_LABEL_KEY[raisedRepair.kind])}
+      </Button>
+    ) : needsOrderEnrollment ? (
+      <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onOpenOrder} disabled={pending}>
+        <ArrowDownUp />
+        {t('settings.models.agents.sourceOrder')}
+      </Button>
+    ) : agent.menu_kind === 'open' ? (
+      <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onAddModel}>
+        <Plus />
+        {t('settings.models.sources.addModel')}
+      </Button>
+    ) : (
+      <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={() => setExpanded(true)}>
+        {t('settings.models.routes.manual')}
+      </Button>
+    )
+  ) : null;
+
+  return (
+    <div className={cn('border-b border-border last:border-b-0', current && 'bg-mint-soft/35')} data-model-issue={needsAttention || undefined}>
+      <div className="group grid min-w-0 grid-cols-[minmax(0,1fr)] items-center gap-3 px-4 py-3 sm:grid-cols-[minmax(180px,0.9fr)_minmax(260px,1.4fr)_auto] sm:px-5">
+        <button
+          type="button"
+          onClick={() => configurable && setExpanded((value) => !value)}
+          className="min-w-0 text-left"
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-mono text-[12.5px] font-semibold text-foreground">{modelId}</span>
+            {current && (
+              <Badge variant="success" className="shrink-0 px-1.5 py-0 text-[9.5px]">
+                {t('settings.models.current')}
+              </Badge>
+            )}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => configurable && setExpanded((value) => !value)}
+          className="col-start-1 row-start-2 flex min-w-0 items-center gap-2 text-left sm:col-start-2 sm:row-start-1"
+        >
+          <span className={cn('size-2 shrink-0 rounded-full', TONE_DOT[tone])} aria-hidden />
+          <span className={cn('shrink-0 text-[11.5px] font-semibold', tone === 'attention' ? 'text-destructive' : tone === 'ok' ? 'text-mint' : 'text-muted')}>
+            {status}
+          </span>
+          {detail && <span className="min-w-0 truncate text-[11.5px] text-muted">· {detail}</span>}
+        </button>
+
+        <div className="col-start-1 row-start-3 flex min-w-0 items-center justify-end gap-1.5 sm:col-start-3 sm:row-start-1">
+          {action}
+          {configurable && (
+            <button
+              type="button"
+              aria-label={t('settings.models.routes.expand') as string}
+              onClick={() => setExpanded((value) => !value)}
+              className={cn(
+                'hidden size-8 items-center justify-center rounded-md text-muted transition hover:bg-surface-2 hover:text-foreground sm:flex',
+                expanded ? 'opacity-100' : 'opacity-60 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100',
+              )}
+            >
+              {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+            </button>
+          )}
+        </div>
+      </div>
+      {configurable && expanded && (
+        <RoutePanel
+          agent={agent}
+          modelId={modelId}
+          sources={sources}
+          read={read}
+          pending={pending}
+          onSetRoute={onSetRoute}
+          onAddModel={onAddModel}
+          onProbeSettled={onProbeSettled}
+        />
+      )}
+    </div>
+  );
+};
+
+const EmptySelectionRow: React.FC<{
+  agent: AgentSupply;
+  pending: boolean;
+  onOpenModels: (agent: AgentSupply) => void;
+}> = ({
+  agent,
+  pending,
+  onOpenModels,
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/[0.035] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5" data-model-issue>
+      <span className="flex min-w-0 items-start gap-2.5">
+        <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+        <span>
+          <span className="block text-[12.5px] font-semibold text-foreground">{t('settings.models.emptySelection.title')}</span>
+          <span className="mt-0.5 block text-[11.5px] text-muted">{t('settings.models.emptySelection.body')}</span>
+        </span>
+      </span>
+      {agent.menu_kind === 'open' ? (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 shrink-0"
+          onClick={() => onOpenModels(agent)}
+          disabled={pending}
+        >
+          {t('settings.models.emptySelection.action')}
+        </Button>
+      ) : (
+        <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
+          <Link to="/agents">{t('settings.models.emptySelection.action')}</Link>
+        </Button>
+      )}
+    </div>
+  );
+};
+
+const AgentModelCard: React.FC<{
+  agent: AgentSupply;
+  sources: Source[];
+  chains: ModelChainIndex;
+  runtime: RuntimeDependency | null;
+  issuesOnly: boolean;
+  pending: boolean;
+  connecting: boolean;
+  onConnectHub: (agent: AgentSupply) => void;
+  onOpenOrder: (agent: AgentSupply) => void;
+  onOpenModels: (agent: AgentSupply) => void;
+  onSetRoute: (
+    backend: AgentBackend,
+    modelId: string,
+    targetModelId: string | null,
+    onCommitted: (before: AgentSupply, after: AgentSupply) => void,
+  ) => void;
+  onAddModel: (backend: AgentBackend) => void;
+  onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
+  onProbeSettled: () => void;
+}> = (props) => {
+  const { t } = useTranslation();
+  const { agent, sources, chains, runtime, issuesOnly } = props;
+  const announceEnrollment = useAnnounceEnrollment(agent.backend, sources);
+  const { Icon, accent } = backendVisual(agent.backend);
+  const allModels = listedModelIds(agent);
+  const models = issuesOnly
+    ? allModels.filter((modelId) => modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime))
+    : allModels;
+  const emptySelection = agentNeedsModelSelection(agent);
+  if (issuesOnly && !emptySelection && models.length === 0) return null;
+
+  return (
+    <section className="overflow-hidden rounded-xl border border-border bg-background">
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
+            <Icon className={cn('size-[18px]', ACCENT_ICON[accent])} />
+          </span>
+          <span className="min-w-0">
+            <span className="flex items-center gap-2">
+              <h2 className="truncate text-[14px] font-bold text-foreground">
+                {t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}
+              </h2>
+              {agent.mode === 'direct' && (
+                <Badge variant="secondary" className="px-2 py-0 text-[10px]">
+                  {t('settings.models.modelStatus.direct')}
+                </Badge>
+              )}
+            </span>
+            <span className="mt-0.5 block text-[11.5px] text-muted">
+              {t('settings.models.agents.modelListCount', { count: allModels.length })}
+            </span>
+          </span>
+        </div>
+
+        {agent.mode === 'hub' ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-9 shrink-0"
+            onClick={() => props.onOpenOrder(agent)}
+            disabled={props.pending}
+          >
+            <ArrowDownUp />
+            {t('settings.models.agents.sourceOrder')}
+          </Button>
+        ) : (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-9 shrink-0"
+            onClick={() => props.onConnectHub(agent)}
+            disabled={props.connecting}
+          >
+            <Settings2 />
+            {t('settings.models.agents.enableManaged')}
+          </Button>
+        )}
+      </div>
+
+      {emptySelection && (
+        <EmptySelectionRow agent={agent} pending={props.pending} onOpenModels={props.onOpenModels} />
+      )}
+
+      {models.length === 0 && !emptySelection ? (
+        <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">
+          <p className="text-[12.5px] text-muted">{t('settings.models.agents.emptyModels')}</p>
+          {agent.menu_kind === 'open' ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9"
+              onClick={() => props.onOpenModels(agent)}
+              disabled={props.pending}
+            >
+              <Plus />
+              {t('settings.models.emptySelection.action')}
+            </Button>
+          ) : (
+            <Button asChild variant="outline" size="sm" className="h-9">
+              <Link to="/agents">
+                <Plus />
+                {t('settings.models.emptySelection.action')}
+              </Link>
+            </Button>
+          )}
+        </div>
+      ) : (
+        models.map((modelId) => (
+          <ModelRow
+            key={modelId}
+            agent={agent}
+            modelId={modelId}
+            sources={sources}
+            read={chains[modelChainKey(agent.backend, modelId)]}
+            runtime={runtime}
+            pending={props.pending}
+            onSetRoute={(backend, modelId, targetModelId) =>
+              props.onSetRoute(backend, modelId, targetModelId, announceEnrollment)
+            }
+            onAddModel={() => props.onAddModel(agent.backend)}
+            onOpenOrder={() => props.onOpenOrder(agent)}
+            onRepair={props.onRepair}
+            onRetest={props.onRetest}
+            retestingSourceId={props.retestingSourceId}
+            onProbeSettled={props.onProbeSettled}
+          />
+        ))
+      )}
+
+      {agent.menu_kind === 'open' && !issuesOnly && (
+        <button
+          type="button"
+          onClick={() => props.onOpenModels(agent)}
+          disabled={props.pending}
+          className="flex min-h-11 w-full items-center justify-center gap-2 border-t border-border px-4 py-2.5 text-[12px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted"
+        >
+          <Settings2 className="size-3.5" />
+          {t('settings.models.agents.manageModels')}
+        </button>
+      )}
+    </section>
   );
 };
 
 export const AgentCard: React.FC<{
   agents: AgentSupply[];
   sources: Source[];
+  chains: ModelChainIndex;
+  runtime: RuntimeDependency | null;
+  issuesOnly: boolean;
+  pendingBackends: ReadonlySet<string>;
   onConnectHub: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
+  onOpenModels: (agent: AgentSupply) => void;
+  onSetRoute: (
+    backend: AgentBackend,
+    modelId: string,
+    targetModelId: string | null,
+    onCommitted: (before: AgentSupply, after: AgentSupply) => void,
+  ) => void;
+  onAddModel: (backend: AgentBackend) => void;
+  onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
+  onProbeSettled: () => void;
   connectingBackend: string | null;
-}> = ({ agents, sources, onConnectHub, onOpenOrder, connectingBackend }) => {
+}> = ({ agents, ...props }) => {
   const { t } = useTranslation();
   return (
-    <section className="rounded-xl border border-border bg-background">
-      <div className="flex items-start justify-between gap-4 border-b border-border px-3.5 py-3.5 sm:px-5 sm:py-4">
-        <div className="flex min-w-0 flex-col gap-[3px]">
-          <h2 className="text-[15px] font-bold text-foreground">{t('settings.models.agents.title')}</h2>
-          <p className="text-[11.5px] leading-relaxed text-muted sm:text-[12px]">
-            {t('settings.models.agents.subtitle')}
-          </p>
+    <div className="flex flex-col gap-4">
+      {agents.map((agent) => (
+        <AgentModelCard
+          key={agent.backend}
+          agent={agent}
+          {...props}
+          pending={props.pendingBackends.has(agent.backend)}
+          connecting={props.connectingBackend === agent.backend}
+        />
+      ))}
+      {props.issuesOnly && !agents.some((agent) => {
+        if (agentNeedsModelSelection(agent)) return true;
+        return listedModelIds(agent).some((modelId) =>
+          modelNeedsAttention(agent, modelId, props.chains[modelChainKey(agent.backend, modelId)], props.runtime),
+        );
+      }) && (
+        <div className="rounded-xl border border-border bg-background px-4 py-10 text-center text-[12.5px] text-muted">
+          {t('settings.models.status.noIssues')}
         </div>
-        <Link
-          to="/admin/settings/backends"
-          className="inline-flex min-h-10 shrink-0 items-center gap-1 text-[12px] font-semibold text-cyan transition-colors hover:text-cyan/80 sm:min-h-0 sm:text-[12.5px]"
-        >
-          {t('settings.models.agents.backendSettings')}
-          <ArrowRight className="size-3.5" />
-        </Link>
-      </div>
-      <div className="flex flex-col">
-        {agents.map((agent) => (
-          <AgentRow
-            key={agent.backend}
-            agent={agent}
-            sources={sources}
-            onConnectHub={onConnectHub}
-            onOpenOrder={onOpenOrder}
-            connecting={connectingBackend === agent.backend}
-          />
-        ))}
-      </div>
-    </section>
+      )}
+    </div>
   );
 };
