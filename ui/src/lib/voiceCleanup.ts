@@ -67,15 +67,32 @@ const MENTION_AT_END = /[@#]<([^>\n]+)>$/u;
 const LEADING_SENTENCE_PUNCTUATION = /^[.,!?:;…，。！？：；、](?:\s|$)/u;
 const LEADING_OUTER_BOUNDARY = /^[\p{P}\p{S}]+/u;
 const TRAILING_OUTER_BOUNDARY = /[\p{P}\p{S}]+$/u;
+const LEADING_WORD_GRAPHEME = /^[\p{L}\p{N}_]\p{M}*/u;
+const TRAILING_WORD_GRAPHEME = /[\p{L}\p{N}_]\p{M}*$/u;
+const OPENING_DELIMITER = /^[\p{Ps}\p{Pi}]$/u;
+const SYMMETRIC_DELIMITER = /^["'`]$/u;
 
 const edgeCharacter = (text: string, side: 'start' | 'end'): string => {
+  const wordGrapheme = side === 'start'
+    ? text.match(LEADING_WORD_GRAPHEME)
+    : text.match(TRAILING_WORD_GRAPHEME);
+  if (wordGrapheme) return wordGrapheme[0];
   const characters = Array.from(text);
   return side === 'start' ? (characters[0] ?? '') : (characters.at(-1) ?? '');
+};
+
+const endsWithOpeningDelimiter = (text: string): boolean => {
+  const characters = Array.from(text);
+  const delimiter = characters.at(-1) ?? '';
+  if (OPENING_DELIMITER.test(delimiter)) return true;
+  if (!SYMMETRIC_DELIMITER.test(delimiter)) return false;
+  return !TRAILING_WORD_GRAPHEME.test(characters.slice(0, -1).join(''));
 };
 
 const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
   const directMention = side === 'start' ? text.match(MENTION_AT_START) : text.match(MENTION_AT_END);
   if (directMention) return edgeCharacter(directMention[1], side);
+  if (side === 'end' && endsWithOpeningDelimiter(text)) return edgeCharacter(text, side);
   const boundaryText = side === 'start'
     ? (LEADING_SENTENCE_PUNCTUATION.test(text) ? text : text.replace(LEADING_OUTER_BOUNDARY, ''))
     : text.replace(TRAILING_OUTER_BOUNDARY, '');

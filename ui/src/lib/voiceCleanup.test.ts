@@ -88,6 +88,34 @@ describe('voice cleanup', () => {
     );
   });
 
+  it('treats combining marks as part of boundary words', () => {
+    const afterNfdWord = voiceInsertionSnapshot('cafe\u0301today', 5, 5);
+    const afterArabicWord = voiceInsertionSnapshot('عربي\u0651next', 5, 5);
+    const beforeNfdWord = voiceInsertionSnapshot('Trytoday', 3, 3);
+
+    expect(applyVoiceInsertion(afterNfdWord.text, afterNfdWord, 'notes')).toBe('cafe\u0301 notes today');
+    expect(applyVoiceInsertion(afterArabicWord.text, afterArabicWord, 'notes')).toBe(
+      'عربي\u0651 notes next',
+    );
+    expect(applyVoiceInsertion(beforeNfdWord.text, beforeNfdWord, 'cafe\u0301')).toBe(
+      'Try cafe\u0301 today',
+    );
+  });
+
+  it('preserves adjacency inside paired delimiters', () => {
+    const insideParentheses = voiceInsertionSnapshot('print()', 6, 6);
+    const insideQuotes = voiceInsertionSnapshot('Say ""', 5, 5);
+    const afterClosedQuote = voiceInsertionSnapshot('Say "hi"today', 8, 8);
+
+    expect(applyVoiceInsertion(insideParentheses.text, insideParentheses, 'value')).toBe(
+      'print(value)',
+    );
+    expect(applyVoiceInsertion(insideQuotes.text, insideQuotes, 'hello')).toBe('Say "hello"');
+    expect(applyVoiceInsertion(afterClosedQuote.text, afterClosedQuote, 'again')).toBe(
+      'Say "hi" again today',
+    );
+  });
+
   it('replaces selected token text without introducing spaces', () => {
     const snapshot = voiceInsertionSnapshot('v12beta', 1, 3);
 

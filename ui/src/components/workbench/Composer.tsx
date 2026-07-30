@@ -373,7 +373,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [restoringRecording, setRestoringRecording] = useState(() => (
-    sessionId != null && voiceSessionsById.get(sessionId)?.status === 'recording'
+    sessionId != null
+    && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? '')
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
@@ -502,7 +503,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setAttachments([]);
     setVoiceRetainedSession(null);
     setRestoringRecording(
-      sessionId != null && voiceSessionsById.get(sessionId)?.status === 'recording',
+      sessionId != null
+      && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? ''),
     );
   }, [sessionId]);
 
