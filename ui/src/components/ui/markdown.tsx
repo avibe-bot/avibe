@@ -10,6 +10,7 @@ import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
+import { resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
 import {
   MENTION_LINK_SCHEME,
   linkifyMentions,
@@ -121,6 +122,10 @@ export const Markdown: React.FC<{
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
    *  secret on click. */
   secretRequests?: boolean;
+  /** Agent-reply opt-in: `/abs/path` and `./relative/path` Markdown links open
+   *  in Avibe's Editor. Relative paths resolve from the owning Session workdir. */
+  localFileWorkdir?: string | null;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
   /** The surface can never accept another write (an archived session's transcript).
    *  Narrow by design: it locks the interactive markers this renderer can mint —
    *  today the secret-request cards — and deliberately does NOT touch reads
@@ -134,6 +139,8 @@ export const Markdown: React.FC<{
   softBreaks = false,
   references,
   secretRequests = false,
+  localFileWorkdir,
+  onOpenLocalFile,
   readOnly = false,
 }) => {
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
@@ -170,6 +177,24 @@ export const Markdown: React.FC<{
           return <ChatImage src={url} alt={alt || ''} width={width} height={height} />;
         }
         const label = `🖼 ${alt || url}`;
+        const localFile = interactive && onOpenLocalFile
+          ? resolveLocalFileLink(url, localFileWorkdir)
+          : null;
+        if (localFile) {
+          return (
+            <a
+              href={url}
+              data-local-file-link="true"
+              onClick={(event) => {
+                event.preventDefault();
+                void onOpenLocalFile?.(localFile);
+              }}
+              onAuxClick={(event) => event.preventDefault()}
+            >
+              {label}
+            </a>
+          );
+        }
         return interactive ? (
           <a href={url} target="_blank" rel="noopener noreferrer nofollow">
             {label}
@@ -211,6 +236,24 @@ export const Markdown: React.FC<{
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;
         }
+        const localFile = interactive && onOpenLocalFile
+          ? resolveLocalFileLink(url, localFileWorkdir)
+          : null;
+        if (localFile) {
+          return (
+            <a
+              href={url}
+              data-local-file-link="true"
+              onClick={(event) => {
+                event.preventDefault();
+                void onOpenLocalFile?.(localFile);
+              }}
+              onAuxClick={(event) => event.preventDefault()}
+            >
+              <LinkedImageProvider>{children}</LinkedImageProvider>
+            </a>
+          );
+        }
         if (!interactive) return <span>{children}</span>;
         // Wrap children so a nested ChatImage (``[![](media)](href)``) renders
         // bare — without its own download anchor inside this one.
@@ -244,7 +287,7 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests, readOnly],
+    [interactive, secretRequests, readOnly, localFileWorkdir, onOpenLocalFile],
   );
 
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees

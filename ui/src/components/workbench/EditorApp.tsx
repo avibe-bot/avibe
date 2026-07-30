@@ -407,7 +407,23 @@ export const EditorApp: React.FC<{
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
       if (previewOverlayKind({ kind: 'file', name, size: null })) openPreview(p, name);
-      else openFile(p, name, typeof params?.mtime === 'number' ? params.mtime : null);
+      else {
+        const line = typeof params?.line === 'number' && Number.isInteger(params.line) && params.line > 0
+          ? params.line
+          : null;
+        const column = typeof params?.column === 'number' && Number.isInteger(params.column) && params.column > 0
+          ? params.column
+          : 1;
+        const endColumn = typeof params?.endColumn === 'number' && Number.isInteger(params.endColumn) && params.endColumn >= column
+          ? params.endColumn
+          : column;
+        openFile(
+          p,
+          name,
+          typeof params?.mtime === 'number' ? params.mtime : null,
+          line ? { line, column, endColumn } : undefined,
+        );
+      }
       return;
     }
     const dir = typeof params?.newFileDir === 'string' ? params.newFileDir : null;

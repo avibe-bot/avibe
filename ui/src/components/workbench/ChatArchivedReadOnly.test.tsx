@@ -502,3 +502,29 @@ describe('read-only transcript locks the secret-request cards', () => {
     }
   });
 });
+
+describe('agent-authored local file links', () => {
+  const linkedMessage = (author: 'agent' | 'user'): WorkbenchMessage => ({
+    ...agentWithQuickReplies(),
+    author,
+    type: author === 'agent' ? 'result' : 'user',
+    text: '[open report](./reports/result.md)',
+    content: {},
+  }) as WorkbenchMessage;
+
+  it('opts only Agent replies into the Editor link handler', () => {
+    const props = {
+      session: session({ workdir: '/workspace/project' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+
+    const agent = render(<MessageRow {...props} message={linkedMessage('agent')} />);
+    expect(agent).toContain('data-local-file-link="true"');
+    expect(agent).not.toContain('target="_blank"');
+
+    const user = render(<MessageRow {...props} message={linkedMessage('user')} />);
+    expect(user).not.toContain('data-local-file-link');
+    expect(user).toContain('target="_blank"');
+  });
+});

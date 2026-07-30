@@ -21,16 +21,29 @@ const DESKTOP_QUERY = '(min-width: 768px)';
 // A file handed to the editor when navigating in from the File Browser (mobile) or a direct link.
 // Carried in router state — like the window params `wm.openApp` passes — so absolute paths stay out
 // of the URL; a refresh (no state) just lands on the empty/welcome state.
-type LaunchFile = { path: string; filename: string; mtime: number | null };
+type LaunchFile = {
+  path: string;
+  filename: string;
+  mtime: number | null;
+  line?: number;
+  column?: number;
+  endColumn?: number;
+};
 
 function readLaunch(state: unknown): LaunchFile | null {
   if (!state || typeof state !== 'object') return null;
   const s = state as Record<string, unknown>;
   if (typeof s.path !== 'string') return null;
+  const line = typeof s.line === 'number' && Number.isInteger(s.line) && s.line > 0 ? s.line : undefined;
+  const column = typeof s.column === 'number' && Number.isInteger(s.column) && s.column > 0 ? s.column : 1;
+  const endColumn = typeof s.endColumn === 'number' && Number.isInteger(s.endColumn) && s.endColumn >= column
+    ? s.endColumn
+    : column;
   return {
     path: s.path,
     filename: typeof s.filename === 'string' ? s.filename : s.path.split('/').filter(Boolean).pop() || s.path,
     mtime: typeof s.mtime === 'number' ? s.mtime : null,
+    ...(line ? { line, column, endColumn } : {}),
   };
 }
 
@@ -99,7 +112,7 @@ const DesktopEditor: React.FC<{
       <Suspense fallback={<PaneLoading />}>
         <EditorApp
           onDirtyChange={onDirtyChange}
-          params={launch ? { path: launch.path, filename: launch.filename, mtime: launch.mtime } : undefined}
+          params={launch ?? undefined}
         />
       </Suspense>
     </div>
@@ -144,6 +157,12 @@ const MobileEditor: React.FC<{
           onOpenFile={openAnother}
           headerActions={<EditorFontSizePopover trigger="mobile" />}
           onDirtyChange={onDirtyChange}
+          reveal={file.line ? {
+            line: file.line,
+            column: file.column ?? 1,
+            endColumn: file.endColumn ?? file.column ?? 1,
+            nonce: 0,
+          } : null}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
