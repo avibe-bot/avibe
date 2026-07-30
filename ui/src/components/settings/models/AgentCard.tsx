@@ -33,6 +33,7 @@ import {
   agentNeedsModelSelection,
   listedModelIds,
   modelChainKey,
+  modelHasOffOrderSupplier,
   modelNeedsAction,
   type ModelChainIndex,
   type ModelChainRead,
@@ -172,6 +173,7 @@ const RoutePanel: React.FC<{
   const storedTarget = stored?.target_model_id ?? null;
   const [choice, setChoice] = React.useState<'global' | 'manual'>(stored ? 'manual' : 'global');
   React.useEffect(() => setChoice(storedTarget ? 'manual' : 'global'), [storedTarget]);
+  const backendName = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
 
   const head = runnableHead(read);
   const actualSource = head ? sourceName(sources, head.source_id) : null;
@@ -201,7 +203,7 @@ const RoutePanel: React.FC<{
                 else setChoice(next);
               }}
               options={[
-                { id: 'global', label: t('settings.models.routes.global') as string },
+                { id: 'global', label: t('settings.models.routes.global', { backend: backendName }) as string },
                 { id: 'manual', label: t('settings.models.routes.manual') as string },
               ]}
               ariaLabel={t('settings.models.routes.title') as string}
@@ -210,10 +212,10 @@ const RoutePanel: React.FC<{
             {choice === 'global' ? (
               <p className="text-[11.5px] leading-relaxed text-muted">
                 {stored
-                  ? t('settings.models.routes.globalPending')
+                  ? t('settings.models.routes.globalPending', { backend: backendName })
                   : actualSource
-                    ? t('settings.models.routes.globalActual', { source: actualSource })
-                    : t('settings.models.routes.globalUnavailable')}
+                    ? t('settings.models.routes.globalActual', { backend: backendName, source: actualSource })
+                    : t('settings.models.routes.globalUnavailable', { backend: backendName })}
               </p>
             ) : (
               <div className="space-y-2">
@@ -235,7 +237,10 @@ const RoutePanel: React.FC<{
           </>
         ) : (
           <p className="rounded-lg border border-border bg-background px-3 py-2.5 text-[11.5px] leading-relaxed text-muted">
-            {t('settings.models.routes.openMenuGlobal', { source: actualSource ?? t('settings.models.routes.none') })}
+            {t('settings.models.routes.openMenuGlobal', {
+              backend: backendName,
+              source: actualSource ?? t('settings.models.routes.none'),
+            })}
           </p>
         )}
       </div>
@@ -260,6 +265,7 @@ const ModelRow: React.FC<{
   pending: boolean;
   onSetRoute: (backend: AgentBackend, modelId: string, targetModelId: string | null) => void;
   onAddModel: () => void;
+  onOpenOrder: () => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
   onRetest: (source: Source) => void;
   retestingSourceId: string | null;
@@ -273,6 +279,7 @@ const ModelRow: React.FC<{
   pending,
   onSetRoute,
   onAddModel,
+  onOpenOrder,
   onRepair,
   onRetest,
   retestingSourceId,
@@ -289,6 +296,10 @@ const ModelRow: React.FC<{
   const nativeProcessBlock = read?.kind === 'ready' && read.chain.supply_state === 'interrupted'
     ? read.chain.chain.find((link) => link.reason === 'native_cli_unavailable') ?? null
     : null;
+  const needsOrderEnrollment = agent.menu_kind === 'open'
+    && read?.kind === 'ready'
+    && read.chain.supply_state === 'interrupted'
+    && modelHasOffOrderSupplier(agent, sources, modelId);
   const repair = blockedRepair(read, sources);
   const raisedRepair = repair && isRaisedRepair(repair.kind)
     ? { source: repair.source, kind: repair.kind }
@@ -372,6 +383,11 @@ const ModelRow: React.FC<{
         onClick={() => onRepair(raisedRepair.source, raisedRepair.kind)}
       >
         {t(REPAIR_LABEL_KEY[raisedRepair.kind])}
+      </Button>
+    ) : needsOrderEnrollment ? (
+      <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onOpenOrder} disabled={pending}>
+        <ArrowDownUp />
+        {t('settings.models.agents.sourceOrder')}
       </Button>
     ) : agent.menu_kind === 'open' ? (
       <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onAddModel}>
@@ -503,7 +519,7 @@ const AgentModelCard: React.FC<{
     targetModelId: string | null,
     onCommitted: (before: AgentSupply, after: AgentSupply) => void,
   ) => void;
-  onAddModel: () => void;
+  onAddModel: (backend: AgentBackend) => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
   onRetest: (source: Source) => void;
   retestingSourceId: string | null;
@@ -609,7 +625,8 @@ const AgentModelCard: React.FC<{
             onSetRoute={(backend, modelId, targetModelId) =>
               props.onSetRoute(backend, modelId, targetModelId, announceEnrollment)
             }
-            onAddModel={props.onAddModel}
+            onAddModel={() => props.onAddModel(agent.backend)}
+            onOpenOrder={() => props.onOpenOrder(agent)}
             onRepair={props.onRepair}
             onRetest={props.onRetest}
             retestingSourceId={props.retestingSourceId}
@@ -649,7 +666,7 @@ export const AgentCard: React.FC<{
     targetModelId: string | null,
     onCommitted: (before: AgentSupply, after: AgentSupply) => void,
   ) => void;
-  onAddModel: () => void;
+  onAddModel: (backend: AgentBackend) => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
   onRetest: (source: Source) => void;
   retestingSourceId: string | null;

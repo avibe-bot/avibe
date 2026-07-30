@@ -1,5 +1,6 @@
 import { eligibleSources } from './eligibility';
-import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+import { buildIdentifier } from './menus/identifiers';
+import type { AgentBackend, AgentChain, AgentMapping, AgentSupply, RuntimeDependency, Source } from './types';
 
 export type ModelChainRead =
   | { kind: 'ready'; chain: AgentChain }
@@ -40,6 +41,27 @@ export function orderedRouteSources(agent: AgentSupply, sources: Source[]): Sour
     .filter((source): source is Source => Boolean(source));
   const seen = new Set(ordered.map((source) => source.id));
   return [...ordered, ...eligible.filter((source) => !seen.has(source.id))];
+}
+
+/** Whether the model already exists on an eligible supplier omitted from this Agent's order. */
+export function modelHasOffOrderSupplier(agent: AgentSupply, sources: Source[], modelId: string): boolean {
+  const enabled = new Set(agent.sources?.order ?? []);
+  const standardVendors = new Set(agent.standard_vendors ?? []);
+  return eligibleSources(sources, agent).some(
+    (source) => !enabled.has(source.id) && source.models.some((model) => (
+      agent.menu_kind === 'open'
+        ? buildIdentifier(source.vendor, model.id, standardVendors) === modelId
+        : model.id === modelId
+    )),
+  );
+}
+
+/** Enabled fixed-menu routes whose target still exists in an eligible source inventory. */
+export function routableMappings(agent: AgentSupply, sources: Source[]): AgentMapping[] {
+  const targets = new Set(
+    orderedRouteSources(agent, sources).flatMap((source) => source.models.map((model) => model.id)),
+  );
+  return (agent.mappings ?? []).filter((mapping) => mapping.enabled && targets.has(mapping.target_model_id));
 }
 
 /** The model list the server says this backend exposes. */

@@ -1,8 +1,7 @@
 // 添加自定义模型 (frame 08). Supplements a source's supply list with a model the
-// auto-discovery missed, so it appears in the OpenCode menu. Source + model id
-// (+ optional display name) → a LIVE identifier preview built with the vendor-id
-// rule (`custom/` fallback). Persists via POST /custom-models; also used to edit
-// an existing custom entry (same upsert endpoint).
+// auto-discovery missed. OpenCode callers show its provider-prefixed identifier;
+// fixed-backend and source-list callers keep the upstream's raw model id. Persists
+// via POST /custom-models; also used to edit an existing custom entry.
 import * as React from 'react';
 import { ChevronDown, Copy, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -25,7 +24,7 @@ import { modelsApi } from '../modelsApi';
 import { manualModelSources } from '../modelRows';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from '../vendorMeta';
 import type { Source } from '../types';
-import { buildIdentifier, type StandardVendors } from './identifiers';
+import { manualModelIdentifier, type StandardVendors } from './identifiers';
 
 const FieldLabel: React.FC<{ mono?: boolean; children: React.ReactNode }> = ({ mono, children }) => (
   <span
@@ -115,13 +114,25 @@ export const AddCustomModelDialog: React.FC<{
   standardVendors: StandardVendors;
   /** Optional source door that opened the shared action. */
   initialSourceId?: string | null;
+  /** OpenCode uses provider-prefixed identifiers; every other caller uses the raw upstream id. */
+  showOpenCodeIdentifier?: boolean;
   /** When set, prefill for editing an existing custom entry. */
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
   /** Fired after a custom model is removed (edit mode only). */
   onDeleted?: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, initialSourceId, edit, onClose, onSaved, onDeleted }) => {
+}> = ({
+  open,
+  sources,
+  standardVendors,
+  initialSourceId,
+  showOpenCodeIdentifier = false,
+  edit,
+  onClose,
+  onSaved,
+  onDeleted,
+}) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -148,7 +159,12 @@ export const AddCustomModelDialog: React.FC<{
   }, [open]);
 
   const trimmedId = modelId.trim();
-  const identifier = source && trimmedId ? buildIdentifier(source.vendor, trimmedId, standardVendors) : '';
+  const identifier = manualModelIdentifier(
+    trimmedId,
+    source?.vendor ?? null,
+    standardVendors,
+    showOpenCodeIdentifier,
+  );
 
   const copyIdentifier = () => {
     if (!identifier || !navigator.clipboard?.writeText) {
@@ -236,26 +252,28 @@ export const AddCustomModelDialog: React.FC<{
           />
         </div>
 
-        <div className="flex flex-col gap-2 rounded-xl border border-violet/30 bg-violet-soft/40 px-4 py-3.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-[11px] font-semibold uppercase tracking-wide text-violet">
-              {t('settings.models.menus.custom.previewLabel')}
+        {showOpenCodeIdentifier && (
+          <div className="flex flex-col gap-2 rounded-xl border border-violet/30 bg-violet-soft/40 px-4 py-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-wide text-violet">
+                {t('settings.models.menus.custom.previewLabel')}
+              </span>
+              <button
+                type="button"
+                aria-label={t('common.copy') as string}
+                onClick={copyIdentifier}
+                disabled={!identifier}
+                className="flex size-10 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground disabled:opacity-40 sm:size-6"
+              >
+                <Copy className="size-4" />
+              </button>
+            </div>
+            <span className="font-mono text-[16px] font-semibold text-foreground">
+              {identifier || t('settings.models.menus.custom.previewEmpty')}
             </span>
-            <button
-              type="button"
-              aria-label={t('common.copy') as string}
-              onClick={copyIdentifier}
-              disabled={!identifier}
-              className="flex size-10 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground disabled:opacity-40 sm:size-6"
-            >
-              <Copy className="size-4" />
-            </button>
+            <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.menus.custom.previewHint')}</p>
           </div>
-          <span className="font-mono text-[16px] font-semibold text-foreground">
-            {identifier || t('settings.models.menus.custom.previewEmpty')}
-          </span>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.menus.custom.previewHint')}</p>
-        </div>
+        )}
 
         <DialogFooter className={cn('gap-2', edit ? 'sm:justify-between' : 'sm:justify-end')}>
           {edit && (

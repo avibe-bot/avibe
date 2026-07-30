@@ -271,6 +271,7 @@ export const OpenCodeMenuDrawer: React.FC<{
         open={customOpen}
         sources={eligibleSources}
         standardVendors={standardVendors}
+        showOpenCodeIdentifier
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {

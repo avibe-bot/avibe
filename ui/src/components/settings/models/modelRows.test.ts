@@ -6,10 +6,12 @@ import {
   manualModelSources,
   modelChainKey,
   modelChainRequests,
+  modelHasOffOrderSupplier,
   modelIssueCount,
   modelNeedsAction,
   modelSupplierCounts,
   orderedRouteSources,
+  routableMappings,
   type ModelChainRead,
 } from './modelRows';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
@@ -113,6 +115,39 @@ describe('model row projection', () => {
       [source('src_a'), source('src_b'), source('src_c')],
     );
     expect(ordered.map((item) => item.id)).toEqual(['src_b', 'src_a']);
+  });
+
+  it('distinguishes an off-order supplier from a missing inventory entry', () => {
+    const outside = { ...source('src_outside'), models: [{ id: 'existing-model', provenance: 'discovered' as const }] };
+    const a = agent({
+      menu_kind: 'open',
+      standard_vendors: ['custom'],
+      sources: {
+        policy: 'custom',
+        order: [],
+        eligibility: [{ source_id: 'src_outside', eligible: true }],
+      },
+    });
+    expect(modelHasOffOrderSupplier(a, [outside], 'custom/existing-model')).toBe(true);
+    expect(modelHasOffOrderSupplier(a, [outside], 'custom/missing-model')).toBe(false);
+  });
+
+  it('drops unavailable sibling routes before a per-row save', () => {
+    const available = { ...source('src_available'), models: [{ id: 'live-target', provenance: 'discovered' as const }] };
+    const a = agent({
+      sources: {
+        policy: 'custom',
+        order: ['src_available'],
+        eligibility: [{ source_id: 'src_available', eligible: true }],
+      },
+      mappings: [
+        { builtin_id: 'live-row', target_model_id: 'live-target', enabled: true },
+        { builtin_id: 'stale-row', target_model_id: 'removed-target', enabled: true },
+      ],
+    });
+    expect(routableMappings(a, [available])).toEqual([
+      { builtin_id: 'live-row', target_model_id: 'live-target', enabled: true },
+    ]);
   });
 
   it('only offers API-key inventories for manual models', () => {

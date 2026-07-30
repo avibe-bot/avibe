@@ -41,6 +41,13 @@ const CLASSIFIED: Record<string, string> = {
 
 type Leaf = { key: string; text: string };
 
+const modelsRoot = (bundle: unknown): unknown => {
+  if (!bundle || typeof bundle !== 'object') return undefined;
+  const settings = (bundle as Record<string, unknown>).settings;
+  if (!settings || typeof settings !== 'object') return undefined;
+  return (settings as Record<string, unknown>).models;
+};
+
 function leaves(bundle: unknown): Leaf[] {
   const out: Leaf[] = [];
   const walk = (node: unknown, path: string[]) => {
@@ -51,7 +58,7 @@ function leaves(bundle: unknown): Leaf[] {
     if (!node || typeof node !== 'object') return;
     for (const [k, v] of Object.entries(node as Record<string, unknown>)) walk(v, [...path, k]);
   };
-  walk((bundle as any).settings?.models, []);
+  walk(modelsRoot(bundle), []);
   return out;
 }
 
@@ -59,7 +66,7 @@ const lookup = (bundle: unknown, key: string): unknown =>
   key.split('.').reduce<unknown>((node, part) => {
     if (!node || typeof node !== 'object') return undefined;
     return (node as Record<string, unknown>)[part];
-  }, (bundle as any).settings?.models);
+  }, modelsRoot(bundle));
 
 describe('Direct-fallback redline over settings.models copy', () => {
   it.each(['zh', 'en'] as const)('walks a non-trivial %s subtree', (lng) => {
@@ -101,5 +108,20 @@ describe('Direct-fallback redline over settings.models copy', () => {
 
   it('keeps zh and en in exact key correspondence under settings.models', () => {
     expect(leaves(zh).map((l) => l.key).sort()).toEqual(leaves(en).map((l) => l.key).sort());
+  });
+
+  it.each(['zh', 'en'] as const)('names the per-Agent source order in %s route copy', (lng) => {
+    const routeCopy = leaves(BUNDLES[lng]).filter((leaf) => leaf.key.startsWith('routes.'));
+    expect(routeCopy.map((leaf) => leaf.text).join('\n')).not.toMatch(/全局顺序|global (?:source )?order/i);
+    for (const key of [
+      'routes.global',
+      'routes.globalPending',
+      'routes.globalActual',
+      'routes.globalUnavailable',
+      'routes.orderDecidesSource',
+      'routes.openMenuGlobal',
+    ]) {
+      expect(lookup(BUNDLES[lng], key), `${key} does not name its backend in ${lng}`).toContain('{{backend}}');
+    }
   });
 });

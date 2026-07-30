@@ -26,6 +26,7 @@ export const ModelRoutePicker: React.FC<{
   onAddModel: () => void;
 }> = ({ agent, sources, value, servedBy, disabled, onChange, onAddModel }) => {
   const { t } = useTranslation();
+  const backendName = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const routeSources = React.useMemo(() => orderedRouteSources(agent, sources), [agent, sources]);
@@ -133,7 +134,7 @@ export const ModelRoutePicker: React.FC<{
                       )}
                       {(supplierCountByModel.get(target.modelId) ?? 0) > 1 && (
                         <span className="block text-[10.5px] text-muted">
-                          {t('settings.models.routes.orderDecidesSource')}
+                          {t('settings.models.routes.orderDecidesSource', { backend: backendName })}
                         </span>
                       )}
                     </span>

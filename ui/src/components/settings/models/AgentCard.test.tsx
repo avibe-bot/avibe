@@ -208,6 +208,37 @@ describe('AgentCard model list', () => {
     expect(html).not.toContain(zh.settings.models.sources.addModel);
   });
 
+  it('routes an off-order OpenCode supplier to source order instead of manual inventory', () => {
+    const enabled = {
+      ...source('src_enabled', 'Enabled source'),
+      models: [{ id: 'another-model', provenance: 'discovered' as const }],
+    };
+    const outside = source('src_outside', 'Disabled supplier');
+    const open = agent({
+      backend: 'opencode',
+      menu_kind: 'open',
+      selected_model_id: 'anthropic/claude-opus-4-6',
+      current: null,
+      sources: {
+        policy: 'custom',
+        order: ['src_enabled'],
+        eligibility: [
+          { source_id: 'src_enabled', eligible: true },
+          { source_id: 'src_outside', eligible: true },
+        ],
+      },
+      model_supply: [{ model_id: 'anthropic/claude-opus-4-6', chain_length: 0 }],
+      mappings: [],
+      menu: { view: 'featured', checked: ['anthropic/claude-opus-4-6'] },
+      builtin_models: null,
+      standard_vendors: ['anthropic'],
+    });
+    const interrupted = chain('anthropic/claude-opus-4-6', { backend: 'opencode', supply_state: 'interrupted', chain: [] });
+    const html = render([open], chains(interrupted), false, [enabled, outside]);
+    expect(html.match(new RegExp(zh.settings.models.agents.sourceOrder, 'g'))).toHaveLength(2);
+    expect(html).not.toContain(zh.settings.models.sources.addModel);
+  });
+
   it('disables every OpenCode model-menu entry while the agent write is pending', () => {
     const open = agent({ backend: 'opencode', menu_kind: 'open', builtin_models: null });
     const pending = new Set(['opencode']);

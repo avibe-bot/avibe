@@ -33,6 +33,7 @@ import {
   modelChainKey,
   modelChainRequests,
   modelIssueCount,
+  routableMappings,
   type ModelChainIndex,
 } from './modelRows';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
@@ -118,7 +119,10 @@ export const SettingsModelsPage: React.FC = () => {
   // freshest agent.
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
-  const [customModelRequest, setCustomModelRequest] = React.useState<{ sourceId?: string } | null>(null);
+  const [customModelRequest, setCustomModelRequest] = React.useState<{
+    sourceId?: string;
+    backend?: AgentBackend;
+  } | null>(null);
 
   // Which backends have a 来源顺序 write outstanding. Held HERE and not in the
   // drawer that issues it, because the drawer does not outlive its own write:
@@ -255,7 +259,9 @@ export const SettingsModelsPage: React.FC = () => {
       void agentWriteRegistry.track(backend, async () => {
         const current = agentsRef.current.find((agent) => agent.backend === backend);
         if (!current || current.menu_kind !== 'fixed') return;
-        const byModel = new Map((current.mappings ?? []).map((mapping) => [mapping.builtin_id, mapping]));
+        const byModel = new Map(
+          routableMappings(current, sources).map((mapping) => [mapping.builtin_id, mapping]),
+        );
         if (targetModelId) {
           byModel.set(modelId, { builtin_id: modelId, target_model_id: targetModelId, enabled: true });
         } else {
@@ -270,7 +276,7 @@ export const SettingsModelsPage: React.FC = () => {
         }
       });
     },
-    [agentSaved, agentWriteRegistry, showToast, t],
+    [agentSaved, agentWriteRegistry, showToast, sources, t],
   );
 
   const loadOlderEvents = React.useCallback(async () => {
@@ -296,14 +302,14 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [feed, showToast, t]);
 
-  const openCustomModel = React.useCallback((sourceId?: string) => {
+  const openCustomModel = React.useCallback((sourceId?: string, backend?: AgentBackend) => {
     const writableSources = manualModelSources(sources);
     if (writableSources.length === 0) {
       setApiKeyOpen(true);
       return;
     }
     const requested = writableSources.find((source) => source.id === sourceId);
-    setCustomModelRequest({ sourceId: requested?.id });
+    setCustomModelRequest({ sourceId: requested?.id, backend });
   }, [sources]);
 
   const connectHub = async (agent: AgentSupply) => {
@@ -409,7 +415,7 @@ export const SettingsModelsPage: React.FC = () => {
                 if (!agentWrites.has(agent.backend)) setMenuBackend(agent.backend);
               }}
               onSetRoute={setModelRoute}
-              onAddModel={() => openCustomModel()}
+              onAddModel={(backend) => openCustomModel(undefined, backend)}
               onRepair={(source, kind) => setRepairTarget({ source, kind })}
               onRetest={(source) => void retestSource(source)}
               retestingSourceId={retestingSourceId}
@@ -486,6 +492,7 @@ export const SettingsModelsPage: React.FC = () => {
         sources={sources}
         standardVendors={standardVendors}
         initialSourceId={customModelRequest?.sourceId}
+        showOpenCodeIdentifier={customModelRequest?.backend === 'opencode'}
         onClose={() => setCustomModelRequest(null)}
         onSaved={() => void refreshSourcesAgents()}
       />
