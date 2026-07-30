@@ -272,10 +272,23 @@ class _SteeringAwareOpenCodeServer:
                                 if awaiting is not None
                                 else self._state.baseline_message_ids
                             )
-                            if final_snapshot and self._has_final_assistant_after(
-                                messages,
-                                evidence_boundary,
-                                inserted_user_text=inserted_user_text,
+                            last_message_id = (
+                                messages[-1].get("info", {}).get("id")
+                                if messages
+                                else None
+                            )
+                            boundary_answer_is_latest = (
+                                self._state.restored
+                                and inserted_user_text is None
+                                and last_message_id in evidence_boundary
+                            )
+                            if final_snapshot and (
+                                boundary_answer_is_latest
+                                or self._has_final_assistant_after(
+                                    messages,
+                                    evidence_boundary,
+                                    inserted_user_text=inserted_user_text,
+                                )
                             ):
                                 self._state.awaiting_after_message_ids = None
                                 self._state.awaiting_user_text = None

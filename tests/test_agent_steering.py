@@ -1321,7 +1321,11 @@ async def test_restored_opencode_status_reconciliation_becomes_terminal_snapshot
                     "finish": "stop",
                 },
                 "parts": [{"type": "text", "text": "done"}],
-            }
+            },
+            {
+                "info": {"id": "steer-user", "role": "user", "time": {}},
+                "parts": [{"type": "text", "text": "follow-up"}],
+            },
         ],
         status_error=ConnectionError("status unavailable"),
     )
