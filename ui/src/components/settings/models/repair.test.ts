@@ -118,9 +118,39 @@ describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', ()
   });
 
   it('offers nothing to a native source with an upstream cause', () => {
-    // Nothing to re-discover: `POST …/test` rejects native sources, whose blockers
-    // are cleared by their own CLI.
+    // Nothing to re-discover (`POST …/test` rejects native), and NOT the re-login
+    // that the unclassified case below gets: a native re-login invalidates the
+    // working sign-in up front, so offering it for 账号被封 would charge the user
+    // that price for a blocker it cannot clear. This is rule 3's boundary.
     expect(repairAction(blocked('models.source.needs_action.account_banned', { ...subscription, ...native }))).toBeNull();
+    expect(repairAction(blocked('models.source.needs_action.balance_exhausted', { ...subscription, ...native }))).toBeNull();
+  });
+
+  it('sends a native source back to sign-in when the last one produced nothing usable', () => {
+    // The state two backend paths write onto a native source, both from INSIDE a
+    // re-login: `completed_source_status` threw, or discovery came back empty. The
+    // row must keep a tap — before this it fell through rule 2 to `canRetest`,
+    // which native can never satisfy, and the remedy survived only in the overflow
+    // menu even though `canReauth` was true the whole time.
+    expect(
+      repairAction(
+        source({
+          ...subscription,
+          ...native,
+          state: { status: 'error', detail_key: 'models.source.error.unclassified' },
+        }),
+      ),
+    ).toBe('reauth');
+  });
+
+  it('does not invent a remedy for a native api_key with no sign-in to redo', () => {
+    // Same cause, no reauth route (`canReauth` is subscription-only), so rule 3
+    // must not hand it the subscription's button.
+    expect(
+      repairAction(
+        source({ ...native, state: { status: 'error', detail_key: 'models.source.error.unclassified' } }),
+      ),
+    ).toBeNull();
   });
 });
 

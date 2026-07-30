@@ -62,6 +62,11 @@ const CREDENTIAL_CAUSES: ReadonlySet<SourceDetailKey> = new Set<SourceDetailKey>
   'models.source.needs_action.credential_revoked',
 ]);
 
+/** 「The last sign-in produced nothing usable」 — the whole of `ErrorDetailKey`,
+ *  and on a native source the only blocker another sign-in can actually clear.
+ *  Rule 3 in `repairAction` is what reads it. */
+const SIGN_IN_INCOMPLETE: SourceDetailKey = 'models.source.error.unclassified';
+
 /**
  * The one-tap remedy for a blocked source, or null when it genuinely has none.
  *
@@ -69,16 +74,18 @@ const CREDENTIAL_CAUSES: ReadonlySet<SourceDetailKey> = new Set<SourceDetailKey>
  *
  *  1. The credential itself failed → replace it, by the route that owns that
  *     source's kind of credential (login for a subscription, key for an api_key).
- *  2. Anything else → the cause lives UPSTREAM (balance run out, account
- *     restricted, an unclassified failure). Avibe cannot fix it and must not
- *     pretend to; what it can do is stop guessing and re-check, which is exactly
- *     what the recovery test is for. The row's affordance is 「handled it —
- *     retry」, not 「top up here」, because no contract field carries a vendor
- *     billing URL and a button that cannot go there would be the dead end again.
+ *  2. Anything else → Avibe cannot name the cause and must not pretend to; what
+ *     it can do is stop guessing and re-check, which is exactly what the recovery
+ *     test is for. The row's affordance is 「handled it — retry」, not 「top up
+ *     here」, because no contract field carries a vendor billing URL and a button
+ *     that cannot go there would be the dead end again.
+ *  3. …unless the source has no recovery test at all (native) AND its blocker is
+ *     the one a fresh sign-in clears — then re-login, because rule 2 would
+ *     otherwise leave that row with no tap whatsoever. Narrow on purpose: the
+ *     branch comment carries the cost argument for why it is not every cause.
  *
- * Returns null only where no route applies at all (a native source, whose
- * blockers are cleared by its own CLI). A healthy source has no remedy to offer
- * because it has no problem — the caller renders nothing, not a disabled button.
+ * A healthy source has no remedy to offer because it has no problem — the caller
+ * renders nothing, not a disabled button.
  */
 export function repairAction(source: Source): RepairKind | null {
   if (!wasBlocked(source.state)) return null;
@@ -88,7 +95,25 @@ export function repairAction(source: Source): RepairKind | null {
     if (canReplaceKey(source)) return 'replace_key';
     return null;
   }
-  return canRetest(source) ? 'retest' : null;
+  if (canRetest(source)) return 'retest';
+  // Native has no recovery test — `test_source` refuses `native_cli` outright — so
+  // rules 1 and 2 together leave a stopped native row with no tap at all, its
+  // remedy surviving only in the overflow menu. Rule 3 covers the one cause where
+  // signing in again is the answer rather than a guess, and the cause matters
+  // because this fallback SPENDS something: a native re-login invalidates the
+  // current sign-in before the vendor page even loads (`reauthCost` below), so
+  // offering it for a blocker it cannot fix is the §4.5 dead end plus a bill.
+  //
+  // `error.unclassified` earns it. It is the only key `ErrorDetailKey` holds, and
+  // it reaches a NATIVE source from exactly two places, both inside a native
+  // re-login: `completed_source_status` threw, or post-login discovery came back
+  // empty. It means 「that sign-in produced nothing usable」, so another one is the
+  // convergent recovery — and without this the two sibling writes of one backend
+  // helper contradict each other, `_mark_native_reauth_unavailable`'s needs_action
+  // branch keeping the button (its key is a credential cause) while its error
+  // branch loses it. A declared upstream cause like 余额耗尽 does NOT earn it, and
+  // the native/`account_banned` case in `repair.test.ts` is that boundary.
+  return source.state.detail_key === SIGN_IN_INCOMPLETE && canReauth(source) ? 'reauth' : null;
 }
 
 /**

@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { apiFailure, modelsApi } from './modelsApi';
-import { FieldLabel, IconField } from './dialogFields';
+import { Field } from './dialogFields';
 import { REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { SupplyGapNote } from './SupplyGapNote';
 import type { Source, SupplyGap } from './types';
@@ -122,15 +122,15 @@ export const ReplaceKeyDialog: React.FC<{
         {forcing ? (
           <SupplyGapNote gaps={gaps} />
         ) : (
-          <div className="flex flex-col gap-2">
-            <FieldLabel mono>{t('settings.models.repair.replaceLabel')}</FieldLabel>
-            <IconField icon={KeyRound}>
+          <Field label={t('settings.models.repair.replaceLabel')} mono icon={KeyRound}>
+            {(id) => (
               <Input
+                id={id}
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
                 autoFocus
-                placeholder="sk-…"
+                placeholder={t('settings.models.field.apiKeyPlaceholder')}
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 disabled={busy || settled}
@@ -142,8 +142,8 @@ export const ReplaceKeyDialog: React.FC<{
                   }
                 }}
               />
-            </IconField>
-          </div>
+            )}
+          </Field>
         )}
 
         {settled && outcome ? (

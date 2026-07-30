@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { modelsApi } from './modelsApi';
 import { AdoptionNote } from './AdoptionNote';
-import { FieldLabel, IconField } from './dialogFields';
+import { Field } from './dialogFields';
 import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
 import type { AdoptedBy, Source } from './types';
@@ -115,50 +115,59 @@ export const AddApiKeyDialog: React.FC<{
           <DialogDescription>{t('settings.models.addKey.subtitle')}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel>{t('settings.models.addKey.vendorLabel')}</FieldLabel>
-          <Select value={vendor} onChange={(e) => onVendorChange(e.target.value)} className="h-11 text-[14px]">
-            {VENDOR_OPTIONS.map((v) => (
-              <option key={v.value} value={v.value}>
-                {t(v.labelKey)}
-              </option>
-            ))}
-          </Select>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.addKey.vendorHint')}</p>
-        </div>
+        <Field label={t('settings.models.addKey.vendorLabel')} hint={t('settings.models.addKey.vendorHint')}>
+          {(id) => (
+            <Select
+              id={id}
+              value={vendor}
+              onChange={(e) => onVendorChange(e.target.value)}
+              className="h-11 text-[14px]"
+            >
+              {VENDOR_OPTIONS.map((v) => (
+                <option key={v.value} value={v.value}>
+                  {t(v.labelKey)}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel mono>{t('settings.models.addKey.keyLabel')}</FieldLabel>
-          <IconField icon={KeyRound}>
+        <Field label={t('settings.models.addKey.keyLabel')} mono icon={KeyRound}>
+          {(id) => (
             <Input
+              id={id}
               type="password"
               autoComplete="off"
               spellCheck={false}
-              placeholder="sk-…"
+              placeholder={t('settings.models.field.apiKeyPlaceholder')}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               className="h-11 pl-9 font-mono text-[14px]"
               disabled={phase === 'submitting' || phase === 'done'}
             />
-          </IconField>
-        </div>
+          )}
+        </Field>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel mono>{t('settings.models.addKey.baseUrlLabel')}</FieldLabel>
-          <IconField icon={Globe}>
+        <Field
+          label={t('settings.models.addKey.baseUrlLabel')}
+          mono
+          icon={Globe}
+          hint={t('settings.models.addKey.baseUrlHint')}
+        >
+          {(id) => (
             <Input
+              id={id}
               type="text"
               autoComplete="off"
               spellCheck={false}
-              placeholder="https://api.example.com/v1"
+              placeholder={t('settings.models.field.baseUrlPlaceholder')}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               className="h-11 pl-9 font-mono text-[14px]"
               disabled={phase === 'submitting' || phase === 'done'}
             />
-          </IconField>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.addKey.baseUrlHint')}</p>
-        </div>
+          )}
+        </Field>
 
         {phase === 'done' && (
           <div className="flex flex-col gap-2">

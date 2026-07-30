@@ -778,6 +778,10 @@
           "xai": "xAI"
         }
       },
+      "field": {
+        "apiKeyPlaceholder": "sk-…",
+        "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
       "oauth": {
         "title": {
           "anthropic": "Connect Claude subscription",
