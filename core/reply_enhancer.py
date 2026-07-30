@@ -64,11 +64,29 @@ def _skip_inline_angle_token(state: StateInline, silent: bool) -> bool:
     return True
 
 
+def _skip_silent_control(state: StateInline, silent: bool) -> bool:
+    """Keep real control contents from influencing inline Markdown parsing."""
+    opener = _SILENT_OPEN_RE.match(state.src, state.pos, state.posMax)
+    if opener is None:
+        return False
+    closing = _SILENT_CLOSE_RE.search(state.src, opener.end(), state.posMax)
+    token_end = closing.end() if closing is not None else state.posMax
+    if not silent:
+        state.pending += state.src[state.pos:token_end]
+    state.pos = token_end
+    return True
+
+
 _INLINE_MARKDOWN.inline.ruler.disable(["autolink", "html_inline"])
 _INLINE_MARKDOWN.inline.ruler.before(
     "backticks",
     "avibe_angle_token",
     _skip_inline_angle_token,
+)
+_INLINE_MARKDOWN.inline.ruler.before(
+    "avibe_angle_token",
+    "avibe_silent_control",
+    _skip_silent_control,
 )
 _INLINE_MARKDOWN.inline.ruler.at("backticks", _track_inline_code)
 
@@ -226,36 +244,20 @@ def strip_silent_blocks(text: str) -> str:
     if "<silent" not in text.lower():
         return text
 
-    source_offsets = list(range(len(text)))
-    changed = False
-    while True:
-        masked = _mask_markdown_code(text)
-        ranges: List[Tuple[int, int]] = []
-        search_from = 0
+    masked = _mask_markdown_code(text)
+    ranges: List[Tuple[int, int]] = []
+    search_from = 0
+    while opener := _SILENT_OPEN_RE.search(masked, search_from):
+        closing = _SILENT_CLOSE_RE.search(text, opener.end())
+        if closing is None:
+            ranges.append((opener.start(), len(text)))
+            break
+        ranges.append((opener.start(), closing.end()))
+        search_from = closing.end()
 
-        while opener := _search_original_match(
-            _SILENT_OPEN_RE,
-            masked,
-            source_offsets,
-            search_from,
-        ):
-            closing = _search_original_match(
-                _SILENT_CLOSE_RE,
-                text,
-                source_offsets,
-                opener.end(),
-            )
-            if closing is None:
-                ranges.append((opener.start(), len(text)))
-                return _trim_blank_boundary_lines(_remove_ranges(text, ranges))
-            ranges.append((opener.start(), closing.end()))
-            search_from = closing.end()
-
-        if not ranges:
-            return _trim_blank_boundary_lines(text) if changed else text
-        changed = True
-        text = _remove_ranges(text, ranges)
-        source_offsets = _remove_offset_ranges(source_offsets, ranges)
+    if not ranges:
+        return text
+    return _trim_blank_boundary_lines(_remove_ranges(text, ranges))
 
 
 # ---------------------------------------------------------------------------
@@ -372,37 +374,6 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts)
-
-
-def _remove_offset_ranges(
-    offsets: List[int],
-    ranges: List[Tuple[int, int]],
-) -> List[int]:
-    """Remove the same ranges from a source-offset map."""
-    result: List[int] = []
-    cursor = 0
-    for start, end in ranges:
-        result.extend(offsets[cursor:start])
-        cursor = end
-    result.extend(offsets[cursor:])
-    return result
-
-
-def _search_original_match(
-    pattern: re.Pattern,
-    text: str,
-    source_offsets: List[int],
-    start: int,
-) -> re.Match | None:
-    """Find a directive token that was contiguous in the original source."""
-    while match := pattern.search(text, start):
-        if (
-            source_offsets[match.end() - 1] - source_offsets[match.start()]
-            == match.end() - match.start() - 1
-        ):
-            return match
-        start = match.start() + 1
-    return None
 
 
 def _trim_blank_boundary_lines(text: str) -> str:

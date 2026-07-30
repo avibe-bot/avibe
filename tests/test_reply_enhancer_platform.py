@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import core.reply_enhancer as reply_enhancer
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.reply_enhancer import process_reply, strip_silent_blocks
 from core.system_prompt_injection import build_system_prompt_injection
@@ -801,6 +802,24 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         expected = "".join(f"visible-{index}" for index in range(2_000))
 
         self.assertEqual(strip_silent_blocks(blocks), expected)
+
+    def test_silent_parser_parses_progressively_exposed_blocks_once(self):
+        lengths = range(1, 201)
+        blocks = "".join(
+            f"<silent>{'`' * length}</silent>" for length in lengths
+        )
+        closers = " ".join("`" * length for length in lengths)
+        text = f"prefix {blocks} {closers}"
+
+        with patch.object(
+            reply_enhancer._BLOCK_MARKDOWN,
+            "parse",
+            wraps=reply_enhancer._BLOCK_MARKDOWN.parse,
+        ) as parse:
+            result = strip_silent_blocks(text)
+
+        self.assertEqual(result, f"prefix  {closers}")
+        self.assertEqual(parse.call_count, 1)
 
     def test_silent_parser_handles_many_malformed_html_prefixes_linearly(self):
         text = "<a" * 8_000 + " `<silent>literal</silent>`"
