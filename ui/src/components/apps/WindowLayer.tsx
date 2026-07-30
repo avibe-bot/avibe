@@ -18,9 +18,10 @@ const ShowPageWindow: React.FC<{
   iconVersion: string | null;
   layerHeight: number;
   layerWidth: number;
+  revalidateVersion: number;
   sessionId: string;
   win: WindowInstance;
-}> = ({ archived, iconVersion, layerHeight, layerWidth, sessionId, win }) => {
+}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
   const api = useApi();
   const { setTitle } = useWindowManager();
   const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
@@ -46,7 +47,7 @@ const ShowPageWindow: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [api, sessionId, setTitle, win.id]);
+  }, [api, revalidateVersion, sessionId, setTitle, win.id]);
 
   const src = showPageWindowSource(sessionId, status, archived);
   return (
@@ -75,6 +76,7 @@ export const WindowLayer: React.FC = () => {
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [archivedSessionIds, setArchivedSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [showPageRevalidateVersion, setShowPageRevalidateVersion] = useState(0);
   const windowsRef = useRef(windows);
   const dockRef = useRef({ order, pins, pages });
 
@@ -219,8 +221,19 @@ export const WindowLayer: React.FC = () => {
   // window's title live, and treat archive as terminal for the frame plus every
   // parent-owned page control.
   useEffect(
-    () =>
-      api.connectWorkbenchEvents({
+    () => {
+      let connected = false;
+      return api.connectWorkbenchEvents({
+        onConnected: () => {
+          // The initial window mount already reads each session uncached. A
+          // later connection can cover events missed during an SSE gap, so make
+          // every open Show Page re-read its authoritative session state.
+          if (!connected) {
+            connected = true;
+            return;
+          }
+          setShowPageRevalidateVersion((version) => version + 1);
+        },
         onSessionActivity: (data) => {
           if (data.event === 'archived') {
             setArchivedSessionIds((current) => {
@@ -240,7 +253,8 @@ export const WindowLayer: React.FC = () => {
               setParams(win.id, { title });
             });
         },
-      }),
+      });
+    },
     [api, setParams, setTitle, t],
   );
 
@@ -275,6 +289,7 @@ export const WindowLayer: React.FC = () => {
             iconVersion={iconVersion}
             layerHeight={size.h}
             layerWidth={size.w}
+            revalidateVersion={showPageRevalidateVersion}
             sessionId={sid ?? ''}
             win={w}
           />

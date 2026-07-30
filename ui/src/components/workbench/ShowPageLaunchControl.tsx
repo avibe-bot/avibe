@@ -52,12 +52,13 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   const { t } = useTranslation();
   const { openApp } = useWindowManager();
   const dock = useDock();
-  const showPageDrag = useShowPageDrag();
+  const { begin: beginShowPageDrag, end: endShowPageDrag } = useShowPageDrag();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragCue, setDragCue] = useState<ViewportPoint | null>(null);
   const dragRef = useRef<ActiveDrag | null>(null);
   const suppressClickRef = useRef(false);
   const hoverTimerRef = useRef<number | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const canLaunch = !showPageMode && !busy && Boolean(sessionId);
   const windowTitle = title?.trim() || t('chat.untitled');
@@ -85,12 +86,19 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
     }, HOVER_CLOSE_DELAY_MS);
   }, [clearHoverTimer]);
 
-  useEffect(() => () => clearHoverTimer(), [clearHoverTimer]);
+  useEffect(
+    () => () => {
+      clearHoverTimer();
+      if (dragRef.current) endShowPageDrag();
+    },
+    [clearHoverTimer, endShowPageDrag],
+  );
 
   const prepare = useCallback(() => onPrepareLaunch(sessionId), [onPrepareLaunch, sessionId]);
 
   const openWindow = useCallback(
     async (point?: ViewportPoint) => {
+      clearHoverTimer();
       setMenuOpen(false);
       if (!(await prepare())) return;
       openApp('showpage', {
@@ -99,10 +107,11 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
         params: { sessionId, title: windowTitle },
       });
     },
-    [openApp, prepare, sessionId, windowTitle],
+    [clearHoverTimer, openApp, prepare, sessionId, windowTitle],
   );
 
   const openLink = useCallback(async () => {
+    clearHoverTimer();
     setMenuOpen(false);
     // Open synchronously inside the click gesture, then navigate after ensure;
     // otherwise popup blockers reject window.open after the awaited request.
@@ -118,7 +127,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       return;
     }
     if (!tab.closed) tab.location.replace(showPagePrivatePath(sessionId));
-  }, [prepare, sessionId]);
+  }, [clearHoverTimer, prepare, sessionId]);
 
   const pinToDock = useCallback(async () => {
     if (!(await prepare())) return;
@@ -157,7 +166,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       event.preventDefault();
       dragRef.current = null;
       setDragCue(null);
-      showPageDrag.end();
+      endShowPageDrag();
       void openWindow(point);
     };
 
@@ -167,12 +176,12 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [openWindow, showPageDrag]);
+  }, [endShowPageDrag, openWindow]);
 
   const endDrag = () => {
     dragRef.current = null;
     setDragCue(null);
-    showPageDrag.end();
+    endShowPageDrag();
     window.setTimeout(() => {
       suppressClickRef.current = false;
     }, 0);
@@ -188,9 +197,19 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
             type="button"
             variant={showPageMode ? 'secondary' : 'ghost'}
             onClick={() => {
+              clearHoverTimer();
               if (suppressClickRef.current) return;
               setMenuOpen(false);
               onToggle();
+            }}
+            onKeyDown={(event) => {
+              if (!canLaunch || event.key !== 'ArrowDown') return;
+              event.preventDefault();
+              clearHoverTimer();
+              setMenuOpen(true);
+              window.requestAnimationFrame(() => {
+                menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+              });
             }}
             onMouseEnter={openHoverMenu}
             onMouseLeave={closeHoverMenu}
@@ -209,7 +228,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               };
               event.dataTransfer.effectAllowed = 'copy';
               event.dataTransfer.setData('application/x-avibe-show-page', sessionId);
-              showPageDrag.begin(pinToDock);
+              beginShowPageDrag(pinToDock);
             }}
             onDragEnd={endDrag}
             disabled={busy}
@@ -239,7 +258,24 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
         >
-          <div role="menu" aria-label={t('chat.showPage.launchMenu')}>
+          <div
+            ref={menuRef}
+            role="menu"
+            aria-label={t('chat.showPage.launchMenu')}
+            onKeyDown={(event) => {
+              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+              const items = Array.from(
+                event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+              );
+              if (items.length === 0) return;
+              event.preventDefault();
+              const current = items.indexOf(document.activeElement as HTMLElement);
+              if (event.key === 'Home') items[0]?.focus();
+              else if (event.key === 'End') items.at(-1)?.focus();
+              else if (event.key === 'ArrowDown') items[(current + 1) % items.length]?.focus();
+              else items[(current - 1 + items.length) % items.length]?.focus();
+            }}
+          >
             <button
               type="button"
               role="menuitem"
