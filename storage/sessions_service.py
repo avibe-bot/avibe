@@ -1277,14 +1277,19 @@ class SQLiteSessionsService:
                             existing_native_session_id = observed_native_session_id.strip()
                             existing_is_owned = _is_owned_backend(existing_backend)
                             existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
+                            import_matches_existing_owner = _import_matches_existing_owner(
+                                existing_backend=existing_backend,
+                                existing_variant=existing_variant,
+                                existing_agent_id=existing_agent_id,
+                                existing_agent_name=existing_agent_name,
+                                imported_backend=imported_backend,
+                                imported_variant=imported_variant,
+                                imported_agent_id=imported_agent_id,
+                                imported_agent_name=imported_agent_name,
+                            )
                             # Prefer a legacy mapping for the reserved owner when one
-                            # exists; otherwise an unbound cross-backend reservation is
+                            # exists; otherwise an unbound route reservation is
                             # provisional and may be adopted by the imported session.
-                            existing_owner_keys = {
-                                _normalize_agent_name_key(value)
-                                for value in (existing_backend, existing_variant, existing_agent_name)
-                                if value
-                            }
                             has_existing_owner_mapping = False
                             for candidate_name, candidate_thread_map in agent_maps.items():
                                 if not isinstance(candidate_thread_map, dict) or not any(
@@ -1293,28 +1298,26 @@ class SQLiteSessionsService:
                                 ):
                                     continue
                                 candidate_variant = str(candidate_name) or "default"
-                                _, candidate_agent_id, candidate_agent_name = _resolve_imported_agent_identity(
-                                    conn, candidate_variant
-                                )
-                                if (
-                                    _normalize_agent_name_key(candidate_variant) in existing_owner_keys
-                                    or (
-                                        existing_agent_id is not None
-                                        and candidate_agent_id == existing_agent_id
-                                    )
-                                    or (
-                                        existing_agent_name is not None
-                                        and candidate_agent_name is not None
-                                        and _normalize_agent_name_key(candidate_agent_name)
-                                        == _normalize_agent_name_key(existing_agent_name)
-                                    )
+                                (
+                                    candidate_backend,
+                                    candidate_agent_id,
+                                    candidate_agent_name,
+                                ) = _resolve_imported_agent_identity(conn, candidate_variant)
+                                if _import_matches_existing_owner(
+                                    existing_backend=existing_backend,
+                                    existing_variant=existing_variant,
+                                    existing_agent_id=existing_agent_id,
+                                    existing_agent_name=existing_agent_name,
+                                    imported_backend=candidate_backend,
+                                    imported_variant=candidate_variant,
+                                    imported_agent_id=candidate_agent_id,
+                                    imported_agent_name=candidate_agent_name,
                                 ):
                                     has_existing_owner_mapping = True
                                     break
                             adopts_unbound_route = (
                                 not existing_native_session_id
-                                and imported_backend != "unknown"
-                                and existing_backend != imported_backend
+                                and not import_matches_existing_owner
                                 and not has_existing_owner_mapping
                             )
                             existing_identity_is_durable = (
@@ -1332,9 +1335,11 @@ class SQLiteSessionsService:
                                     imported_backend == "unknown" or existing_backend == imported_backend
                                 )
                             )
-                            same_variant = _normalize_agent_name_key(
-                                existing_variant
-                            ) == _normalize_agent_name_key(imported_variant)
+                            replaces_route_owner = not import_matches_existing_owner and (
+                                not existing_is_owned
+                                or adopts_unbound_route
+                                or sentinel_variant_compatible
+                            )
                             same_agent_identity = (
                                 imported_agent_id is not None and existing_agent_id == imported_agent_id
                             )
@@ -1351,10 +1356,8 @@ class SQLiteSessionsService:
                             )
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
                             variant_conflicts = (
-                                not same_variant
+                                not import_matches_existing_owner
                                 and not sentinel_variant_compatible
-                                and not same_agent_identity
-                                and not same_agent_name
                             )
                             if not adopts_unbound_route and (
                                 (existing_variant_is_owned and variant_conflicts)
@@ -1419,17 +1422,17 @@ class SQLiteSessionsService:
                                 update_values["agent_backend"] = (
                                     imported_backend if imported_backend != "unknown" else existing_backend or "default"
                                 )
-                                if imported_backend != "unknown" and imported_backend != existing_backend:
-                                    update_values["model"] = None
-                                    update_values["reasoning_effort"] = None
-                                    update_values["metadata_json"] = json.dumps(
-                                        reconcile_explicit_overrides(
-                                            _json_loads(existing_anchor_row["metadata_json"], {}),
-                                            cleared=OVERRIDABLE_SETTING_COLUMNS,
-                                        ),
-                                        separators=(",", ":"),
-                                        ensure_ascii=False,
-                                    )
+                            if replaces_route_owner:
+                                update_values["model"] = None
+                                update_values["reasoning_effort"] = None
+                                update_values["metadata_json"] = json.dumps(
+                                    reconcile_explicit_overrides(
+                                        _json_loads(existing_anchor_row["metadata_json"], {}),
+                                        cleared=OVERRIDABLE_SETTING_COLUMNS,
+                                    ),
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                )
                             if not preserves_existing_identity:
                                 update_values["agent_id"] = imported_agent_id
                                 update_values["agent_name"] = imported_agent_name
@@ -1893,6 +1896,42 @@ def _is_sentinel_variant(agent_variant: str) -> bool:
 
 def _normalize_agent_name_key(agent_name: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "-", str(agent_name or "").strip().lower()).strip("-_")
+
+
+def _import_matches_existing_owner(
+    *,
+    existing_backend: str,
+    existing_variant: str,
+    existing_agent_id: str | None,
+    existing_agent_name: str | None,
+    imported_backend: str,
+    imported_variant: str,
+    imported_agent_id: str | None,
+    imported_agent_name: str | None,
+) -> bool:
+    """Compare owners from most-specific Agent identity to generic backend aliases."""
+    if existing_agent_id is not None and imported_agent_id is not None:
+        return existing_agent_id == imported_agent_id
+    if existing_agent_name is not None:
+        existing_name_key = _normalize_agent_name_key(existing_agent_name)
+        return existing_name_key in {
+            _normalize_agent_name_key(imported_variant),
+            _normalize_agent_name_key(imported_agent_name or ""),
+        }
+    if existing_agent_id is not None:
+        return False
+
+    existing_variant_key = _normalize_agent_name_key(existing_variant)
+    imported_variant_key = _normalize_agent_name_key(imported_variant)
+    if not _is_sentinel_variant(existing_variant) and existing_variant_key not in _BACKEND_AGENT_NAMES:
+        return existing_variant_key == imported_variant_key
+    if imported_agent_id is not None or imported_agent_name is not None:
+        return False
+    return imported_variant_key == existing_variant_key or (
+        imported_backend == existing_backend
+        and imported_backend != "unknown"
+        and imported_variant_key == _normalize_agent_name_key(existing_backend)
+    )
 
 
 def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
