@@ -166,6 +166,59 @@ function serializeCurrentEditor(): { text: string; references: MentionReference[
 
 const serializedNodeLength = (node: LexicalNode): number => nodeToMarkerText(node, []).length;
 
+// Mention markers and their visible chip titles use different coordinate
+// systems. Keep leaf ranges in marker offsets while retaining visible text for
+// language-aware spacing at a captured selection boundary.
+type SerializedVisibleSegment = {
+  start: number;
+  end: number;
+  visibleText: string;
+};
+
+function serializedVisibleSegments(): SerializedVisibleSegment[] {
+  const segments: SerializedVisibleSegment[] = [];
+  const visit = (node: LexicalNode, base: number, rootLevel = false) => {
+    if ($isBeautifulMentionNode(node) || $isLineBreakNode(node) || $isTextNode(node)) {
+      const visibleText = $isBeautifulMentionNode(node)
+        ? node.getValue()
+        : node.getTextContent();
+      segments.push({ start: base, end: base + serializedNodeLength(node), visibleText });
+      return;
+    }
+    if (!$isElementNode(node)) return;
+    let offset = base;
+    const children = node.getChildren();
+    for (let index = 0; index < children.length; index += 1) {
+      visit(children[index], offset);
+      offset += serializedNodeLength(children[index]);
+      if (rootLevel && index < children.length - 1) {
+        segments.push({ start: offset, end: offset + 1, visibleText: '\n' });
+        offset += 1;
+      }
+    }
+  };
+  visit($getRoot(), 0, true);
+  return segments;
+}
+
+function visibleBoundaryAtOffset(target: number, side: 'left' | 'right'): string {
+  const segments = serializedVisibleSegments();
+  const ordered = side === 'left' ? [...segments].reverse() : segments;
+  for (const segment of ordered) {
+    if (side === 'left' && target <= segment.start) continue;
+    if (side === 'right' && target >= segment.end) continue;
+    if (segment.end - segment.start === segment.visibleText.length) {
+      const offset = Math.max(0, Math.min(target - segment.start, segment.visibleText.length));
+      return side === 'left'
+        ? (Array.from(segment.visibleText.slice(0, offset)).at(-1) ?? '')
+        : (Array.from(segment.visibleText.slice(offset))[0] ?? '');
+    }
+    const characters = Array.from(segment.visibleText);
+    return side === 'left' ? (characters.at(-1) ?? '') : (characters[0] ?? '');
+  }
+  return '';
+}
+
 type SerializedPoint = {
   key: string;
   offset: number;
@@ -399,20 +452,29 @@ function BootstrapPlugin({
         }),
       captureSelection: () => editor.getEditorState().read(() => {
         const { text } = serializeCurrentEditor();
+        const snapshotAt = (start: number, end: number) => voiceInsertionSnapshot(
+          text,
+          start,
+          end,
+          {
+            left: visibleBoundaryAtOffset(start, 'left'),
+            right: visibleBoundaryAtOffset(end, 'right'),
+          },
+        );
         const selection = $getSelection();
         if ($isNodeSelection(selection)) {
           const range = serializedRangeForNodes(selection.getNodes());
-          if (range) return voiceInsertionSnapshot(text, range.start, range.end);
+          if (range) return snapshotAt(range.start, range.end);
         }
         if (!$isRangeSelection(selection)) {
-          return voiceInsertionSnapshot(text, text.length, text.length);
+          return snapshotAt(text.length, text.length);
         }
         const anchor = serializedOffsetForPoint(selection.anchor);
         const focus = serializedOffsetForPoint(selection.focus);
         if (anchor === null || focus === null) {
-          return voiceInsertionSnapshot(text, text.length, text.length);
+          return snapshotAt(text.length, text.length);
         }
-        return voiceInsertionSnapshot(text, Math.min(anchor, focus), Math.max(anchor, focus));
+        return snapshotAt(Math.min(anchor, focus), Math.max(anchor, focus));
       }),
       replaceSelection: (snapshot, text) => {
         let replaced = false;

@@ -10,6 +10,13 @@ export type VoiceInsertionSnapshot = {
   end: number;
   before: string;
   after: string;
+  leftBoundary?: string;
+  rightBoundary?: string;
+};
+
+type VoiceInsertionBoundaries = {
+  left?: string;
+  right?: string;
 };
 
 type VoiceCleanupFetch = (
@@ -39,6 +46,7 @@ export const voiceInsertionSnapshot = (
   text: string,
   start: number,
   end: number,
+  boundaries: VoiceInsertionBoundaries = {},
 ): VoiceInsertionSnapshot => {
   const [safeStart, safeEnd] = boundedSelection(text, start, end);
   return {
@@ -47,15 +55,22 @@ export const voiceInsertionSnapshot = (
     end: safeEnd,
     before: text.slice(Math.max(0, safeStart - VOICE_CONTEXT_BEFORE_CHARS), safeStart),
     after: text.slice(safeEnd, safeEnd + VOICE_CONTEXT_AFTER_CHARS),
+    leftBoundary: boundaries.left,
+    rightBoundary: boundaries.right,
   };
 };
 
 const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
-const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
 const MENTION_AT_START = /^[@#]<([^>\n]+)>/u;
 const MENTION_AT_END = /[@#]<([^>\n]+)>$/u;
 const LEADING_OUTER_PUNCTUATION = /^[\p{Ps}\p{Pi}"'“‘]+/u;
 const TRAILING_OUTER_PUNCTUATION = /[\p{Pe}\p{Pf}.!,?:;…，。！？：；、"'’”]+$/u;
+
+const edgeCharacter = (text: string, side: 'start' | 'end'): string => {
+  const characters = Array.from(text);
+  return side === 'start' ? (characters[0] ?? '') : (characters.at(-1) ?? '');
+};
 
 const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
   const boundaryText = side === 'start'
@@ -64,13 +79,18 @@ const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
   const mention = side === 'start'
     ? boundaryText.match(MENTION_AT_START)
     : boundaryText.match(MENTION_AT_END);
-  if (mention) return side === 'start' ? (mention[1].at(0) ?? '') : (mention[1].at(-1) ?? '');
-  return side === 'start' ? (boundaryText.at(0) ?? '') : (boundaryText.at(-1) ?? '');
+  if (mention) return edgeCharacter(mention[1], side);
+  return edgeCharacter(boundaryText, side);
 };
 
-const needsBoundarySpace = (left: string, right: string): boolean => {
-  const leftChar = boundaryCharacter(left, 'end');
-  const rightChar = boundaryCharacter(right, 'start');
+const needsBoundarySpace = (
+  left: string,
+  right: string,
+  leftBoundary?: string,
+  rightBoundary?: string,
+): boolean => {
+  const leftChar = leftBoundary ?? boundaryCharacter(left, 'end');
+  const rightChar = rightBoundary ?? boundaryCharacter(right, 'start');
   return (
     WORD_CHARACTER.test(leftChar)
     && WORD_CHARACTER.test(rightChar)
@@ -87,10 +107,11 @@ export const voiceInsertionText = (
   if (currentText !== snapshot.text) return null;
   const normalized = transcript.trim();
   if (!normalized) return '';
+  if (snapshot.start !== snapshot.end) return normalized;
   const left = currentText.slice(0, snapshot.start);
   const right = currentText.slice(snapshot.end);
-  return `${needsBoundarySpace(left, normalized) ? ' ' : ''}${normalized}${
-    needsBoundarySpace(normalized, right) ? ' ' : ''
+  return `${needsBoundarySpace(left, normalized, snapshot.leftBoundary) ? ' ' : ''}${normalized}${
+    needsBoundarySpace(normalized, right, undefined, snapshot.rightBoundary) ? ' ' : ''
   }`;
 };
 

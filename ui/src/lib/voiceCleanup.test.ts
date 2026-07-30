@@ -30,6 +30,12 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(snapshot.text, snapshot, '后天发布')).toBe('请后天发布确认');
   });
 
+  it('does not add spaces at Southeast Asian script boundaries', () => {
+    const snapshot = voiceInsertionSnapshot('กข', 1, 1);
+
+    expect(applyVoiceInsertion(snapshot.text, snapshot, 'ค')).toBe('กคข');
+  });
+
   it('adds spaces at Latin mention boundaries without changing CJK boundaries', () => {
     const beforeLatinMention = voiceInsertionSnapshot('Ask @<Alice>', 4, 4);
     const afterLatinMention = voiceInsertionSnapshot('Ask @<Alice>', 12, 12);
@@ -44,6 +50,16 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(beforeCjkMention.text, beforeCjkMention, '一下')).toBe('问一下@<小明>');
   });
 
+  it('uses visible mention titles instead of serialized ids for spacing', () => {
+    const cjkSession = voiceInsertionSnapshot('Ask #<session-id>', 4, 4, { right: '项' });
+    const latinSession = voiceInsertionSnapshot('Ask #<session-id>', 4, 4, { right: 'P' });
+    const afterCjkSession = voiceInsertionSnapshot('#<session-id>', 13, 13, { left: '目' });
+
+    expect(applyVoiceInsertion(cjkSession.text, cjkSession, 'check')).toBe('Ask check#<session-id>');
+    expect(applyVoiceInsertion(latinSession.text, latinSession, 'check')).toBe('Ask check #<session-id>');
+    expect(applyVoiceInsertion(afterCjkSession.text, afterCjkSession, 'now')).toBe('#<session-id>now');
+  });
+
   it('adds Latin boundary spaces outside terminal and opening punctuation', () => {
     const beforeWord = voiceInsertionSnapshot('Send today', 5, 5);
     const afterLabel = voiceInsertionSnapshot('Note:publish', 5, 5);
@@ -56,6 +72,12 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(beforeQuotedWord.text, beforeQuotedWord, 'please')).toBe(
       'Say please "today"',
     );
+  });
+
+  it('replaces selected token text without introducing spaces', () => {
+    const snapshot = voiceInsertionSnapshot('v12beta', 1, 3);
+
+    expect(applyVoiceInsertion(snapshot.text, snapshot, '13')).toBe('v13beta');
   });
 
   it('refuses to insert when the draft no longer matches the snapshot', () => {

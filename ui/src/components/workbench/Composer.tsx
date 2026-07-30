@@ -372,6 +372,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [restoringRecording, setRestoringRecording] = useState(() => (
+    sessionId != null && voiceSessionsById.get(sessionId)?.status === 'recording'
+  ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
@@ -387,7 +390,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
-  const voiceDraftReadOnly = recordingStarting || recording || transcribing;
+  const voiceDraftReadOnly = recordingStarting || recording || restoringRecording || transcribing;
 
   useLayoutEffect(() => {
     disabledRef.current = disabled;
@@ -498,6 +501,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   useEffect(() => {
     setAttachments([]);
     setVoiceRetainedSession(null);
+    setRestoringRecording(
+      sessionId != null && voiceSessionsById.get(sessionId)?.status === 'recording',
+    );
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -730,11 +736,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const restore = () => {
       if (!alive) return;
       const session = voiceSessionsById.get(sessionId);
-      if (!session) return;
+      if (!session) {
+        setRestoringRecording(false);
+        return;
+      }
       if (session.status === 'recording') {
+        setRestoringRecording(true);
         timer = setTimeout(restore, 50);
         return;
       }
+      setRestoringRecording(false);
       if (session.status === 'transcribing' && session.finalization) {
         transcribingRef.current = true;
         setTranscribing(true);
@@ -1083,13 +1094,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   disabled={isVoiceControlDisabled(
                     disabled,
                     recording,
-                    transcribing || recordingStarting,
+                    transcribing || recordingStarting || restoringRecording,
                     Boolean(voiceRetainedSession),
                   )}
                   aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                   className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
                 >
-                  {transcribing || recordingStarting ? (
+                  {transcribing || recordingStarting || restoringRecording ? (
                     <Loader2 className="size-4 animate-spin" />
                   ) : recording ? (
                     <Square className="size-4" />
