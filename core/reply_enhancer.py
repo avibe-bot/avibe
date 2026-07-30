@@ -440,48 +440,46 @@ def _silent_control_ranges_and_mask(
     caps the work for adversarial chains of hidden, unmatched fences.
     """
     code_ranges, block_ranges = _markdown_code_ranges(text)
-    controls = _candidates_outside_ranges(candidates, code_ranges)
+    controls, _ = _partition_ranges_by_start(candidates, code_ranges)
     parsed_controls: List[Tuple[int, int]] = []
 
     for _ in range(2):
         control_ranges = _silent_ranges_for_openers(text, controls)
-        invalid_blocks = [
-            block_range
-            for block_range in block_ranges
-            if _position_in_ranges(block_range[0], control_ranges)
-        ]
+        _, invalid_blocks = _partition_ranges_by_start(
+            block_ranges,
+            control_ranges,
+        )
         if not invalid_blocks:
             break
 
         opaque_source = _mask_ranges(text, control_ranges)
         code_ranges, block_ranges = _markdown_code_ranges(opaque_source)
         parsed_controls = controls
-        discovered = _candidates_outside_ranges(candidates, code_ranges)
+        discovered, _ = _partition_ranges_by_start(candidates, code_ranges)
         expanded = sorted({*controls, *discovered})
         controls = expanded
 
     control_ranges = _silent_ranges_for_openers(text, controls)
-    invalid_blocks = [
-        block_range
-        for block_range in block_ranges
-        if _position_in_ranges(block_range[0], control_ranges)
-    ]
+    _, invalid_blocks = _partition_ranges_by_start(
+        block_ranges,
+        control_ranges,
+    )
     if invalid_blocks:
+        _, provisional_candidates = _partition_ranges_by_start(
+            candidates,
+            invalid_blocks,
+        )
         provisional = sorted(
             {
                 *controls,
-                *(
-                    candidate
-                    for candidate in candidates
-                    if _position_in_ranges(candidate[0], invalid_blocks)
-                ),
+                *provisional_candidates,
             }
         )
         provisional_ranges = _silent_ranges_for_openers(text, provisional)
         opaque_source = _mask_ranges(text, provisional_ranges)
         code_ranges, _ = _markdown_code_ranges(opaque_source)
         parsed_controls = provisional
-        discovered = _candidates_outside_ranges(candidates, code_ranges)
+        discovered, _ = _partition_ranges_by_start(candidates, code_ranges)
         controls = sorted({*controls, *discovered})
 
     if parsed_controls and parsed_controls != controls:
@@ -494,21 +492,30 @@ def _silent_control_ranges_and_mask(
     )
 
 
-def _candidates_outside_ranges(
-    candidates: List[Tuple[int, int]],
-    excluded_ranges: List[Tuple[int, int]],
-) -> List[Tuple[int, int]]:
-    """Return candidates whose opener is not covered by an excluded range."""
-    return [
-        candidate
-        for candidate in candidates
-        if not _position_in_ranges(candidate[0], excluded_ranges)
-    ]
-
-
-def _position_in_ranges(position: int, ranges: List[Tuple[int, int]]) -> bool:
-    """Return whether *position* falls inside any source range."""
-    return any(start <= position < end for start, end in ranges)
+def _partition_ranges_by_start(
+    ranges: List[Tuple[int, int]],
+    containers: List[Tuple[int, int]],
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Partition start-sorted ranges by start-sorted container membership."""
+    outside: List[Tuple[int, int]] = []
+    inside: List[Tuple[int, int]] = []
+    container_index = 0
+    for source_range in ranges:
+        position = source_range[0]
+        while (
+            container_index < len(containers)
+            and containers[container_index][1] <= position
+        ):
+            container_index += 1
+        if (
+            container_index < len(containers)
+            and containers[container_index][0] <= position
+            and position < containers[container_index][1]
+        ):
+            inside.append(source_range)
+        else:
+            outside.append(source_range)
+    return outside, inside
 
 
 def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:

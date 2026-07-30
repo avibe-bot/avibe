@@ -912,6 +912,50 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.endswith("Tail remains."))
         self.assertLessEqual(parse.call_count, 4)
 
+    def test_silent_parser_partitions_sorted_ranges_in_one_pass(self):
+        class CountingPosition:
+            comparisons = 0
+
+            def __init__(self, value):
+                self.value = value
+
+            def __le__(self, other):
+                type(self).comparisons += 1
+                return self.value <= other.value
+
+            def __lt__(self, other):
+                type(self).comparisons += 1
+                return self.value < other.value
+
+        count = 8_000
+        containers = [
+            (CountingPosition(index * 4), CountingPosition(index * 4 + 1))
+            for index in range(count)
+        ]
+        ranges = [
+            source_range
+            for index in range(count)
+            for source_range in (
+                (CountingPosition(index * 4), CountingPosition(index * 4)),
+                (
+                    CountingPosition(index * 4 + 2),
+                    CountingPosition(index * 4 + 2),
+                ),
+            )
+        ]
+
+        outside, inside = reply_enhancer._partition_ranges_by_start(
+            ranges,
+            containers,
+        )
+
+        self.assertEqual(len(outside), count)
+        self.assertEqual(len(inside), count)
+        self.assertLess(
+            CountingPosition.comparisons,
+            8 * (len(ranges) + len(containers)),
+        )
+
     def test_process_reply_keeps_original_enhancement_eligibility(self):
         text = (
             "`<silent>hidden</silent>``\n"
