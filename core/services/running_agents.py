@@ -610,15 +610,21 @@ async def _end_claude(controller: "Controller", composite_key: Optional[str], ba
         pid = get_claude_client_pid(client)
     except Exception:  # noqa: BLE001
         pid = None
-    # Interrupt any in-flight turn first (best-effort), then disconnect + free the
-    # SDK client / subprocess via the same path idle-eviction uses.
+    agent = _get_agent(controller, "claude")
+    end_runtime_session = getattr(agent, "end_runtime_session", None)
     try:
-        if hasattr(client, "interrupt"):
-            await client.interrupt()
-    except Exception:  # noqa: BLE001
-        logger.debug("end: claude interrupt failed for %s", ck, exc_info=True)
-    try:
-        await session_handler.cleanup_session(ck)
+        if callable(end_runtime_session):
+            ended = await end_runtime_session(ck)
+            if ended is False:
+                return {"ok": False, "error": "session_not_live"}
+        else:
+            # Compatibility for teardown while the Claude adapter is not registered.
+            try:
+                if hasattr(client, "interrupt"):
+                    await client.interrupt()
+            except Exception:  # noqa: BLE001
+                logger.debug("end: claude interrupt failed for %s", ck, exc_info=True)
+            await session_handler.cleanup_session(ck)
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: claude cleanup_session failed for %s: %s", ck, exc)
         return {"ok": False, "error": "cleanup_failed", "detail": str(exc)}

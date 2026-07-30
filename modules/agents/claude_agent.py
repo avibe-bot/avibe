@@ -733,6 +733,7 @@ class ClaudeAgent(BaseAgent):
                 self.claude_sessions.get(composite_key) is not client
                 or self.receiver_tasks.get(composite_key) is not receiver_task
                 or receiver_task.done()
+                or composite_key in self._steering_closing_keys()
                 or self._pending_requests.get(composite_key) is not primary_requests
                 or len(primary_requests) != primary_request_count
                 or primary_requests[0] is not target.agent_request
@@ -829,6 +830,25 @@ class ClaudeAgent(BaseAgent):
             logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)
 
+        return True
+
+    async def end_runtime_session(self, composite_key: str) -> bool:
+        """Interrupt and clean up one runtime without racing native steering."""
+        async with self._steering_lock(composite_key):
+            client = self.claude_sessions.get(composite_key)
+            if client is None:
+                return False
+            self._steering_closing_keys().add(composite_key)
+            try:
+                if hasattr(client, "interrupt"):
+                    await client.interrupt()
+            except Exception:  # noqa: BLE001 - operational End remains best-effort
+                logger.debug(
+                    "Failed to interrupt Claude runtime before ending %s",
+                    composite_key,
+                    exc_info=True,
+                )
+        await self._cleanup_runtime_session(composite_key)
         return True
 
     async def _receive_messages(
@@ -1351,77 +1371,19 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             composite_key = composite_key or f"{base_session_id}:{working_path}"
-            mark_session_idle = getattr(self.session_handler, "mark_session_idle", None)
-            if callable(mark_session_idle):
-                mark_session_idle(composite_key)
+            # Claim teardown before waiting for an in-flight steering write. This
+            # makes its post-write check return UNKNOWN instead of ACCEPTED while
+            # the sole receiver is already exiting.
+            self._steering_closing_keys().add(composite_key)
             logger.error(
                 f"Error in Claude receiver for session {composite_key}: {e}",
                 exc_info=True,
             )
-            # The reused receiver context still carries the FIRST turn's token, so a
-            # 2nd-or-later turn's crash would emit its terminal error under a stale
-            # token — the outbound active-turn guard treats it as superseded and drops
-            # BOTH the failed-status write and the completion signal, hanging Chat to
-            # the 600s timeout. Adopt the CURRENT (FIFO-head) turn's token onto the
-            # context BEFORE clearing the FIFO (and before either the auth-recovery or
-            # the non-auth emit below), mirroring the in-loop auth-failure paths (Codex P2).
-            _pending = self._pending_requests.get(composite_key) or []
-            pending_request = _pending[0] if _pending else None
-            self._adopt_pending_turn_token(context, pending_request)
-            # Clean up all pending reactions for this session on error —
-            # the receiver is dead and won't process any more results.
-            await self._clear_pending_reactions(composite_key, context)
-            error_notify = self._format_error_notify(e)
-            failure_context = getattr(pending_request, "context", context)
-            await self.record_model_hub_native_failure(failure_context, str(e))
-            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            await self._handle_receiver_exception(
+                composite_key,
                 context,
-                "claude",
-                error_notify,
-                output=terminal_output_for(pending_request),
-                terminal_error=str(e),
+                e,
             )
-            if not handled:
-                await self.session_handler.handle_session_error(composite_key, context, e)
-                # ``handle_session_error`` sends via the IM client, which doesn't
-                # write to ``messages``; the web Chat renders only durable rows, so
-                # persist a terminal notify or the avibe user's turn stops with no
-                # explanation (mirrors the synchronous query-failure path above).
-                try:
-                    from core.message_mirror import persist_agent_message
-
-                    notification = backend_failure_notification_output(
-                        context,
-                        "claude",
-                        request=pending_request,
-                        output=terminal_output_for(pending_request),
-                    )
-                    persist_agent_message(
-                        context,
-                        "notify",
-                        error_notify,
-                        metadata=notification.metadata,
-                        native_message_id=notification.idempotency_key,
-                    )
-                except Exception:
-                    logger.debug("claude: failed to persist terminal receiver-error row", exc_info=True)
-                # A dead receiver is terminal. The HANDLED (auth) branch already
-                # settled the turn via ``maybe_emit_auth_recovery_message``; the
-                # non-auth branch is settled by NOTHING, so route it through the
-                # OUTBOUND status chokepoint here (empty error result → dot red +
-                # releases the SSE waiter) instead of letting the avibe Chat hang to
-                # the 600s stream timeout and then settle idle. No-op off-workbench
-                # (Codex P2).
-                await self.controller.emit_agent_message(
-                    context,
-                    "result",
-                    "",
-                    is_error=True,
-                    level="silent",
-                    output=terminal_output_for(pending_request),
-                    terminal_error=str(e),
-                )
-            self._release_service_runtime_turn(context)
         # NOTE: no `finally` cleanup of pending reactions here.
         # When the receiver ends normally (stream exhausted after a result),
         # new messages may have already queued their reactions via
@@ -1512,6 +1474,71 @@ class ClaudeAgent(BaseAgent):
                 terminal_error="Claude receiver ended without a terminal result",
             )
         finally:
+            self._release_service_runtime_turn(context)
+
+    async def _handle_receiver_exception(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        error: Exception,
+    ) -> None:
+        async with self._steering_lock(composite_key):
+            mark_session_idle = getattr(self.session_handler, "mark_session_idle", None)
+            if callable(mark_session_idle):
+                mark_session_idle(composite_key)
+
+            # A reused receiver context can carry an older Turn token. Bind failure
+            # delivery to the current FIFO head before clearing terminal state.
+            pending = self._pending_requests.get(composite_key) or []
+            pending_request = pending[0] if pending else None
+            self._adopt_pending_turn_token(context, pending_request)
+            await self._clear_pending_reactions(composite_key, context)
+            error_notify = self._format_error_notify(error)
+            failure_context = getattr(pending_request, "context", context)
+            await self.record_model_hub_native_failure(failure_context, str(error))
+            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                context,
+                "claude",
+                error_notify,
+                output=terminal_output_for(pending_request),
+                terminal_error=str(error),
+            )
+            if not handled:
+                await self.session_handler.handle_session_error(
+                    composite_key,
+                    context,
+                    error,
+                )
+                try:
+                    from core.message_mirror import persist_agent_message
+
+                    notification = backend_failure_notification_output(
+                        context,
+                        "claude",
+                        request=pending_request,
+                        output=terminal_output_for(pending_request),
+                    )
+                    persist_agent_message(
+                        context,
+                        "notify",
+                        error_notify,
+                        metadata=notification.metadata,
+                        native_message_id=notification.idempotency_key,
+                    )
+                except Exception:
+                    logger.debug(
+                        "claude: failed to persist terminal receiver-error row",
+                        exc_info=True,
+                    )
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    level="silent",
+                    output=terminal_output_for(pending_request),
+                    terminal_error=str(error),
+                )
             self._release_service_runtime_turn(context)
 
     async def _handle_assistant_terminal_failure(
