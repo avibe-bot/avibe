@@ -70,7 +70,7 @@ class _StubConfig(SimpleNamespace):
             platform="slack",
             language="en",
             agents=SimpleNamespace(
-                codex=SimpleNamespace(cli_path="codex"),
+                codex=SimpleNamespace(cli_path="codex", auth_mode="oauth"),
                 claude=SimpleNamespace(cli_path="claude"),
                 opencode=SimpleNamespace(cli_path="opencode"),
             ),
@@ -223,6 +223,30 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             output=ANY,
             terminal_error="❌ Codex error: 401 Unauthorized",
         )
+
+    async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
+        controller = _StubController()
+        controller.config.agents.codex.auth_mode = "api_key"
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(controller.im_client.sent_button_messages, [])
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        _, text = controller.im_client.sent_messages[0]
+        self.assertIn("API key", text)
+        self.assertIn("Base URL", text)
+        self.assertNotIn("OAuth", text)
+        persisted_text = persist.call_args.args[2]
+        self.assertIn("API key", persisted_text)
+        self.assertNotIn("/setup codex", persisted_text)
 
     async def test_maybe_emit_auth_recovery_message_defers_non_auth_error_to_caller(self):
         # A NON-auth terminal error returns False: the calling backend emits its

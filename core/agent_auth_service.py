@@ -891,7 +891,7 @@ class AgentAuthService:
         output: MessageOutput | None = None,
         terminal_error: str | None = None,
     ) -> bool:
-        """Emit a reset-oauth button when the backend error is auth-related.
+        """Emit the recovery action appropriate for an auth-related error.
 
         Each backend error-emit site calls this FIRST and emits its own failure
         path only when this returns ``False``. When this DOES handle the error,
@@ -902,26 +902,39 @@ class AgentAuthService:
         if not classify_auth_error(backend, error_text):
             return False
 
-        recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
-        await self._send_message_with_button(
-            context,
-            recovery_text,
-            button_text=self._t("button.resetOAuth"),
-            callback_data=f"auth_setup:{backend}",
+        backend_config = self._resolve_backend_config(backend)
+        uses_codex_api_key = (
+            backend == "codex"
+            and getattr(backend_config, "auth_mode", None) == "api_key"
         )
-        # The IM send above goes through ``send_message_with_buttons``, which is NOT
-        # a durable ``messages`` row, and the web Chat renders only durable rows —
-        # so persist the recovery text (error + reset instruction) HERE, the single
-        # home for it, rather than each backend persisting an error-only copy that
-        # drops the actionable reset prompt (Codex P2). No-op for contexts without
-        # a resolvable scope (persist_agent_message guards internally).
+        if uses_codex_api_key:
+            recovery_text = f"{error_text}\n\n{self._t('command.setup.apiKeyRecoveryPrompt', backend=backend)}"
+            await self._send_message(context, recovery_text)
+        else:
+            recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
+            await self._send_message_with_button(
+                context,
+                recovery_text,
+                button_text=self._t("button.resetOAuth"),
+                callback_data=f"auth_setup:{backend}",
+            )
+        # Transport sends are not durable ``messages`` rows, and the web Chat
+        # renders only durable rows. Persist the recovery text here, the single
+        # home for it, rather than letting each backend store an error-only copy
+        # that drops the actionable recovery prompt. No-op for contexts without a
+        # resolvable scope (persist_agent_message guards internally).
         #
         # The durable row has NO inline button, so persist a BUTTON-FREE variant:
         # ``resetPrompt`` says "use the button below", which is a dangling
         # instruction on the workbench Chat. Point at the cross-platform
         # ``/setup {backend}`` command instead so the persisted copy is actionable
         # everywhere (Codex P2).
-        durable_text = f"{error_text}\n\n{self._t('command.setup.resetPromptPlain', backend=backend)}"
+        durable_prompt = (
+            self._t("command.setup.apiKeyRecoveryPrompt", backend=backend)
+            if uses_codex_api_key
+            else self._t("command.setup.resetPromptPlain", backend=backend)
+        )
+        durable_text = f"{error_text}\n\n{durable_prompt}"
         try:
             from core.message_mirror import persist_agent_message
 

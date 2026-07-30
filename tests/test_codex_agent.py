@@ -1422,10 +1422,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
         self.assertNotIn("Channel-level session key:", developer_instructions)
 
-    async def test_resume_thread_does_not_force_model_provider_when_thread_matches_config(self):
+    async def test_resume_thread_rebinds_managed_provider_when_thread_id_matches_config(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=True))
-        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.codex_config = SimpleNamespace(
+            default_model=None,
+            auth_mode="api_key",
+            base_url="https://relay.example/v1",
+        )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent.sessions = SimpleNamespace(
             get_agent_session_id=Mock(return_value="thread-existing"),
@@ -1464,7 +1468,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.send_request.await_args_list[1].args[0], "thread/read")
         method, params = transport.send_request.await_args_list[2].args
         self.assertEqual(method, "thread/resume")
-        self.assertNotIn("modelProvider", params)
+        self.assertEqual(params["modelProvider"], "openai-managed")
 
     async def test_resume_thread_overrides_stale_session_model_provider(self):
         agent = object.__new__(CodexAgent)
