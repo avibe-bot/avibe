@@ -50,7 +50,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   onPrepareLaunch,
 }) => {
   const { t } = useTranslation();
-  const { openApp } = useWindowManager();
+  const { openApp, setGestureActive } = useWindowManager();
   const dock = useDock();
   const { begin: beginShowPageDrag, end: endShowPageDrag } = useShowPageDrag();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -89,9 +89,12 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   useEffect(
     () => () => {
       clearHoverTimer();
-      if (dragRef.current) endShowPageDrag();
+      if (dragRef.current) {
+        endShowPageDrag();
+        setGestureActive(false);
+      }
     },
-    [clearHoverTimer, endShowPageDrag],
+    [clearHoverTimer, endShowPageDrag, setGestureActive],
   );
 
   const prepare = useCallback(() => onPrepareLaunch(sessionId), [onPrepareLaunch, sessionId]);
@@ -167,6 +170,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       dragRef.current = null;
       setDragCue(null);
       endShowPageDrag();
+      setGestureActive(false);
       void openWindow(point);
     };
 
@@ -176,12 +180,13 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [endShowPageDrag, openWindow]);
+  }, [endShowPageDrag, openWindow, setGestureActive]);
 
   const endDrag = () => {
     dragRef.current = null;
     setDragCue(null);
     endShowPageDrag();
+    setGestureActive(false);
     window.setTimeout(() => {
       suppressClickRef.current = false;
     }, 0);
@@ -214,6 +219,12 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
             onMouseEnter={openHoverMenu}
             onMouseLeave={closeHoverMenu}
             onFocus={openHoverMenu}
+            onBlur={(event) => {
+              clearHoverTimer();
+              const next = event.relatedTarget;
+              if (next instanceof Node && menuRef.current?.contains(next)) return;
+              setMenuOpen(false);
+            }}
             draggable={canLaunch}
             onDragStart={(event) => {
               if (!canLaunch || !window.matchMedia?.('(min-width: 768px)').matches) {
@@ -228,6 +239,9 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               };
               event.dataTransfer.effectAllowed = 'copy';
               event.dataTransfer.setData('application/x-avibe-show-page', sessionId);
+              // Reuse the window gesture shield so a drop over an app iframe
+              // still reaches this document's dragover/drop listeners.
+              setGestureActive(true);
               beginShowPageDrag(pinToDock);
             }}
             onDragEnd={endDrag}
@@ -262,6 +276,12 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
             ref={menuRef}
             role="menu"
             aria-label={t('chat.showPage.launchMenu')}
+            onBlur={(event) => {
+              const next = event.relatedTarget;
+              if (next instanceof Node && event.currentTarget.contains(next)) return;
+              clearHoverTimer();
+              setMenuOpen(false);
+            }}
             onKeyDown={(event) => {
               if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
               const items = Array.from(

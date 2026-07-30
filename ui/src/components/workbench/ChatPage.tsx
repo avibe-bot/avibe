@@ -186,6 +186,14 @@ export const ChatPage: React.FC = () => {
   // One authority invalidates an in-flight restore/open when the user explicitly
   // chooses Chat (including a same-session ?view=chat navigation).
   const showPageRequestRef = useRef(0);
+  useEffect(
+    () => () => {
+      // External launches resolve after an async ensure. Once this page has
+      // unmounted, none of those prepared actions may still open or pin it.
+      showPageRequestRef.current += 1;
+    },
+    [],
+  );
   const showPageRestoreAttemptRef = useRef<string | null>(null);
   const selectChatView = useCallback((sid: string, remember: boolean) => {
     showPageRequestRef.current += 1;
@@ -679,6 +687,8 @@ export const ChatPage: React.FC = () => {
       // archive onto the chat now mounted (markSessionArchived guards the row
       // identity too; this also skips the needless refresh).
       if (archivedSessionId !== sessionIdRef.current) return;
+      showPageRequestRef.current += 1;
+      setShowPageBusy(false);
       writeChatViewMode(archivedSessionId, 'chat');
       setSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
@@ -1153,7 +1163,10 @@ export const ChatPage: React.FC = () => {
       onSessionActivity: (data) => {
         if (data.session_id === sessionIdRef.current && data.event === 'archived') {
           // The session you're viewing was archived (here or in another tab) —
-          // archive is terminal, so leave the chat.
+          // archive is terminal, so cancel any prepared external launch before
+          // leaving the chat.
+          showPageRequestRef.current += 1;
+          setShowPageBusy(false);
           writeChatViewMode(data.session_id, 'chat');
           goBack();
           return;
