@@ -11,6 +11,7 @@ import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
+import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
@@ -181,6 +182,16 @@ export const ChatPage: React.FC = () => {
   // before the composer bridge target, which depends on showPageMode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  // One authority invalidates an in-flight restore/open when the user explicitly
+  // chooses Chat (including a same-session ?view=chat navigation).
+  const showPageRequestRef = useRef(0);
+  const showPageRestoreAttemptRef = useRef<string | null>(null);
+  const selectChatView = useCallback((sid: string, remember: boolean) => {
+    showPageRequestRef.current += 1;
+    setShowPageMode(false);
+    setShowPageBusy(false);
+    if (remember) writeChatViewMode(sid, 'chat');
+  }, []);
   // Sessions whose first-open visualize prompt failed to send — retry it on the
   // next toggle (the page row already exists, so `existed` alone won't re-prompt).
   const showPagePromptRetryRef = useRef<Set<string>>(new Set());
@@ -214,12 +225,13 @@ export const ChatPage: React.FC = () => {
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
   useEffect(() => {
-    // ChatPage is reused across :sessionId — clear all show-page state so the
-    // next chat starts in chat view with a live (not stuck-busy) toggle.
-    setShowPageMode(false);
+    // ChatPage is reused across :sessionId. Clear the previous frame immediately;
+    // once the new session row loads, the restore effect below applies its own
+    // remembered view through the same open path as a user click.
+    showPageRestoreAttemptRef.current = null;
+    selectChatView(sessionId ?? '', false);
     setShowPageUrl(null);
-    setShowPageBusy(false);
-  }, [sessionId]);
+  }, [selectChatView, sessionId]);
 
   // Honor the ?view=chat "show me the chat" signal ONCE: leave Show Page mode and strip
   // the param. This makes the intent work even for a same-session jump (where the
@@ -227,11 +239,13 @@ export const ChatPage: React.FC = () => {
   // stripping it (like the ?msg jump below) keeps it a no-op on every render afterwards.
   useEffect(() => {
     if (!showChatSignal) return;
-    setShowPageMode(false);
+    const sid = sessionId ?? '';
+    showPageRestoreAttemptRef.current = sid || null;
+    selectChatView(sid, true);
     const next = new URLSearchParams(window.location.search);
     next.delete('view');
     setSearchParams(next, { replace: true });
-  }, [showChatSignal, setSearchParams]);
+  }, [selectChatView, sessionId, showChatSignal, setSearchParams]);
 
   // Publish this chat's composer to the ComposerBridge so the sidebar's
   // "reference this session" action can insert a #<session> mention into the
@@ -664,6 +678,7 @@ export const ChatPage: React.FC = () => {
       // archive onto the chat now mounted (markSessionArchived guards the row
       // identity too; this also skips the needless refresh).
       if (archivedSessionId !== sessionIdRef.current) return;
+      writeChatViewMode(archivedSessionId, 'chat');
       setSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
     },
@@ -1138,6 +1153,7 @@ export const ChatPage: React.FC = () => {
         if (data.session_id === sessionIdRef.current && data.event === 'archived') {
           // The session you're viewing was archived (here or in another tab) —
           // archive is terminal, so leave the chat.
+          writeChatViewMode(data.session_id, 'chat');
           goBack();
           return;
         }
@@ -1386,22 +1402,17 @@ export const ChatPage: React.FC = () => {
     [api, sessionId],
   );
 
-  // Toggle the chat surface ↔ the session's Show Page (iframe). The first open
-  // ensures the page exists; if it was just created, ask the agent to build the
-  // visualization. Errors surface via the apiFetch toast layer.
-  const toggleShowPage = useCallback(async () => {
-    const sid = sessionId;
-    if (!sid) return;
-    if (showPageMode) {
-      setShowPageMode(false);
-      return;
-    }
+  // One open path serves both a user toggle and remembered-view restoration. It
+  // ensures the page exists and, when newly created, asks the agent to build it.
+  // Errors surface via the apiFetch toast layer.
+  const openShowPage = useCallback(async (sid: string) => {
+    const request = ++showPageRequestRef.current;
     setShowPageBusy(true);
     try {
       const res = await api.ensureShowPage(sid);
-      // Bail if the user switched chats while ensure was in flight — otherwise a
-      // stale resolve would flip the NEW chat into iframe mode + send its prompt.
-      if (sessionIdRef.current !== sid) return;
+      // Bail if the user switched chats or explicitly selected Chat while ensure
+      // was in flight. The request id closes the same-session ?view=chat race.
+      if (sessionIdRef.current !== sid || showPageRequestRef.current !== request) return;
       if (res?.ok) {
         // Public pages are served under /p/<share_id>/; private under /show/<id>/.
         setShowPageUrl(
@@ -1412,6 +1423,7 @@ export const ChatPage: React.FC = () => {
           ),
         );
         setShowPageMode(true);
+        writeChatViewMode(sid, 'show-page');
         // First open (or a prior prompt that failed to send) asks the agent to
         // build the visualization. sendMessage returns false on a failed send;
         // track it so the NEXT toggle retries — the page row exists after this,
@@ -1431,12 +1443,36 @@ export const ChatPage: React.FC = () => {
     } catch {
       // apiFetch already surfaced a toast; stay in chat view.
     } finally {
-      // Always clear — the in-flight request is done regardless of which chat is
-      // now mounted (ChatPage is reused across sessions; a guarded clear would
-      // strand the shared busy flag on a session the user switched to).
-      setShowPageBusy(false);
+      if (sessionIdRef.current === sid && showPageRequestRef.current === request) {
+        setShowPageBusy(false);
+      }
     }
-  }, [sessionId, showPageMode, readOnly, api, sendMessage, t]);
+  }, [readOnly, api, sendMessage, t]);
+
+  const toggleShowPage = useCallback(async () => {
+    const sid = sessionId;
+    if (!sid) return;
+    if (showPageMode) {
+      selectChatView(sid, true);
+      return;
+    }
+    await openShowPage(sid);
+  }, [openShowPage, selectChatView, sessionId, showPageMode]);
+
+  // Restore a session's last selected surface after its authoritative row loads.
+  // Explicit chat/message deep links win, and archived sessions permanently fall
+  // back to Chat because their Show Page is offline.
+  useEffect(() => {
+    const sid = sessionId;
+    if (!sid || session?.id !== sid || showPageRestoreAttemptRef.current === sid) return;
+    showPageRestoreAttemptRef.current = sid;
+    if (readOnly) {
+      writeChatViewMode(sid, 'chat');
+      return;
+    }
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
+    void openShowPage(sid);
+  }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
@@ -1599,7 +1635,7 @@ export const ChatPage: React.FC = () => {
     // Wait until THIS session's initial data is present (refresh resolved and
     // the loaded session matches the route) — before that the loaded-vs-around
     // decision and the scroll target wouldn't be meaningful.
-    if (loading || !session || session.id !== sessionId) return;
+    if (loading || session?.id !== sessionId) return;
 
     handledJumpRef.current = targetMsg;
     const requestSessionId = sessionId;
@@ -1608,7 +1644,8 @@ export const ChatPage: React.FC = () => {
     // surface (transcript) is hidden behind the iframe — a scroll + highlight
     // there would be unseen. Exit Show Page mode so the chat is visible for the
     // jump (the user came here from a search result, so they want the message).
-    setShowPageMode(false);
+    showPageRestoreAttemptRef.current = sessionId;
+    selectChatView(sessionId, true);
 
     // Clear only ``msg`` (preserve any other query params) so a re-render /
     // visibility gap-recovery can't re-fire the jump. Read the live URL so we
@@ -1674,7 +1711,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [deepLinkMessageId, sessionId, loading, session?.id, api, startHighlight, setSearchParams]);
+  }, [deepLinkMessageId, sessionId, loading, session?.id, api, selectChatView, startHighlight, setSearchParams]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
