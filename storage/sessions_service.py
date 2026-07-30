@@ -1269,6 +1269,7 @@ class SQLiteSessionsService:
                             existing_agent_id = str(existing_anchor_row["agent_id"] or "").strip() or None
                             existing_agent_name = str(existing_anchor_row["agent_name"] or "").strip() or None
                             existing_is_owned = _is_owned_backend(existing_backend)
+                            existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
                             sentinel_variant_compatible = (
                                 existing_is_owned
                                 and _is_sentinel_variant(existing_variant)
@@ -1278,7 +1279,9 @@ class SQLiteSessionsService:
                             same_variant = existing_variant == imported_variant
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
                             variant_conflicts = not same_variant and not sentinel_variant_compatible
-                            if existing_is_owned and (variant_conflicts or backend_conflicts):
+                            if (existing_variant_is_owned and variant_conflicts) or (
+                                existing_is_owned and backend_conflicts
+                            ):
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row to a different owner "
                                     "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
