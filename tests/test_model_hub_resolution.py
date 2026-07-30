@@ -663,6 +663,48 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
     assert config.sources[0].state.status == "cooldown"
 
 
+def test_opencode_agent_supply_distinguishes_explicit_pin_from_resolver_pick(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    service.store.load().agents["opencode"].menu.checked = [
+        "anthropic/claude-opus-4-6"
+    ]
+
+    resolver_picked = service.get_agent_sources("opencode")
+
+    assert resolver_picked["selected_model_id"] == "anthropic/claude-opus-4-6"
+    assert resolver_picked["selected_model_explicit"] is False
+
+    service.requested_model_override = lambda backend: (
+        "anthropic/claude-opus-4-6" if backend == "opencode" else None
+    )
+    explicit_pin = service.get_agent_sources("opencode")
+
+    assert explicit_pin["selected_model_id"] == "anthropic/claude-opus-4-6"
+    assert explicit_pin["selected_model_explicit"] is True
+
+
+@pytest.mark.parametrize(
+    ("requested_model", "expected_model", "expected_explicit"),
+    [
+        ("claude-opus-4-6", "claude-opus-4-6", True),
+        ("", None, False),
+    ],
+)
+def test_fixed_menu_agent_supply_marks_only_configured_selection_explicit(
+    tmp_path,
+    requested_model,
+    expected_model,
+    expected_explicit,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    service.store.requested_models["claude"] = requested_model
+
+    agent = service.get_agent_sources("claude")
+
+    assert agent["selected_model_id"] == expected_model
+    assert agent["selected_model_explicit"] is expected_explicit
+
+
 def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)

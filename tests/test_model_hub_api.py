@@ -849,6 +849,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         assert {
             "selected_by_agent",
             "selected_model_id",
+            "selected_model_explicit",
             "current",
             "sources",
             "supply_status",

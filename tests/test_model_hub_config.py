@@ -313,6 +313,7 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
         "menu_kind": "fixed",
         "selected_by_agent": None,
         "selected_model_id": None,
+        "selected_model_explicit": False,
         "current": None,
         "sources": {"policy": "follow", "order": [], "eligibility": []},
         "supply_status": None,
@@ -336,6 +337,13 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
     }
     with pytest.raises(ValidationError):
         supply_validator.validate(invented)
+
+    invalid_explicitness = {
+        **base_supply,
+        "selected_model_explicit": True,
+    }
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_explicitness)
 
     invalid_reason = copy.deepcopy(base_supply)
     invalid_reason["sources"]["eligibility"] = [
