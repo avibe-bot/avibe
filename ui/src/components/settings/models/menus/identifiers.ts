@@ -7,7 +7,7 @@
 // generate and preview it.
 import type { Accent } from '../vendorMeta';
 import { sourceAccent } from '../vendorMeta';
-import type { AgentBackend, Source } from '../types';
+import type { Source } from '../types';
 
 // The standard OpenCode vendor ids come from the backend via the opencode
 // agent's `standard_vendors` projection (agent-supply v1.2), server-populated
@@ -34,33 +34,12 @@ export function buildIdentifier(sourceVendor: string, modelId: string, standardV
   return `${inferProvider(sourceVendor, standardVendors)}/${modelId}`;
 }
 
-// Which backend a fixed-menu backend's own native subscription belongs to
-// (its sanctioned native_cli client): Claude sub → claude, ChatGPT sub → codex.
-const NATIVE_SUB_VENDOR: Partial<Record<AgentBackend, string>> = {
-  claude: 'anthropic',
-  codex: 'openai',
-};
-
-/**
- * SINGLE chokepoint mirroring the backend `_eligible_for_agent` predicate — the
- * one place that decides whether a source may feed an agent's menu/mapping, so
- * the drawers never re-derive eligibility from `supply_channel` piecemeal.
- *
- * - OpenCode (open menu): only API-key sources materialize as providers;
- *   subscriptions (native_cli AND hub-held experimental) are excluded.
- * - Fixed-menu (Claude / Codex mapping targets): any hub-supplied API-key
- *   source, PLUS this backend's own native subscription (a Claude sub is a
- *   valid target for Claude Code, a ChatGPT sub for Codex).
- *
- * ESCALATED (2026-07-23): this mirrors backend logic the UI can't read; the
- * integration pass should drive it from a backend-provided signal (like
- * `builtin_models`). This function is the swap point.
- */
-export function isSourceEligible(source: Source, backend: AgentBackend): boolean {
-  if (backend === 'opencode') return source.kind === 'api_key';
-  if (source.kind === 'api_key') return true;
-  return source.kind === 'subscription' && source.vendor === NATIVE_SUB_VENDOR[backend];
-}
+// `isSourceEligible` lived here and is gone: it mirrored the backend
+// `_eligible_for_agent` predicate, which the UI cannot compute (it depends on the
+// `subscription_hub_experimental` flag and on recorded consent), so it was
+// guaranteed to drift and to offer rows the live API rejects. Contract v3
+// publishes the answer as `AgentSupply.sources.eligibility`; read it through
+// `../eligibility`.
 
 // ── Grouped menu model, derived from the ordered sources list ──────────────
 
