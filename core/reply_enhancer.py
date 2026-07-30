@@ -171,15 +171,22 @@ def strip_silent_blocks(text: str) -> str:
 
     changed = False
     while True:
-        opener = _SILENT_OPEN_RE.search(_mask_markdown_code(text))
-        if opener is None:
-            return text.strip() if changed else text
+        masked = _mask_markdown_code(text)
+        ranges: List[Tuple[int, int]] = []
+        search_from = 0
 
+        while opener := _SILENT_OPEN_RE.search(masked, search_from):
+            closing = _SILENT_CLOSE_RE.search(text, opener.end())
+            if closing is None:
+                ranges.append((opener.start(), len(text)))
+                return _remove_ranges(text, ranges).strip()
+            ranges.append((opener.start(), closing.end()))
+            search_from = closing.end()
+
+        if not ranges:
+            return text.strip() if changed else text
         changed = True
-        closing = _SILENT_CLOSE_RE.search(text, opener.end())
-        if closing is None:
-            return text[: opener.start()].strip()
-        text = text[: opener.start()] + text[closing.end() :]
+        text = _remove_ranges(text, ranges)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +280,17 @@ def _mask_markdown_code(text: str) -> str:
     for start, end in ranges:
         parts.append(text[cursor:start])
         parts.append(" " * (end - start))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
+    """Remove sorted, non-overlapping character ranges from *text*."""
+    parts: List[str] = []
+    cursor = 0
+    for start, end in ranges:
+        parts.append(text[cursor:start])
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts)
@@ -391,7 +409,9 @@ def _opening_fence_delimiter(
                 if cursor < len(line) and line[cursor] in {" ", "\t"}:
                     cursor += 1
                 column = 0
+                list_indents = []
                 quote_after_list = True
+                continue
             break
         marker_end, ordered_start = marker
 
@@ -415,6 +435,10 @@ def _opening_fence_delimiter(
         cursor, column = _consume_indentation(line, cursor, column)
         padding = column - padding_start_column
         if cursor == whitespace_start and cursor == len(line):
+            if paragraph_open and not list_indents:
+                cursor = marker_start
+                column = marker_column
+                break
             column += 1
             list_indents.append(column)
             saw_list_marker = True
@@ -425,6 +449,7 @@ def _opening_fence_delimiter(
             break
         list_indents.append(column)
         saw_list_marker = True
+        quote_after_list = False
 
     delimiter = _fence_run(line, cursor)
     if delimiter is None:
@@ -433,7 +458,9 @@ def _opening_fence_delimiter(
             None,
             quote_depth,
             list_indents,
-            False if saw_list_marker or indented_code else True,
+            False
+            if saw_list_marker or indented_code
+            else _line_opens_paragraph(line[cursor:]),
         )
 
     minimum_column = (
@@ -568,7 +595,7 @@ def _line_leaves_fence_container(
 ) -> bool:
     """Return whether a nonblank line exits the opening fence container."""
     if not line.strip():
-        return False
+        return quote_depth > 0 and _required_quote_prefix(line, quote_depth) is None
     prefix_end = _required_quote_prefix(line, quote_depth)
     if prefix_end is None:
         return True
@@ -620,41 +647,92 @@ def _inline_code_ranges_in_line(
     end: int,
 ) -> List[Tuple[int, int]]:
     """Pair inline backtick runs in one linear pass over a single line."""
-    runs: List[Tuple[int, int, int]] = []
+    runs: List[Tuple[int, int, int, bool]] = []
     cursor = start
     while cursor < end:
+        if text[cursor] == "<":
+            html_end = _raw_html_token_end(text, cursor, end)
+            if html_end is not None:
+                cursor = html_end
+                continue
         if text[cursor] != "`":
             cursor += 1
             continue
         run_end = cursor + 1
         while run_end < end and text[run_end] == "`":
             run_end += 1
-        run_start = cursor + 1 if _is_backslash_escaped(text, cursor) else cursor
-        if run_start < run_end:
-            runs.append((run_start, run_end, run_end - run_start))
+        runs.append(
+            (
+                cursor,
+                run_end,
+                run_end - cursor,
+                _is_backslash_escaped(text, cursor),
+            )
+        )
         cursor = run_end
 
-    next_same: List[int | None] = [None] * len(runs)
+    next_closing: List[int | None] = [None] * len(runs)
     next_by_length: dict[int, int] = {}
     for index in range(len(runs) - 1, -1, -1):
-        length = runs[index][2]
-        next_same[index] = next_by_length.get(length)
+        _, _, length, escaped = runs[index]
+        opening_length = length - 1 if escaped else length
+        if opening_length:
+            next_closing[index] = next_by_length.get(opening_length)
         next_by_length[length] = index
 
     ranges: List[Tuple[int, int]] = []
     index = 0
     while index < len(runs):
-        opening_start, _, _ = runs[index]
-        if _is_backslash_escaped(text, opening_start):
+        opening_start, _, _, escaped = runs[index]
+        if escaped:
+            opening_start += 1
+        if opening_start == runs[index][1]:
             index += 1
             continue
-        closing_index = next_same[index]
+        closing_index = next_closing[index]
         if closing_index is None:
             index += 1
             continue
         ranges.append((opening_start, runs[closing_index][1]))
         index = closing_index + 1
     return ranges
+
+
+def _raw_html_token_end(text: str, start: int, end: int) -> int | None:
+    """Return the end of a raw inline HTML token beginning at *start*."""
+    cursor = start + 1
+    if cursor >= end:
+        return None
+    if text[cursor] == "/":
+        cursor += 1
+    if cursor >= end or not (text[cursor].isalpha() or text[cursor] in {"!", "?"}):
+        return None
+
+    quote: str | None = None
+    while cursor < end:
+        char = text[cursor]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == ">":
+            return cursor + 1
+        cursor += 1
+    return None
+
+
+def _line_opens_paragraph(content: str) -> bool:
+    """Return whether a non-container Markdown line starts paragraph text."""
+    stripped = content.lstrip(" \t")
+    if re.match(r"#{1,6}(?:[ \t]+|$)", stripped):
+        return False
+    if re.fullmatch(r"(?:={3,}|-{3,})[ \t]*", stripped):
+        return False
+    compact = re.sub(r"[ \t]", "", stripped)
+    if len(compact) >= 3 and len(set(compact)) == 1 and compact[0] in {"*", "-", "_"}:
+        return False
+    return True
 
 
 def _is_backslash_escaped(text: str, index: int) -> bool:
