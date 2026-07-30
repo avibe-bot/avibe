@@ -28,6 +28,55 @@ export function inTextEntrySurface(el: Element | null): boolean {
   );
 }
 
+/** Bind the browser-safe close chord to one mounted same-origin Show Page frame. */
+export function bindShowPageFrameCloseShortcut(
+  iframe: HTMLIFrameElement,
+  onClose: () => void,
+): () => void {
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (
+      event.code !== 'KeyW' ||
+      !event.altKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey
+    ) {
+      return;
+    }
+    let active: Element | null = null;
+    try {
+      active = iframe.contentDocument?.activeElement ?? null;
+    } catch {
+      active = null;
+    }
+    if (inTextEntrySurface(active)) return;
+    event.preventDefault();
+    onClose();
+  };
+
+  const attach = () => {
+    try {
+      // The WindowProxy can survive navigation, so remove before every load-time
+      // attach to keep exactly one capture listener on the active document.
+      iframe.contentWindow?.removeEventListener('keydown', onKeyDown, true);
+      iframe.contentWindow?.addEventListener('keydown', onKeyDown, true);
+    } catch {
+      // Cross-origin frames are not expected for the private Show Page surface.
+    }
+  };
+
+  attach();
+  iframe.addEventListener('load', attach);
+  return () => {
+    iframe.removeEventListener('load', attach);
+    try {
+      iframe.contentWindow?.removeEventListener('keydown', onKeyDown, true);
+    } catch {
+      // The frame may already be torn down.
+    }
+  };
+}
+
 /** Resolve focused window chrome, including controls rendered in a body portal. */
 export function windowIdForKeyboardTarget(target: Element | null, layer: Element | null): string | null {
   if (!target || !layer) return null;

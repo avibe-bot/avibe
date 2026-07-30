@@ -311,7 +311,10 @@ export const AppWindow: React.FC<{
                 onEnable={annotationHost.annotation.enable}
                 onDisable={annotationHost.annotation.disable}
                 onSetMode={annotationHost.annotation.setMode}
-                onPopoverOpenChange={setAnnotateOpen}
+                onPopoverOpenChange={(open) => {
+                  if (open) wm.focus(win.id);
+                  setAnnotateOpen(open);
+                }}
                 ownerWindowId={win.id}
               />
             </div>

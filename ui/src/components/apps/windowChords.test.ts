@@ -1,6 +1,29 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
+import {
+  bindShowPageFrameCloseShortcut,
+  inTerminalSurface,
+  inTextEntrySurface,
+  windowIdForKeyboardTarget,
+} from './windowChords';
+
+class ListenerHub {
+  private listeners = new Map<string, Set<EventListener>>();
+
+  addEventListener(type: string, listener: EventListener) {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  emit(type: string, event: unknown) {
+    this.listeners.get(type)?.forEach((listener) => listener(event as Event));
+  }
+}
 
 // Mock an Element by its closest() behavior alone — realm-agnostic and jsdom-free.
 // A PLAIN OBJECT is never `instanceof HTMLElement`, so it doubles as the cross-realm
@@ -31,6 +54,43 @@ describe('inTerminalSurface', () => {
     expect(inTerminalSurface(elWithClosest((s) => s === '.xterm'))).toBe(true);
     expect(inTerminalSurface(elWithClosest(() => false))).toBe(false);
     expect(inTerminalSurface(null)).toBe(false);
+  });
+});
+
+describe('bindShowPageFrameCloseShortcut', () => {
+  const shortcutEvent = () => ({
+    code: 'KeyW',
+    altKey: true,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    preventDefault: vi.fn(),
+  });
+
+  it('binds when a recovered iframe mounts and reattaches after frame load', () => {
+    const iframeEvents = new ListenerHub();
+    const firstWindow = new ListenerHub();
+    const recoveredWindow = new ListenerHub();
+    const frame = {
+      contentDocument: { activeElement: null },
+      contentWindow: firstWindow,
+      addEventListener: iframeEvents.addEventListener.bind(iframeEvents),
+      removeEventListener: iframeEvents.removeEventListener.bind(iframeEvents),
+    } as unknown as HTMLIFrameElement;
+    const close = vi.fn();
+    const cleanup = bindShowPageFrameCloseShortcut(frame, close);
+
+    firstWindow.emit('keydown', shortcutEvent());
+    expect(close).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(frame, 'contentWindow', { value: recoveredWindow });
+    iframeEvents.emit('load', {});
+    recoveredWindow.emit('keydown', shortcutEvent());
+    expect(close).toHaveBeenCalledTimes(2);
+
+    cleanup();
+    recoveredWindow.emit('keydown', shortcutEvent());
+    expect(close).toHaveBeenCalledTimes(2);
   });
 });
 

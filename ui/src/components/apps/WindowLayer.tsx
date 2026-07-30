@@ -225,17 +225,11 @@ export const WindowLayer: React.FC = () => {
   // window's title live, and treat archive as terminal for the frame plus every
   // parent-owned page control.
   useEffect(
-    () => {
-      let connected = false;
-      return api.connectWorkbenchEvents({
+    () =>
+      api.connectWorkbenchEvents({
         onConnected: () => {
-          // The initial window mount already reads each session uncached. A
-          // later connection can cover events missed during an SSE gap, so make
-          // every open Show Page re-read its authoritative session state.
-          if (!connected) {
-            connected = true;
-            return;
-          }
+          // Re-read after EVERY subscription is established. This closes both
+          // the initial GET-to-first-connect gap and any later reconnect gap.
           setShowPageRevalidateVersion((version) => version + 1);
         },
         onSessionActivity: (data) => {
@@ -257,8 +251,7 @@ export const WindowLayer: React.FC = () => {
               setParams(win.id, { title });
             });
         },
-      });
-    },
+      }),
     [api, setParams, setTitle, t],
   );
 

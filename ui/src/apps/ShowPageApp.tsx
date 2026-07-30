@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MonitorX, PinOff } from 'lucide-react';
 
-import { inTextEntrySurface } from '../components/apps/windowChords';
+import { bindShowPageFrameCloseShortcut } from '../components/apps/windowChords';
 import { useRequiredShowPageAnnotationHost } from '../components/workbench/ShowPageAnnotationHostContext';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
@@ -22,61 +22,26 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
   const { unpin } = useDock();
   const { annotation, src } = useRequiredShowPageAnnotationHost();
   const { setIframe: setAnnotationIframe, handleIframeLoad } = annotation;
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const shortcutCleanupRef = useRef<() => void>(() => undefined);
   const setIframe = useCallback(
     (iframe: HTMLIFrameElement | null) => {
-      iframeRef.current = iframe;
+      shortcutCleanupRef.current();
+      shortcutCleanupRef.current = () => undefined;
       setAnnotationIframe(iframe);
+      if (!iframe) return;
+      shortcutCleanupRef.current = bindShowPageFrameCloseShortcut(iframe, () => {
+        if (confirmClose(windowId)) close(windowId);
+      });
     },
-    [setAnnotationIframe],
+    [close, confirmClose, setAnnotationIframe, windowId],
   );
 
   const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : '';
 
-  // Bridge ⌥W (close window) into the same-origin Show Page iframe: a keydown
-  // inside the iframe dispatches to ITS document and never bubbles to the parent
-  // WindowLayer listener, so without this ⌥W could not close the window while the
-  // user is interacting with the page content (Codex §7.1f review). Re-attach on
-  // each (re)load; text-entry surfaces inside the page keep Option+W for char entry.
-  useEffect(() => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
-      let active: Element | null = null;
-      try {
-        active = iframe.contentDocument?.activeElement ?? null;
-      } catch {
-        active = null;
-      }
-      if (inTextEntrySurface(active)) return;
-      e.preventDefault();
-      if (confirmClose(windowId)) close(windowId);
-    };
-    const attach = () => {
-      try {
-        // Capture phase (`true`) on the iframe's WINDOW — the EARLIEST target in the
-        // event path (window → document → element). A page that installs its own
-        // capture-phase keydown listener and calls stopPropagation() would run before
-        // a document-level capture listener and still swallow ⌥W; the window capture
-        // runs before that, so only the explicit text-entry exemption above can
-        // suppress the close shortcut (Codex §7.1g review).
-        iframe.contentWindow?.addEventListener('keydown', onKeyDown, true);
-      } catch {
-        // Cross-origin (should not happen for the same-origin /show/ surface).
-      }
-    };
-    attach();
-    iframe.addEventListener('load', attach);
-    return () => {
-      iframe.removeEventListener('load', attach);
-      try {
-        iframe.contentWindow?.removeEventListener('keydown', onKeyDown, true);
-      } catch {
-        // Document already torn down.
-      }
-    };
-  }, [close, confirmClose, iframeRef, windowId]);
+  // Callback refs run whenever the lifecycle host recovers from missing to ready,
+  // unlike an effect keyed by a stable ref object. The callback binds immediately;
+  // this cleanup is a final backstop for teardown.
+  useEffect(() => () => shortcutCleanupRef.current(), []);
 
   if (!sessionId || !src) {
     return (
