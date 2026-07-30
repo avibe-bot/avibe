@@ -329,3 +329,25 @@ export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutc
     ? { kind: 'ok', sourceName, latencyMs: probe.latency_ms }
     : { kind: 'failed', sourceName, detailKey: probe.error };
 }
+
+/**
+ * Did that probe leave a mark on the server? 试跑 is a real turn, so a failing
+ * one is not a read: `probe_agent` routes the failure through `_cooldown` or
+ * `_set_source_blocker`, which changes the source's health and can move the
+ * Agent's head and supply rollup with it. A caller that only stores the verdict
+ * shows the row states the failure just invalidated.
+ *
+ * Deliberately 「any unreachable probe」 rather than 「an unreachable hub probe」.
+ * The native branch answers from `native_source_ready` and returns before the
+ * write block, so today it writes nothing — but keying on the channel would
+ * oblige every reader to track which branch writes, and the cost of being wrong
+ * is a stale page, while the cost of the extra read is one request on a button
+ * the user pressed. A reachable probe is the case that provably writes nothing:
+ * the write block sits entirely under `if not reachable`, and no path clears a
+ * cooldown on success.
+ *
+ * A THROWN probe needs no re-read for the same reason, checked outcome by
+ * outcome: `probe_no_candidate` is raised before any write, and an engine failure
+ * propagates out of `_engine_call` above the write block.
+ */
+export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable;

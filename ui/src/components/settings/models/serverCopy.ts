@@ -51,8 +51,23 @@ export type OAuthJourney = 'connect' | 'reauth';
  * The failure codes raised while MATERIALIZING the terminal flow, not while
  * authorizing it (api.md → POST /sources errors). The vendor said yes; what came
  * after it didn't.
+ *
+ * Membership is 「this code can ONLY arise after terminal success」, and that is
+ * what disqualified `engine_down`. It is the engine-outage catch-all: every
+ * `_oauth_call` maps `EngineUnavailableError` — and any unexpected exception —
+ * onto it, and `_oauth_status` is one of its callers, so a plain outage during
+ * polling produces it while the flow is still pending. Reading it as
+ * materialization made a reauth announce 「已重新登录，但这个来源还是不可用」 for a
+ * sign-in that had not happened, which is the one claim the user cannot check.
+ *
+ * It falls through to `generic` (「连接失败，请重试」) rather than to a line naming
+ * the engine, because the same code is also raised for
+ * `NativeOAuthUnavailableError`: 「中枢没有响应」 would be false on the native
+ * channel, the same false-on-the-channel-reading-it problem the copy in this
+ * lane keeps hitting. Generic states the outage and asks for a retry, which is
+ * true whichever phase it interrupted.
  */
-const MATERIALIZE_CODES = ['discovery_failed', 'engine_down', 'migration_item_conflict'];
+const MATERIALIZE_CODES = ['discovery_failed', 'migration_item_conflict'];
 
 /**
  * A terminal-response failure code → the copy for it, for THIS journey.

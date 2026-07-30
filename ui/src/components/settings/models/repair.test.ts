@@ -16,6 +16,7 @@ import zh from '../../../i18n/zh.json';
 import {
   dryRunOutcome,
   dryRunPlan,
+  probeWroteState,
   reauthBodyKey,
   reauthCost,
   repairAction,
@@ -415,6 +416,39 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       sourceName: 'Key A',
       detailKey: null,
     });
+  });
+});
+
+describe('probeWroteState — whether 试跑 left a mark the page has to re-read', () => {
+  it('treats a failing probe as a write', () => {
+    // `probe_agent` cools the head down or blocks it on the way out, so the row
+    // states and ● 当前 behind the sheet are stale the moment this returns. The
+    // key here is one of the five `_cooldown` reasons, i.e. the branch that
+    // writes `retry_at` onto the source the chain resolved to.
+    expect(
+      probeWroteState(probe({ reachable: false, latency_ms: null, error: 'models.source.cooldown.server_error' })),
+    ).toBe(true);
+  });
+
+  it('treats a failing NATIVE probe as a write too, deliberately', () => {
+    // The native branch returns before the write block, so today this is a read
+    // the rule over-counts. Pinned as a decision rather than left implicit:
+    // keying on the channel would oblige every caller to track which branch of
+    // `probe_agent` writes, and the failure modes are not symmetric — being
+    // wrong this way costs one request on a button the user pressed, the other
+    // way it costs a page that silently disagrees with the server.
+    expect(
+      probeWroteState(
+        probe({ channel: 'native_cli', reachable: false, latency_ms: null, error: 'models.probe.native_cli_unavailable' }),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['hub', 'native_cli'] as const)('reads a reachable %s probe as a pure read', (channel) => {
+    // The write block sits entirely under `if not reachable`, and no path clears
+    // a cooldown on success — so a green 试跑 must NOT refetch, or every check
+    // costs the page two extra requests for nothing.
+    expect(probeWroteState(probe({ channel, latency_ms: channel === 'hub' ? 412 : null }))).toBe(false);
   });
 });
 

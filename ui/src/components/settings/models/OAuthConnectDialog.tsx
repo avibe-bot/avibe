@@ -240,10 +240,15 @@ export const OAuthConnectDialog: React.FC<{
         if (cancelled) return;
         // A poll that lands on a just-succeeded flow is also the call that
         // materializes the outcome, so it can fail for reasons that have nothing
-        // to do with the authorization (consent_required / discovery_failed /
-        // engine_down): the vendor said yes and what came after it broke. Naming
-        // that separately is the difference between 「重试授权」 and 「授权成功，
-        // 后面没成」 — and WHICH object it broke is the journey's to say.
+        // to do with the authorization (consent_required / discovery_failed):
+        // the vendor said yes and what came after it broke. Naming that
+        // separately is the difference between 「重试授权」 and 「授权成功，后面
+        // 没成」 — and WHICH object it broke is the journey's to say.
+        //
+        // Which phase a code belongs to is `oauthFailureKey`'s to decide, not
+        // this site's: the SAME poll can fail before authorization completes,
+        // and the codes that only exist after it are the only ones that may
+        // claim completion. `engine_down` is not one of them.
         const failure = apiFailure(err);
         reauthLeftRowsStale(failure);
         transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });

@@ -48,7 +48,7 @@ import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { apiFailure, modelsApi } from './modelsApi';
-import { dryRunOutcome, dryRunPlan, type DryRunOutcome } from './repair';
+import { dryRunOutcome, dryRunPlan, probeWroteState, type DryRunOutcome } from './repair';
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
@@ -463,7 +463,14 @@ export const SourceOrderDrawer: React.FC<{
           </>
         )}
 
-        {DRY_RUN_ENABLED && <DryRunRow agent={agent} sources={sources} />}
+        {DRY_RUN_ENABLED && (
+          <DryRunRow
+            agent={agent}
+            sources={sources}
+            chainKey={`${policy}|${order.join('>')}`}
+            reread={onSaved}
+          />
+        )}
 
         {/* The phone's home for 模型菜单与映射. A frame that doesn't draw a control
             at 390px is saying where to move it, not that a phone user may not
@@ -509,7 +516,16 @@ const failedLine = (t: TFunction, name: string, detail: string | null): string =
  * head the Hub does not carry the request for (a native CLI login) — which is
  * `可用` without a number, not a zero.
  */
-const DryRunRow: React.FC<{ agent: AgentSupply; sources: Source[] }> = ({ agent, sources }) => {
+const DryRunRow: React.FC<{
+  agent: AgentSupply;
+  sources: Source[];
+  /** The chain as the USER has it — see the reset effect for why the report is
+   *  keyed on this and not on the head the server computes from it. */
+  chainKey: string;
+  /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
+   *  write, so the page it sits on is stale until this runs. */
+  reread: () => void;
+}> = ({ agent, sources, chainKey, reread }) => {
   const { t } = useTranslation();
   const plan = dryRunPlan(agent);
   const [running, setRunning] = React.useState(false);
@@ -520,16 +536,22 @@ const DryRunRow: React.FC<{ agent: AgentSupply; sources: Source[] }> = ({ agent,
   const [errorText, setErrorText] = React.useState<string | null>(null);
   const seq = React.useRef(0);
 
-  // A result describes ONE chain head. Reorder the list, move the head, and the
-  // line above stops being about anything — so it goes, rather than sitting there
-  // naming a source this Agent no longer starts from.
-  const head = `${agent.current?.source_id ?? ''}·${agent.current?.model_id ?? ''}`;
+  // A result describes ONE chain, and editing the chain stops it being about
+  // anything — so it goes, rather than sitting there under a list it no longer
+  // answers for.
+  //
+  // Keyed on the chain the USER edits, not on `agent.current`, because the head
+  // is where the two diverge: a failing 试跑 cools its own head down, so the
+  // re-read below moves `agent.current` almost every time the report is a
+  // failure. Keyed on the head, the refresh would erase the sentence the click
+  // produced — and the line names its source, so after a self-inflicted move it
+  // is the EXPLANATION for the new head rather than a claim about it.
   React.useEffect(() => {
     seq.current += 1;
     setRunning(false);
     setOutcome(null);
     setErrorText(null);
-  }, [head]);
+  }, [chainKey]);
 
   // No head, or Direct mode: the route answers `direct_mode` / has nothing
   // runnable to reach, and the page says why one level up with the remedy
@@ -545,6 +567,10 @@ const DryRunRow: React.FC<{ agent: AgentSupply; sources: Source[] }> = ({ agent,
       const probe = await modelsApi.probeAgent(plan.backend);
       if (seq.current !== mine) return;
       setOutcome(dryRunOutcome(probe, sources));
+      // Store the verdict first, then re-read: `probeWroteState` owns which
+      // outcomes changed the server, and the row states and ● 当前 on the page
+      // behind this sheet are stale until the page re-reads them.
+      if (probeWroteState(probe)) reread();
     } catch (err) {
       if (seq.current !== mine) return;
       // The server's own reason when it named one (`probe_no_candidate` carries a

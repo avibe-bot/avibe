@@ -65,7 +65,7 @@ describe('oauthFailureKey', () => {
   // The codes raised while MATERIALIZING the terminal flow. Listed here, not
   // imported: the test's job is to fail when the module's list and the contract's
   // POST /sources errors drift apart, which a shared constant cannot do.
-  const MATERIALIZE = ['discovery_failed', 'engine_down', 'migration_item_conflict'] as const;
+  const MATERIALIZE = ['discovery_failed', 'migration_item_conflict'] as const;
 
   it('keeps the consent remedy for both journeys', () => {
     // consent_required is answered by a control the user can still reach, so its
@@ -80,6 +80,23 @@ describe('oauthFailureKey', () => {
     expect(oauthFailureKey(code, 'connect')).toBe('settings.models.oauth.error.finalize');
     expect(oauthFailureKey(code, 'reauth')).toBe('settings.models.oauth.error.finalizeReauth');
   });
+
+  it.each(['connect', 'reauth'] as const)(
+    'refuses to read an engine outage as a finished sign-in in a %s',
+    (journey) => {
+      // `engine_down` is the engine-outage catch-all, not a phase: every
+      // `_oauth_call` maps EngineUnavailableError (and any unexpected exception)
+      // onto it, and `_oauth_status` is one of its callers — so a poll can carry
+      // it while the flow is still pending, with nothing authorized and nothing
+      // materialized. Claiming 「已重新登录，但…」 there is unverifiable by the user.
+      expect(oauthFailureKey('engine_down', journey)).toBe('settings.models.oauth.error.generic');
+      // And the generic line rather than one naming the engine, because the same
+      // code covers NativeOAuthUnavailableError, where 「中枢没有响应」 is false.
+      expect(oauthFailureKey('engine_down', journey)).not.toBe(
+        'settings.models.oauth.error.finalizeReauth',
+      );
+    },
+  );
 
   it.each(['connect', 'reauth'] as const)('degrades an unrecognized code to the generic line in a %s', (journey) => {
     expect(oauthFailureKey('some_future_code', journey)).toBe('settings.models.oauth.error.generic');
