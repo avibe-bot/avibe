@@ -14,7 +14,11 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import and_, case, func, insert, or_, select, update
 
 from config import paths
-from storage.agent_session_rows import session_openable_in_chat, unchanged_text
+from storage.agent_session_rows import (
+    reserve_write_lock,
+    session_openable_in_chat,
+    unchanged_text,
+)
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
@@ -724,6 +728,41 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
                     logger.debug("failed to bridge runs.updated for %s", run_id, exc_info=True)
         except Exception:
             logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
+
+
+def _publish_queue_updated(session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    try:
+        from core.inbox_events import bus, is_controller_process
+    except Exception:
+        logger.debug("failed to import queue event publisher", exc_info=True)
+        return
+    payload = {"session_id": normalized_session_id}
+    try:
+        bus.publish("queue.updated", payload)
+        if bus.subscriber_count() == 0 and not is_controller_process():
+            try:
+                from vibe import internal_client
+
+                internal_client.publish_event_sync(
+                    "queue.updated",
+                    payload,
+                    timeout=1.5,
+                )
+            except Exception:
+                logger.debug(
+                    "failed to bridge queue.updated for %s",
+                    normalized_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.debug(
+            "failed to publish queue.updated for %s",
+            normalized_session_id,
+            exc_info=True,
+        )
 
 
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
@@ -2006,11 +2045,21 @@ class SQLiteBackgroundTaskStore:
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
+        queue_session_id = ""
         with self.engine.begin() as conn:
-            row = conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
+            # Cancellation and Workbench queue retirement are one ownership
+            # transition. Reserve the writer before reading so a concurrent
+            # claim cannot move the Run between the decision and its row delete.
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
             if not row:
                 return False
             status = normalize_run_status(row["status"])
+            metadata = _json_loads(row["metadata_json"], {})
             values: dict[str, Any] = {
                 "cancel_requested": 1,
                 "cancel_requested_at": now,
@@ -2028,7 +2077,22 @@ class SQLiteBackgroundTaskStore:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
                 )
+                if (
+                    status == "queued"
+                    and isinstance(metadata, dict)
+                    and metadata.get("workbench_queue_holds_run") is True
+                ):
+                    from storage import messages_service
+
+                    session_id = str(row["session_id"] or "").strip()
+                    if messages_service.delete_queued_agent_run(
+                        conn,
+                        session_id=session_id,
+                        run_id=run_id,
+                    ):
+                        queue_session_id = session_id
         _publish_run_rows_updated([row_to_publish])
+        _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:

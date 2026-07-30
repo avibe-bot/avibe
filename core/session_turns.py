@@ -1885,8 +1885,8 @@ class SessionTurnManager:
         If a turn is running (and something is queued), interrupt it (the user chose
         to cut in) and opt into ``flush_on_cancel`` so the queue runs as that turn
         unwinds. If nothing is running, flush directly as a fresh turn. No-op when
-        the queue is empty. Returns a result dict (``code='stop_failed'`` → 409 for
-        the HTTP adapter).
+        the queue is empty. A refused Stop or idle flush returns a typed failure for
+        the HTTP/CLI caller while leaving the durable queue retryable.
         """
         turn = self.in_flight.get(session_id)
         if turn is not None and not turn.task.done():
@@ -1942,9 +1942,12 @@ class SessionTurnManager:
             )
             queue_remains = True
         return {
-            "ok": True,
             "session_id": session_id,
-            "status": "flush_failed" if queue_remains else "empty",
+            **(
+                {"ok": False, "code": "flush_failed"}
+                if queue_remains
+                else {"ok": True, "status": "empty"}
+            ),
         }
 
     # --- shared turn chokepoints (status + Show checkpoint projection) ------------

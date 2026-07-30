@@ -777,10 +777,13 @@ def create_app(controller: "Controller") -> FastAPI:
     @app.post("/internal/send-now/{session_id}")
     async def _send_now(session_id: str) -> Any:
         """HTTP adapter: delegate "立即发送" (run the send-while-busy queue now) to
-        the turn owner (FSM, Phase 1b); ``stop_failed`` -> 409."""
+        the turn owner (FSM, Phase 1b); typed failures remain HTTP failures."""
         result = await manager.send_now(session_id)
-        if result.get("code") == "stop_failed":
+        code = result.get("code")
+        if code == "stop_failed":
             return JSONResponse(status_code=409, content=result)
+        if code == "flush_failed":
+            return JSONResponse(status_code=503, content=result)
         return result
 
     # Expose the per-session turn gate to in-process callers (the scheduler)

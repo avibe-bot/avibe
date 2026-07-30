@@ -273,6 +273,36 @@ def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, caps
     assert payload["details"]["controller_status_code"] == 409
 
 
+def test_send_now_surfaces_an_idle_flush_failure(monkeypatch, tmp_path, capsys):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+
+    async def _send_now(session_id):
+        return {
+            "status_code": 503,
+            "body": {
+                "ok": False,
+                "session_id": session_id,
+                "code": "flush_failed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "flush_failed"
+    assert payload["details"]["session_id"] == "sesaaa"
+    assert payload["details"]["controller_status_code"] == 503
+
+
 def test_send_now_rejects_an_archived_session_before_controller_call(
     monkeypatch,
     tmp_path,

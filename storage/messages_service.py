@@ -888,6 +888,45 @@ def delete_queued(conn: Connection, ids: list[str]) -> None:
     conn.execute(delete(messages).where(messages.c.id.in_(ids)))
 
 
+def delete_queued_agent_run(
+    conn: Connection,
+    *,
+    session_id: str,
+    run_id: str,
+) -> int:
+    """Retire the exact queued row owned by a canceled Workbench Agent Run."""
+
+    normalized_session_id = str(session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_session_id or not normalized_run_id:
+        return 0
+    rows = list(
+        conn.execute(
+            select(
+                messages.c.id,
+                messages.c.native_message_id,
+                messages.c.metadata_json,
+            )
+            .where(messages.c.session_id == normalized_session_id)
+            .where(messages.c.type == QUEUED_TYPE)
+        ).mappings()
+    )
+    row_ids = [
+        str(row["id"])
+        for row in rows
+        if _queued_agent_run_id(dict(row)) == normalized_run_id
+    ]
+    if not row_ids:
+        return 0
+    result = conn.execute(
+        delete(messages)
+        .where(messages.c.id.in_(row_ids))
+        .where(messages.c.session_id == normalized_session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+    )
+    return result.rowcount or 0
+
+
 def clear_queued(conn: Connection, session_id: str) -> int:
     """Drop ALL send-while-busy queued rows for a session. Used by archive so no
     queued prompt can later be flushed into a now-terminal session (on natural
