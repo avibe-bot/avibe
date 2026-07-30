@@ -1710,19 +1710,24 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("disposition", "retained_credential_ref"),
+    ("terminal_state", "disposition", "retained_credential_ref"),
     [
         (
+            "failed",
             RetainedMaterialDisposition.FLOW_SOURCE_REF,
             "cred_hub_existing",
         ),
-        (RetainedMaterialDisposition.UNKNOWN, None),
+        ("failed", RetainedMaterialDisposition.UNKNOWN, None),
+        ("cancelled", RetainedMaterialDisposition.UNKNOWN, None),
     ],
 )
-def test_failed_hub_reauth_irreversible_dispositions_fail_closed(
+@pytest.mark.parametrize("entrypoint", ["status", "submit"])
+def test_hub_reauth_irreversible_dispositions_fail_closed(
     tmp_path,
+    terminal_state,
     disposition,
     retained_credential_ref,
+    entrypoint,
 ):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -1754,17 +1759,35 @@ def test_failed_hub_reauth_irreversible_dispositions_fail_closed(
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
-            "state": "failed",
-            "error_key": "models.oauth.binding_failed",
+            "state": terminal_state,
+            "error_key": (
+                "models.oauth.binding_failed"
+                if terminal_state == "failed"
+                else None
+            ),
             "channel": "hub",
             "retained_material_disposition": disposition,
             "retained_credential_ref": retained_credential_ref,
         }
     )
 
-    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    if entrypoint == "status":
+        result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    else:
+        async def return_terminal(_flow_id, _value):
+            return adapter.flows[flow["flow_id"]]
 
-    assert result["flow"]["state"] == "failed"
+        adapter.submit_oauth = return_terminal
+        result = asyncio.run(
+            service.oauth_submit(
+                {
+                    "flow_id": flow["flow_id"],
+                    "value": "oauth-code",
+                }
+            )
+        )
+
+    assert result["flow"]["state"] == terminal_state
     persisted = store.config.sources[0]
     assert persisted.credential_ref == "cred_hub_existing"
     assert [model.id for model in persisted.models] == ["manual-model"]

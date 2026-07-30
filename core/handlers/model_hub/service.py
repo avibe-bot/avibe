@@ -628,6 +628,16 @@ class ModelHubService:
     def _oauth_channel(self, flow_id: str) -> OAuthChannel:
         return self._oauth_binding(flow_id).channel
 
+    @staticmethod
+    def _is_hub_unsuccessful_terminal(
+        binding: OAuthFlowBinding,
+        flow: OAuthFlowState,
+    ) -> bool:
+        return (
+            binding.channel == "hub"
+            and flow.state in {"failed", "cancelled"}
+        )
+
     def _oauth_binding(self, flow_id: str) -> OAuthFlowBinding:
         binding = self.oauth_flows.binding(flow_id)
         if binding is None:
@@ -1370,8 +1380,7 @@ class ModelHubService:
     ) -> tuple[OAuthFlowState, dict | None]:
         if flow.state != "success":
             if (
-                flow.state == "failed"
-                and binding.channel == "hub"
+                self._is_hub_unsuccessful_terminal(binding, flow)
                 and binding.source_id is not None
             ):
                 async with self._mutation_lock:
@@ -2794,9 +2803,9 @@ class ModelHubService:
                                 intent="reauth",
                             )
                         }
-                    if (
-                        pending_flow.state in {"failed", "cancelled"}
-                        and pending_binding.channel == "hub"
+                    if self._is_hub_unsuccessful_terminal(
+                        pending_binding,
+                        pending_flow,
                     ):
                         config = (
                             await self._materialize_failed_hub_reauth(
@@ -3024,9 +3033,9 @@ class ModelHubService:
                 return
             flow = await self._oauth_status(flow_id, binding.channel)
             self._raise_if_flow_expired(flow_id, flow)
-            if flow.state == "success" or (
-                flow.state == "failed"
-                and binding.channel == "hub"
+            if flow.state == "success" or self._is_hub_unsuccessful_terminal(
+                binding,
+                flow,
             ):
                 terminal = (binding, flow)
             else:
@@ -3041,10 +3050,9 @@ class ModelHubService:
                     )
                     if (
                         cancelled.state == "success"
-                        or cancelled.state == "failed"
-                        or (
-                            binding.intent == "reauth"
-                            and cancelled.state == "cancelled"
+                        or self._is_hub_unsuccessful_terminal(
+                            binding,
+                            cancelled,
                         )
                     ):
                         terminal = (binding, cancelled)
@@ -3054,18 +3062,11 @@ class ModelHubService:
                     self.oauth_flows.forget(flow_id)
         if terminal is not None:
             binding, flow = terminal
-            if flow.state == "cancelled":
-                async with self._mutation_lock:
-                    await self._materialize_failed_hub_reauth(
-                        binding,
-                        flow,
-                    )
-            else:
-                await self._materialize_completed_oauth(
-                    flow_id,
-                    binding,
-                    flow,
-                )
+            await self._materialize_completed_oauth(
+                flow_id,
+                binding,
+                flow,
+            )
             if flow.state != "success":
                 async with self._mutation_lock:
                     try:
