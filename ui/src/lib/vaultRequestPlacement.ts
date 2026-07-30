@@ -1,7 +1,7 @@
 import type { VaultRequest, WorkbenchMessage } from '@/context/ApiContext';
 import { chatRowKind } from '@/lib/chatRowKind';
 import { specFor } from '@/lib/messageTypes';
-import { messageOrderTimeMs } from '@/lib/transcriptOrder';
+import { messageOrderTimeMs, timestampOrderTimeMs } from '@/lib/transcriptOrder';
 
 export type VaultRequestType = 'access' | 'sign' | 'provision' | 'other';
 
@@ -92,7 +92,7 @@ export function placeVaultProvisionRequests(
       continue;
     }
 
-    const requestTime = Date.parse(request.created_at);
+    const requestTime = timestampOrderTimeMs(request.created_at);
     const sameTurn = agentMessages.find((message) => sameRequestTurn(request, message));
     // Do not guess when the request predates the retained message window: its
     // real owner may have been trimmed, and attaching it to the first visible

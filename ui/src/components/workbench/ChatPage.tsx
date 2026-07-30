@@ -68,7 +68,7 @@ import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
-import { VaultRequestCard } from '../ui/vault-request-card';
+import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
@@ -1973,6 +1973,12 @@ export const ChatPage: React.FC = () => {
     // ``h-16`` header occupies 4rem at the top, so subtract that instead.
     <ImageViewerProvider images={sessionImages}>
       <FileViewerProvider>
+      <VaultProvisionDialogProvider
+        key={sessionId ?? 'no-session'}
+        requests={vaultRequests}
+        onResolved={refreshVaultRequests}
+        disabled={readOnly}
+      >
       {/* Mobile: a FIXED full-screen flex column (the AppShell brand header is
           hidden on chat) so the composer has NO scrollable ancestor — that is what
           let iOS fling it off the top. useIosKeyboardInset then sizes this surface
@@ -2137,6 +2143,7 @@ export const ChatPage: React.FC = () => {
         />
       </div>
       </div>
+      </VaultProvisionDialogProvider>
       </FileViewerProvider>
     </ImageViewerProvider>
   );

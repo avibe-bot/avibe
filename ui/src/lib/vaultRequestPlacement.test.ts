@@ -57,6 +57,19 @@ const orderedMessage = (
   return message(`msg_${microseconds.toString(16).padStart(15, '0')}${idSuffix}`, createdAt, author);
 };
 
+const microsecondMessage = (
+  idSuffix: string,
+  microsecondsAfterSecond: number,
+  author = 'agent',
+): WorkbenchMessage => {
+  const secondStart = Date.parse('2026-07-30T10:00:00Z') * 1_000;
+  return message(
+    `msg_${(secondStart + microsecondsAfterSecond).toString(16).padStart(15, '0')}${idSuffix}`,
+    '2026-07-30T10:00:00Z',
+    author,
+  );
+};
+
 describe('vaultRequestType', () => {
   it('keeps provision separate from access and sign approvals', () => {
     expect(vaultRequestType(request('p', 'provision', '2026-07-30T10:00:00Z'))).toBe('provision');
@@ -103,6 +116,19 @@ describe('placeVaultProvisionRequests', () => {
     ]);
 
     expect(placed.byMessageId.get(sameSecondMessages[1].id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
+  it('does not round a request back onto an earlier reply in the same millisecond', () => {
+    const earlierInput = microsecondMessage('11111111', 100_000, 'user');
+    const earlierReply = microsecondMessage('22222222', 500_100);
+    const ownerReply = microsecondMessage('33333333', 500_950);
+    const placed = placeVaultProvisionRequests([earlierInput, earlierReply, ownerReply], [
+      request('p', 'provision', '2026-07-30T10:00:00.500900Z'),
+    ]);
+
+    expect(placed.byMessageId.has(earlierReply.id)).toBe(false);
+    expect(placed.byMessageId.get(ownerReply.id)?.map((item) => item.id)).toEqual(['p']);
     expect(placed.unanchored).toEqual([]);
   });
 

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
-import { byCreatedThenId, mergeById, insertMessageOrdered, messageOrderTimeMs } from './transcriptOrder';
+import {
+  byCreatedThenId,
+  mergeById,
+  insertMessageOrdered,
+  messageOrderTimeMs,
+  timestampOrderTimeMs,
+} from './transcriptOrder';
 
 // The transcript keeps its rows in durable (created_at, id) order at all times.
 // Only id + created_at drive ordering, so fixtures fill just those; the rest is
@@ -23,6 +29,19 @@ describe('messageOrderTimeMs', () => {
 
     expect(messageOrderTimeMs(mk(preciseId, createdAt))).toBe(preciseTime);
     expect(messageOrderTimeMs(mk('imported-id', createdAt))).toBe(Date.parse(createdAt));
+  });
+});
+
+describe('timestampOrderTimeMs', () => {
+  it('retains microseconds from UTC and offset ISO timestamps', () => {
+    const base = Date.parse('2026-07-30T10:00:00.500Z');
+
+    expect(timestampOrderTimeMs('2026-07-30T10:00:00.500100Z')).toBeCloseTo(base + 0.1, 6);
+    expect(timestampOrderTimeMs('2026-07-30T18:00:00.500900+08:00')).toBeCloseTo(base + 0.9, 6);
+  });
+
+  it('preserves Date.parse invalid timestamp behavior', () => {
+    expect(timestampOrderTimeMs('not-a-timestamp')).toBeNaN();
   });
 });
 

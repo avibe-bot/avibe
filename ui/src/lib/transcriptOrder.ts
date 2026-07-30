@@ -1,6 +1,21 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 
 const TIME_SORTABLE_MESSAGE_ID_RE = /^msg_([0-9a-f]{15})/i;
+const ISO_FRACTION_RE = /\.(\d+)(?=Z$|[+-]\d{2}:?\d{2}$)/;
+
+/** Parse an ISO timestamp without dropping precision beyond milliseconds. */
+export const timestampOrderTimeMs = (timestamp: string): number => {
+  const fraction = ISO_FRACTION_RE.exec(timestamp);
+  if (!fraction) return Date.parse(timestamp);
+
+  const millisecondDigits = fraction[1].padEnd(3, '0').slice(0, 3);
+  const normalized = `${timestamp.slice(0, fraction.index)}.${millisecondDigits}${timestamp.slice(fraction.index + fraction[0].length)}`;
+  const milliseconds = Date.parse(normalized);
+  if (Number.isNaN(milliseconds)) return milliseconds;
+
+  const microseconds = Number.parseInt(fraction[1].padEnd(6, '0').slice(0, 6), 10);
+  return milliseconds + (microseconds % 1_000) / 1_000;
+};
 
 /** Best available wall-clock position for a durable transcript row.
  *
@@ -15,7 +30,7 @@ export const messageOrderTimeMs = (message: Pick<WorkbenchMessage, 'id' | 'creat
     const microseconds = Number.parseInt(idTime, 16);
     if (Number.isSafeInteger(microseconds)) return microseconds / 1_000;
   }
-  return Date.parse(message.created_at);
+  return timestampOrderTimeMs(message.created_at);
 };
 
 // Pure ordering/merge helpers for the chat transcript, kept transport-agnostic
