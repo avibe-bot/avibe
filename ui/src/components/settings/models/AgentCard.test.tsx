@@ -71,23 +71,31 @@ const chains = (...rows: AgentChain[]): ModelChainIndex => Object.fromEntries(
   rows.map((row) => [modelChainKey(row.backend, row.model_id), { kind: 'ready', chain: row }]),
 );
 
-const render = (agents: AgentSupply[], reads: ModelChainIndex, issuesOnly = false) => renderToStaticMarkup(
+const render = (
+  agents: AgentSupply[],
+  reads: ModelChainIndex,
+  issuesOnly = false,
+  sourceRows: Source[] = [source('src_a', 'Anthropic API Key'), source('src_b', 'OpenAI API Key')],
+  pendingBackends: ReadonlySet<string> = new Set(),
+) => renderToStaticMarkup(
   <MemoryRouter>
     <I18nextProvider i18n={i18n}>
       <ToastProvider>
         <AgentCard
           agents={agents}
-          sources={[source('src_a', 'Anthropic API Key'), source('src_b', 'OpenAI API Key')]}
+          sources={sourceRows}
           chains={reads}
           runtime={null}
           issuesOnly={issuesOnly}
-          pendingBackends={new Set()}
+          pendingBackends={pendingBackends}
           onConnectHub={vi.fn()}
           onOpenOrder={vi.fn()}
           onOpenModels={vi.fn()}
           onSetRoute={vi.fn()}
           onAddModel={vi.fn()}
           onRepair={vi.fn()}
+          onRetest={vi.fn()}
+          retestingSourceId={null}
           onProbeSettled={vi.fn()}
           connectingBackend={null}
         />
@@ -148,6 +156,50 @@ describe('AgentCard model list', () => {
     const html = render([agent()], chains(broken, chain('claude-sonnet-4-6')));
     expect(html).toContain(zh.settings.models.modelStatus.needsAction);
     expect(html).toContain(zh.settings.models.routes.manual);
+  });
+
+  it('gives a blocked non-credential source its retest remedy on the model row', () => {
+    const blockedSource = {
+      ...source('src_a', 'Anthropic API Key'),
+      state: { status: 'error' as const, detail_key: 'models.source.error.unclassified' as const },
+    };
+    const blocked = chain('claude-opus-4-6', {
+      supply_state: 'interrupted',
+      chain: [{
+        source_id: 'src_a',
+        channel: 'hub',
+        via_mapping: false,
+        resolved_model_id: null,
+        health: 'needs_action',
+        runnable: false,
+        reason: null,
+        retry_at: null,
+      }],
+    });
+    const html = render([agent()], chains(blocked, chain('claude-sonnet-4-6')), false, [blockedSource]);
+    expect(html).toContain(zh.settings.models.repair.retest);
+    expect(html).not.toContain(zh.settings.models.routes.manual);
+  });
+
+  it('disables every OpenCode model-menu entry while the agent write is pending', () => {
+    const open = agent({ backend: 'opencode', menu_kind: 'open', builtin_models: null });
+    const pending = new Set(['opencode']);
+    const footer = render([open], {}, false, undefined, pending);
+    expect(footer).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?管理型号<\/button>/);
+
+    const rowZero = render([
+      agent({
+        backend: 'opencode',
+        menu_kind: 'open',
+        selected_model_id: null,
+        current: null,
+        model_supply: [],
+        mappings: [],
+        menu: { view: 'featured', checked: [] },
+        builtin_models: null,
+      }),
+    ], {}, false, undefined, pending);
+    expect(rowZero).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?选择型号<\/button>/);
   });
 
   it('filters to affected rows without leaving healthy siblings behind', () => {

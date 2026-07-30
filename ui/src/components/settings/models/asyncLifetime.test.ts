@@ -387,6 +387,10 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     expect(page).toMatch(/createPendingWrites\(setAgentWrites\)/);
     expect(page).toMatch(/pending: agentWrites\.has\(orderAgent\.backend\)/);
     expect(page).toMatch(/track: \(work\) => agentWriteRegistry\.track\(orderAgent\.backend, work\)/);
+    // Every OpenCode menu door disables at the card, and the page repeats the
+    // guard at the ownership boundary so a stale click cannot bypass it.
+    expect(page).toMatch(/agent\.backend === menuBackend && !agentWrites\.has\(agent\.backend\)/);
+    expect(page).toMatch(/if \(!agentWrites\.has\(agent\.backend\)\) setMenuBackend\(agent\.backend\)/);
   });
 });
 

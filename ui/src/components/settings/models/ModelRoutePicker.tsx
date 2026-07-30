@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { orderedRouteSources } from './modelRows';
+import { modelSupplierCounts, orderedRouteSources } from './modelRows';
 import type { AgentSupply, Source } from './types';
 
 type RouteTarget = {
@@ -28,9 +28,10 @@ export const ModelRoutePicker: React.FC<{
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
+  const routeSources = React.useMemo(() => orderedRouteSources(agent, sources), [agent, sources]);
   const groups = React.useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    return orderedRouteSources(agent, sources)
+    return routeSources
       .map((source) => ({
         source,
         targets: source.models
@@ -49,19 +50,13 @@ export const ModelRoutePicker: React.FC<{
           }),
       }))
       .filter((group) => group.targets.length > 0);
-  }, [agent, query, sources]);
+  }, [query, routeSources]);
 
   const selectedSources = React.useMemo(
-    () => orderedRouteSources(agent, sources).filter((source) => source.models.some((model) => model.id === value)),
-    [agent, sources, value],
+    () => routeSources.filter((source) => source.models.some((model) => model.id === value)),
+    [routeSources, value],
   );
-  const supplierCountByModel = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const { targets } of groups) {
-      for (const target of targets) counts.set(target.modelId, (counts.get(target.modelId) ?? 0) + 1);
-    }
-    return counts;
-  }, [groups]);
+  const supplierCountByModel = React.useMemo(() => modelSupplierCounts(routeSources), [routeSources]);
   const selectedLabel = selectedSources.length === 0
     ? value
     : servedBy

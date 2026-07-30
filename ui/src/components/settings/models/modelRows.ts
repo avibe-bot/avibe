@@ -15,6 +15,17 @@ export function manualModelSources(sources: Source[]): Source[] {
   return sources.filter((source) => source.kind === 'api_key');
 }
 
+/** Count suppliers from the complete route inventory, never a searched subset. */
+export function modelSupplierCounts(sources: Source[]): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const source of sources) {
+    for (const modelId of new Set(source.models.map((model) => model.id))) {
+      counts.set(modelId, (counts.get(modelId) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
 /** Every server-eligible source is a route-target inventory; the order only ranks groups. */
 export function orderedRouteSources(agent: AgentSupply, sources: Source[]): Source[] {
   const eligible = eligibleSources(sources, agent);

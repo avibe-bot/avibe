@@ -24,6 +24,7 @@ import {
   repairAction,
   REPAIR_LABEL_KEY,
   type DryRunOutcome,
+  type RepairKind,
 } from './repair';
 import { serverText } from './serverCopy';
 import { ModelRoutePicker } from './ModelRoutePicker';
@@ -58,16 +59,18 @@ const runnableHead = (read: ModelChainRead | undefined): AgentChainLink | null =
 const blockedRepair = (
   read: ModelChainRead | undefined,
   sources: Source[],
-): { source: Source; kind: RaisedRepair } | null => {
+): { source: Source; kind: RepairKind } | null => {
   if (read?.kind !== 'ready') return null;
   for (const link of read.chain.chain) {
     const source = sources.find((candidate) => candidate.id === link.source_id);
     if (!source) continue;
     const kind = repairAction(source);
-    if (kind === 'reauth' || kind === 'replace_key') return { source, kind };
+    if (kind) return { source, kind };
   }
   return null;
 };
+
+const isRaisedRepair = (kind: RepairKind): kind is RaisedRepair => kind !== 'retest';
 
 const ModelProbe: React.FC<{
   agent: AgentSupply;
@@ -258,8 +261,23 @@ const ModelRow: React.FC<{
   onSetRoute: (backend: AgentBackend, modelId: string, targetModelId: string | null) => void;
   onAddModel: () => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
   onProbeSettled: () => void;
-}> = ({ agent, modelId, sources, read, runtime, pending, onSetRoute, onAddModel, onRepair, onProbeSettled }) => {
+}> = ({
+  agent,
+  modelId,
+  sources,
+  read,
+  runtime,
+  pending,
+  onSetRoute,
+  onAddModel,
+  onRepair,
+  onRetest,
+  retestingSourceId,
+  onProbeSettled,
+}) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const configurable = agent.mode === 'hub';
@@ -269,6 +287,9 @@ const ModelRow: React.FC<{
   const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
   const needsAction = modelNeedsAction(agent, modelId, read, runtime);
   const repair = blockedRepair(read, sources);
+  const raisedRepair = repair && isRaisedRepair(repair.kind)
+    ? { source: repair.source, kind: repair.kind }
+    : null;
   const structuralEmpty =
     read?.kind === 'ready'
       ? read.chain.chain.length === 0
@@ -321,14 +342,25 @@ const ModelRow: React.FC<{
       <Button asChild variant="outline" size="xs" className="h-7 shrink-0">
         <Link to="/admin/settings/dependencies">{t('settings.models.modelStatus.runtimeAction')}</Link>
       </Button>
-    ) : repair ? (
+    ) : repair?.kind === 'retest' ? (
       <Button
         variant="outline"
         size="xs"
         className="h-7 shrink-0"
-        onClick={() => onRepair(repair.source, repair.kind)}
+        onClick={() => onRetest(repair.source)}
+        disabled={retestingSourceId !== null}
       >
-        {t(REPAIR_LABEL_KEY[repair.kind])}
+        {retestingSourceId === repair.source.id && <Loader2 className="animate-spin" />}
+        {t(REPAIR_LABEL_KEY.retest)}
+      </Button>
+    ) : raisedRepair ? (
+      <Button
+        variant="outline"
+        size="xs"
+        className="h-7 shrink-0"
+        onClick={() => onRepair(raisedRepair.source, raisedRepair.kind)}
+      >
+        {t(REPAIR_LABEL_KEY[raisedRepair.kind])}
       </Button>
     ) : agent.menu_kind === 'open' ? (
       <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={onAddModel}>
@@ -405,8 +437,13 @@ const ModelRow: React.FC<{
   );
 };
 
-const EmptySelectionRow: React.FC<{ agent: AgentSupply; onOpenModels: (agent: AgentSupply) => void }> = ({
+const EmptySelectionRow: React.FC<{
+  agent: AgentSupply;
+  pending: boolean;
+  onOpenModels: (agent: AgentSupply) => void;
+}> = ({
   agent,
+  pending,
   onOpenModels,
 }) => {
   const { t } = useTranslation();
@@ -420,7 +457,13 @@ const EmptySelectionRow: React.FC<{ agent: AgentSupply; onOpenModels: (agent: Ag
         </span>
       </span>
       {agent.menu_kind === 'open' ? (
-        <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={() => onOpenModels(agent)}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 shrink-0"
+          onClick={() => onOpenModels(agent)}
+          disabled={pending}
+        >
           {t('settings.models.emptySelection.action')}
         </Button>
       ) : (
@@ -451,6 +494,8 @@ const AgentModelCard: React.FC<{
   ) => void;
   onAddModel: () => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
   onProbeSettled: () => void;
 }> = (props) => {
   const { t } = useTranslation();
@@ -513,13 +558,21 @@ const AgentModelCard: React.FC<{
         )}
       </div>
 
-      {emptySelection && <EmptySelectionRow agent={agent} onOpenModels={props.onOpenModels} />}
+      {emptySelection && (
+        <EmptySelectionRow agent={agent} pending={props.pending} onOpenModels={props.onOpenModels} />
+      )}
 
       {models.length === 0 && !emptySelection ? (
         <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">
           <p className="text-[12.5px] text-muted">{t('settings.models.agents.emptyModels')}</p>
           {agent.menu_kind === 'open' ? (
-            <Button variant="outline" size="sm" className="h-9" onClick={() => props.onOpenModels(agent)}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-9"
+              onClick={() => props.onOpenModels(agent)}
+              disabled={props.pending}
+            >
               <Plus />
               {t('settings.models.emptySelection.action')}
             </Button>
@@ -547,6 +600,8 @@ const AgentModelCard: React.FC<{
             }
             onAddModel={props.onAddModel}
             onRepair={props.onRepair}
+            onRetest={props.onRetest}
+            retestingSourceId={props.retestingSourceId}
             onProbeSettled={props.onProbeSettled}
           />
         ))
@@ -556,7 +611,8 @@ const AgentModelCard: React.FC<{
         <button
           type="button"
           onClick={() => props.onOpenModels(agent)}
-          className="flex min-h-11 w-full items-center justify-center gap-2 border-t border-border px-4 py-2.5 text-[12px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground"
+          disabled={props.pending}
+          className="flex min-h-11 w-full items-center justify-center gap-2 border-t border-border px-4 py-2.5 text-[12px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted"
         >
           <Settings2 className="size-3.5" />
           {t('settings.models.agents.manageModels')}
@@ -584,6 +640,8 @@ export const AgentCard: React.FC<{
   ) => void;
   onAddModel: () => void;
   onRepair: (source: Source, kind: RaisedRepair) => void;
+  onRetest: (source: Source) => void;
+  retestingSourceId: string | null;
   onProbeSettled: () => void;
   connectingBackend: string | null;
 }> = ({ agents, ...props }) => {

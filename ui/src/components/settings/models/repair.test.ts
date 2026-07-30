@@ -160,6 +160,18 @@ describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', ()
   });
 });
 
+describe('model-row repair routing', () => {
+  it('routes retest through the server recovery endpoint and refreshes the shared rows', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const card = readFileSync(join(here, 'AgentCard.tsx'), 'utf8');
+    const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(card).toMatch(/repair\?\.kind === 'retest'[\s\S]*?onRetest\(repair\.source\)/);
+    expect(page).toMatch(/const retestSource = async \(source: Source\)[\s\S]*?modelsApi\.testSource\(source\.id\)/);
+    expect(page).toMatch(/onRetest=\{\(source\) => void retestSource\(source\)\}/);
+  });
+});
+
 const gap = (backend: SupplyGap['backend'], model_id: string): SupplyGap => ({ backend, model_id });
 
 describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog, ReplaceKeyDialog)', () => {

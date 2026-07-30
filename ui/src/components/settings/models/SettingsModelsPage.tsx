@@ -102,6 +102,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
+  const [retestingSourceId, setRetestingSourceId] = React.useState<string | null>(null);
   const [issuesOnly, setIssuesOnly] = React.useState(false);
   const agentSectionRef = React.useRef<HTMLDivElement>(null);
 
@@ -329,8 +330,31 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
+  const retestSource = async (source: Source) => {
+    if (retestingSourceId !== null) return;
+    setRetestingSourceId(source.id);
+    try {
+      const count = await modelsApi.testSource(source.id);
+      if (!aliveRef.current) return;
+      await refreshSourcesAgents();
+      if (aliveRef.current) {
+        showToast(t('settings.models.sourceActions.rediscovered', { count }) as string, 'success');
+      }
+    } catch {
+      if (!aliveRef.current) return;
+      await refreshSourcesAgents();
+      if (aliveRef.current) {
+        showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
+      }
+    } finally {
+      if (aliveRef.current) setRetestingSourceId(null);
+    }
+  };
+
   // Resolve an open drawer's agent from live state so edits see fresh data.
-  const menuAgent = agents.find((a) => a.backend === menuBackend) ?? null;
+  const menuAgent = agents.find(
+    (agent) => agent.backend === menuBackend && !agentWrites.has(agent.backend),
+  ) ?? null;
   // AC-7: the 来源顺序 drawer exists for Hub-mode backends only. Gating here as
   // well as on the button means a mode flip while the drawer is open closes it,
   // instead of leaving an editor open over an order nothing reads.
@@ -380,10 +404,14 @@ export const SettingsModelsPage: React.FC = () => {
               pendingBackends={agentWrites}
               onConnectHub={(agent) => void connectHub(agent)}
               onOpenOrder={(agent) => setOrderBackend(agent.backend)}
-              onOpenModels={(agent) => setMenuBackend(agent.backend)}
+              onOpenModels={(agent) => {
+                if (!agentWrites.has(agent.backend)) setMenuBackend(agent.backend);
+              }}
               onSetRoute={setModelRoute}
               onAddModel={() => openCustomModel()}
               onRepair={(source, kind) => setRepairTarget({ source, kind })}
+              onRetest={(source) => void retestSource(source)}
+              retestingSourceId={retestingSourceId}
               onProbeSettled={() => void refreshSourcesAgents()}
               connectingBackend={connecting}
             />

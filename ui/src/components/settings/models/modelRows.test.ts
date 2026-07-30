@@ -7,6 +7,7 @@ import {
   modelChainKey,
   modelIssueCount,
   modelNeedsAction,
+  modelSupplierCounts,
   orderedRouteSources,
   type ModelChainRead,
 } from './modelRows';
@@ -94,6 +95,12 @@ describe('model row projection', () => {
   it('only offers API-key inventories for manual models', () => {
     const subscription = { ...source('src_subscription'), kind: 'subscription' as const };
     expect(manualModelSources([subscription, source('src_key')]).map((item) => item.id)).toEqual(['src_key']);
+  });
+
+  it('counts duplicate suppliers from the full inventory', () => {
+    const first = { ...source('src_a'), models: [{ id: 'shared-model', provenance: 'discovered' as const }] };
+    const second = { ...source('src_b'), models: [{ id: 'shared-model', provenance: 'manual' as const }] };
+    expect(modelSupplierCounts([first, second]).get('shared-model')).toBe(2);
   });
 
   it('counts an interrupted model and the honest row-zero state independently', () => {
