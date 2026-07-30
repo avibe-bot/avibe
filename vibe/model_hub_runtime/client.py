@@ -21,6 +21,11 @@ _MODEL_PROBE_BYTES = 4 * 1024 * 1024
 _SAFE_ERROR_CODES = frozenset(
     {
         "api_error",
+        # Closed mirror of classification._BANNED_PATTERNS account-status
+        # tokens; the runtime preserves only exact machine codes.
+        "account_banned",
+        "account_disabled",
+        "account_suspended",
         "authentication_error",
         "billing_error",
         "context_length_exceeded",
@@ -533,10 +538,12 @@ def _error_code(payload: bytes) -> str | None:
         return None
     error = decoded.get("error")
     if isinstance(error, dict):
-        value = error.get("type") or error.get("code")
-        return _safe_error_code(value)
-    value = decoded.get("code")
-    return _safe_error_code(value)
+        for value in (error.get("type"), error.get("code")):
+            safe_value = _safe_error_code(value)
+            if safe_value is not None:
+                return safe_value
+        return None
+    return _safe_error_code(decoded.get("code"))
 
 
 def _safe_error_code(value: object) -> str | None:

@@ -31,8 +31,10 @@ from vibe.i18n import t as i18n_t
 
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
+TurnMode = Literal["direct", "hub"]
 
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
+_CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
 _CONTEXT_FAILURE_RECORDED_ATTR = "_vibe_model_hub_failure_recorded"
 _NATIVE_QUOTA_RE = re.compile(
     r"(?:quota|usage|credit|billing).{0,32}(?:exhaust|exceed|limit|deplet|insufficient)|"
@@ -100,9 +102,26 @@ class OpenCodeOverlay:
 def bind_launch(context: Any, launch: ModelHubLaunch) -> None:
     try:
         setattr(context, _CONTEXT_LAUNCH_ATTR, launch)
+        setattr(
+            context,
+            _CONTEXT_MODE_ATTR,
+            "direct" if launch.channel == "direct" else "hub",
+        )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False)
     except (AttributeError, TypeError):
         return
+
+
+def bind_turn_mode(context: Any, mode: TurnMode) -> None:
+    try:
+        setattr(context, _CONTEXT_MODE_ATTR, mode)
+    except (AttributeError, TypeError):
+        return
+
+
+def turn_mode_for_context(context: Any) -> TurnMode | None:
+    value = getattr(context, _CONTEXT_MODE_ATTR, None)
+    return value if value in {"direct", "hub"} else None
 
 
 def launch_for_context(context: Any) -> ModelHubLaunch | None:
@@ -806,6 +825,9 @@ class ModelHubRuntimeRouter:
                 process_scope,
             )
 
+    def turn_mode(self, backend: BackendName) -> TurnMode:
+        return cast(TurnMode, self.service.store.load().agents[backend].mode)
+
     async def resolve(
         self,
         backend: BackendName,
@@ -941,9 +963,17 @@ class ModelHubRuntimeRouter:
         launch = launch_for_context(context)
         if launch is None or launch.channel not in {"native_cli", "hub"} or not launch.source_id:
             return False
-        if launch.channel == "hub" and self.turn_gateway is not None:
-            return False
         if getattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False):
+            return False
+        if launch.channel == "hub" and self.turn_gateway is not None:
+            turn_id = str(
+                (getattr(context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
+            setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False
         decision: ResolutionDecision | None
         if _NATIVE_QUOTA_RE.search(diagnostic):

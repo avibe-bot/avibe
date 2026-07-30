@@ -936,16 +936,15 @@ class SessionTurnManager:
         if not turn_id or not callable(settle):
             return
         try:
-            from modules.agents.model_hub import launch_for_context
+            from modules.agents.model_hub import (
+                launch_for_context,
+                turn_mode_for_context,
+            )
 
             launch = launch_for_context(context)
-            mode = (
-                "direct"
-                if launch is not None and launch.channel == "direct"
-                else "hub"
-                if launch is not None
-                else None
-            )
+            mode = turn_mode_for_context(context)
+            if mode is None and launch is not None:
+                mode = "direct" if launch.channel == "direct" else "hub"
             settle(
                 turn_id,
                 settled_by=settled_by,

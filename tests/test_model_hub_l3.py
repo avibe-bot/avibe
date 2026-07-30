@@ -47,6 +47,7 @@ from modules.agents.model_hub import (
     ModelHubLaunch,
     ModelHubRuntimeRouter,
     bind_launch,
+    bind_turn_mode,
 )
 
 
@@ -462,6 +463,69 @@ def test_fsm_drop_overrides_a_completed_gateway_attempt(tmp_path: Path) -> None:
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_backend_terminal_failure_overrides_gateway_success(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "backend-terminal.json")
+    registry = TurnCorrelationRegistry(store)
+    exact_turn = _begin_hub_attempt(
+        registry,
+        turn_id="turn_backend_terminal",
+    )
+    success = _outcome(RawOutcomeKind.SUCCESS)
+    registry.finish_attempt(
+        exact_turn,
+        outcome=success,
+        decision=classify_outcome(success),
+    )
+
+    registry.fail_hub_attempt("turn_backend_terminal")
+    registry.settle(
+        "turn_backend_terminal",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get("turn_backend_terminal")
+    assert record is not None
+    assert record["outcome"] == "failed_terminal"
+    assert record["served"] is None
+    assert record["terminal_error"]["reason"] == "protocol_error"
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_lost_terminal_retains_completed_fallback_attempts(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "lost-terminal.json")
+    registry = TurnCorrelationRegistry(store)
+    exact_turn = _begin_hub_attempt(
+        registry,
+        turn_id="turn_lost_terminal",
+    )
+    failure = _outcome(
+        RawOutcomeKind.HTTP_ERROR,
+        status=429,
+    )
+    registry.finish_attempt(
+        exact_turn,
+        outcome=failure,
+        decision=classify_outcome(failure),
+    )
+
+    registry.settle(
+        "turn_lost_terminal",
+        settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get("turn_lost_terminal")
+    assert record is not None
+    assert record["outcome"] == "exhausted"
+    assert record["failed_attempts"][0]["reason"] == "rate_limited"
+    _assert_valid("turn-provenance.schema.json", record)
+
+
 def test_ambiguous_mixed_and_opencode_attempts_leave_no_record(
     tmp_path: Path,
 ) -> None:
@@ -622,6 +686,25 @@ def test_fsm_settlement_persists_the_turn_time_mode() -> None:
             runtime_model="gpt-5",
         ),
     )
+
+    manager._settle_model_hub_turn(
+        context,
+        SETTLED_BY_TERMINAL_RESULT,
+    )
+
+    runtime.settle_turn.assert_called_once()
+    assert runtime.settle_turn.call_args.kwargs["mode"] == "direct"
+
+
+def test_fsm_settlement_persists_model_less_direct_mode() -> None:
+    runtime = SimpleNamespace(settle_turn=Mock())
+    manager = SessionTurnManager(
+        SimpleNamespace(model_hub_runtime=runtime)
+    )
+    context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_opencode_default"}
+    )
+    bind_turn_mode(context, "direct")
 
     manager._settle_model_hub_turn(
         context,

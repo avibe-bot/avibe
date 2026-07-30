@@ -477,6 +477,32 @@ class TurnCorrelationRegistry:
                 {**identity.payload(), "reason": reason}
             )
 
+    def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
+        """Replace a gateway success rejected by the backend terminal result."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            trace = self._traces.get(normalized)
+            if trace is None:
+                return
+            identity = trace.pending_attempt
+            payload = (
+                identity.payload()
+                if identity is not None and identity.channel == "hub"
+                else trace.served
+            )
+            if payload is None or payload.get("channel") != "hub":
+                return
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = {
+                **payload,
+                "reason": "protocol_error",
+                "stream_started": True,
+            }
+
     def note_turn_mode(self, turn_id: str, mode: TurnMode) -> None:
         self.store.put_mode(turn_id, mode)
 
@@ -557,14 +583,17 @@ class TurnCorrelationRegistry:
                     else served
                 )
                 if terminal_error is None and interrupted_attempt is None:
-                    return
-                outcome = "failed_terminal"
-                served = None
-                terminal_error = terminal_error or {
-                    **interrupted_attempt,
-                    "reason": "stream_interrupted",
-                    "stream_started": True,
-                }
+                    if not trace.failed_attempts:
+                        return
+                    outcome = "exhausted"
+                else:
+                    outcome = "failed_terminal"
+                    served = None
+                    terminal_error = terminal_error or {
+                        **interrupted_attempt,
+                        "reason": "stream_interrupted",
+                        "stream_started": True,
+                    }
             elif (
                 settled_by == SETTLED_BY_TERMINAL_RESULT
                 and trace.pending_attempt is not None

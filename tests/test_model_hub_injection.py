@@ -306,6 +306,33 @@ def test_native_failure_is_forwarded_to_turn_correlation(
         reason="unclassified_error",
     )
 
+    hub_context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_hub_terminal"}
+    )
+    bind_launch(
+        hub_context,
+        ModelHubLaunch(
+            backend="codex",
+            channel="hub",
+            requested_model="gpt-5",
+            target_model="gpt-5",
+            runtime_model="gpt-5",
+            source_id="src_hub0001",
+        ),
+    )
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                hub_context,
+                "backend rejected the completion",
+            )
+        )
+        is False
+    )
+    correlation.fail_hub_attempt.assert_called_once_with(
+        "turn_hub_terminal"
+    )
+
 
 def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
     first = _source(

@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceBinding,
 )
+from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -639,6 +640,18 @@ class Handler(BaseHTTPRequestHandler):
         if payload['model'].endswith('/unsafe-error-code'):
             self._json(400, {{'error': {{'type': 'invalid_key_upstream-secret'}}}})
             return
+        if payload['model'].endswith('/account-banned'):
+            self._json(403, {{'error': {{'type': 'account_banned', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/account-suspended'):
+            self._json(403, {{'error': {{'code': 'account_suspended', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/account-disabled'):
+            self._json(403, {{'error': {{'type': 'vendor_error', 'code': 'account_disabled', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/ban-token-in-message'):
+            self._json(403, {{'error': {{'message': 'prefix account_banned suffix upstream-secret'}}}})
+            return
         if payload['model'].endswith('/redirected'):
             self.send_response(307)
             self.send_header('Location', 'https://example.test/credential-leak')
@@ -818,7 +831,16 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
                 _binding(
                     credential_ref,
                     allowed_origins=("codex",),
-                    model_ids=("model-a", "rate-limited", "unsafe-error-code", "redirected"),
+                    model_ids=(
+                        "model-a",
+                        "rate-limited",
+                        "unsafe-error-code",
+                        "account-banned",
+                        "account-suspended",
+                        "account-disabled",
+                        "ban-token-in-message",
+                        "redirected",
+                    ),
                 )
             ]
         )
@@ -848,6 +870,28 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         assert "upstream-secret" not in (failure.redacted_message or "")
         unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
         assert (await unsafe_code.outcome()).error_code is None
+        for model_id, error_code in (
+            ("account-banned", "account_banned"),
+            ("account-suspended", "account_suspended"),
+            ("account-disabled", "account_disabled"),
+        ):
+            banned = await adapter.invoke("src_fixture123", model_id, {}, False, "codex")
+            banned_outcome = await banned.outcome()
+            assert banned_outcome.error_code == error_code
+            assert banned_outcome.redacted_message == "upstream returned HTTP 403"
+            assert classify_outcome(banned_outcome).reason == "account_banned"
+        free_text = await adapter.invoke(
+            "src_fixture123",
+            "ban-token-in-message",
+            {},
+            False,
+            "codex",
+        )
+        free_text_outcome = await free_text.outcome()
+        assert free_text_outcome.error_code is None
+        assert "account_banned" not in (free_text_outcome.redacted_message or "")
+        assert "upstream-secret" not in (free_text_outcome.redacted_message or "")
+        assert classify_outcome(free_text_outcome).reason == "credential_revoked"
         redirected = await adapter.invoke("src_fixture123", "redirected", {}, False, "codex")
         redirect_outcome = await redirected.outcome()
         assert redirect_outcome.kind is RawOutcomeKind.HTTP_ERROR
