@@ -2862,6 +2862,9 @@
     "showPage": {
       "open": "可视化",
       "backToChat": "回聊天",
+      "launchMenu": "打开 Show Page",
+      "newWindow": "新窗口",
+      "newLink": "新链接",
       "annotate": {
         "toggle": "标注",
         "smart": "Smart",

@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -39,6 +39,7 @@ import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
+import { ShowPageLaunchControl } from './ShowPageLaunchControl';
 import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import {
@@ -1402,52 +1403,70 @@ export const ChatPage: React.FC = () => {
     [api, sessionId],
   );
 
-  // One open path serves both a user toggle and remembered-view restoration. It
-  // ensures the page exists and, when newly created, asks the agent to build it.
-  // Errors surface via the apiFetch toast layer.
-  const openShowPage = useCallback(async (sid: string) => {
-    const request = ++showPageRequestRef.current;
-    setShowPageBusy(true);
-    try {
-      const res = await api.ensureShowPage(sid);
-      // Bail if the user switched chats or explicitly selected Chat while ensure
-      // was in flight. The request id closes the same-session ?view=chat race.
-      if (sessionIdRef.current !== sid || showPageRequestRef.current !== request) return;
-      if (res?.ok) {
-        // Public pages are served under /p/<share_id>/; private under /show/<id>/.
-        setShowPageUrl(
-          showPageEmbeddedPath(
-            res.visibility === 'public' && res.share_id
-              ? `/p/${encodeURIComponent(res.share_id)}/`
-              : `/show/${encodeURIComponent(sid)}/`,
-          ),
-        );
-        setShowPageMode(true);
-        writeChatViewMode(sid, 'show-page');
-        // First open (or a prior prompt that failed to send) asks the agent to
-        // build the visualization. sendMessage returns false on a failed send;
-        // track it so the NEXT toggle retries — the page row exists after this,
-        // so `existed` alone would never re-prompt a created-but-unprompted page.
-        // Never on a read-only (archived) session: the store refuses to CREATE a
-        // page there, but a session archived after a failed prompt is still in the
-        // retry set, and re-prompting it would only 409. The header no longer
-        // offers the toggle at all once the session reads archived, so this is the
-        // callback-level backstop for an invocation that raced that render.
-        if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
-          void sendMessage(t('chat.showPage.prompt')).then((sent) => {
-            if (sent === false) showPagePromptRetryRef.current.add(sid);
-            else showPagePromptRetryRef.current.delete(sid);
-          });
+  // One action path serves inline view changes and external launches. Every
+  // target first ensures the page and sends the same first-build prompt; only
+  // the inline target changes this chat's remembered surface.
+  const performShowPageAction = useCallback(
+    async (sid: string, target: 'inline' | 'prepare'): Promise<boolean> => {
+      const request = ++showPageRequestRef.current;
+      setShowPageBusy(true);
+      try {
+        const res = await api.ensureShowPage(sid);
+        // Bail if the user switched chats or explicitly selected Chat while ensure
+        // was in flight. The request id closes the same-session ?view=chat race.
+        if (sessionIdRef.current !== sid || showPageRequestRef.current !== request) return false;
+        if (res?.ok) {
+          if (target === 'inline') {
+            // Public pages are served under /p/<share_id>/; private under /show/<id>/.
+            setShowPageUrl(
+              showPageEmbeddedPath(
+                res.visibility === 'public' && res.share_id
+                  ? `/p/${encodeURIComponent(res.share_id)}/`
+                  : `/show/${encodeURIComponent(sid)}/`,
+              ),
+            );
+            setShowPageMode(true);
+            writeChatViewMode(sid, 'show-page');
+          }
+          // First open (or a prior prompt that failed to send) asks the agent to
+          // build the visualization. sendMessage returns false on a failed send;
+          // track it so the NEXT toggle retries — the page row exists after this,
+          // so `existed` alone would never re-prompt a created-but-unprompted page.
+          // Never on a read-only (archived) session: the store refuses to CREATE a
+          // page there, but a session archived after a failed prompt is still in the
+          // retry set, and re-prompting it would only 409. The header no longer
+          // offers the toggle at all once the session reads archived, so this is the
+          // callback-level backstop for an invocation that raced that render.
+          if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
+            void sendMessage(t('chat.showPage.prompt')).then((sent) => {
+              if (sent === false) showPagePromptRetryRef.current.add(sid);
+              else showPagePromptRetryRef.current.delete(sid);
+            });
+          }
+          return true;
+        }
+        return false;
+      } catch {
+        // apiFetch already surfaced a toast; stay in chat view.
+        return false;
+      } finally {
+        if (sessionIdRef.current === sid && showPageRequestRef.current === request) {
+          setShowPageBusy(false);
         }
       }
-    } catch {
-      // apiFetch already surfaced a toast; stay in chat view.
-    } finally {
-      if (sessionIdRef.current === sid && showPageRequestRef.current === request) {
-        setShowPageBusy(false);
-      }
-    }
-  }, [readOnly, api, sendMessage, t]);
+    },
+    [readOnly, api, sendMessage, t],
+  );
+
+  const openShowPage = useCallback(
+    (sid: string) => performShowPageAction(sid, 'inline'),
+    [performShowPageAction],
+  );
+
+  const prepareShowPageLaunch = useCallback(
+    (sid: string) => performShowPageAction(sid, 'prepare'),
+    [performShowPageAction],
+  );
 
   const toggleShowPage = useCallback(async () => {
     const sid = sessionId;
@@ -1964,6 +1983,7 @@ export const ChatPage: React.FC = () => {
           showPageMode={showPageActive}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
+          onPrepareShowPageLaunch={prepareShowPageLaunch}
           onShowPageVisibilityChange={handleShowPagePayload}
           onShareOpenChange={setShareOpen}
           annotation={annotation}
@@ -2508,6 +2528,7 @@ interface ChatHeaderBarProps {
   showPageMode: boolean;
   showPageBusy: boolean;
   onToggleShowPage: () => void;
+  onPrepareShowPageLaunch: (sessionId: string) => Promise<boolean>;
   onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
   onShareOpenChange?: (open: boolean) => void;
   annotation: AnnotationBridge;
@@ -2522,7 +2543,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
   const { t } = useTranslation();
   const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
@@ -2641,26 +2662,14 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onPopoverOpenChange={onAnnotateOpenChange}
               />
             )}
-            <Button
-              type="button"
-              variant={showPageMode ? 'secondary' : 'ghost'}
-              onClick={onToggleShowPage}
-              disabled={showPageBusy}
-              aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              className="h-7 shrink-0 gap-1.5 px-2"
-            >
-              {showPageBusy ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : showPageMode ? (
-                <MessageSquare className="size-3.5" />
-              ) : (
-                <Presentation className="size-3.5" />
-              )}
-              <span className="hidden text-xs font-medium md:inline">
-                {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              </span>
-            </Button>
+            <ShowPageLaunchControl
+              sessionId={session.id}
+              title={session.title}
+              showPageMode={showPageMode}
+              busy={showPageBusy}
+              onToggle={onToggleShowPage}
+              onPrepareLaunch={onPrepareShowPageLaunch}
+            />
             {showPageActions.share && (
               <ShowPageShareControl
                 sessionId={session.id}

@@ -266,6 +266,7 @@ describe('read-only header withdraws the Show Page controls', () => {
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
         annotation={{
           state: null,
           iframeRef: { current: null },
@@ -401,6 +402,7 @@ describe('archived conflicts converge whatever the verb', () => {
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
         annotation={{
           state: null,
           iframeRef: { current: null },

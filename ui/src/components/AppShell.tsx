@@ -17,6 +17,7 @@ import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerContext';
 import { DockProvider } from '../context/DockContext';
+import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
@@ -402,6 +403,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider>
     <DockProvider>
+    <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
@@ -632,6 +634,7 @@ export const AppShell: React.FC = () => {
           the sidebar launcher. */}
       <WindowLayer />
     </div>
+    </ShowPageDragProvider>
     </DockProvider>
     </WindowManagerProvider>
   );
