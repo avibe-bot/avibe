@@ -12,6 +12,8 @@ import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesAct
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
 import { WindowBodyGestureShield, shouldShieldWindowBody } from './windowGesture';
 import { ErrorBoundary } from '../ui/error-boundary';
+import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
+import { useShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHostContext';
 
 const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'n', className: 'left-2 right-2 top-0 h-1.5 cursor-ns-resize' },
@@ -35,6 +37,7 @@ export const AppWindow: React.FC<{
   const { t } = useTranslation();
   const wm = useWindowManager();
   const navigate = useNavigate();
+  const annotationHost = useShowPageAnnotationHost();
   // Gate the chat-bubble's SPA navigation through the same unsaved-changes guard the
   // sidebar uses, so a route-level dirty blocker can veto it (and the minimize) as one.
   const authorizeRouteAction = useUnsavedChangesActionGuard();
@@ -50,6 +53,7 @@ export const AppWindow: React.FC<{
   // that changes the bounds — otherwise the geometry jumps before the transition class arrives and
   // maximize/restore don't animate at all.
   const [dragging, setDragging] = useState(false);
+  const [annotateOpen, setAnnotateOpen] = useState(false);
 
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
@@ -256,7 +260,7 @@ export const AppWindow: React.FC<{
         onDoubleClick={() => wm.toggleMaximize(win.id)}
         className="flex h-9 shrink-0 select-none items-center gap-3 border-b border-border px-3.5"
       >
-        <div className="flex items-center gap-2">
+        <div className={clsx('flex shrink-0 items-center gap-2', showpageSid ? 'w-20' : 'w-[52px]')}>
           {lights.map((l) => (
             <button
               key={l.key}
@@ -272,7 +276,7 @@ export const AppWindow: React.FC<{
             </button>
           ))}
         </div>
-        <div className="flex flex-1 items-center justify-center gap-1.5 overflow-hidden">
+        <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-hidden">
           {showpageSid && showpageAvatar ? (
             <span
               aria-hidden
@@ -292,10 +296,25 @@ export const AppWindow: React.FC<{
           )}
           <span className="truncate text-[13px] font-semibold text-foreground">{win.title ?? t(def.titleKey)}</span>
         </div>
-        {/* Right cluster balances the traffic lights so the title stays centered; a
-            standalone-surface app (showpage) also gets a chat-bubble + open-in-new-tab
-            pair here — two size-6 buttons + gap-1 fill the 52px box exactly. */}
-        <div className="flex w-[52px] shrink-0 items-center justify-end gap-1">
+        {/* Mirror the left cluster so the title stays centered. Show Page windows
+            add a compact annotation control before chat + open-in-new-tab. */}
+        <div className={clsx('flex shrink-0 items-center justify-end gap-1', showpageSid ? 'w-20' : 'w-[52px]')}>
+          {showpageSid && annotationHost && !win.minimized && exitKind === null && (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <ShowPageAnnotateControl
+                compact
+                state={annotationHost.annotation.state}
+                onEnable={annotationHost.annotation.enable}
+                onDisable={annotationHost.annotation.disable}
+                onSetMode={annotationHost.annotation.setMode}
+                onPopoverOpenChange={setAnnotateOpen}
+              />
+            </div>
+          )}
           {chatHref && (
             <button
               type="button"
@@ -348,6 +367,7 @@ export const AppWindow: React.FC<{
             transparent overlay so a gesture's pointer can't be stolen by the iframe and the
             cursor doesn't flicker over it — belt-and-braces with the gesture's pointer capture. */}
         <WindowBodyGestureShield active={shouldShieldWindowBody(wm.gestureActive, win.minimized)} />
+        {annotateOpen && <div aria-hidden data-annotation-shield className="absolute inset-0 z-20" />}
       </div>
 
       {!win.maximized &&

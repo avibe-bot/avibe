@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MonitorX, PinOff } from 'lucide-react';
 
 import { inTextEntrySurface } from '../components/apps/windowChords';
+import { useRequiredShowPageAnnotationHost } from '../components/workbench/ShowPageAnnotationHostContext';
 import { useApi } from '../context/ApiContext';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
-import { showPagePrivatePath } from './showPageAvatar';
 
 // A pinned Show Page opened as a workbench app. The body always frames the
 // PRIVATE /show/<session_id>/ surface (authenticated workbench context, live
@@ -26,7 +26,16 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
   // "read once" effect and re-hit /api/sessions on every such change (Codex).
   const { setTitle, close, confirmClose } = useWindowManager();
   const { unpin } = useDock();
+  const { annotation, src } = useRequiredShowPageAnnotationHost();
+  const { setIframe: setAnnotationIframe, handleIframeLoad } = annotation;
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const setIframe = useCallback(
+    (iframe: HTMLIFrameElement | null) => {
+      iframeRef.current = iframe;
+      setAnnotationIframe(iframe);
+    },
+    [setAnnotationIframe],
+  );
 
   const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : '';
   // 'loading' optimistically frames the page (the common case: it exists);
@@ -104,7 +113,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
         // Document already torn down.
       }
     };
-  }, [close, confirmClose, windowId]);
+  }, [close, confirmClose, iframeRef, windowId]);
 
   if (!sessionId || state === 'missing') {
     return (
@@ -141,9 +150,10 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
   // per the standing product decision we do NOT harden it here.
   return (
     <iframe
-      ref={iframeRef}
+      ref={setIframe}
+      onLoad={handleIframeLoad}
       title={t('chat.showPage.title')}
-      src={showPagePrivatePath(sessionId)}
+      src={src ?? undefined}
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
       allow="clipboard-write"
       className="h-full w-full border-0 bg-background"

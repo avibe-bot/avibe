@@ -3,10 +3,12 @@ import { useTranslation } from 'react-i18next';
 
 import { APP_REGISTRY, type AppId } from '../../apps/registry';
 import { dockIndexFromShortcut } from '../../apps/dockShortcuts';
+import { showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useApi } from '../../context/ApiContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useShowPageInventory } from '../useShowPages';
+import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { AppWindow } from './AppWindow';
 import { inTerminalSurface, inTextEntrySurface } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
@@ -212,9 +214,16 @@ export const WindowLayer: React.FC = () => {
       {windows.map((w) => {
         // For a showpage window, join the inventory (already loaded above — no new
         // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
-        const sid = w.appId === 'showpage' ? (w.params?.sessionId as string | undefined) : undefined;
+        const sid = w.appId === 'showpage' && typeof w.params?.sessionId === 'string' ? w.params.sessionId : undefined;
         const iconVersion = sid ? pages.find((p) => p.session_id === sid)?.icon_version ?? null : null;
-        return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
+        if (w.appId !== 'showpage') {
+          return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
+        }
+        return (
+          <ShowPageAnnotationHost key={w.id} src={sid ? showPageEmbeddedPath(showPagePrivatePath(sid)) : null}>
+            <AppWindow win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />
+          </ShowPageAnnotationHost>
+        );
       })}
     </div>
   );

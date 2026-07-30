@@ -18,6 +18,7 @@ import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../l
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import {
   activityItemKind,
@@ -79,15 +80,6 @@ import {
   type LiveActivityState,
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
-
-// The chat host marks its Show Page iframe with ``vibe-embed=1`` (annotation
-// contract §6) so the in-page overlay switches to embedded mode — floating
-// toolbar hidden, controlled via postMessage from the header control. Applied
-// wherever the iframe src is composed (first open + visibility re-point).
-const SHOW_PAGE_EMBED_PARAM = 'vibe-embed=1';
-function embedShowPageSrc(path: string): string {
-  return path.includes('?') ? `${path}&${SHOW_PAGE_EMBED_PARAM}` : `${path}?${SHOW_PAGE_EMBED_PARAM}`;
-}
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -1413,7 +1405,7 @@ export const ChatPage: React.FC = () => {
       if (res?.ok) {
         // Public pages are served under /p/<share_id>/; private under /show/<id>/.
         setShowPageUrl(
-          embedShowPageSrc(
+          showPageEmbeddedPath(
             res.visibility === 'public' && res.share_id
               ? `/p/${encodeURIComponent(res.share_id)}/`
               : `/show/${encodeURIComponent(sid)}/`,
@@ -1451,7 +1443,7 @@ export const ChatPage: React.FC = () => {
   // so it never stays on a route that now 404s.
   const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
     const path = localPath(next);
-    if (path) setShowPageUrl(embedShowPageSrc(path));
+    if (path) setShowPageUrl(showPageEmbeddedPath(path));
   }, []);
 
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
@@ -1957,7 +1949,7 @@ export const ChatPage: React.FC = () => {
         // isolation isn't the security boundary anyway. We still drop the exotic
         // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
-          ref={annotation.iframeRef}
+          ref={annotation.setIframe}
           onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
           src={showPageUrl}

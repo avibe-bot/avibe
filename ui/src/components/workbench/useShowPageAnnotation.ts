@@ -21,7 +21,7 @@ export interface AnnotationBridge {
   /** Last state reported by the overlay; null until the first state message. */
   state: AnnotationState | null;
   /** Attach to the Show Page iframe so the bridge can target its window. */
-  iframeRef: React.RefObject<HTMLIFrameElement | null>;
+  setIframe: React.RefCallback<HTMLIFrameElement>;
   /** Attach to the iframe `onLoad` to re-sync after a (re)load / re-point. */
   handleIframeLoad: () => void;
   /** `enable` without a mode uses the overlay's remembered mode (§3). */
@@ -57,6 +57,7 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   }
 
   useEffect(() => {
+    if (!src) return;
     const onMessage = (event: MessageEvent) => {
       // Same-origin iframe only: ignore other origins, and other windows (the
       // Show Page is same-origin and may talk to the parent for other reasons —
@@ -76,11 +77,15 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, []);
+  }, [src]);
 
   const post = useCallback((message: ControlMessage) => {
     const win = iframeRef.current?.contentWindow;
     if (win) win.postMessage(message, window.location.origin);
+  }, []);
+
+  const setIframe = useCallback<React.RefCallback<HTMLIFrameElement>>((iframe) => {
+    iframeRef.current = iframe;
   }, []);
 
   const enable = useCallback(
@@ -101,5 +106,5 @@ export function useShowPageAnnotation(src: string | null): AnnotationBridge {
   // listener is already attached, so we also query as a backstop (§3).
   const handleIframeLoad = useCallback(() => post({ type: 'avibe:annotation:query' }), [post]);
 
-  return { state, iframeRef, handleIframeLoad, enable, disable, setMode };
+  return { state, setIframe, handleIframeLoad, enable, disable, setMode };
 }
