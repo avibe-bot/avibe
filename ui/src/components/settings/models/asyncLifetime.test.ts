@@ -49,6 +49,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createFlowAuthority,
   createLatestAsyncAuthority,
+  failureLanded,
   flowLetGo,
   flowStateTerminal,
   flowStep,
@@ -456,6 +457,48 @@ describe('terminalArrivalMovedRows — which terminal is also a write', () => {
     // And that owner no longer asks which journey it is before re-reading: a
     // create's `oauth_cancel` commits the source it was told to throw away.
     expect(dialog).not.toMatch(/if \(!isReauth\) return;/);
+  });
+});
+
+describe('failureLanded — whose account of the rows is the one on screen', () => {
+  it('accepts the failure the authority actually latched', () => {
+    expect(failureLanded('fail')).toBe(true);
+  });
+
+  it('refuses an arrival that reached an already-settled view', () => {
+    // The finding this pins. A poll can settle terminally with `discovery_failed`
+    // AND a non-empty `interrupted_pairs`; a paste submit rejecting afterwards is
+    // still `isCurrent()` — settling changes neither the authority nor the flow id —
+    // so it used to hand its own (empty) list to the owner and erase the gap report
+    // while `flowStep` correctly kept the poll's sentence above it.
+    expect(failureLanded('ignore')).toBe(false);
+  });
+
+  it('refuses the states no error arrival can produce', () => {
+    // `flowStep` answers an `error` event with `fail` or `ignore` and nothing else,
+    // so these are unreachable from the two call sites — pinned so a later branch
+    // that starts producing one of them has to come back to this rule.
+    expect(failureLanded('timeout')).toBe(false);
+    expect(failureLanded('succeed')).toBe(false);
+    expect(failureLanded('continue')).toBe(false);
+  });
+
+  it('gates the pairs at every catch that carries them, and nothing else', () => {
+    // Structural: the two `catch` sites are the only places a failure's pairs enter
+    // the owner, and each has to hand over the authority's own answer. The reorder
+    // is the substance of the fix — the transition has to have happened before the
+    // pairs are offered, or there is no answer to hand over.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const carrying = [...dialog.matchAll(/rowsBehindAreStale\(failure[^)]*\)/g)].map((m) => m[0]);
+
+    // Three: the start rejection, the status poll's, and the paste submit's. The
+    // start one cannot reach a settled view today and asks regardless — a site that
+    // is right because of where it sits stops being right when it is moved.
+    expect(carrying.length).toBe(3);
+    for (const call of carrying) expect(call).toMatch(/failureLanded\(step\.action\)/);
+    // And the refetch is still owed on the ignored path: the gate is the second
+    // argument, never a reason to skip the call.
+    expect(dialog).not.toMatch(/if \(failureLanded\(/);
   });
 });
 

@@ -814,4 +814,25 @@ describe('the class: no component decides a repair for itself', () => {
     expect(offenders).toEqual([]);
     expect(read('SourceOrderDrawer.tsx')).toMatch(/chainKey=\{dryRunChainKey\(agent, policy, order\)\}/);
   });
+
+  /**
+   * A translated sentence put into state. `serverText` needs `t`, so whatever it
+   * returns is copy in ONE language — stored, it survives the language switch that
+   * re-renders everything around it, and the row ends up bilingual with itself. The
+   * reason keeps; the sentence is built where it is read.
+   */
+  const STORED_SENTENCE = /set[A-Z][A-Za-z]*\(\s*(?:serverText|failedLine|t)\(/;
+
+  it.each(files)('%s stores the reason and renders the sentence', (name) => {
+    expect(read(name)).not.toMatch(STORED_SENTENCE);
+  });
+
+  it('keeps the dry-run failure as a reason, three states and all', () => {
+    const src = read('SourceOrderDrawer.tsx');
+    // `{ key: null }` is not the same as `null`: 「it failed and nobody named why」
+    // has a sentence (the generic line), 「nothing ran yet」 has none.
+    expect(src).toMatch(/useState<\{ key: string \| null \} \| null>\(null\)/);
+    expect(src).toMatch(/setErrorReason\(\{ key: failure\?\.detail \?\? null \}\)/);
+    expect(src).toMatch(/errorReason && serverText\(t, errorReason\.key, 'settings\.models\.dryRun\.error'\)/);
+  });
 });

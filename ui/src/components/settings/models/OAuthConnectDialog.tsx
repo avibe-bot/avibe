@@ -25,6 +25,7 @@ import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuth
 import { AdoptionNote } from './AdoptionNote';
 import {
   createFlowAuthority,
+  failureLanded,
   initialFlowView,
   isDone,
   pollFailureSettles,
@@ -144,9 +145,17 @@ export const OAuthConnectDialog: React.FC<{
    * without a source. That half is what a create does not have, so that is the one
    * part still asking about the journey. A path with no error carries no pairs, and
    * passing nothing is how it says so.
+   *
+   * Which is why `pairsSpeak` exists beside them rather than being read off the
+   * failure: passing no pairs still WRITES an empty list, so 「this arrival has
+   * none」 and 「this arrival may not answer that question」 need saying separately.
+   * Every path that IS the arrival of record — a terminal settle, the close path,
+   * a released flow — leaves the default alone; the two `catch` sites hand over
+   * `failureLanded(step.action)`, because an arrival the authority ignored is not
+   * the failure whose sentence these pairs are rendered under.
    */
-  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>) => {
-    if (isReauth) setStranded(failure?.interrupted ?? []);
+  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>, pairsSpeak = true) => {
+    if (isReauth && pairsSpeak) setStranded(failure?.interrupted ?? []);
     onConnectedRef.current();
   };
 
@@ -304,8 +313,11 @@ export const OAuthConnectDialog: React.FC<{
         // and the codes that only exist after it are the only ones that may
         // claim completion. `engine_down` is not one of them.
         const failure = apiFailure(err);
-        rowsBehindAreStale(failure);
-        transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
+        // The authority goes first because its answer is what decides whether these
+        // pairs are the ones on screen — see `failureLanded`. The refetch below is
+        // owed whatever it answers.
+        const step = transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
+        rowsBehindAreStale(failure, failureLanded(step.action));
       }
     };
 
@@ -384,15 +396,21 @@ export const OAuthConnectDialog: React.FC<{
           resolvedAfterClose();
           return;
         }
-        rowsBehindAreStale(failure);
         const code = failure?.code;
-        transition({
+        // Nothing can have settled this view yet — the reset above is the last
+        // thing that touched it, and both other arrivals need the flow this call
+        // failed to produce. It asks anyway, because 「may these pairs speak?」 is
+        // one rule for every arrival that carries them, and a site that answers it
+        // by being sure of its position is a site that stops being right when the
+        // position moves.
+        const step = transition({
           kind: 'error',
           errorKey:
             code === 'consent_required'
               ? 'settings.models.oauth.error.consent'
               : 'settings.models.oauth.error.start',
         });
+        rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
 
@@ -458,9 +476,17 @@ export const OAuthConnectDialog: React.FC<{
       if (!isCurrent()) return;
       // Submit reaches the same materialization as the poll, so it can fail the
       // same way — including after the credential change has committed.
+      //
+      // `isCurrent()` is not enough on its own to make this arrival the failure of
+      // record: a terminal poll settles the VIEW without touching the authority or
+      // the flow id, so a submit rejecting afterwards is still current and still
+      // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
-      rowsBehindAreStale(failure);
-      authority.transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
+      const step = authority.transition({
+        kind: 'error',
+        errorKey: oauthFailureKey(failure?.code, journey),
+      });
+      rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
       if (isCurrent()) setSubmitting(false);
     }

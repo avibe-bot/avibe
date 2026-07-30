@@ -545,10 +545,13 @@ const DryRunRow: React.FC<{
   const plan = dryRunPlan(agent);
   const [running, setRunning] = React.useState(false);
   const [outcome, setOutcome] = React.useState<DryRunOutcome | null>(null);
-  // The already-resolved sentence, not the key: a thrown failure may carry no key
-  // at all, and `null` then has to mean 「nothing ran yet」 rather than 「it failed
-  // for a reason nobody named」.
-  const [errorText, setErrorText] = React.useState<string | null>(null);
+  // The REASON, not the sentence built from it: a stored sentence keeps the
+  // language it was built in, and a language switch re-renders this row without
+  // re-running the probe. Wrapped rather than a bare `string | null`, because a
+  // thrown failure may carry no key at all and `null` has to keep meaning 「nothing
+  // ran yet」 — `{ key: null }` is the third state, 「it failed and nobody named
+  // why」, whose sentence is the generic line below.
+  const [errorReason, setErrorReason] = React.useState<{ key: string | null } | null>(null);
   const seq = React.useRef(0);
 
   // A result describes ONE chain, and editing the chain stops it being about
@@ -565,14 +568,14 @@ const DryRunRow: React.FC<{
     seq.current += 1;
     setRunning(false);
     setOutcome(null);
-    setErrorText(null);
+    setErrorReason(null);
   }, [chainKey]);
 
   const run = async (backend: AgentBackend) => {
     const mine = ++seq.current;
     setRunning(true);
     setOutcome(null);
-    setErrorText(null);
+    setErrorReason(null);
     try {
       const probe = await modelsApi.probeAgent(backend);
       // `seq` guards the REPORT, not the refetch. An edit to the chain while this
@@ -599,9 +602,11 @@ const DryRunRow: React.FC<{
         seq.current === mine,
       );
       // The server's own reason when it named one (`probe_no_candidate` carries a
-      // detail key), the generic line when it didn't — the same degradation the
-      // rest of the page gives a server-chosen key.
-      if (arrival.report) setErrorText(serverText(t, failure?.detail, 'settings.models.dryRun.error'));
+      // detail key), and the absence of one when it didn't. Which sentence either
+      // becomes is the render's call — the same degradation the rest of the page
+      // gives a server-chosen key, applied with the `t` that is current when it is
+      // READ rather than the one that happened to be in scope when it arrived.
+      if (arrival.report) setErrorReason({ key: failure?.detail ?? null });
       // Either because the probe may have run and written with the answer lost on
       // the way back, or because the refusal that came back contradicts the chain
       // this row is drawn from — `probeArrival` keeps those two apart.
@@ -613,7 +618,7 @@ const DryRunRow: React.FC<{
 
   const ok = outcome?.kind === 'ok';
   const line = !outcome
-    ? errorText
+    ? errorReason && serverText(t, errorReason.key, 'settings.models.dryRun.error')
     : outcome.kind === 'ok'
       ? outcome.latencyMs !== null
         ? (t('settings.models.dryRun.ok', { name: outcome.sourceName, ms: outcome.latencyMs }) as string)

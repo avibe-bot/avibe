@@ -269,6 +269,23 @@ export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
 export const pollFailureSettles = (submitOutstanding: boolean): boolean => !submitOutstanding;
 
 /**
+ * Whether the failure that just arrived is the one now ON SCREEN.
+ *
+ * `flowStep` answers `ignore` to everything that reaches a view already settled, so
+ * a paste submit rejecting after the poll latched `discovery_failed` leaves the
+ * sentence the user is reading belonging to the POLL. The stranded pairs render
+ * directly beneath that sentence, as the cost of the failure it names, so they may
+ * only come from the arrival that produced it: the late one's own list is empty —
+ * the write that stranded those rows happened on the other request — and would
+ * erase the gap report rather than restate it.
+ *
+ * Deliberately not `terminalArrivalMovedRows`, which reads the same `action` to
+ * answer a different question. Whether a request may have WRITTEN is independent of
+ * whether it may SPEAK, and the refetch beside these pairs is owed either way.
+ */
+export const failureLanded = (action: FlowAction): boolean => action === 'fail';
+
+/**
  * Whether a journey may walk away from the flow it opened without cancelling it —
  * i.e. whether SOMEONE ELSE can still be handed that exact flow.
  *
