@@ -363,14 +363,14 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
 
 def _markdown_block_ranges(
     text: str,
-) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, str]]]:
     """Return code-block ranges and source ranges eligible for inline parsing."""
     line_offsets = [0]
     line_offsets.extend(
         match.end() for match in re.finditer(r"\r\n|\r|\n", text)
     )
     code_ranges: List[Tuple[int, int]] = []
-    inline_ranges: List[Tuple[int, int]] = []
+    inline_ranges: List[Tuple[int, int, str]] = []
     for token in _BLOCK_MARKDOWN.parse(text):
         if token.map is None:
             continue
@@ -380,52 +380,105 @@ def _markdown_block_ranges(
         if token.type in {"fence", "code_block"}:
             code_ranges.append((start, end))
         elif token.type == "inline":
-            inline_ranges.append((start, end))
+            inline_ranges.append((start, end, token.content))
         elif (
             token.type == "html_block"
             and _has_unclosed_special_html_opener(token.content)
         ):
             # A malformed special opener must not hide a later explicit
             # backtick example from the control-directive scanner.
-            inline_ranges.append((start, end))
+            inline_ranges.append((start, end, token.content))
     return code_ranges, inline_ranges
 
 
 def _inline_code_ranges(
     text: str,
-    inline_source_ranges: List[Tuple[int, int]],
+    inline_source_ranges: List[Tuple[int, int, str]],
 ) -> List[Tuple[int, int]]:
     """Return inline code spans from CommonMark inline-capable blocks."""
     ranges: List[Tuple[int, int]] = []
-    for source_start, source_end in inline_source_ranges:
+    for source_start, source_end, content in inline_source_ranges:
         ranges.extend(
-            _inline_code_ranges_in_segment(text, source_start, source_end)
+            _inline_code_ranges_in_block(
+                text,
+                source_start,
+                source_end,
+                content,
+            )
         )
     return ranges
 
 
-def _inline_code_ranges_in_segment(
+def _inline_code_ranges_in_block(
     text: str,
     start: int,
     end: int,
+    content: str,
 ) -> List[Tuple[int, int]]:
-    """Return CommonMark inline-code ranges in one non-block-code segment."""
-    if start >= end:
+    """Map CommonMark inline-code ranges back to the original source."""
+    if start >= end or not content:
         return []
-    segment = text[start:end]
     env: dict = {
-        _INLINE_ANGLE_RANGES_KEY: dict(_inline_angle_token_ranges(segment)),
+        _INLINE_ANGLE_RANGES_KEY: dict(_inline_angle_token_ranges(content)),
     }
     _INLINE_MARKDOWN.inline.parse(
-        segment,
+        content,
         _INLINE_MARKDOWN,
         env,
         [],
     )
-    return [
-        (start + range_start, start + range_end)
-        for range_start, range_end in env.get(_INLINE_CODE_RANGES_KEY, [])
-    ]
+    backtick_offsets = _inline_backtick_source_offsets(
+        text,
+        start,
+        end,
+        content,
+    )
+    ranges: List[Tuple[int, int]] = []
+    for range_start, range_end in env.get(_INLINE_CODE_RANGES_KEY, []):
+        source_start = backtick_offsets.get(range_start)
+        source_last = backtick_offsets.get(range_end - 1)
+        if source_start is not None and source_last is not None:
+            ranges.append((source_start, source_last + 1))
+    return ranges
+
+
+def _inline_backtick_source_offsets(
+    text: str,
+    start: int,
+    end: int,
+    content: str,
+) -> dict[int, int]:
+    """Map backticks in container-stripped inline content to source offsets."""
+    source_lines: List[Tuple[int, str]] = []
+    line_start = start
+    for match in re.finditer(r"\r\n|\r|\n", text[start:end]):
+        line_end = start + match.start()
+        source_lines.append((line_start, text[line_start:line_end]))
+        line_start = start + match.end()
+    if line_start <= end:
+        source_lines.append((line_start, text[line_start:end]))
+
+    offsets: dict[int, int] = {}
+    source_index = 0
+    content_offset = 0
+    for content_line in content.split("\n"):
+        if "`" in content_line:
+            for candidate_index in range(source_index, len(source_lines)):
+                absolute_start, source_line = source_lines[candidate_index]
+                relative_start = source_line.find(content_line)
+                if relative_start < 0:
+                    continue
+                for relative_offset, char in enumerate(content_line):
+                    if char == "`":
+                        offsets[content_offset + relative_offset] = (
+                            absolute_start + relative_start + relative_offset
+                        )
+                source_index = candidate_index + 1
+                break
+        elif source_index < len(source_lines):
+            source_index += 1
+        content_offset += len(content_line) + 1
+    return offsets
 
 
 def _inline_angle_token_ranges(text: str) -> List[Tuple[int, int]]:

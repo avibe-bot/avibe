@@ -667,6 +667,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "<https://example.com/`>  `tail",
         )
 
+    def test_silent_parser_strips_quote_prefixes_before_inline_html(self):
+        text = (
+            "> text <!A\n"
+            "> `> <silent>remove outside code</silent> `tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "> text <!A\n> `>  `tail",
+        )
+
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
         unmatched_runs = " ".join("`" * length for length in range(2, 502))
         text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
