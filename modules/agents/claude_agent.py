@@ -692,42 +692,19 @@ class ClaudeAgent(BaseAgent):
 
     async def _end_ambiguous_steering_input(
         self,
-        client,
         composite_key: str,
         end_input,
     ) -> None:
         """Half-close native input so delivered work finishes before a durable EOF."""
-        if end_input is not None:
-            try:
-                await end_input()
-                self._ambiguous_input_shutdown_keys().add(composite_key)
-                return
-            except Exception:  # noqa: BLE001 - reconciliation remains receiver-owned
-                logger.warning(
-                    "Failed to half-close ambiguous Claude steering input for %s",
-                    composite_key,
-                    exc_info=True,
-                )
-        else:
+        try:
+            await end_input()
+            self._ambiguous_input_shutdown_keys().add(composite_key)
+        except Exception:  # noqa: BLE001 - the existing receiver keeps ownership
             logger.warning(
-                "Claude transport cannot half-close ambiguous steering input for %s",
+                "Failed to half-close ambiguous Claude steering input for %s; preserving the live receiver",
                 composite_key,
+                exc_info=True,
             )
-        disconnect = getattr(client, "disconnect", None)
-        if callable(disconnect):
-            try:
-                await disconnect()
-                self._ambiguous_input_shutdown_keys().add(composite_key)
-                return
-            except Exception:  # noqa: BLE001 - final fallback cancels the receiver
-                logger.error(
-                    "Failed to disconnect Claude after ambiguous input for %s",
-                    composite_key,
-                    exc_info=True,
-                )
-        receiver_task = self.receiver_tasks.get(composite_key)
-        if receiver_task is not None and not receiver_task.done():
-            receiver_task.cancel()
 
     async def steer_active_turn(
         self,
@@ -770,6 +747,12 @@ class ClaudeAgent(BaseAgent):
                 )
             primary_request_count = len(primary_requests)
             end_input = self._ambiguous_steering_input_closer(client)
+            if end_input is None:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="native_input_reconciliation_unsupported",
+                    backend=self.name,
+                )
 
             writers = self._steering_writer_keys()
             writers.add(composite_key)
@@ -783,7 +766,6 @@ class ClaudeAgent(BaseAgent):
                     )
                     self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
-                        client,
                         composite_key,
                         end_input,
                     )
@@ -815,7 +797,6 @@ class ClaudeAgent(BaseAgent):
                         )
                         self._touch_steering_activity(composite_key)
                         await self._end_ambiguous_steering_input(
-                            client,
                             composite_key,
                             end_input,
                         )
@@ -846,7 +827,6 @@ class ClaudeAgent(BaseAgent):
                     )
                     self._touch_steering_activity(composite_key)
                     await self._end_ambiguous_steering_input(
-                        client,
                         composite_key,
                         end_input,
                     )
@@ -1567,10 +1547,7 @@ class ClaudeAgent(BaseAgent):
             )
             await self._flush_detached_activity_output(composite_key, context)
             await self._flush_detached_unsolicited_output(composite_key, context)
-            if (
-                composite_key in self._ambiguous_input_shutdown_keys()
-                and not self._has_pending_requests(composite_key)
-            ):
+            if not self._has_pending_requests(composite_key):
                 await self._cleanup_runtime_session(
                     composite_key,
                     current_receiver_task=asyncio.current_task(),

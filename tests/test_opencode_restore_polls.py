@@ -124,7 +124,8 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     agent._client_manager = SimpleNamespace(_server_manager=server)
 
     async def _get_server():
-        return server
+        current_task = asyncio.current_task()
+        return agent._restored_poll_servers.get(current_task, server)
 
     agent._get_server = _get_server
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
@@ -260,10 +261,37 @@ def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> Non
     agent._test_server.messages = [
         {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []}
     ]
+    agent._test_server.status = {"type": "idle"}
     agent._test_server.status_error = TimeoutError("status unavailable")
+    reconciled_messages: list[dict] = []
 
-    assert asyncio.run(agent.restore_active_polls()) == 1
+    class _ReconcilePollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            agent._test_server.status_error = None
+            server = await agent._get_server()
+            reconciled_messages.extend(
+                await server.list_messages(
+                    poll_info.opencode_session_id,
+                    poll_info.working_path,
+                )
+            )
+
+        async def remove_restored_ack(self, poll_info):
+            return None
+
+    agent._poll_loop = _ReconcilePollLoop()
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
     assert removed == []
+    assert reconciled_messages[-1]["info"]["error"] == {
+        "name": "NativeSessionEndedBeforeResult",
+        "data": {"message": "OpenCode became idle before producing an assistant result"},
+    }
 
 
 def test_restored_avibe_poll_marks_session_running():

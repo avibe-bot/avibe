@@ -75,6 +75,7 @@ class _OpenCodeSteerState:
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
     restored: bool = False
+    reconcile_initial_status: bool = False
     status_reconciliation_failures: int = 0
     terminal_status_failure_messages: list[Dict[str, Any]] | None = None
 
@@ -127,6 +128,33 @@ class _SteeringAwareOpenCodeServer:
             for part in (message.get("parts") or [])
         )
 
+    def _terminal_reconciliation_failure(
+        self,
+        session_id: str,
+        messages: list[Dict[str, Any]],
+        *,
+        name: str,
+        message: str,
+    ) -> list[Dict[str, Any]]:
+        self._state.closing = True
+        failure = {
+            "info": {
+                "id": f"avibe-status-reconciliation:{session_id}",
+                "role": "assistant",
+                "time": {"completed": time.time()},
+                # Keep the restored poll in its bounded error path until it
+                # emits the terminal failure through the existing Result owner.
+                "finish": "tool-calls",
+                "error": {
+                    "name": name,
+                    "data": {"message": message},
+                },
+            },
+            "parts": [],
+        }
+        self._state.terminal_status_failure_messages = [*messages, failure]
+        return self._state.terminal_status_failure_messages
+
     async def list_messages(self, session_id: str, directory: str) -> list[Dict[str, Any]]:
         while True:
             wait_for_insert = False
@@ -142,7 +170,8 @@ class _SteeringAwareOpenCodeServer:
                     awaiting is not None and self._message_ids(messages).issubset(awaiting)
                 )
                 final_snapshot = self._is_final_assistant_snapshot(messages)
-                if unchanged_since_insert or final_snapshot:
+                reconcile_initial_status = self._state.reconcile_initial_status
+                if unchanged_since_insert or final_snapshot or reconcile_initial_status:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
                     except Exception as exc:
@@ -152,37 +181,35 @@ class _SteeringAwareOpenCodeServer:
                             >= _STATUS_RECONCILIATION_FAILURE_LIMIT
                         ):
                             if self._state.restored:
-                                self._state.closing = True
-                                failure = {
-                                    "info": {
-                                        "id": f"avibe-status-reconciliation:{session_id}",
-                                        "role": "assistant",
-                                        "time": {"completed": time.time()},
-                                        # Keep the restored poll in its bounded error
-                                        # path until it emits the terminal failure.
-                                        "finish": "tool-calls",
-                                        "error": {
-                                            "name": "StatusReconciliationError",
-                                            "data": {"message": str(exc)},
-                                        },
-                                    },
-                                    "parts": [],
-                                }
-                                self._state.terminal_status_failure_messages = [
-                                    *messages,
-                                    failure,
-                                ]
-                                return self._state.terminal_status_failure_messages
+                                return self._terminal_reconciliation_failure(
+                                    session_id,
+                                    messages,
+                                    name="StatusReconciliationError",
+                                    message=str(exc),
+                                )
                             raise
                         wait_for_insert = True
                     else:
                         self._state.status_reconciliation_failures = 0
+                        self._state.reconcile_initial_status = False
                         if status is not None and status.get("type") in {"busy", "retry"}:
                             wait_for_insert = True
                         else:
                             self._state.awaiting_after_message_ids = None
                             if final_snapshot:
                                 self._state.closing = True
+                            elif reconcile_initial_status and not any(
+                                message.get("info", {}).get("role") == "assistant"
+                                and message.get("info", {}).get("id")
+                                not in self._state.baseline_message_ids
+                                for message in messages
+                            ):
+                                return self._terminal_reconciliation_failure(
+                                    session_id,
+                                    messages,
+                                    name="NativeSessionEndedBeforeResult",
+                                    message="OpenCode became idle before producing an assistant result",
+                                )
                             return messages
                 else:
                     self._state.awaiting_after_message_ids = None
@@ -1112,7 +1139,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if workbench_session_id:
                 self.controller.session_turns.restore_running(workbench_session_id)
 
-            task = asyncio.create_task(self._run_restored_poll_loop_with_tracking(poll_info))
+            task = asyncio.create_task(
+                self._run_restored_poll_loop_with_tracking(
+                    poll_info,
+                    reconcile_initial_status=status_unknown,
+                )
+            )
             self._active_requests[poll_info.base_session_id] = task
             self._session_manager.set_request_session(
                 poll_info.base_session_id,
@@ -1132,7 +1164,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         return restored_count
 
-    async def _run_restored_poll_loop_with_tracking(self, poll_info) -> None:
+    async def _run_restored_poll_loop_with_tracking(
+        self,
+        poll_info,
+        *,
+        reconcile_initial_status: bool = False,
+    ) -> None:
         server = await self._get_server()
         await server.mark_run_active(poll_info.opencode_session_id)
         current_task = asyncio.current_task()
@@ -1142,37 +1179,49 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if isinstance(poll_info.processing_indicator, dict)
             else None
         )
-        if current_task is not None and isinstance(steering_snapshot, dict):
-            target_session_id = str(steering_snapshot.get("target_session_id") or "")
-            logical_turn_id = str(steering_snapshot.get("logical_turn_id") or "")
-            if target_session_id and logical_turn_id:
-                steer_state = _OpenCodeSteerState(
-                    task=current_task,
-                    base_session_id=poll_info.base_session_id,
-                    target_session_id=target_session_id,
-                    logical_turn_id=logical_turn_id,
-                    native_session_id=poll_info.opencode_session_id,
-                    directory=poll_info.working_path,
-                    agent=(
-                        steering_snapshot.get("agent")
-                        if isinstance(steering_snapshot.get("agent"), str)
-                        else None
-                    ),
-                    model=poll_info.model_dict,
-                    reasoning_effort=poll_info.reasoning_effort,
-                    system=(
-                        steering_snapshot.get("system")
-                        if isinstance(steering_snapshot.get("system"), str)
-                        else None
-                    ),
-                    baseline_message_ids=set(poll_info.baseline_message_ids),
-                    restored=True,
-                )
+        target_session_id = (
+            str(steering_snapshot.get("target_session_id") or "")
+            if isinstance(steering_snapshot, dict)
+            else ""
+        )
+        logical_turn_id = (
+            str(steering_snapshot.get("logical_turn_id") or "")
+            if isinstance(steering_snapshot, dict)
+            else ""
+        )
+        has_steering_identity = bool(target_session_id and logical_turn_id)
+        if current_task is not None and (has_steering_identity or reconcile_initial_status):
+            steer_state = _OpenCodeSteerState(
+                task=current_task,
+                base_session_id=poll_info.base_session_id,
+                target_session_id=target_session_id,
+                logical_turn_id=logical_turn_id,
+                native_session_id=poll_info.opencode_session_id,
+                directory=poll_info.working_path,
+                agent=(
+                    steering_snapshot.get("agent")
+                    if isinstance(steering_snapshot, dict)
+                    and isinstance(steering_snapshot.get("agent"), str)
+                    else None
+                ),
+                model=poll_info.model_dict,
+                reasoning_effort=poll_info.reasoning_effort,
+                system=(
+                    steering_snapshot.get("system")
+                    if isinstance(steering_snapshot, dict)
+                    and isinstance(steering_snapshot.get("system"), str)
+                    else None
+                ),
+                baseline_message_ids=set(poll_info.baseline_message_ids),
+                restored=True,
+                reconcile_initial_status=reconcile_initial_status,
+            )
+            if has_steering_identity:
                 self._steering_states[poll_info.base_session_id] = steer_state
-                self._restored_poll_servers[current_task] = _SteeringAwareOpenCodeServer(
-                    server,
-                    steer_state,
-                )
+            self._restored_poll_servers[current_task] = _SteeringAwareOpenCodeServer(
+                server,
+                steer_state,
+            )
         try:
             await self._poll_loop.run_restored_poll_loop(poll_info)
         finally:

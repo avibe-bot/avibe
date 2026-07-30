@@ -50,6 +50,11 @@ def _one_result_client():
     return _Client()
 
 
+def _with_input_closer(client):
+    client._transport = SimpleNamespace(end_input=AsyncMock())
+    return client
+
+
 def _build_agent(mark_idle_calls):
     controller = SimpleNamespace(
         config=SimpleNamespace(platform="slack"),
@@ -118,7 +123,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -200,7 +205,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        client = _BufferedClient()
+        client = _with_input_closer(_BufferedClient())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -414,7 +419,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent.claude_sessions)
         self.assertNotIn(composite_key, agent.receiver_tasks)
 
-    async def test_failed_ambiguous_half_close_disconnects_and_settles_primary(self):
+    async def test_failed_ambiguous_half_close_preserves_work_until_later_result(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
@@ -426,16 +431,13 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         release_query = asyncio.Event()
         result_ready = asyncio.Event()
         result_yielded = asyncio.Event()
-        disconnected = asyncio.Event()
+        second_result_ready = asyncio.Event()
 
         class _CloseFailedClient:
             async def query(self, _text, *, session_id):
                 query_started.set()
                 await release_query.wait()
                 raise TimeoutError(f"ambiguous write for {session_id}")
-
-            async def disconnect(self):
-                disconnected.set()
 
             def receive_messages(self):
                 async def _iterate():
@@ -444,7 +446,10 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     primary.result = "primary result"
                     result_yielded.set()
                     yield primary
-                    await disconnected.wait()
+                    await second_result_ready.wait()
+                    second = _ResultMessage()
+                    second.result = "reconciled result"
+                    yield second
 
                 return _iterate()
 
@@ -452,7 +457,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         client._transport = SimpleNamespace(
             end_input=AsyncMock(side_effect=RuntimeError("stdin close failed"))
         )
-        client.disconnect = AsyncMock(side_effect=client.disconnect)
+        client.disconnect = AsyncMock()
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -488,13 +493,15 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         release_query.set()
 
         receipt = await steer_task
+        client.disconnect.assert_not_awaited()
+        second_result_ready.set()
         await receiver_task
 
         self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
         client._transport.end_input.assert_awaited_once_with()
         client.disconnect.assert_awaited_once_with()
         agent.emit_result_message.assert_awaited_once()
-        self.assertEqual(agent.emit_result_message.await_args.args[1], "primary result")
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "reconciled result")
         self.assertFalse(agent._has_pending_requests(composite_key))
         self.assertNotIn(composite_key, agent.claude_sessions)
         self.assertNotIn(composite_key, agent.receiver_tasks)
@@ -515,7 +522,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                 query_started.set()
                 await release_query.wait()
 
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(asyncio.Event().wait())
         agent.claude_sessions[composite_key] = client
         agent.receiver_tasks[composite_key] = receiver_task
@@ -626,7 +633,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             return await original_eof(*args, **kwargs)
 
         agent._handle_receiver_eof = _observed_eof
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -719,7 +726,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             return await original_handler(*args, **kwargs)
 
         agent._handle_receiver_exception = _observed_handler
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -790,7 +797,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                 events.append("interrupt")
                 interrupt_called.set()
 
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(asyncio.Event().wait())
         agent.claude_sessions[composite_key] = client
         agent.receiver_tasks[composite_key] = receiver_task
@@ -937,7 +944,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        client = _Client()
+        client = _with_input_closer(_Client())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -1039,7 +1046,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        client = _SteeringClient()
+        client = _with_input_closer(_SteeringClient())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,

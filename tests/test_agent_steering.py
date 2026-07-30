@@ -410,13 +410,12 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
 
 
 @pytest.mark.anyio
-async def test_claude_disconnects_when_ambiguous_input_cannot_be_half_closed() -> None:
+async def test_claude_refuses_steering_without_ambiguous_input_reconciliation() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
     receiver_task = await _held_task()
-    client = _ClaudeClient(error=TimeoutError("write acknowledgement timed out"))
+    client = _ClaudeClient()
     client._transport = None
-    client.disconnect = AsyncMock()
     agent = object.__new__(ClaudeAgent)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
@@ -429,15 +428,15 @@ async def test_claude_disconnects_when_ambiguous_input_cannot_be_half_closed() -
 
         receipt = await steer_active_turn(controller, "claude", _steer_request(identity[1]))
 
-        assert receipt.outcome is SteerOutcome.UNKNOWN
-        assert client.queries == [("primary", "runtime-key"), (STEER_TEXT, "runtime-key")]
-        client.disconnect.assert_awaited_once_with()
+        assert receipt.outcome is SteerOutcome.REFUSED
+        assert receipt.reason == "native_input_reconciliation_unsupported"
+        assert client.queries == [("primary", "runtime-key")]
     finally:
         await _cancel_tasks(gate_task, receiver_task)
 
 
 @pytest.mark.anyio
-async def test_claude_disconnects_when_ambiguous_input_half_close_fails() -> None:
+async def test_claude_preserves_receiver_when_ambiguous_input_half_close_fails() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
     receiver_task = await _held_task()
@@ -458,7 +457,8 @@ async def test_claude_disconnects_when_ambiguous_input_half_close_fails() -> Non
 
         assert receipt.outcome is SteerOutcome.UNKNOWN
         client._transport.end_input.assert_awaited_once_with()
-        client.disconnect.assert_awaited_once_with()
+        client.disconnect.assert_not_awaited()
+        assert not receiver_task.done()
     finally:
         await _cancel_tasks(gate_task, receiver_task)
 
