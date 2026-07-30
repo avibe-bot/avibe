@@ -78,6 +78,7 @@ class _OpenCodeSteerState:
     reconcile_initial_status: bool = False
     status_reconciliation_failures: int = 0
     terminal_status_failure_messages: list[Dict[str, Any]] | None = None
+    terminal_status_failure_generation: int = 0
 
     @property
     def native_turn_id(self) -> str:
@@ -119,7 +120,7 @@ class _SteeringAwareOpenCodeServer:
         )
 
     @staticmethod
-    def _has_completed_assistant_after(
+    def _has_final_assistant_after(
         messages: list[Dict[str, Any]],
         excluded_message_ids: set[str],
     ) -> bool:
@@ -127,6 +128,8 @@ class _SteeringAwareOpenCodeServer:
             message.get("info", {}).get("role") == "assistant"
             and message.get("info", {}).get("id") not in excluded_message_ids
             and message.get("info", {}).get("time", {}).get("completed")
+            and message.get("info", {}).get("finish") != "tool-calls"
+            and not message.get("info", {}).get("error")
             for message in messages
         )
 
@@ -190,14 +193,12 @@ class _SteeringAwareOpenCodeServer:
                             self._state.status_reconciliation_failures
                             >= _STATUS_RECONCILIATION_FAILURE_LIMIT
                         ):
-                            if self._state.restored:
-                                return self._terminal_reconciliation_failure(
-                                    session_id,
-                                    messages,
-                                    name="StatusReconciliationError",
-                                    message=str(exc),
-                                )
-                            raise
+                            return self._terminal_reconciliation_failure(
+                                session_id,
+                                messages,
+                                name="StatusReconciliationError",
+                                message=str(exc),
+                            )
                         wait_for_insert = True
                     else:
                         self._state.status_reconciliation_failures = 0
@@ -210,10 +211,10 @@ class _SteeringAwareOpenCodeServer:
                                 self._state.closing = True
                             elif (
                                 reconcile_insert
-                                and not self._has_completed_assistant_after(messages, awaiting)
+                                and not self._has_final_assistant_after(messages, awaiting)
                             ) or (
                                 reconcile_initial_status
-                                and not self._has_completed_assistant_after(
+                                and not self._has_final_assistant_after(
                                     messages,
                                     self._state.baseline_message_ids,
                                 )
@@ -230,6 +231,28 @@ class _SteeringAwareOpenCodeServer:
                     return messages
             if wait_for_insert:
                 await asyncio.sleep(0.1)
+
+    async def prompt_async(self, *args, **kwargs) -> None:
+        async with self._state.lock:
+            terminal_messages = self._state.terminal_status_failure_messages
+            if terminal_messages is not None:
+                # The normal poll loop retries a first native error with
+                # "continue". Do not dispatch new work after reconciliation
+                # already proved terminal; advance only the synthetic evidence
+                # ID so its existing retry budget reaches terminal delivery.
+                self._state.terminal_status_failure_generation += 1
+                failure = terminal_messages[-1]
+                info = dict(failure.get("info", {}))
+                info["id"] = (
+                    f"avibe-status-reconciliation:{self._state.native_session_id}:"
+                    f"{self._state.terminal_status_failure_generation}"
+                )
+                self._state.terminal_status_failure_messages = [
+                    *terminal_messages[:-1],
+                    {**failure, "info": info},
+                ]
+                return
+            await self._server.prompt_async(*args, **kwargs)
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:
@@ -1113,6 +1136,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 and message.get("info", {}).get("id") not in baseline_message_ids
                 for index, message in enumerate(messages)
             )
+            reconcile_after_message_ids = (
+                {
+                    str(message.get("info", {}).get("id"))
+                    for message in messages[: last_completed_assistant_index + 1]
+                    if message.get("info", {}).get("id")
+                }
+                if has_post_assistant_user
+                else None
+            )
             try:
                 status_unknown = False
                 native_status = await server.get_session_status(
@@ -1159,6 +1191,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 self._run_restored_poll_loop_with_tracking(
                     poll_info,
                     reconcile_initial_status=status_unknown,
+                    reconcile_after_message_ids=reconcile_after_message_ids,
                 )
             )
             self._active_requests[poll_info.base_session_id] = task
@@ -1185,6 +1218,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         poll_info,
         *,
         reconcile_initial_status: bool = False,
+        reconcile_after_message_ids: set[str] | None = None,
     ) -> None:
         server = await self._get_server()
         await server.mark_run_active(poll_info.opencode_session_id)
@@ -1206,7 +1240,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             else ""
         )
         has_steering_identity = bool(target_session_id and logical_turn_id)
-        if current_task is not None and (has_steering_identity or reconcile_initial_status):
+        if current_task is not None and (
+            has_steering_identity
+            or reconcile_initial_status
+            or reconcile_after_message_ids is not None
+        ):
             steer_state = _OpenCodeSteerState(
                 task=current_task,
                 base_session_id=poll_info.base_session_id,
@@ -1229,6 +1267,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     else None
                 ),
                 baseline_message_ids=set(poll_info.baseline_message_ids),
+                awaiting_after_message_ids=(
+                    set(reconcile_after_message_ids)
+                    if reconcile_after_message_ids is not None
+                    else None
+                ),
                 restored=True,
                 reconcile_initial_status=reconcile_initial_status,
             )

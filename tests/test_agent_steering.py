@@ -22,6 +22,7 @@ from modules.agents.opencode.agent import (
     _OpenCodeSteerState,
     _SteeringAwareOpenCodeServer,
 )
+from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 
@@ -1053,6 +1054,17 @@ async def test_opencode_insert_reconciliation_survives_visible_user_until_idle()
         receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
         assert server.messages[-1]["info"]["role"] == "user"
 
+        server.messages.append(
+            {
+                "info": {
+                    "id": "steered-tool-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "tool-calls",
+                },
+                "parts": [],
+            }
+        )
         server.status = {"type": "idle"}
         messages = await poll_server.list_messages("opencode-session", primary.working_path)
 
@@ -1126,13 +1138,83 @@ async def test_opencode_status_reconciliation_failures_are_bounded() -> None:
     state = agent._steering_states[primary.base_session_id]
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
-        with pytest.raises(ConnectionError, match="status unavailable"):
-            await asyncio.wait_for(
-                poll_server.list_messages("opencode-session", primary.working_path),
-                timeout=1,
-            )
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+        first_failure_id = messages[-1]["info"]["id"]
+        await poll_server.prompt_async(
+            session_id="opencode-session",
+            directory=primary.working_path,
+            text="continue",
+        )
+        repeated = await poll_server.list_messages("opencode-session", primary.working_path)
+
         assert server.list_calls == 3
-        assert state.closing is False
+        assert state.closing is True
+        assert repeated[-1]["info"]["id"] != first_failure_id
+        assert repeated[-1]["info"]["error"] == {
+            "name": "StatusReconciliationError",
+            "data": {"message": "status unavailable"},
+        }
+        assert server.prompt_calls == []
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
+    monkeypatch,
+) -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status_error=ConnectionError("status unavailable"),
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    agent.controller = SimpleNamespace()
+    agent.opencode_config = SimpleNamespace(error_retry_limit=1)
+    agent.record_model_hub_native_failure = AsyncMock()
+    emit_failure = AsyncMock()
+    monkeypatch.setattr("modules.agents.opencode.poll_loop.emit_backend_failure", emit_failure)
+
+    original_sleep = asyncio.sleep
+
+    async def _fast_sleep(_delay: float) -> None:
+        await original_sleep(0)
+
+    monkeypatch.setattr("modules.agents.opencode.poll_loop.asyncio.sleep", _fast_sleep)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        result = await asyncio.wait_for(
+            OpenCodePollLoop(agent).run_prompt_poll(
+                primary,
+                poll_server,
+                "opencode-session",
+                agent_to_use="build",
+                model_dict={"providerID": "openai", "modelID": "gpt-5"},
+                reasoning_effort="high",
+                baseline_message_ids=set(),
+            ),
+            timeout=1,
+        )
+
+        assert result == (None, False)
+        assert server.prompt_calls == []
+        emit_failure.assert_awaited_once()
+        assert emit_failure.await_args.kwargs["failure_id"].endswith(":1")
     finally:
         await _cancel_tasks(gate_task)
 

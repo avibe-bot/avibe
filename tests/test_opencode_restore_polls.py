@@ -219,28 +219,33 @@ def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> Non
         {"info": {"id": "steer-user", "role": "user", "time": {}}, "parts": []},
     ]
     agent._test_server.status = {"type": "idle"}
-    poll_started = asyncio.Event()
-    release_poll = asyncio.Event()
+    reconciled_messages: list[dict] = []
 
-    class _HeldPollLoop:
+    class _ReconcilePollLoop:
         async def run_restored_poll_loop(self, poll_info):
-            poll_started.set()
-            await release_poll.wait()
+            server = await agent._get_server()
+            reconciled_messages.extend(
+                await server.list_messages(
+                    poll_info.opencode_session_id,
+                    poll_info.working_path,
+                )
+            )
 
         async def remove_restored_ack(self, poll_info):
             return None
 
-    agent._poll_loop = _HeldPollLoop()
+    agent._poll_loop = _ReconcilePollLoop()
 
     async def _run():
         restored = await agent.restore_active_polls()
-        await poll_started.wait()
-        release_poll.set()
         await asyncio.gather(*agent._active_requests.values())
         return restored
 
     assert asyncio.run(_run()) == 1
     assert removed == []
+    assert reconciled_messages[-1]["info"]["error"]["name"] == (
+        "NativeSessionEndedBeforeResult"
+    )
 
 
 def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
