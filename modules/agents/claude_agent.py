@@ -52,6 +52,7 @@ class ClaudeAgent(BaseAgent):
     # Preserve the usual task-notification -> assistant/result association while
     # bounding terminal-only notifications on the otherwise long-lived stream.
     ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 30.0
+    AMBIGUOUS_STEER_RECONCILIATION_SECONDS = 2.0
 
     # AskUserQuestion support is disabled - SDK cannot respond programmatically
     # Set to True when SDK adds support (see issue #10168)
@@ -77,7 +78,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
-        self._steering_terminal_barriers: dict[str, int] = {}
+        self._steering_terminal_barriers: dict[str, list[str]] = {}
         self._steering_closing: set[str] = set()
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
@@ -616,14 +617,34 @@ class ClaudeAgent(BaseAgent):
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
-    def _advance_steering_generation(self, composite_key: str) -> None:
+    def _advance_steering_generation(
+        self,
+        composite_key: str,
+        *,
+        barrier: str = "accepted",
+    ) -> None:
         current_generation = self._steering_generation(composite_key)
         self._steering_generations[composite_key] = current_generation + 1
         barriers = getattr(self, "_steering_terminal_barriers", None)
         if barriers is None:
             barriers = {}
             self._steering_terminal_barriers = barriers
-        barriers[composite_key] = barriers.get(composite_key, 0) + 1
+        barriers.setdefault(composite_key, []).append(barrier)
+
+    def _next_terminal_barrier(self, composite_key: str) -> str | None:
+        barriers = getattr(self, "_steering_terminal_barriers", None) or {}
+        pending = barriers.get(composite_key) or []
+        return pending[0] if pending else None
+
+    def _consume_terminal_barrier(self, composite_key: str) -> str | None:
+        barriers = getattr(self, "_steering_terminal_barriers", None) or {}
+        pending = barriers.get(composite_key) or []
+        if not pending:
+            return None
+        barrier = pending.pop(0)
+        if not pending:
+            barriers.pop(composite_key, None)
+        return barrier
 
     def _terminal_claim_superseded(
         self,
@@ -634,14 +655,7 @@ class ClaudeAgent(BaseAgent):
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
         )
-        barriers = getattr(self, "_steering_terminal_barriers", None)
-        buffered_terminal = bool(barriers and barriers.get(composite_key, 0) > 0)
-        if buffered_terminal:
-            remaining = barriers[composite_key] - 1
-            if remaining:
-                barriers[composite_key] = remaining
-            else:
-                barriers.pop(composite_key, None)
+        buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
     def _touch_steering_activity(self, composite_key: str) -> None:
@@ -699,7 +713,10 @@ class ClaudeAgent(BaseAgent):
                 try:
                     await client.query(request.text, session_id=composite_key)
                 except (asyncio.TimeoutError, TimeoutError) as exc:
-                    self._advance_steering_generation(composite_key)
+                    self._advance_steering_generation(
+                        composite_key,
+                        barrier="unknown",
+                    )
                     self._touch_steering_activity(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
@@ -723,7 +740,10 @@ class ClaudeAgent(BaseAgent):
                             "unexpected eof",
                         )
                     ):
-                        self._advance_steering_generation(composite_key)
+                        self._advance_steering_generation(
+                            composite_key,
+                            barrier="unknown",
+                        )
                         self._touch_steering_activity(composite_key)
                         return steer_result(
                             SteerOutcome.UNKNOWN,
@@ -746,7 +766,10 @@ class ClaudeAgent(BaseAgent):
                             backend=self.name,
                             diagnostic=diagnostic,
                         )
-                    self._advance_steering_generation(composite_key)
+                    self._advance_steering_generation(
+                        composite_key,
+                        barrier="unknown",
+                    )
                     self._touch_steering_activity(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
@@ -913,7 +936,17 @@ class ClaudeAgent(BaseAgent):
                 session_key=session_key,
             )
 
-            async for message in client.receive_messages():
+            message_stream = client.receive_messages().__aiter__()
+            buffered_message = None
+            while True:
+                try:
+                    if buffered_message is not None:
+                        message = buffered_message
+                        buffered_message = None
+                    else:
+                        message = await anext(message_stream)
+                except StopAsyncIteration:
+                    break
                 try:
                     touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
                     if callable(touch_session_activity):
@@ -1263,12 +1296,45 @@ class ClaudeAgent(BaseAgent):
                                 )
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
+                        ambiguous_without_followup = False
+                        async with self._steering_lock(composite_key):
+                            if self._next_terminal_barrier(composite_key) == "unknown":
+                                try:
+                                    buffered_message = await asyncio.wait_for(
+                                        anext(message_stream),
+                                        timeout=self.AMBIGUOUS_STEER_RECONCILIATION_SECONDS,
+                                    )
+                                except (asyncio.TimeoutError, StopAsyncIteration):
+                                    self._consume_terminal_barrier(composite_key)
+                                    ambiguous_without_followup = True
+                                else:
+                                    self._consume_terminal_barrier(composite_key)
+                                    logger.info(
+                                        "Reconciled ambiguous Claude steering from a follow-up native frame for %s",
+                                        composite_key,
+                                    )
+                                    continue
+
+                        if ambiguous_without_followup:
+                            logger.info(
+                                "Settling the primary Claude result after ambiguous steering produced no follow-up for %s",
+                                composite_key,
+                            )
+                            await self._cleanup_runtime_session(
+                                composite_key,
+                                current_receiver_task=asyncio.current_task(),
+                                preserve_pending_request_state=True,
+                            )
+
                         async with self._steering_lock(composite_key):
                             if (
                                 composite_key in self._steering_closing_keys()
-                                or self._terminal_claim_superseded(
-                                    composite_key,
-                                    terminal_steering_generation,
+                                or (
+                                    not ambiguous_without_followup
+                                    and self._terminal_claim_superseded(
+                                        composite_key,
+                                        terminal_steering_generation,
+                                    )
                                 )
                             ):
                                 logger.info(
@@ -1402,6 +1468,8 @@ class ClaudeAgent(BaseAgent):
                                 )
                             if emit_failed:
                                 self._release_service_runtime_turn(context)
+                        if ambiguous_without_followup:
+                            return
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.

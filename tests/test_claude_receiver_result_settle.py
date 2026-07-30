@@ -338,6 +338,74 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.emit_result_message.await_args.args[1], "reconciled result")
         self.assertFalse(agent._has_pending_requests(composite_key))
 
+    async def test_ambiguous_steer_without_followup_settles_primary_and_retires_runtime(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-ambiguous-undelivered:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.AMBIGUOUS_STEER_RECONCILIATION_SECONDS = 0.01
+        result_ready = asyncio.Event()
+        no_followup = asyncio.Event()
+
+        class _UndeliveredClient:
+            async def query(self, _text, *, session_id):
+                raise TimeoutError(f"ambiguous write for {session_id}")
+
+            def receive_messages(self):
+                async def _iterate():
+                    await result_ready.wait()
+                    primary = _ResultMessage()
+                    primary.result = "primary result"
+                    yield primary
+                    await no_followup.wait()
+
+                return _iterate()
+
+        client = _UndeliveredClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-ambiguous-undelivered",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-ambiguous-undelivered",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="ambiguous input",
+        )
+
+        receipt = await agent.steer_active_turn(request, target)
+        self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
+
+        result_ready.set()
+        await receiver_task
+        await asyncio.sleep(0)
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "primary result")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        self.assertNotIn(composite_key, agent.claude_sessions)
+        self.assertNotIn(composite_key, agent.receiver_tasks)
+
     async def test_successful_steer_supersedes_a_concurrent_activity_flush(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
