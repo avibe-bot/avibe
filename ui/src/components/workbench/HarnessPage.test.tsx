@@ -7,7 +7,14 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
-import { DetailSession, RunTriggerChip, WatchDetail, harnessEmptyStateKey, harnessTabFromParam } from './HarnessPage';
+import {
+  DetailSession,
+  RunDetail,
+  RunTriggerChip,
+  WatchDetail,
+  harnessEmptyStateKey,
+  harnessTabFromParam,
+} from './HarnessPage';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -147,6 +154,18 @@ describe('runRowTitle', () => {
   it('never slices the title — truncation is the row layout\'s job', () => {
     const long = 'x'.repeat(400);
     expect(runRowTitle({ message: long, prompt: null, definition_name: null }, 'Agent run')).toBe(long);
+  });
+});
+
+describe('RunDetail title', () => {
+  it('bounds a pathological title while preserving the complete message', () => {
+    const message = `Fix the parser regression.\\n\\n${'Preserve every trailing constraint. '.repeat(40)}`;
+    const html = render(<RunDetail run={run({ message })} />);
+
+    expect(html).toContain('line-clamp-2');
+    expect(html).toContain('break-words');
+    expect(html).toContain(`title="${message.trim()}"`);
+    expect(html).toContain(message);
   });
 });
 
