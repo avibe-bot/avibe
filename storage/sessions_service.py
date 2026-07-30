@@ -1257,6 +1257,7 @@ class SQLiteSessionsService:
                         imported_backend, imported_agent_id, imported_agent_name = _resolve_imported_agent_identity(
                             conn, imported_variant
                         )
+                        encoded_session_id = encode_session_value(native_session_id)
                         existing_anchor_row = _find_scope_anchor_row(
                             conn,
                             scope_id=scope_id,
@@ -1268,13 +1269,12 @@ class SQLiteSessionsService:
                             observed_variant = str(existing_anchor_row["agent_variant"] or "")
                             observed_agent_id = str(existing_anchor_row["agent_id"] or "")
                             observed_agent_name = str(existing_anchor_row["agent_name"] or "")
+                            observed_native_session_id = str(existing_anchor_row["native_session_id"] or "")
                             existing_backend = observed_backend.strip()
                             existing_variant = observed_variant.strip() or "default"
                             existing_agent_id = observed_agent_id.strip() or None
                             existing_agent_name = observed_agent_name.strip() or None
-                            existing_native_session_id = str(
-                                existing_anchor_row["native_session_id"] or ""
-                            ).strip()
+                            existing_native_session_id = observed_native_session_id.strip()
                             existing_is_owned = _is_owned_backend(existing_backend)
                             existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
                             existing_identity_is_durable = (
@@ -1309,6 +1309,7 @@ class SQLiteSessionsService:
                                 not same_variant
                                 and not sentinel_variant_compatible
                                 and not same_agent_identity
+                                and not same_agent_name
                             )
                             if (existing_variant_is_owned and variant_conflicts) or (
                                 existing_is_owned and backend_conflicts
@@ -1392,37 +1393,19 @@ class SQLiteSessionsService:
                                 update_values["agent_id"] = imported_agent_id
                             if backfills_agent_name:
                                 update_values["agent_name"] = imported_agent_name
-                            if len(update_values) <= 1:
-                                break
                             update_stmt = (
                                 agent_sessions.update()
                                 .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
                                 .where(agent_sessions.c.status != "archived")
-                            )
-                            if (
-                                not existing_is_owned
-                                or sentinel_variant_compatible
-                                or backfills_agent_id
-                                or backfills_agent_name
-                            ):
-                                update_stmt = update_stmt.where(
-                                    func.coalesce(agent_sessions.c.agent_backend, "") == observed_backend
-                                ).where(func.coalesce(agent_sessions.c.agent_variant, "") == observed_variant)
-                            if not existing_identity_is_durable:
-                                update_stmt = update_stmt.where(
-                                    func.coalesce(agent_sessions.c.agent_id, "") == observed_agent_id
-                                ).where(
-                                    func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name
+                                .where(func.coalesce(agent_sessions.c.agent_backend, "") == observed_backend)
+                                .where(func.coalesce(agent_sessions.c.agent_variant, "") == observed_variant)
+                                .where(func.coalesce(agent_sessions.c.agent_id, "") == observed_agent_id)
+                                .where(func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name)
+                                .where(
+                                    func.coalesce(agent_sessions.c.native_session_id, "")
+                                    == observed_native_session_id
                                 )
-                            else:
-                                if backfills_agent_id:
-                                    update_stmt = update_stmt.where(
-                                        func.coalesce(agent_sessions.c.agent_id, "") == observed_agent_id
-                                    )
-                                if backfills_agent_name:
-                                    update_stmt = update_stmt.where(
-                                        func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name
-                                    )
+                            )
                             if conn.execute(update_stmt.values(**update_values)).rowcount:
                                 break
                             logger.warning(
@@ -1432,14 +1415,42 @@ class SQLiteSessionsService:
                                 imported_backend,
                                 imported_variant,
                             )
-                            existing_anchor_row = _find_scope_anchor_row(
+                            refreshed_anchor_row = _find_scope_anchor_row(
                                 conn,
                                 scope_id=scope_id,
                                 session_anchor=base_anchor,
                             )
+                            if refreshed_anchor_row is None:
+                                logger.warning(
+                                    "Skipping legacy session import because the anchor disappeared during update "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            refreshed_native_session_id = str(
+                                refreshed_anchor_row["native_session_id"] or ""
+                            )
+                            if (
+                                refreshed_native_session_id != observed_native_session_id
+                                and refreshed_native_session_id != encoded_session_id
+                            ):
+                                logger.warning(
+                                    "Skipping legacy session import after losing a concurrent native-session claim "
+                                    "scope_id=%s anchor=%s winner_native_session_id=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    refreshed_native_session_id,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            existing_anchor_row = refreshed_anchor_row
                         if skip_mapping:
                             continue
-                        encoded_session_id = encode_session_value(native_session_id)
                         row_key = _session_row_key(
                             scope_id=scope_id,
                             agent_variant=imported_variant,

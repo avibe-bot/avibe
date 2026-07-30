@@ -913,15 +913,22 @@ def test_save_state_sets_registered_custom_agent_identity_on_existing_owned_row(
         service.close()
 
 
-def test_save_state_identity_backfill_loses_concurrent_route_claim(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    service = SQLiteSessionsService(db_path)
-    race_fired = 0
-    anchor_snapshot_prefix = (
-        "SELECT agent_sessions.id, agent_sessions.agent_backend, agent_sessions.agent_variant, "
-        "agent_sessions.agent_id, agent_sessions.agent_name, agent_sessions.native_session_id"
-    )
+_SAVE_STATE_ANCHOR_SNAPSHOT_PREFIX = (
+    "SELECT agent_sessions.id, agent_sessions.agent_backend, agent_sessions.agent_variant, "
+    "agent_sessions.agent_id, agent_sessions.agent_name, agent_sessions.native_session_id"
+)
 
+
+def _commit_route_claim_after_save_state_snapshot(
+    engine,
+    db_path: Path,
+    *,
+    session_id: str,
+    values: dict,
+) -> dict:
+    state = {"fired": 0}
+
+    @event.listens_for(engine, "after_cursor_execute")
     def claim_route_after_snapshot(
         _conn: object,
         _cursor: object,
@@ -930,21 +937,26 @@ def test_save_state_identity_backfill_loses_concurrent_route_claim(tmp_path: Pat
         _context: object,
         _executemany: object,
     ) -> None:
-        nonlocal race_fired
-        if race_fired or not " ".join(statement.split()).startswith(anchor_snapshot_prefix):
+        if state["fired"] or not " ".join(statement.split()).startswith(
+            _SAVE_STATE_ANCHOR_SNAPSHOT_PREFIX
+        ):
             return
-        race_fired += 1
+        state["fired"] += 1
         other = create_sqlite_engine(db_path)
         try:
             with other.begin() as other_conn:
                 other_conn.execute(
-                    agent_sessions.update()
-                    .where(agent_sessions.c.id == session_id)
-                    .values(agent_backend="opencode", agent_variant="writer")
+                    agent_sessions.update().where(agent_sessions.c.id == session_id).values(**values)
                 )
         finally:
             other.dispose()
 
+    return state
+
+
+def test_save_state_identity_backfill_loses_concurrent_route_claim(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
     try:
         with service.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
@@ -979,24 +991,26 @@ def test_save_state_identity_backfill_loses_concurrent_route_claim(tmp_path: Pat
                 require_workdir=False,
             )
 
-        event.listen(service.engine, "after_cursor_execute", claim_route_after_snapshot)
-        try:
-            service.save_state(
-                SessionState(
-                    session_mappings={
-                        "slack::C123": {
-                            "reviewer": {
-                                "slack_171717.123": "reviewer-native",
-                            }
+        race = _commit_route_claim_after_save_state_snapshot(
+            service.engine,
+            db_path,
+            session_id=session_id,
+            values={"agent_backend": "opencode", "agent_variant": "writer"},
+        )
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
                         }
                     }
-                )
+                }
             )
-        finally:
-            event.remove(service.engine, "after_cursor_execute", claim_route_after_snapshot)
+        )
 
         row = service.get_agent_session_by_id(session_id)
-        assert race_fired == 1
+        assert race["fired"] == 1
         assert row is not None
         assert row["agent_backend"] == "opencode"
         assert row["agent_variant"] == "writer"
@@ -1007,7 +1021,68 @@ def test_save_state_identity_backfill_loses_concurrent_route_claim(tmp_path: Pat
         service.close()
 
 
-def test_save_state_accepts_matching_agent_identity_across_variant_aliases(tmp_path: Path) -> None:
+@pytest.mark.parametrize("winner_backend", ["claude", "codex"])
+def test_save_state_final_native_bind_loses_concurrent_claim(
+    tmp_path: Path, winner_backend: str
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        race = _commit_route_claim_after_save_state_snapshot(
+            service.engine,
+            db_path,
+            session_id=session_id,
+            values={
+                "agent_backend": winner_backend,
+                "agent_variant": winner_backend,
+                "agent_id": f"agent-{winner_backend}",
+                "agent_name": f"{winner_backend}-reviewer",
+                "native_session_id": f"{winner_backend}-native",
+            },
+        )
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "codex": {
+                            "slack_171717.123": "codex-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert race["fired"] == 1
+        assert row is not None
+        assert row["agent_backend"] == winner_backend
+        assert row["agent_variant"] == winner_backend
+        assert row["agent_id"] == f"agent-{winner_backend}"
+        assert row["agent_name"] == f"{winner_backend}-reviewer"
+        assert row["native_session_id"] == f"{winner_backend}-native"
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("existing_agent_id", ["agent-reviewer", None])
+def test_save_state_accepts_matching_agent_identity_across_variant_aliases(
+    tmp_path: Path, existing_agent_id: str | None
+) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
     try:
@@ -1040,7 +1115,7 @@ def test_save_state_accepts_matching_agent_identity_across_variant_aliases(tmp_p
                 session_anchor="slack_171717.123",
                 native_session_id="",
                 workdir="/tmp",
-                agent_id="agent-reviewer",
+                agent_id=existing_agent_id,
                 agent_name="Reviewer",
                 metadata={"legacy_scope_key": "slack::C123"},
                 require_workdir=False,
