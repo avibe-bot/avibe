@@ -2376,11 +2376,48 @@ class ModelHubService:
         }
 
     @staticmethod
-    def _known_turn_backend(turn_id: str) -> Optional[str]:
+    def note_turn_mode(
+        turn_id: str,
+        mode: Literal["direct", "hub"],
+    ) -> None:
+        """Store the mode on the message row whose lifetime defines the turn."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(
+                messages.update()
+                .where(
+                    func.json_extract(
+                        messages.c.metadata_json,
+                        "$.turn_id",
+                    )
+                    == normalized
+                )
+                .values(
+                    metadata_json=func.json_set(
+                        messages.c.metadata_json,
+                        "$.model_hub_mode",
+                        mode,
+                    )
+                )
+            )
+
+    @staticmethod
+    def _known_turn(
+        turn_id: str,
+    ) -> tuple[Optional[str], Optional[Literal["direct", "hub"]]]:
         try:
             with get_cached_sqlite_engine().connect() as conn:
-                return conn.execute(
-                    select(agent_sessions.c.agent_backend)
+                row = conn.execute(
+                    select(
+                        agent_sessions.c.agent_backend.label("backend"),
+                        func.json_extract(
+                            messages.c.metadata_json,
+                            "$.model_hub_mode",
+                        ).label("mode"),
+                    )
                     .select_from(
                         messages.join(
                             agent_sessions,
@@ -2395,9 +2432,16 @@ class ModelHubService:
                         == turn_id
                     )
                     .limit(1)
-                ).scalar_one_or_none()
+                ).mappings().first()
         except Exception:
-            return None
+            return None, None
+        if row is None:
+            return None, None
+        mode = row["mode"]
+        return (
+            str(row["backend"]),
+            mode if mode in {"direct", "hub"} else None,
+        )
 
     def get_turn_provenance(self, turn_id: object) -> dict:
         normalized = str(turn_id or "").strip()
@@ -2406,9 +2450,8 @@ class ModelHubService:
         record = self.provenance.get(normalized)
         if record is not None:
             return record
-        mode = self.provenance.get_mode(normalized)
-        backend = self._known_turn_backend(normalized)
-        if backend is None and mode is None:
+        backend, mode = self._known_turn(normalized)
+        if backend is None:
             raise ModelHubError("turn_not_found", status=404)
         detail = (
             "models.provenance.direct_mode"

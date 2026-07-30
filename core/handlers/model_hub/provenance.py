@@ -26,7 +26,6 @@ from .classification import ResolutionDecision, ResolutionReason
 BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
-TurnMode = Literal["direct", "hub"]
 ScopeKey = tuple[BackendName, str]
 
 
@@ -71,6 +70,95 @@ class ProcessScope:
     untracked_use: bool = False
 
 
+class GatewayTurnTerminalizer:
+    """One funnel for every exit after an exact gateway identity is prepared."""
+
+    def __init__(
+        self,
+        registry: "TurnCorrelationRegistry",
+        *,
+        backend: str,
+        token: str,
+    ) -> None:
+        self._registry = registry
+        self._backend = backend
+        self._token = token
+        self.turn_id = registry._open_prepared_gateway_turn(
+            backend=backend,
+            token=token,
+        )
+        self._stream_started = False
+
+    def __enter__(self) -> "GatewayTurnTerminalizer":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            stream_started=self._stream_started,
+        )
+
+    def bind_request_model(self, model_id: str) -> Optional[str]:
+        if self.turn_id is None:
+            return None
+        matched = self._registry.begin_gateway_request(
+            backend=self._backend,
+            token=self._token,
+            requested_model_id=model_id,
+        )
+        if matched != self.turn_id:
+            self.turn_id = None
+        return self.turn_id
+
+    def fail(
+        self,
+        reason: Literal["invalid_parameter", "protocol_error"],
+    ) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            reason=reason,
+            stream_started=self._stream_started,
+            force=True,
+        )
+
+    def mark_no_candidate(self, supply_state: SupplyState) -> None:
+        self._registry.mark_gateway_no_candidate(
+            self.turn_id,
+            supply_state,
+        )
+
+    def begin_attempt(
+        self,
+        *,
+        source_id: str,
+        resolved_model_id: str,
+        channel: SupplyChannel,
+        via_mapping: bool,
+    ) -> None:
+        self._registry.begin_attempt(
+            self.turn_id,
+            source_id=source_id,
+            resolved_model_id=resolved_model_id,
+            channel=channel,
+            via_mapping=via_mapping,
+        )
+
+    def finish_attempt(
+        self,
+        *,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> None:
+        self._registry.finish_attempt(
+            self.turn_id,
+            outcome=outcome,
+            decision=decision,
+        )
+
+    def mark_stream_started(self) -> None:
+        self._stream_started = True
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -91,7 +179,6 @@ class BoundedProvenanceStore:
 
     def __init__(self, path: Path, *, max_entries: int = 500):
         self.path = path
-        self.mode_path = path.with_name(f"{path.stem}_modes{path.suffix}")
         self.max_entries = max_entries
         self._lock = threading.RLock()
 
@@ -156,34 +243,6 @@ class BoundedProvenanceStore:
                 ),
                 None,
             )
-
-    def put_mode(self, turn_id: str, mode: TurnMode) -> None:
-        """Persist the turn-time mode separately from provenance records."""
-
-        normalized = str(turn_id or "").strip()
-        if not normalized:
-            raise ValueError("turn_id is required")
-        with self._lock:
-            records = [
-                item
-                for item in self._read_path(self.mode_path)
-                if str(item.get("turn_id") or "") != normalized
-            ]
-            records.append({"turn_id": normalized, "mode": mode})
-            self._write_path(self.mode_path, records)
-
-    def get_mode(self, turn_id: str) -> Optional[TurnMode]:
-        with self._lock:
-            record = next(
-                (
-                    item
-                    for item in reversed(self._read_path(self.mode_path))
-                    if item.get("turn_id") == turn_id
-                ),
-                None,
-            )
-        mode = record.get("mode") if record is not None else None
-        return mode if mode in {"direct", "hub"} else None
 
 
 class TurnCorrelationRegistry:
@@ -376,19 +435,28 @@ class TurnCorrelationRegistry:
             trace.gateway_model_id = resolved_model_id
             trace.gateway_via_mapping = via_mapping
 
-    def fail_gateway_validation(
+    def gateway_terminalizer(
         self,
         *,
         backend: str,
         token: str,
-        reason: Literal["invalid_parameter", "protocol_error"],
-    ) -> None:
-        """Record an exact authenticated request rejected before resolution."""
+    ) -> GatewayTurnTerminalizer:
+        return GatewayTurnTerminalizer(
+            self,
+            backend=backend,
+            token=token,
+        )
 
+    def _open_prepared_gateway_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+    ) -> Optional[str]:
         with self._lock:
             exact = self._exact_turn(backend, token)
             if exact is None:
-                return
+                return None
             turn_id, _ = exact
             trace = self._traces.get(turn_id)
             if (
@@ -396,16 +464,58 @@ class TurnCorrelationRegistry:
                 or trace.gateway_source_id is None
                 or trace.gateway_model_id is None
             ):
+                return None
+            trace.pending_attempt = AttemptIdentity(
+                source_id=trace.gateway_source_id,
+                resolved_model_id=trace.gateway_model_id,
+                channel="hub",
+                via_mapping=trace.gateway_via_mapping,
+            )
+            return turn_id
+
+    def _terminalize_gateway_exit(
+        self,
+        turn_id: Optional[str],
+        *,
+        reason: Literal["invalid_parameter", "protocol_error"] = "protocol_error",
+        stream_started: bool,
+        force: bool = False,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.ambiguous:
+                return
+            if not force and (
+                trace.served is not None
+                or trace.terminal_error is not None
+                or trace.model_supply_state is not None
+                or (
+                    trace.pending_attempt is None
+                    and bool(trace.failed_attempts)
+                )
+            ):
+                return
+            identity = trace.pending_attempt
+            if identity is None and (
+                trace.gateway_source_id is not None
+                and trace.gateway_model_id is not None
+            ):
+                identity = AttemptIdentity(
+                    source_id=trace.gateway_source_id,
+                    resolved_model_id=trace.gateway_model_id,
+                    channel="hub",
+                    via_mapping=trace.gateway_via_mapping,
+                )
+            if identity is None or identity.channel != "hub":
                 return
             trace.pending_attempt = None
             trace.served = None
             trace.terminal_error = {
-                "source_id": trace.gateway_source_id,
-                "resolved_model_id": trace.gateway_model_id,
-                "channel": "hub",
-                "via_mapping": trace.gateway_via_mapping,
+                **identity.payload(),
                 "reason": reason,
-                "stream_started": False,
+                "stream_started": stream_started,
             }
 
     def begin_native_attempt(
@@ -481,6 +591,9 @@ class TurnCorrelationRegistry:
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is not None:
+                trace.pending_attempt = None
+                trace.served = None
+                trace.terminal_error = None
                 trace.model_supply_state = supply_state
 
     def begin_attempt(
@@ -561,9 +674,6 @@ class TurnCorrelationRegistry:
                 "reason": "protocol_error",
                 "stream_started": True,
             }
-
-    def note_turn_mode(self, turn_id: str, mode: TurnMode) -> None:
-        self.store.put_mode(turn_id, mode)
 
     def finish_attempt(
         self,

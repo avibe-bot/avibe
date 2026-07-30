@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import aiohttp
 import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -9,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiohttp
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
+from sqlalchemy import create_engine, delete, select
 
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
@@ -51,6 +52,7 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_turn_mode,
 )
+from storage.models import agent_sessions, messages, metadata
 
 
 CONTRACTS = Path(__file__).parents[1] / "docs" / "plans" / "model-hub-contracts"
@@ -461,6 +463,70 @@ def test_authenticated_gateway_validation_failure_is_correlated(
     asyncio.run(exercise())
 
 
+def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        service = _service(
+            tmp_path,
+            sources=[_source("src_primary01", "Primary")],
+        )
+
+        async def fail_sync(_bindings) -> None:
+            raise RuntimeError("engine unavailable")
+
+        service.adapter.sync_sources = fail_sync
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_pre_observer_engine_down",
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={
+                        "model": "shared-model",
+                        "input": "ping",
+                        "stream": False,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 503
+                await response.read()
+
+            trace = gateway.correlation._traces[
+                "turn_pre_observer_engine_down"
+            ]
+            assert trace.pending_attempt is None
+            assert trace.terminal_error == {
+                "source_id": "src_primary01",
+                "resolved_model_id": "shared-model",
+                "channel": "hub",
+                "via_mapping": False,
+                "reason": "protocol_error",
+                "stream_started": False,
+            }
+        finally:
+            await gateway.close()
+
+        gateway.correlation.settle(
+            "turn_pre_observer_engine_down",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_pre_observer_engine_down")
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
 def test_gateway_provenance_retains_pre_mapping_model_identity(
     tmp_path: Path,
 ) -> None:
@@ -865,12 +931,15 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
     tmp_path: Path,
 ) -> None:
     correlation = Mock()
-    correlation.note_turn_mode.side_effect = OSError("mode store unavailable")
+    service = _service(
+        tmp_path,
+        sources=[_source("src_primary01", "Primary")],
+    )
+    service.note_turn_mode = Mock(
+        side_effect=OSError("mode store unavailable")
+    )
     router = ModelHubRuntimeRouter(
-        service=_service(
-            tmp_path,
-            sources=[_source("src_primary01", "Primary")],
-        ),
+        service=service,
         turn_gateway=SimpleNamespace(correlation=correlation),
     )
 
@@ -1439,16 +1508,18 @@ def test_provenance_absence_codes_are_distinguishable(
     )
     monkeypatch.setattr(
         service,
-        "_known_turn_backend",
+        "_known_turn",
         lambda turn_id: (
-            "codex"
-            if turn_id in {"turn_direct", "turn_ambiguous"}
-            else None
+            ("codex", "direct")
+            if turn_id == "turn_direct"
+            else (
+                ("codex", "hub")
+                if turn_id == "turn_ambiguous"
+                else (None, None)
+            )
         ),
     )
 
-    service.provenance.put_mode("turn_direct", "direct")
-    service.provenance.put_mode("turn_ambiguous", "hub")
     service.store.config.agents["codex"].mode = "hub"
     with pytest.raises(ModelHubError) as direct:
         service.get_turn_provenance("turn_direct")
@@ -1468,6 +1539,74 @@ def test_provenance_absence_codes_are_distinguishable(
         service.get_turn_provenance("turn_unknown")
     assert unknown.value.code == "turn_not_found"
     assert unknown.value.status == 404
+
+
+def test_turn_mode_marker_is_deleted_with_its_turn_record(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'state.db'}")
+    metadata.create_all(engine)
+    now = NOW.isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_turn_mode",
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="anchor",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="msg_turn_mode",
+                session_id="ses_turn_mode",
+                platform="avibe",
+                author="user",
+                type="user",
+                source="user",
+                content_json="{}",
+                metadata_json=json.dumps({"turn_id": "turn_direct"}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    service = _service(
+        tmp_path,
+        sources=[_source("src_primary01", "Primary")],
+    )
+    monkeypatch.setattr(
+        "core.handlers.model_hub.service.get_cached_sqlite_engine",
+        lambda: engine,
+    )
+    service.note_turn_mode("turn_direct", "direct")
+    with engine.connect() as conn:
+        stored_mode = conn.execute(
+            select(
+                messages.c.metadata_json,
+            ).where(messages.c.id == "msg_turn_mode")
+        ).scalar_one()
+    assert json.loads(stored_mode)["model_hub_mode"] == "direct"
+
+    with pytest.raises(ModelHubError) as unavailable:
+        service.get_turn_provenance("turn_direct")
+    assert unavailable.value.code == "provenance_unavailable"
+    assert unavailable.value.detail == "models.provenance.direct_mode"
+
+    with engine.begin() as conn:
+        conn.execute(
+            delete(messages).where(messages.c.id == "msg_turn_mode")
+        )
+
+    with pytest.raises(ModelHubError) as deleted:
+        service.get_turn_provenance("turn_direct")
+    assert deleted.value.code == "turn_not_found"
 
 
 def test_known_opencode_turn_is_fail_closed_but_not_unknown(
@@ -1503,8 +1642,12 @@ def test_known_opencode_turn_is_fail_closed_but_not_unknown(
     service.provenance = store
     monkeypatch.setattr(
         service,
-        "_known_turn_backend",
-        lambda turn_id: "opencode" if turn_id == "turn_opencode" else None,
+        "_known_turn",
+        lambda turn_id: (
+            ("opencode", None)
+            if turn_id == "turn_opencode"
+            else (None, None)
+        ),
     )
 
     with pytest.raises(ModelHubError) as unavailable:

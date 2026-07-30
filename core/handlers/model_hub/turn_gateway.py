@@ -13,7 +13,11 @@ from config import paths
 
 from .adapter import RawCallOutcome, RawOutcomeKind
 from .classification import classify_outcome
-from .provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+from .provenance import (
+    BoundedProvenanceStore,
+    GatewayTurnTerminalizer,
+    TurnCorrelationRegistry,
+)
 from .request import ModelHubRequest
 from .service import ModelHubError, ModelHubService, ResolvedInvocation
 
@@ -141,100 +145,78 @@ class ModelHubTurnGateway:
         token = self._authorized_token(request, backend)
         if token is None:
             return self._error_response(status=401, code="authentication_error")
-        endpoint = request.match_info["endpoint"].strip("/")
-        if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
-            self.correlation.fail_gateway_validation(
-                backend=backend,
-                token=token,
-                reason="protocol_error",
-            )
-            return self._error_response(status=404, code="not_found_error")
-        try:
-            payload = await request.json(loads=json.loads)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            self.correlation.fail_gateway_validation(
-                backend=backend,
-                token=token,
-                reason="invalid_parameter",
-            )
-            return self._error_response(status=400, code="invalid_request_error")
-        if not isinstance(payload, dict):
-            self.correlation.fail_gateway_validation(
-                backend=backend,
-                token=token,
-                reason="invalid_parameter",
-            )
-            return self._error_response(status=400, code="invalid_request_error")
-        model_id = payload.get("model")
-        stream = payload.get("stream", False)
-        if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
-            self.correlation.fail_gateway_validation(
-                backend=backend,
-                token=token,
-                reason="invalid_parameter",
-            )
-            return self._error_response(status=400, code="invalid_request_error")
-
-        turn_id = self.correlation.begin_gateway_request(
+        with self.correlation.gateway_terminalizer(
             backend=backend,
             token=token,
-            requested_model_id=model_id,
-        )
+        ) as terminalizer:
+            endpoint = request.match_info["endpoint"].strip("/")
+            if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+                terminalizer.fail("protocol_error")
+                return self._error_response(status=404, code="not_found_error")
+            try:
+                payload = await request.json(loads=json.loads)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            if not isinstance(payload, dict):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            model_id = payload.get("model")
+            stream = payload.get("stream", False)
+            if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            terminalizer.bind_request_model(model_id)
 
-        def observe_attempt(
-            source_id: str,
-            resolved_model_id: str,
-            channel: str,
-            via_mapping: bool,
-            outcome: Optional[RawCallOutcome],
-            decision,
-        ) -> None:
-            if outcome is None or decision is None:
-                self.correlation.begin_attempt(
-                    turn_id,
-                    source_id=source_id,
-                    resolved_model_id=resolved_model_id,
-                    channel=channel,
-                    via_mapping=via_mapping,
+            def observe_attempt(
+                source_id: str,
+                resolved_model_id: str,
+                channel: str,
+                via_mapping: bool,
+                outcome: Optional[RawCallOutcome],
+                decision,
+            ) -> None:
+                if outcome is None or decision is None:
+                    terminalizer.begin_attempt(
+                        source_id=source_id,
+                        resolved_model_id=resolved_model_id,
+                        channel=channel,
+                        via_mapping=via_mapping,
+                    )
+                    return
+                terminalizer.finish_attempt(
+                    outcome=outcome,
+                    decision=decision,
                 )
-                return
-            self.correlation.finish_attempt(
-                turn_id,
-                outcome=outcome,
-                decision=decision,
-            )
 
-        try:
-            protocol_headers = {
-                name.lower(): value
-                for name, value in request.headers.items()
-                if name.lower() in _PROTOCOL_HEADERS
-            }
-            resolved = await self.service.resolve(
-                backend=backend,
-                model_id=model_id,
-                request=ModelHubRequest(
-                    payload,
-                    protocol=_REQUEST_PROTOCOLS[endpoint],
-                    headers=protocol_headers,
-                ),
+            try:
+                protocol_headers = {
+                    name.lower(): value
+                    for name, value in request.headers.items()
+                    if name.lower() in _PROTOCOL_HEADERS
+                }
+                resolved = await self.service.resolve(
+                    backend=backend,
+                    model_id=model_id,
+                    request=ModelHubRequest(
+                        payload,
+                        protocol=_REQUEST_PROTOCOLS[endpoint],
+                        headers=protocol_headers,
+                    ),
+                    stream=stream,
+                    supply_channel="hub",
+                    attempt_observer=observe_attempt,
+                )
+            except ModelHubError as exc:
+                if exc.supply_state is not None:
+                    terminalizer.mark_no_candidate(exc.supply_state)
+                return self._error_response(status=exc.status, code=exc.code)
+            return await self._resolved_response(
+                request,
+                resolved,
                 stream=stream,
-                supply_channel="hub",
-                attempt_observer=observe_attempt,
+                terminalizer=terminalizer,
             )
-        except ModelHubError as exc:
-            if exc.supply_state is not None:
-                self.correlation.mark_gateway_no_candidate(
-                    turn_id,
-                    exc.supply_state,
-                )
-            return self._error_response(status=exc.status, code=exc.code)
-        return await self._resolved_response(
-            request,
-            resolved,
-            stream=stream,
-            turn_id=turn_id,
-        )
 
     async def _resolved_response(
         self,
@@ -242,7 +224,7 @@ class ModelHubTurnGateway:
         resolved: ResolvedInvocation,
         *,
         stream: bool,
-        turn_id: Optional[str],
+        terminalizer: GatewayTurnTerminalizer,
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
@@ -258,8 +240,7 @@ class ModelHubTurnGateway:
                 payload.extend(chunk)
             outcome = await handle.outcome()
             decision = classify_outcome(outcome)
-            self.correlation.finish_attempt(
-                turn_id,
+            terminalizer.finish_attempt(
                 outcome=outcome,
                 decision=decision,
             )
@@ -287,11 +268,11 @@ class ModelHubTurnGateway:
         await response.prepare(request)
         try:
             async for chunk in handle.stream:
+                terminalizer.mark_stream_started()
                 await response.write(chunk)
         finally:
             outcome = await handle.outcome()
-            self.correlation.finish_attempt(
-                turn_id,
+            terminalizer.finish_attempt(
                 outcome=outcome,
                 decision=classify_outcome(outcome),
             )

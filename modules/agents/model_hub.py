@@ -818,11 +818,11 @@ class ModelHubRuntimeRouter:
         ts: str,
         mode: Optional[Literal["direct", "hub"]] = None,
     ) -> None:
-        if self.turn_gateway is not None:
-            try:
-                if mode is not None:
-                    self.turn_gateway.correlation.note_turn_mode(turn_id, mode)
-            finally:
+        try:
+            if mode is not None:
+                self.service.note_turn_mode(turn_id, mode)
+        finally:
+            if self.turn_gateway is not None:
                 self.turn_gateway.correlation.settle(
                     turn_id,
                     settled_by=settled_by,

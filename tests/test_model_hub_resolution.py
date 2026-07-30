@@ -236,6 +236,7 @@ def _assert_no_references_to(service, model_id: str) -> None:
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=422, code="tool_schema_error"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"), False, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=413, code="request_too_large"), False, "surface", None),
         (
             _outcome(
                 RawOutcomeKind.HTTP_ERROR,
@@ -456,6 +457,7 @@ def test_parameter_error_and_started_stream_never_fallback(tmp_path):
     for outcome in (
         _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"),
         _outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"),
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=413, code="request_too_large"),
         _outcome(RawOutcomeKind.HTTP_ERROR, status=429, stream_started=True),
     ):
         adapter = FakeAdapter([outcome])
