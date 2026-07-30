@@ -38,6 +38,7 @@ EventReason = Literal[
     "credential_revoked",
     "balance_exhausted",
     "account_banned",
+    "permission_denied",
     "unclassified_error",
     "no_enabled_source",
     "no_eligible_source",
@@ -59,6 +60,7 @@ _NON_SELF_HEALING_REASONS = {
     "account_banned",
     "unclassified_error",
 }
+_REQUEST_SCOPED_REASONS = {"permission_denied"}
 _STRUCTURAL_REASONS = {
     "no_enabled_source",
     "no_eligible_source",
@@ -151,6 +153,8 @@ def build_resolution_event(
             raise ValueError("Invalid supply_interrupted event")
     elif reason in _STRUCTURAL_REASONS:
         raise ValueError("Structural reasons require supply_interrupted")
+    if reason in _REQUEST_SCOPED_REASONS and kind != "switch":
+        raise ValueError("Request-scoped reasons require a switch event")
     if kind == "needs_action" and (
         from_source is None
         or to_source is not None

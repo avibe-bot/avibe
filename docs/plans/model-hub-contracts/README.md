@@ -1,9 +1,10 @@
 # Model Hub — Interface Contracts
 
-Status: **FROZEN v4 (targeted)** · 2026-07-29 · change only via orchestrator
-Advances `agent-chain` and `probe-result` from contract version 3 to 4. The
-same-assumption audit makes prose-only corrections in `source` and `agent-supply`;
-all other schema shapes and versions remain at v3.
+Status: **FROZEN v4 (targeted)** · 2026-07-30 · change only via orchestrator
+Advances `agent-chain`, `probe-result`, and `turn-provenance` from contract
+version 3 to 4. The same-assumption audit makes prose-only corrections in
+`source` and `agent-supply`; the versionless `resolution-event` adds the
+request-scoped `permission_denied` cause.
 Derived from: spec v2 (`../model-hub.md`), implementation plan
 (`../model-hub-implementation.md`),
 spike S1 engine survey (`docs/plans/model-hub-engine-survey.md`),
@@ -98,6 +99,14 @@ order after any mutation; clients never compute partial reorders.
   `vibe/model_hub_runtime/state.py:135-166`, and owner-vetoable. It corrects only
   the hub-OAuth stable-ref repair invariant; chat messages alone did not unfreeze
   these files.
+- **Targeted v4 process instance trail — entry 3 (v4c).** Review finding
+  `3680338859` proved that the runtime-preserved `permission_error` machine code
+  could be a model- or resource-scoped denial, while the classifier collapsed an
+  otherwise redacted 403 into source-global `credential_revoked`. The
+  orchestrator authorized this owner-vetoable amendment in L3 review round 11:
+  `permission_denied` is an attempt failure, mirrored into provenance and legal
+  only on a switch event; it has no Source-state `detail_key` and never mutates
+  source health.
 - Contract tests (implementation plan §5) validate both directions against
   these schemas.
 
@@ -260,7 +269,7 @@ loads it and mutation-tests every comparable row.
 | --- | --- | --- | --- | --- |
 | M1 | the ten `detail_key` values (5 cooldown + 4 needs_action + 1 error) | `source.schema.json` → `state`, across all three status branches — the `error` key is pinned as a `const`, which counts | `probe-result.schema.json` → `error` (minus null and its probe-local native readiness key), and the `examples` list on the home field itself | `equality` |
 | M2 | source status → chain health | `source.schema.json` → `state.status` | `agent-chain.schema.json` → `chain[].health` | `projection` |
-| M3 | attempt-failure causes | `resolution-event.schema.json` → `reason` | `turn-provenance.schema.json` → `failed_attempts[].reason` | `partition` |
+| M3 | attempt-failure causes, including request-scoped `permission_denied` | `resolution-event.schema.json` → `reason` | `turn-provenance.schema.json` → `failed_attempts[].reason` | `partition` |
 | M4 | non-self-healing cause ↔ blocking `detail_key` | `resolution-event.schema.json` → `reason` | `source.schema.json` → the `needs_action` and `error` `detail_key` branches | `bijection` |
 | M5 | the supply-state taxonomy | `agent-supply.schema.json` → `supply_status` | `named_agents[].supply_status`; `agent-chain.schema.json` → `supply_state`; `turn-provenance.schema.json` → `model_supply_state` | `projection` |
 | M6 | backend identifiers | `agent-supply.schema.json` → `backend` | `agent-chain.schema.json` and `probe-result.schema.json` → `backend`; `turn-provenance.schema.json` and `resolution-event.schema.json` → `agent` (`system` is the declared event-only extra) | `equality` |
@@ -287,6 +296,9 @@ What the rules mean, and why the non-equality rules differ:
   on the branch that pins `kind: supply_interrupted` — and `recovery`/`manual`/`mapping`
   are declared, because a resolution that is not a failure has no attempt to report. A
   new `reason` fails the check until it is classified, which is the point.
+  `permission_denied` belongs here because it describes the failed request
+  attempt, but deliberately does not join M4: the preserved machine code does not
+  prove a source-global credential or account state.
 - **`mapping`** — M8 is one concept in two field conventions: a bare classifier in
   the chain and an i18n key in the probe error slot. The explicit one-to-one map is
   checked in both directions; adding a spelling on either side fails until paired.
@@ -303,8 +315,8 @@ What the rules mean, and why the non-equality rules differ:
 | `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. Targeted v4 audit changes no shape: `supply_status` is derived from complete process-aware runnability, so unavailable native CLI supply is `interrupted`, not cooldown-only `waiting`. Hub with no pinned selection remains null throughout. |
 | `agent-chain.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain and preserves visibility/order for blocked members. Each item now distinguishes source-global `health` from resolve-time channel availability: `runnable = health-permits AND process-available`; Hub availability is definitionally true, while an unavailable native CLI item at any health stays dimmed in place with `reason: native_cli_unavailable`. Cooldown plus unavailable is `interrupted`, not `waiting`. |
 | `probe-result.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. The probe selects the first runnable item; unavailable chain items are skipped. Hub keeps v3's completed-request truth table. Native CLI re-verifies process readiness, never claims completion evidence, and pins `latency_ms: null` in both directions. It reads the requested model's `supply_state`, never `supply_status`. |
-| `turn-provenance.schema.json` | L2 API, L3 writer. v3 adds the FSM-truth `canceled` outcome and a reason-free `canceled_attempt` slot. Records exist only when attribution is exact; Direct and ambiguous absence are route errors in `api.md`. |
-| `resolution-event.schema.json` | L2 emitter, L4 UI. v3 permits nullable `model_id` only for source-scoped system events, rejects `system` on backend-scoped interruption, and keeps one record with impact derived live. |
+| `turn-provenance.schema.json` | L2 API, L3 writer. v4 adds request-scoped `permission_denied` to failed attempts without changing the exact-attribution rule. The FSM-truth `canceled` outcome keeps its reason-free `canceled_attempt` slot. Direct and ambiguous absence remain route errors in `api.md`. |
+| `resolution-event.schema.json` | L2 emitter, L4 UI. The versionless feed adds `permission_denied` only for a model-scoped switch; it cannot describe cooldown, recovery, or needs-action source state. The record stays single-grained with impact derived live. |
 | `oauth-flow.schema.json` | L2, L4 UI, L1 engine adapter |
 | `migration-scan.schema.json` | L6, L5 UI. Unchanged by the v2 ruling — native-config import is an onboarding feature, not a priority mechanism. |
 | `runtime-dependency.schema.json` | L1, L2 status API, L7 guards. **URL policy (orchestrator, 07-23 12:05):** the example URLs are placeholders; L1 ships with upstream release URLs + SHA256 integrity verification. Availability guard = L7/orchestrator deliverable BEFORE GA: mirror the pinned assets into Avibe-owned release storage (same manifest-verified backup/recovery pattern as Show Runtime, per repo release rules), then point the manifest at the mirror with upstream recorded as provenance. SHA256s never change (same bytes). L1 must NOT build the mirror or touch the Show Runtime guard. **Platform expansion (07-23 13:13):** linux-arm64 / darwin-x64 assets get pinned (+ schema platform-enum rev) together with the mirror work at L7; until then unsupported hosts fail closed, Direct = escape hatch (L1's `model_hub_engine_platform_unsupported` coverage is the intended behavior). **Cross-vendor note (07-29):** if the v2.1 cross-vendor spike (spec §10.4) concludes that a conversion pair needs a CPA plugin or a different engine build, that lands here as a pin + SHA256 revision with mirrored assets published before the manifest moves — never as user-facing configuration. |

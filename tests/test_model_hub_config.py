@@ -234,6 +234,52 @@ def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
             _validate_mirror_entry(entry, mutated)
 
 
+def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
+    event_schema = _schema("resolution-event.schema.json")
+    event_validator = Draft7Validator(event_schema)
+    permission_event = next(
+        example
+        for example in event_schema["examples"]
+        if example["reason"] == "permission_denied"
+    )
+    event_validator.validate(permission_event)
+
+    invalid_cooldown = {
+        **permission_event,
+        "kind": "cooldown",
+        "to_source": None,
+    }
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_cooldown)
+
+    provenance_schema = _schema("turn-provenance.schema.json")
+    assert provenance_schema["properties"]["contract_version"]["const"] == 4
+    permission_record = next(
+        example
+        for example in provenance_schema["examples"]
+        if any(
+            attempt["reason"] == "permission_denied"
+            for attempt in example["failed_attempts"]
+        )
+    )
+    Draft7Validator(provenance_schema).validate(permission_record)
+
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    schemas = _mirror_schemas(registry)
+    failed_reasons = _json_pointer(
+        schemas["turn-provenance.schema.json"],
+        "/properties/failed_attempts/items/properties/reason",
+    )["enum"]
+    failed_reasons.remove("permission_denied")
+    with pytest.raises(AssertionError):
+        _validate_mirror_entry(
+            next(entry for entry in registry["entries"] if entry["id"] == "M3"),
+            schemas,
+        )
+
+
 def test_v4_shape_amendments_reject_the_false_states_they_replace():
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
@@ -290,7 +336,11 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
 
-    canceled = _schema("turn-provenance.schema.json")["examples"][-1]
+    canceled = next(
+        example
+        for example in _schema("turn-provenance.schema.json")["examples"]
+        if example["outcome"] == "canceled"
+    )
     Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
     invented_failure = copy.deepcopy(canceled)
     invented_failure["canceled_attempt"]["reason"] = "server_error"

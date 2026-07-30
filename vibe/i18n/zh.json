@@ -552,6 +552,7 @@
         "credential_revoked": "凭证已撤销",
         "balance_exhausted": "余额不足",
         "account_banned": "账户不可用",
+        "permission_denied": "请求权限被拒绝",
         "unclassified_error": "来源发生未分类错误",
         "no_enabled_source": "没有已启用的来源",
         "no_eligible_source": "没有适用的来源",

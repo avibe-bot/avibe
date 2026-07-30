@@ -552,6 +552,7 @@
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
         "account_banned": "account unavailable",
+        "permission_denied": "request permission denied",
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",

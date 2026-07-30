@@ -29,6 +29,7 @@ from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.client import _SAFE_ERROR_CODES
 from vibe.model_hub_runtime.state import EngineStateError
 
 
@@ -276,6 +277,154 @@ def test_error_classification_table(outcome, refresh_attempted, action, reason):
     decision = classify_outcome(outcome, refresh_attempted=refresh_attempted)
     assert decision.action == action
     assert decision.reason == reason
+
+
+def test_safe_error_code_family_is_exhaustively_classified_without_overclaim():
+    dispositions = {
+        "api_error": (500, False, "fallback", "server_error", None),
+        "account_banned": (403, False, "fallback", "account_banned", None),
+        "account_disabled": (403, False, "fallback", "account_banned", None),
+        "account_suspended": (403, False, "fallback", "account_banned", None),
+        "authentication_error": (401, False, "refresh", None, None),
+        "billing_error": (402, False, "fallback", "balance_exhausted", None),
+        "context_length_exceeded": (
+            400,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "insufficient_quota": (
+            429,
+            False,
+            "fallback",
+            "quota_exhausted",
+            None,
+        ),
+        "invalid_api_key": (401, False, "refresh", None, None),
+        "invalid_request_error": (
+            400,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "model_not_found": (
+            404,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "not_found_error": (
+            404,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "overloaded_error": (529, False, "fallback", "server_error", None),
+        "permission_error": (
+            403,
+            False,
+            "fallback",
+            "permission_denied",
+            None,
+        ),
+        "quota_exceeded": (
+            429,
+            False,
+            "fallback",
+            "quota_exhausted",
+            None,
+        ),
+        "rate_limit_error": (429, False, "fallback", "rate_limited", None),
+        "rate_limit_exceeded": (429, False, "fallback", "rate_limited", None),
+        "request_too_large": (
+            413,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "server_error": (500, False, "fallback", "server_error", None),
+    }
+
+    assert set(dispositions) == set(_SAFE_ERROR_CODES)
+    for code, (
+        status,
+        refresh_attempted,
+        action,
+        reason,
+        error_code,
+    ) in dispositions.items():
+        decision = classify_outcome(
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=status, code=code),
+            refresh_attempted=refresh_attempted,
+        )
+        assert (
+            decision.action,
+            decision.reason,
+            decision.error_code,
+        ) == (action, reason, error_code), code
+
+
+def test_permission_denial_falls_back_without_mutating_source_health(tmp_path):
+    adapter = FakeAdapter(
+        [
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=403,
+                code="permission_error",
+            ),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == "src_backup001"
+    assert [source.state.status for source in service.store.load().sources] == [
+        "standby",
+        "standby",
+    ]
+    events = service.list_events(limit=10)
+    assert len(events) == 1
+    assert events[0]["kind"] == "switch"
+    assert events[0]["reason"] == "permission_denied"
+    assert events[0]["from_source"] == "src_primary01"
+    assert events[0]["to_source"] == "src_backup001"
+
+
+def test_permission_denial_probe_does_not_block_the_source(tmp_path):
+    service = _service(
+        tmp_path,
+        FakeAdapter(
+            [
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=403,
+                    code="permission_error",
+                )
+            ]
+        ),
+    )
+
+    result = asyncio.run(
+        service.probe_agent("claude", "claude-opus-4-6")
+    )
+
+    assert result["reachable"] is False
+    assert result["error"] == "models.source.error.unclassified"
+    assert service.store.load().sources[0].state.status == "standby"
+    assert service.list_events(limit=10) == []
 
 
 def test_quota_failure_cools_source_switches_and_emits_redacted_events(tmp_path):

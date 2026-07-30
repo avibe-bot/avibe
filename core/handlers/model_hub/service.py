@@ -2181,6 +2181,8 @@ class ModelHubService:
     ) -> tuple[str, Optional[EventReason]]:
         if decision.action == "surface":
             return "models.source.error.unclassified", None
+        if decision.reason == "permission_denied":
+            return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
@@ -3097,7 +3099,7 @@ class ModelHubService:
                         agent=event_agent,
                         model_id=target_model,
                     )
-                else:
+                elif event_reason != "permission_denied":
                     detail_key = {
                         "credential_expired": "models.source.needs_action.oauth_expired",
                         "credential_revoked": "models.source.needs_action.credential_revoked",
