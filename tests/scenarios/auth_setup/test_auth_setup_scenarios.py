@@ -245,6 +245,67 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             },
         )
 
+    def test_subject_mismatch_can_reenter_with_clean_return_path(self):
+        """Scenario: AUTH-SETUP-310"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            side_effect=cloud_management.CloudManagementError(
+                "cloud_management_subject_mismatch",
+                status=409,
+            ),
+        ):
+            mismatch = client.get(
+                "/auth/organization/callback?code=wrong-user&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(mismatch.status_code, 302)
+        self.assertIn(
+            "cloud_management_error=cloud_management_subject_mismatch",
+            mismatch.headers["location"],
+        )
+
+        clean_next = "/admin/organization/overview"
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            return_value=("https://avibe.bot/oauth/management/authorize?state=state-2", "state-2"),
+        ) as begin:
+            reentry = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "interactive", "next": clean_next},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(reentry.status_code, 202)
+        self.assertEqual(begin.call_args.kwargs["next_path"], clean_next)
+
+        grant = cloud_management.ManagementGrant(
+            handle="grant-2",
+            browser_id="browser-1",
+            subject="user-1",
+            email="alex@example.com",
+            token="not-exposed",
+            expires_at=4_102_444_800,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            return_value=(grant, clean_next),
+        ):
+            success = client.get(
+                "/auth/organization/callback?code=right-user&state=state-2",
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(success.status_code, 302)
+        self.assertEqual(success.headers["location"], clean_next)
+        self.assertNotIn("cloud_management_error", success.headers["location"])
+
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_codex_failure_scenario_emits_reset_path(self):

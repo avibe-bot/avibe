@@ -189,6 +189,13 @@ scenarios:
     layer: scenario
     backend: cloud_management
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_unbound_loopback_requires_interactive_sign_in
+  - id: AUTH-SETUP-310
+    name: Organization subject mismatch can re-enter explicit authorization with a clean return path
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: cloud_management
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_can_reenter_with_clean_return_path
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

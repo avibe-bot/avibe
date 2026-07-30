@@ -42,7 +42,7 @@ type OverviewData = {
   instances: OrganizationInstance[];
   members: OrganizationMember[];
   resources: OrganizationResource[];
-  projects: OrganizationProject[];
+  projects: OrganizationProject[] | null;
 };
 
 function isUnhealthy(status: ReturnType<typeof aggregateSyncStatus>): boolean {
@@ -106,10 +106,10 @@ export function OrganizationOverviewPage() {
             )
           : Promise.resolve({ resources: [] }),
       ]);
-      const projectResults = await Promise.all(
+      const projectResults = await Promise.allSettled(
         instanceResult.instances.map((instance) => request<{ projects: OrganizationProject[] }>(
             `/api/cloud-management/instances/${encodeURIComponent(instance.id)}/projects`,
-          ).catch(() => ({ projects: [] }))),
+          )),
       );
       if (!isCurrent()) return;
       setLoadedData({
@@ -118,7 +118,11 @@ export function OrganizationOverviewPage() {
           instances: instanceResult.instances,
           members: memberResult.members,
           resources: resourceResult.resources,
-          projects: projectResults.flatMap((result) => result.projects),
+          projects: projectResults.every((result) => result.status === 'fulfilled')
+            ? projectResults.flatMap((result) => (
+                result.status === 'fulfilled' ? result.value.projects : []
+              ))
+            : null,
         },
       });
     } catch (caught) {
@@ -197,7 +201,12 @@ export function OrganizationOverviewPage() {
               icon={<Boxes className="size-5" />}
             />
             <StatCard label={t('organization.nav.instances')} value={data.instances.length} icon={<Server className="size-5" />} />
-            <StatCard label={t('organization.overview.projects')} value={data.projects.length} icon={<FolderTree className="size-5" />} />
+            <StatCard
+              label={t('organization.overview.projects')}
+              value={data.projects === null ? '-' : data.projects.length}
+              detail={data.projects === null ? t('organization.overview.projectCountUnavailable') : undefined}
+              icon={<FolderTree className="size-5" />}
+            />
             {canManage ? (
               <StatCard label={t('organization.nav.resources')} value={data.resources.length} icon={<Workflow className="size-5" />} />
             ) : null}

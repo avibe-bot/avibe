@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   aggregateSyncStatus,
+  hasDuplicateOrganizationPrincipals,
   hasDuplicateProjectPrincipals,
   isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
+  organizationAuthorizationReturnPath,
   organizationSwitchDestination,
   requiresMemberRoleDowngradeConfirmation,
   requiresProjectAccessNarrowingConfirmation,
@@ -27,6 +29,36 @@ describe('Organization policy helpers', () => {
       { principal_kind: 'email', principal_value: 'member@example.com', access_role: 'viewer' },
       { principal_kind: 'email_domain', principal_value: 'member@example.com', access_role: 'viewer' },
     ])).toBe(false);
+  });
+
+  it('rejects duplicate normalized Avibe access principals', () => {
+    expect(hasDuplicateOrganizationPrincipals([
+      { kind: 'email', value: 'Member@Example.com' },
+      { kind: 'email', value: ' member@example.com ' },
+    ])).toBe(true);
+    expect(hasDuplicateOrganizationPrincipals([
+      { kind: 'email_domain', value: '@Example.com' },
+      { kind: 'email_domain', value: ' example.com ' },
+    ])).toBe(true);
+    expect(hasDuplicateOrganizationPrincipals([
+      { kind: 'organization_group', value: 'group-1' },
+      { kind: 'organization_group', value: ' group-1 ' },
+    ])).toBe(true);
+    expect(hasDuplicateOrganizationPrincipals([
+      { kind: 'email', value: 'member@example.com' },
+      { kind: 'email_domain', value: 'member@example.com' },
+    ])).toBe(false);
+  });
+
+  it('removes callback errors from Organization authorization return paths', () => {
+    expect(organizationAuthorizationReturnPath(
+      '/admin/organization/overview',
+      '?tab=access&cloud_management_error=cloud_management_subject_mismatch',
+    )).toBe('/admin/organization/overview?tab=access');
+    expect(organizationAuthorizationReturnPath(
+      '/admin/organization/overview',
+      '?cloud_management_error=cloud_management_subject_mismatch',
+    )).toBe('/admin/organization/overview');
   });
 
   it('derives child sync status in the documented severity order', () => {

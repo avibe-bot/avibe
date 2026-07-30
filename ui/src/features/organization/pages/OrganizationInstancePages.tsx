@@ -60,6 +60,7 @@ import {
 } from '../components';
 import { useOrganization } from '../context';
 import {
+  hasDuplicateOrganizationPrincipals,
   hasDuplicateProjectPrincipals,
   isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
@@ -262,14 +263,31 @@ function AccessEntryDialog({
     value: normalizeOrganizationPrincipal(kind, resolvedValue),
     role,
   };
+  const archivedGroup = kind === 'organization_group'
+    ? groups.find((group) => group.id === value && group.archived_at)
+    : undefined;
+  const nextEntries = () => (
+    editingIndex === null
+      ? [...entries, candidate]
+      : entries.map((entry, index) => (index === editingIndex ? candidate : entry))
+  );
+  const hasDuplicatePrincipal = (next: InstanceAccessEntry[]) => (
+    hasDuplicateOrganizationPrincipals(next.map((entry) => ({
+      kind: entry.kind,
+      value: entry.value,
+    })))
+  );
 
   const commit = async () => {
     if (!candidate.value) return;
-    setSaving(true);
     setError(undefined);
-    const next = editingIndex === null
-      ? [...entries, candidate]
-      : entries.map((entry, index) => (index === editingIndex ? candidate : entry));
+    const next = nextEntries();
+    if (hasDuplicatePrincipal(next)) {
+      setError('duplicate_instance_access_principal');
+      setConfirmNarrowing(false);
+      return;
+    }
+    setSaving(true);
     try {
       const result = await request<{ entries: InstanceAccessEntry[] }>(
         `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/authorized-users`,
@@ -286,6 +304,11 @@ function AccessEntryDialog({
   };
 
   const save = () => {
+    setError(undefined);
+    if (hasDuplicatePrincipal(nextEntries())) {
+      setError('duplicate_instance_access_principal');
+      return;
+    }
     const narrows = Boolean(editing) && (
       editing?.role === 'editor' && candidate.role === 'viewer'
       || editing?.kind !== candidate.kind
@@ -325,6 +348,11 @@ function AccessEntryDialog({
                   value={resolvedValue}
                   onChange={(event) => setValue(event.target.value)}
                 >
+                  {archivedGroup ? (
+                    <option value={archivedGroup.id}>
+                      {archivedGroup.name} ({t('organization.groups.archived')})
+                    </option>
+                  ) : null}
                   {activeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
                 </Select>
               ) : (

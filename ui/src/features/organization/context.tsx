@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, {
   createContext,
   useCallback,
@@ -7,7 +8,6 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { useLocation } from 'react-router-dom';
 
 import { OrganizationApiError, organizationRequest } from './api/client';
 import type {
@@ -15,6 +15,7 @@ import type {
   Organization,
   OrganizationDetail,
 } from './api/types';
+import { organizationAuthorizationReturnPath } from './policy';
 
 type GateState =
   | 'loading'
@@ -50,15 +51,28 @@ function callbackError(): string | null {
   const params = new URLSearchParams(window.location.search);
   const error = params.get('cloud_management_error');
   if (error) {
-    params.delete('cloud_management_error');
-    const query = params.toString();
-    window.history.replaceState(null, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+    const next = organizationAuthorizationReturnPath(
+      window.location.pathname,
+      window.location.search,
+    );
+    window.history.replaceState(null, '', `${next}${window.location.hash}`);
   }
   return error;
 }
 
+function gateForOrganizationError(
+  error: unknown,
+  unauthorizedGate: Extract<GateState, 'authorization_required' | 'revoked'>,
+): GateState {
+  if (!(error instanceof OrganizationApiError)) return 'unreachable';
+  if (error.code === 'cloud_management_subject_mismatch') return 'subject_mismatch';
+  if (error.status === 401) return unauthorizedGate;
+  if (error.status === 409) return 'cloud_not_connected';
+  if (error.retryable || error.status >= 500) return 'unreachable';
+  return 'error';
+}
+
 export function OrganizationProvider({ children }: { children: React.ReactNode }) {
-  const location = useLocation();
   const [gate, setGate] = useState<GateState>('loading');
   const [session, setSession] = useState<Extract<CloudManagementSession, { connected: true }> | null>(null);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -76,21 +90,20 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
         '/api/cloud-management/session/start',
         {
           method: 'POST',
-          body: JSON.stringify({ mode, next: `${location.pathname}${location.search}` }),
+          body: JSON.stringify({
+            mode,
+            next: organizationAuthorizationReturnPath(
+              window.location.pathname,
+              window.location.search,
+            ),
+          }),
         },
       );
       window.location.assign(result.authorize_url);
     } catch (error) {
-      if (error instanceof OrganizationApiError) {
-        if (error.code === 'cloud_management_subject_mismatch') setGate('subject_mismatch');
-        else if (error.status === 409) setGate('cloud_not_connected');
-        else if (error.status === 401) setGate('authorization_required');
-        else setGate('unreachable');
-      } else {
-        setGate('unreachable');
-      }
+      setGate(gateForOrganizationError(error, 'authorization_required'));
     }
-  }, [location.pathname, location.search]);
+  }, []);
 
   const loadOrganizationAtGeneration = useCallback(async (
     organizationId: string,
@@ -114,7 +127,12 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
 
   const selectOrganization = useCallback(async (organizationId: string) => {
     const generation = ++operationGeneration.current;
-    await loadOrganizationAtGeneration(organizationId, generation);
+    try {
+      await loadOrganizationAtGeneration(organizationId, generation);
+    } catch (error) {
+      if (generation !== operationGeneration.current) return;
+      setGate(gateForOrganizationError(error, 'revoked'));
+    }
   }, [loadOrganizationAtGeneration]);
 
   const loadOrganizations = useCallback(async (generation: number) => {
@@ -176,14 +194,10 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
       await loadOrganizations(generation);
     } catch (error) {
       if (generation !== operationGeneration.current) return;
-      if (error instanceof OrganizationApiError) {
-        if (error.code === 'cloud_management_subject_mismatch') setGate('subject_mismatch');
-        else if (error.status === 401) setGate(returnedError ? 'authorization_required' : 'revoked');
-        else if (error.status === 409) setGate('cloud_not_connected');
-        else setGate('unreachable');
-      } else {
-        setGate('unreachable');
-      }
+      setGate(gateForOrganizationError(
+        error,
+        returnedError ? 'authorization_required' : 'revoked',
+      ));
     }
   }, [loadOrganizations, startAuthorization]);
 
@@ -232,7 +246,12 @@ export function OrganizationProvider({ children }: { children: React.ReactNode }
   const refreshOrganization = useCallback(async () => {
     if (!selectedOrganizationId) return;
     const generation = ++operationGeneration.current;
-    await loadOrganizationAtGeneration(selectedOrganizationId, generation);
+    try {
+      await loadOrganizationAtGeneration(selectedOrganizationId, generation);
+    } catch (error) {
+      if (generation !== operationGeneration.current) return;
+      setGate(gateForOrganizationError(error, 'revoked'));
+    }
   }, [loadOrganizationAtGeneration, selectedOrganizationId]);
 
   const value = useMemo<OrganizationContextValue>(() => ({

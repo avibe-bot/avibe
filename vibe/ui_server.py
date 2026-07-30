@@ -2200,7 +2200,7 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = payload
         return None
-    if request.method == "GET":
+    if request.method == "GET" and not request.path.startswith("/api/"):
         # Bound unauthenticated login-start floods at the door (this writes a
         # handshake + sets cookies); a real user spends only a couple per login.
         if _auth_rate_limited():

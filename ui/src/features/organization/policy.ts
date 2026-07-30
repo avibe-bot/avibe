@@ -9,6 +9,11 @@ export type OrganizationPrincipalKind = ProjectBinding['principal_kind'];
 export type ProjectAccessMode = 'inherit' | 'owner_only' | 'restricted';
 export type AggregateSyncStatus = 'none' | 'in_sync' | 'applying' | 'offline' | 'error';
 
+type OrganizationPrincipal = {
+  kind: OrganizationPrincipalKind;
+  value: string;
+};
+
 const ORGANIZATION_GROUP_DETAIL_PATH = /^\/admin\/organization\/groups\/[^/]+\/?$/;
 const ORGANIZATION_INSTANCE_DETAIL_PATH = /^\/admin\/organization\/instances\/[^/]+\/(?:access|projects)\/?$/;
 
@@ -21,11 +26,18 @@ export function normalizeOrganizationPrincipal(
   return (kind === 'email_domain' ? normalized.replace(/^@/, '') : normalized).toLowerCase();
 }
 
-export function hasDuplicateProjectPrincipals(bindings: ProjectBinding[]): boolean {
-  const keys = bindings.map((binding) => (
-    `${binding.principal_kind}:${normalizeOrganizationPrincipal(binding.principal_kind, binding.principal_value)}`
+export function hasDuplicateOrganizationPrincipals(principals: OrganizationPrincipal[]): boolean {
+  const keys = principals.map((principal) => (
+    `${principal.kind}:${normalizeOrganizationPrincipal(principal.kind, principal.value)}`
   ));
   return new Set(keys).size !== keys.length;
+}
+
+export function hasDuplicateProjectPrincipals(bindings: ProjectBinding[]): boolean {
+  return hasDuplicateOrganizationPrincipals(bindings.map((binding) => ({
+    kind: binding.principal_kind,
+    value: binding.principal_value,
+  })));
 }
 
 function projectBindingKey(binding: ProjectBinding): string {
@@ -101,6 +113,13 @@ export function organizationSwitchDestination(pathname: string): string | null {
     return '/admin/organization/instances';
   }
   return null;
+}
+
+export function organizationAuthorizationReturnPath(pathname: string, search: string): string {
+  const params = new URLSearchParams(search);
+  params.delete('cloud_management_error');
+  const query = params.toString();
+  return `${pathname}${query ? `?${query}` : ''}`;
 }
 
 export function requiresMemberRoleDowngradeConfirmation(

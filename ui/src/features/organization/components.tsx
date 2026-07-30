@@ -75,7 +75,7 @@ export function TableFrame({ children, className }: { children: React.ReactNode;
 
 export function StatCard({ label, value, detail, icon }: {
   label: string;
-  value: number;
+  value: React.ReactNode;
   detail?: string;
   icon: React.ReactNode;
 }) {
@@ -217,6 +217,7 @@ export function ErrorBanner({ code, onRetry }: { code?: string; onRetry?: () => 
     'invalid_resource_acl_intent',
     'invalid_email',
     'invalid_domain',
+    'duplicate_instance_access_principal',
     'duplicate_project_access_principal',
     'owner_entry_locked',
     'resource_sync_conflict',
