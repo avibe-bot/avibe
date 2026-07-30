@@ -4316,10 +4316,16 @@ class ScheduledTaskService:
                     # ``compute_next_run_at`` and to SQLite's UTC clock. The
                     # explicit re-run affordance below stays either way: unlike a
                     # watch, ``vibe task run`` is real and is the honest next step.
-                    if self._task_definition_finished(definition_id, task):
+                    lifecycle = self._task_lifecycle_state(definition_id, task)
+                    if lifecycle == "finished":
                         lines.append(self._t("harness.notice.taskFinished"))
-                    else:
+                    elif lifecycle == "paused":
                         lines.append(self._t("harness.notice.paused", id=definition_id))
+                    # ``running`` (``vibe task run`` accepts a disabled one-shot, and
+                    # an in-flight execution outranks the ended predicate) and
+                    # ``waiting`` (a switch the mirror has not caught up with): no
+                    # lifecycle line at all. Either copy would contradict the badge,
+                    # and the re-run/show affordance below stands on its own.
                 elif task is not None:
                     next_run = compute_next_run_at(
                         enabled=task.enabled,
@@ -4333,17 +4339,19 @@ class ScheduledTaskService:
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
 
-    def _task_definition_finished(self, definition_id: Optional[str], task: Any) -> bool:
-        """Whether the lifecycle badge reads this task as FINISHED — asked of the badge.
+    def _task_lifecycle_state(self, definition_id: Optional[str], task: Any) -> str:
+        """The lifecycle state the badge shows for this task — asked of the badge.
 
         The authoritative answer is ``definition_lifecycle_state``, the same SQL CASE
         every list and count surface evaluates, so the notice copy and the badge share
-        one clock and one parse of ``run_at``. The Python inference below it is a
-        FALLBACK for the file backend and for a row the read cannot reach: there is no
-        SQL badge in those worlds to disagree with, and the inference asks the same
-        question the projection encodes (``compute_next_run_at`` returns ``None``
-        exactly when the named instant is behind us, with ``enabled=True`` so the
-        switch cannot mask the clock).
+        one clock and one parse of ``run_at`` — and one priority order: an in-flight
+        execution outranks the ended predicate, so the caller sees ``running`` rather
+        than a boolean that flattened it into "not finished". The Python inference
+        below it is a FALLBACK for the file backend and for a row the read cannot
+        reach: there is no SQL badge in those worlds to disagree with, and the
+        inference asks the same question the projection encodes
+        (``compute_next_run_at`` returns ``None`` exactly when the named instant is
+        behind us, with ``enabled=True`` so the switch cannot mask the clock).
         """
 
         if definition_id:
@@ -4359,17 +4367,16 @@ class ScheduledTaskService:
                     )
                     state = None
                 if state is not None:
-                    return state == "finished"
-        return bool(
-            task.schedule_type == "at"
-            and not compute_next_run_at(
-                enabled=True,
-                schedule_type=task.schedule_type,
-                cron=task.cron,
-                run_at=task.run_at,
-                timezone_name=task.timezone,
-            )
-        )
+                    return state
+        if task.schedule_type == "at" and not compute_next_run_at(
+            enabled=True,
+            schedule_type=task.schedule_type,
+            cron=task.cron,
+            run_at=task.run_at,
+            timezone_name=task.timezone,
+        ):
+            return "finished"
+        return "paused"
 
     def _last_success_instant(self, definition_id: Optional[str]) -> Optional[str]:
         """When this definition last succeeded, for the body's own context.

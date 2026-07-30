@@ -1783,6 +1783,50 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         f"the copy must agree with the badge the user is looking at: {tz_body!r}"
     )
 
+    # THE IN-FLIGHT SPLIT: ``vibe task run`` accepts a disabled one-shot, and an
+    # in-flight execution outranks the ended predicate in the canonical CASE — the
+    # badge says RUNNING. Flattening every non-finished state to "paused" printed
+    # resume copy beside that badge. With a rerun in flight the notice prints NO
+    # lifecycle line: either claim would contradict the badge, and the re-run/show
+    # affordance stands on its own.
+    _task(
+        sqlite,
+        "task-running",
+        name="rerun in flight",
+        schedule_type="at",
+        cron=None,
+        run_at="2026-07-20T00:00:00+00:00",
+        enabled=False,
+    )
+    sqlite.enqueue_run(
+        {
+            "id": "run-manual-rerun",
+            "request_type": "scheduled",
+            "status": "queued",
+            "definition_id": "task-running",
+            "created_at": "2026-07-29T00:00:00+00:00",
+        }
+    )
+    store.load()
+    assert (
+        sqlite.definition_lifecycle_state("task-running", definition_type="task")
+        == "running"
+    ), "the premise: an in-flight execution outranks the ended predicate"
+
+    running_body = service._failure_notice_body(
+        {"id": "run-earlier", "task_id": "task-running", "error": "boom"},
+        {"failure_id": "failure:run-earlier", "interrupt_reason": None},
+    )
+    assert "vibe task resume task-running" not in running_body, (
+        f"the copy must not say PAUSED while the badge says RUNNING: {running_body!r}"
+    )
+    assert i18n_t("harness.notice.taskFinished", "en") not in running_body, (
+        f"nor FINISHED while an execution is in flight: {running_body!r}"
+    )
+    assert "vibe task run task-running" in running_body, (
+        f"the re-run affordance stands on its own: {running_body!r}"
+    )
+
 
 # --- group 2d: crash/exception ordering in the delivery protocol -----------
 #
