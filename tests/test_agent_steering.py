@@ -114,6 +114,7 @@ def _primary_request(*, session_id: str = "avibe-session", backend: str) -> Agen
             "agent_session_id": session_id,
             "workbench_session_id": session_id,
             "turn_token": "logical-turn",
+            "agent_runtime_turn_token": "runtime-token",
         },
     )
     return AgentRequest(
@@ -135,6 +136,7 @@ def _controller_with_active_gate(agent, primary: AgentRequest, gate_task: asynci
         task=gate_task,
         request=primary,
         context=primary.context,
+        agent=agent,
     )
     service = SimpleNamespace(agents={agent.name: agent}, _turn_gates={"runtime-key": gate})
     controller = SimpleNamespace(agent_service=service)
@@ -474,6 +476,40 @@ async def test_shared_guard_requires_the_avibe_session_identity() -> None:
         receipt = await steer_active_turn(controller, "codex", request)
         assert receipt.outcome is SteerOutcome.NOT_ACTIVE
         assert transport.calls == []
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.asyncio
+async def test_shared_service_uses_the_active_runtime_generation_after_registry_refresh() -> None:
+    primary = _primary_request(backend="codex")
+    gate_task = await _held_task()
+    active_transport = _CodexTransport()
+    active_agent = object.__new__(CodexAgent)
+    active_agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+    active_agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "codex-thread",
+        primary.working_path,
+    )
+    active_agent._transports = {primary.working_path: active_transport}
+    controller = _controller_with_active_gate(active_agent, primary, gate_task)
+
+    replacement_agent = object.__new__(CodexAgent)
+    replacement_agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "replacement-turn")
+    replacement_agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "replacement-thread",
+        primary.working_path,
+    )
+    replacement_agent._transports = {}
+    controller.agent_service.agents["codex"] = replacement_agent
+    try:
+        identity = active_steer_identity(controller, "codex", "avibe-session")
+        assert identity == ("logical-turn", "codex-turn")
+        receipt = await steer_active_turn(controller, "codex", _steer_request("codex-turn"))
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert [method for method, _params in active_transport.calls] == ["turn/steer"]
     finally:
         await _cancel_tasks(gate_task)
 

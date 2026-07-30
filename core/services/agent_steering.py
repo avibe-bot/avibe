@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
 
 AGENT_TURN_TOKEN = "turn_token"
+AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
 
 
 class SteerOutcome(str, Enum):
@@ -48,6 +49,7 @@ class ActiveSteerTarget:
     logical_turn_id: str
     context: Any
     agent_request: AgentRequest | None
+    agent: Any
 
 
 def result(
@@ -86,15 +88,21 @@ def _active_target(controller: Any, backend: str, session_id: str) -> ActiveStee
         ):
             continue
         task = getattr(gate, "task", None)
-        if task is not None and task.done():
+        if task is None or task.done():
             continue
         agent_request = getattr(gate, "request", None)
         context = getattr(gate, "context", None) or getattr(agent_request, "context", None)
         if context is None or session_id not in _context_session_ids(context):
             continue
         payload = getattr(context, "platform_specific", None) or {}
+        runtime_turn_id = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        if runtime_turn_id != str(getattr(gate, "token", "") or ""):
+            continue
         logical_turn_id = str(payload.get(AGENT_TURN_TOKEN) or "").strip()
         if not logical_turn_id:
+            continue
+        agent = getattr(gate, "agent", None)
+        if agent is None:
             continue
         matches.append(
             ActiveSteerTarget(
@@ -102,6 +110,7 @@ def _active_target(controller: Any, backend: str, session_id: str) -> ActiveStee
                 logical_turn_id=logical_turn_id,
                 context=context,
                 agent_request=agent_request,
+                agent=agent,
             )
         )
 
@@ -112,10 +121,10 @@ def active_steer_identity(controller: Any, backend: str, session_id: str) -> tup
     """Return the current logical/native identity pair for a steerable Turn."""
 
     target = _active_target(controller, backend, session_id)
-    service = getattr(controller, "agent_service", None)
-    agent = getattr(service, "agents", {}).get(backend) if service is not None else None
-    native_identity = getattr(agent, "steering_native_turn_id", None)
-    if target is None or not callable(native_identity):
+    if target is None:
+        return None
+    native_identity = getattr(target.agent, "steering_native_turn_id", None)
+    if not callable(native_identity):
         return None
     native_turn_id = str(native_identity(target) or "").strip()
     if not native_turn_id:
@@ -130,22 +139,20 @@ async def steer_active_turn(
 ) -> SteerResult:
     """Insert text through a registered backend without entering normal dispatch."""
 
-    service = getattr(controller, "agent_service", None)
-    agent = getattr(service, "agents", {}).get(backend) if service is not None else None
-    if agent is None:
-        return result(
-            SteerOutcome.REFUSED,
-            reason="runtime_unavailable",
-            backend=backend,
-        )
-
     target = _active_target(controller, backend, request.target_session_id)
     if target is None:
+        service = getattr(controller, "agent_service", None)
+        if getattr(service, "agents", {}).get(backend) is None:
+            return result(
+                SteerOutcome.REFUSED,
+                reason="runtime_unavailable",
+                backend=backend,
+            )
         return result(SteerOutcome.NOT_ACTIVE, reason="no_matching_active_turn", backend=backend)
     if target.logical_turn_id != request.expected_logical_turn_id:
         return result(SteerOutcome.NOT_ACTIVE, reason="stale_logical_turn", backend=backend)
 
-    steer = getattr(agent, "steer_active_turn", None)
+    steer = getattr(target.agent, "steer_active_turn", None)
     if not callable(steer):
         return result(SteerOutcome.REFUSED, reason="unsupported", backend=backend)
     receipt = await steer(request, target)
