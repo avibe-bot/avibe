@@ -1,0 +1,798 @@
+"""Exact-attribution turn provenance for process-scoped Model Hub traffic."""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import tempfile
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal, Optional
+
+from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
+
+from .adapter import RawCallOutcome
+from .classification import ResolutionDecision, ResolutionReason
+
+
+BackendName = Literal["claude", "codex", "opencode"]
+SupplyChannel = Literal["native_cli", "hub"]
+SupplyState = Literal["waiting", "interrupted"]
+ScopeKey = tuple[BackendName, str]
+
+
+@dataclass(frozen=True)
+class AttemptIdentity:
+    source_id: str
+    resolved_model_id: str
+    channel: SupplyChannel
+    via_mapping: bool
+
+    def payload(self) -> dict:
+        return {
+            "source_id": self.source_id,
+            "resolved_model_id": self.resolved_model_id,
+            "channel": self.channel,
+            "via_mapping": self.via_mapping,
+        }
+
+
+@dataclass
+class TurnTrace:
+    turn_id: str
+    agent: BackendName
+    requested_model_id: str
+    scope_key: ScopeKey
+    failed_attempts: list[dict] = field(default_factory=list)
+    served: Optional[dict] = None
+    terminal_error: Optional[dict] = None
+    pending_attempt: Optional[AttemptIdentity] = None
+    model_supply_state: Optional[SupplyState] = None
+    gateway_source_id: Optional[str] = None
+    gateway_model_id: Optional[str] = None
+    gateway_via_mapping: bool = False
+    ambiguous: bool = False
+
+
+@dataclass
+class ProcessScope:
+    token: str
+    active_turns: set[str] = field(default_factory=set)
+    ambiguous_turns: set[str] = field(default_factory=set)
+    untracked_use: bool = False
+
+
+class GatewayTurnTerminalizer:
+    """One funnel for every exit after an exact gateway identity is prepared."""
+
+    def __init__(
+        self,
+        registry: "TurnCorrelationRegistry",
+        *,
+        backend: str,
+        token: str,
+    ) -> None:
+        self._registry = registry
+        self._backend = backend
+        self._token = token
+        self.turn_id = registry._open_prepared_gateway_turn(
+            backend=backend,
+            token=token,
+        )
+        self._stream_started = False
+
+    def __enter__(self) -> "GatewayTurnTerminalizer":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            stream_started=self._stream_started,
+        )
+
+    def bind_request_model(self, model_id: str) -> Optional[str]:
+        if self.turn_id is None:
+            return None
+        matched = self._registry.begin_gateway_request(
+            backend=self._backend,
+            token=self._token,
+            requested_model_id=model_id,
+        )
+        if matched != self.turn_id:
+            self.turn_id = None
+        return self.turn_id
+
+    def fail(
+        self,
+        reason: Literal["invalid_parameter", "protocol_error"],
+    ) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            reason=reason,
+            stream_started=self._stream_started,
+            force=True,
+        )
+
+    def mark_no_candidate(self, supply_state: SupplyState) -> None:
+        self._registry.mark_gateway_no_candidate(
+            self.turn_id,
+            supply_state,
+        )
+
+    def begin_attempt(
+        self,
+        *,
+        source_id: str,
+        resolved_model_id: str,
+        channel: SupplyChannel,
+        via_mapping: bool,
+    ) -> None:
+        self._registry.begin_attempt(
+            self.turn_id,
+            source_id=source_id,
+            resolved_model_id=resolved_model_id,
+            channel=channel,
+            via_mapping=via_mapping,
+        )
+
+    def finish_attempt(
+        self,
+        *,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> None:
+        self._registry.finish_attempt(
+            self.turn_id,
+            outcome=outcome,
+            decision=decision,
+        )
+
+    def mark_stream_started(self) -> None:
+        self._stream_started = True
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _terminal_reason(decision: ResolutionDecision) -> str:
+    code = decision.error_code or ""
+    if code == "stream_interrupted":
+        return "stream_interrupted"
+    if code == "upstream_request_invalid":
+        return "invalid_parameter"
+    if code == "tool_incompatible":
+        return "tool_incompatible"
+    return "protocol_error"
+
+
+class BoundedProvenanceStore:
+    """Atomic, bounded persistence for exact turn records."""
+
+    def __init__(self, path: Path, *, max_entries: int = 500):
+        self.path = path
+        self.max_entries = max_entries
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _read_path(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _read(self) -> list[dict]:
+        return self._read_path(self.path)
+
+    def _write_path(self, path: Path, records: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(
+            records[-self.max_entries :],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            temporary_path = tmp.name
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+
+    def _write(self, records: list[dict]) -> None:
+        self._write_path(self.path, records)
+
+    def put(self, record: dict) -> None:
+        turn_id = str(record.get("turn_id") or "")
+        if not turn_id:
+            raise ValueError("turn_id is required")
+        with self._lock:
+            records = [
+                item
+                for item in self._read()
+                if str(item.get("turn_id") or "") != turn_id
+            ]
+            records.append(record)
+            self._write(records)
+
+    def get(self, turn_id: str) -> Optional[dict]:
+        with self._lock:
+            return next(
+                (
+                    dict(item)
+                    for item in reversed(self._read())
+                    if item.get("turn_id") == turn_id
+                ),
+                None,
+            )
+
+
+class TurnCorrelationRegistry:
+    """Correlate process credentials to the existing Workbench turn token."""
+
+    def __init__(self, store: BoundedProvenanceStore):
+        self.store = store
+        self._lock = threading.RLock()
+        self._scopes: dict[ScopeKey, ProcessScope] = {}
+        self._token_scopes: dict[str, ScopeKey] = {}
+        self._turn_scopes: dict[str, set[ScopeKey]] = {}
+        self._traces: dict[str, TurnTrace] = {}
+
+    @staticmethod
+    def _scope_key(backend: str, process_scope: str) -> ScopeKey:
+        if backend not in {"claude", "codex", "opencode"}:
+            raise ValueError("unsupported backend")
+        normalized = str(process_scope or "").strip()
+        if not normalized:
+            raise ValueError("process scope is required")
+        return backend, normalized  # type: ignore[return-value]
+
+    def credentials(
+        self,
+        backend: str,
+        process_scope: str,
+        turn_id: Optional[str],
+    ) -> str:
+        key = self._scope_key(backend, process_scope)
+        normalized_turn_id = str(turn_id or "").strip() or None
+        with self._lock:
+            scope = self._scopes.get(key)
+            if scope is None:
+                scope = ProcessScope(token=secrets.token_urlsafe(32))
+                self._scopes[key] = scope
+                self._token_scopes[scope.token] = key
+
+            # Frozen v3 has no discriminator for the shared OpenCode server.
+            if normalized_turn_id is None or backend == "opencode":
+                scope.untracked_use = True
+                for active_turn_id in scope.active_turns:
+                    trace = self._traces.get(active_turn_id)
+                    if trace is not None:
+                        trace.ambiguous = True
+                return scope.token
+
+            if scope.active_turns - {normalized_turn_id}:
+                overlapping = scope.active_turns | {normalized_turn_id}
+                scope.ambiguous_turns.update(overlapping)
+                for active_turn_id in overlapping:
+                    trace = self._traces.get(active_turn_id)
+                    if trace is not None:
+                        trace.ambiguous = True
+            scope.active_turns.add(normalized_turn_id)
+            self._turn_scopes.setdefault(normalized_turn_id, set()).add(key)
+            return scope.token
+
+    def authenticates(self, backend: str, token: str) -> bool:
+        with self._lock:
+            authorized = False
+            for candidate, key in self._token_scopes.items():
+                matches = secrets.compare_digest(candidate, token)
+                authorized = authorized or (matches and key[0] == backend)
+            return authorized
+
+    def retire_scope(
+        self,
+        backend: str,
+        process_scope: str,
+        *,
+        terminal_turn_id: Optional[str] = None,
+    ) -> None:
+        """Invalidate a process credential when its owning runtime is evicted."""
+
+        key = self._scope_key(backend, process_scope)
+        normalized_terminal_turn_id = str(terminal_turn_id or "").strip()
+        with self._lock:
+            scope = self._scopes.pop(key, None)
+            if scope is None:
+                return
+            self._token_scopes.pop(scope.token, None)
+            for turn_id in scope.active_turns:
+                trace = self._traces.get(turn_id)
+                terminal_is_exact = (
+                    turn_id == normalized_terminal_turn_id
+                    and trace is not None
+                    and not trace.ambiguous
+                    and not scope.untracked_use
+                    and scope.active_turns == {turn_id}
+                    and turn_id not in scope.ambiguous_turns
+                    and bool(trace.failed_attempts or trace.terminal_error)
+                )
+                if terminal_is_exact:
+                    turn_scopes = self._turn_scopes.get(turn_id)
+                    if turn_scopes is not None:
+                        turn_scopes.discard(key)
+                elif trace is not None:
+                    trace.ambiguous = True
+
+    def _exact_turn(self, backend: str, token: str) -> tuple[str, ScopeKey] | None:
+        key = self._token_scopes.get(token)
+        if key is None or key[0] != backend:
+            return None
+        scope = self._scopes[key]
+        if scope.untracked_use or len(scope.active_turns) != 1:
+            for turn_id in scope.active_turns:
+                trace = self._traces.get(turn_id)
+                if trace is not None:
+                    trace.ambiguous = True
+            return None
+        turn_id = next(iter(scope.active_turns))
+        if turn_id in scope.ambiguous_turns:
+            return None
+        trace = self._traces.get(turn_id)
+        if trace is not None and trace.ambiguous:
+            return None
+        return turn_id, key
+
+    def begin_gateway_request(
+        self,
+        *,
+        backend: str,
+        token: str,
+        requested_model_id: str,
+    ) -> Optional[str]:
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None:
+                return None
+            turn_id, key = exact
+            trace = self._traces.get(turn_id)
+            if trace is None:
+                trace = TurnTrace(
+                    turn_id=turn_id,
+                    agent=key[0],
+                    requested_model_id=requested_model_id,
+                    scope_key=key,
+                )
+                self._traces[turn_id] = trace
+            elif (
+                trace.gateway_model_id is not None
+                and trace.gateway_model_id != requested_model_id
+            ):
+                trace.ambiguous = True
+                self._scopes[key].ambiguous_turns.add(turn_id)
+                return None
+            return turn_id
+
+    def prepare_gateway_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+        requested_model_id: str,
+        resolved_model_id: str,
+        source_id: str,
+        via_mapping: bool,
+    ) -> None:
+        """Retain the caller-facing model before the CLI rewrites its request."""
+
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None:
+                return
+            turn_id, key = exact
+            trace = self._traces.setdefault(
+                turn_id,
+                TurnTrace(
+                    turn_id=turn_id,
+                    agent=key[0],
+                    requested_model_id=requested_model_id,
+                    scope_key=key,
+                ),
+            )
+            if (
+                trace.requested_model_id != requested_model_id
+                or (
+                    trace.gateway_source_id is not None
+                    and trace.gateway_source_id != source_id
+                )
+                or (
+                    trace.gateway_model_id is not None
+                    and trace.gateway_model_id != resolved_model_id
+                )
+            ):
+                trace.ambiguous = True
+                self._scopes[key].ambiguous_turns.add(turn_id)
+                return
+            trace.gateway_source_id = source_id
+            trace.gateway_model_id = resolved_model_id
+            trace.gateway_via_mapping = via_mapping
+
+    def gateway_terminalizer(
+        self,
+        *,
+        backend: str,
+        token: str,
+    ) -> GatewayTurnTerminalizer:
+        return GatewayTurnTerminalizer(
+            self,
+            backend=backend,
+            token=token,
+        )
+
+    def _open_prepared_gateway_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+    ) -> Optional[str]:
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None:
+                return None
+            turn_id, _ = exact
+            trace = self._traces.get(turn_id)
+            if (
+                trace is None
+                or trace.gateway_source_id is None
+                or trace.gateway_model_id is None
+            ):
+                return None
+            trace.pending_attempt = AttemptIdentity(
+                source_id=trace.gateway_source_id,
+                resolved_model_id=trace.gateway_model_id,
+                channel="hub",
+                via_mapping=trace.gateway_via_mapping,
+            )
+            return turn_id
+
+    def _terminalize_gateway_exit(
+        self,
+        turn_id: Optional[str],
+        *,
+        reason: Literal["invalid_parameter", "protocol_error"] = "protocol_error",
+        stream_started: bool,
+        force: bool = False,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.ambiguous:
+                return
+            if not force and (
+                trace.served is not None
+                or trace.terminal_error is not None
+                or trace.model_supply_state is not None
+                or (
+                    trace.pending_attempt is None
+                    and bool(trace.failed_attempts)
+                )
+            ):
+                return
+            identity = trace.pending_attempt
+            if identity is None and (
+                trace.gateway_source_id is not None
+                and trace.gateway_model_id is not None
+            ):
+                identity = AttemptIdentity(
+                    source_id=trace.gateway_source_id,
+                    resolved_model_id=trace.gateway_model_id,
+                    channel="hub",
+                    via_mapping=trace.gateway_via_mapping,
+                )
+            if identity is None or identity.channel != "hub":
+                return
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = {
+                **identity.payload(),
+                "reason": reason,
+                "stream_started": stream_started,
+            }
+
+    def begin_native_attempt(
+        self,
+        *,
+        backend: str,
+        process_scope: str,
+        turn_id: Optional[str],
+        requested_model_id: str,
+        source_id: str,
+        resolved_model_id: str,
+        via_mapping: bool,
+    ) -> None:
+        token = self.credentials(backend, process_scope, turn_id)
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None or exact[0] != normalized_turn_id:
+                return
+            trace = self._traces.setdefault(
+                normalized_turn_id,
+                TurnTrace(
+                    turn_id=normalized_turn_id,
+                    agent=exact[1][0],
+                    requested_model_id=requested_model_id,
+                    scope_key=exact[1],
+                ),
+            )
+            trace.pending_attempt = AttemptIdentity(
+                source_id=source_id,
+                resolved_model_id=resolved_model_id,
+                channel="native_cli",
+                via_mapping=via_mapping,
+            )
+
+    def mark_no_candidate(
+        self,
+        *,
+        backend: str,
+        process_scope: str,
+        turn_id: Optional[str],
+        requested_model_id: str,
+        supply_state: SupplyState,
+    ) -> None:
+        token = self.credentials(backend, process_scope, turn_id)
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None or exact[0] != normalized_turn_id:
+                return
+            trace = self._traces.setdefault(
+                normalized_turn_id,
+                TurnTrace(
+                    turn_id=normalized_turn_id,
+                    agent=exact[1][0],
+                    requested_model_id=requested_model_id,
+                    scope_key=exact[1],
+                ),
+            )
+            trace.model_supply_state = supply_state
+
+    def mark_gateway_no_candidate(
+        self,
+        turn_id: Optional[str],
+        supply_state: SupplyState,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None:
+                trace.pending_attempt = None
+                trace.served = None
+                trace.terminal_error = None
+                trace.model_supply_state = supply_state
+
+    def begin_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        source_id: str,
+        resolved_model_id: str,
+        channel: SupplyChannel,
+        via_mapping: bool,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None:
+                return
+            observed_via_mapping = via_mapping or (
+                trace.gateway_via_mapping
+                and trace.gateway_model_id == resolved_model_id
+            )
+            trace.pending_attempt = AttemptIdentity(
+                source_id=source_id,
+                resolved_model_id=resolved_model_id,
+                channel=channel,
+                via_mapping=observed_via_mapping,
+            )
+
+    def fail_native_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        reason: ResolutionReason,
+    ) -> None:
+        """Convert an observed native terminal failure into a failed attempt."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            trace = self._traces.get(normalized)
+            if (
+                trace is None
+                or trace.pending_attempt is None
+                or trace.pending_attempt.channel != "native_cli"
+            ):
+                return
+            identity = trace.pending_attempt
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = None
+            trace.failed_attempts.append(
+                {**identity.payload(), "reason": reason}
+            )
+
+    def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
+        """Replace a gateway success rejected by the backend terminal result."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            trace = self._traces.get(normalized)
+            if trace is None:
+                return
+            identity = trace.pending_attempt
+            payload = (
+                identity.payload()
+                if identity is not None and identity.channel == "hub"
+                else trace.served
+            )
+            if payload is None or payload.get("channel") != "hub":
+                return
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = {
+                **payload,
+                "reason": "protocol_error",
+                "stream_started": True,
+            }
+
+    def finish_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.pending_attempt is None:
+                return
+            identity = trace.pending_attempt
+            trace.pending_attempt = None
+            if decision.action == "return":
+                trace.served = identity.payload()
+                trace.terminal_error = None
+                return
+            if decision.action == "fallback" and decision.reason is not None:
+                trace.failed_attempts.append(
+                    {**identity.payload(), "reason": decision.reason}
+                )
+                return
+            if decision.action == "surface":
+                trace.terminal_error = {
+                    **identity.payload(),
+                    "reason": _terminal_reason(decision),
+                    "stream_started": outcome.stream_started,
+                }
+
+    def settle(self, turn_id: str, *, settled_by: Optional[str], ts: Optional[str] = None) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        with self._lock:
+            trace = self._traces.pop(normalized_turn_id, None)
+            scope_keys = self._turn_scopes.pop(normalized_turn_id, set())
+            poisoned = False
+            for key in scope_keys:
+                scope = self._scopes.get(key)
+                if scope is None:
+                    continue
+                poisoned = poisoned or scope.untracked_use
+                scope.active_turns.discard(normalized_turn_id)
+                scope.ambiguous_turns.discard(normalized_turn_id)
+            if trace is None or trace.ambiguous or poisoned:
+                return
+
+            served = trace.served
+            terminal_error = trace.terminal_error
+            canceled_attempt = None
+            supply_state = None
+            if settled_by == SETTLED_BY_STOPPED:
+                outcome = "canceled"
+                canceled_attempt = (
+                    trace.pending_attempt.payload()
+                    if trace.pending_attempt is not None
+                    else None
+                )
+                served = None
+                terminal_error = None
+            elif trace.model_supply_state is not None:
+                outcome = "no_candidate"
+                served = None
+                terminal_error = None
+                supply_state = trace.model_supply_state
+            elif settled_by in {
+                SETTLED_BY_NO_TERMINAL_RESULT,
+                SETTLED_BY_BACKEND_REFRESH,
+            }:
+                interrupted_attempt = (
+                    trace.pending_attempt.payload()
+                    if trace.pending_attempt is not None
+                    else served
+                )
+                if terminal_error is None and interrupted_attempt is None:
+                    if not trace.failed_attempts:
+                        return
+                    outcome = "exhausted"
+                else:
+                    outcome = "failed_terminal"
+                    served = None
+                    terminal_error = terminal_error or {
+                        **interrupted_attempt,
+                        "reason": "stream_interrupted",
+                        "stream_started": True,
+                    }
+            elif (
+                settled_by == SETTLED_BY_TERMINAL_RESULT
+                and trace.pending_attempt is not None
+                and trace.pending_attempt.channel == "native_cli"
+            ):
+                outcome = "served"
+                served = trace.pending_attempt.payload()
+                terminal_error = None
+            elif terminal_error is not None:
+                outcome = "failed_terminal"
+                served = None
+            elif served is not None:
+                outcome = "served"
+            elif trace.failed_attempts:
+                outcome = "exhausted"
+            else:
+                return
+
+            self.store.put(
+                {
+                    "contract_version": 4,
+                    "turn_id": normalized_turn_id,
+                    "ts": ts or _utc_now_iso(),
+                    "agent": trace.agent,
+                    "requested_model_id": trace.requested_model_id,
+                    "outcome": outcome,
+                    "failed_attempts": list(trace.failed_attempts),
+                    "served": served,
+                    "terminal_error": terminal_error,
+                    "canceled_attempt": canceled_attempt,
+                    "model_supply_state": supply_state,
+                }
+            )

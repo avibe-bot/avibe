@@ -1,7 +1,10 @@
 # Model Hub — Interface Contracts
 
-Status: **FROZEN v3** · 2026-07-29 · change only via orchestrator
-Supersedes FROZEN v2 outright — no back-compat, no migration shims.
+Status: **FROZEN v4 (targeted)** · 2026-07-30 · change only via orchestrator
+Advances `agent-chain`, `probe-result`, and `turn-provenance` from contract
+version 3 to 4. The same-assumption audit makes prose-only corrections in
+`source` and `agent-supply`; the versionless `resolution-event` adds the
+request-scoped `permission_denied` cause.
 Derived from: spec v2 (`../model-hub.md`), implementation plan
 (`../model-hub-implementation.md`),
 spike S1 engine survey (`docs/plans/model-hub-engine-survey.md`),
@@ -53,6 +56,16 @@ Client-visible changes:
 - Resolution events remain single records. v3 adds neither affected-backend fan-out
   nor an attribution-grain marker.
 
+## Targeted v4 process
+
+Targeted revisions are orchestrator-authorized, evidence-pinned amendments: code
+citations are required in the schema `$comment`s, and the revision is delivered as
+a dedicated contract commit merged into the implementing lane's branch. Chat
+messages alone never unfreeze a file. The first instance is this commit,
+`docs(model-hub): amend channel-aware native CLI contracts v4`, consolidating
+escalations #2+#3 as one class-level correction against master `807d1eee`; it remains
+owner-vetoable.
+
 ## Resolved decision, carried forward from v1 (owner, 2026-07-23 10:33)
 
 **Hybrid supply by default + consent-gated experimental hub-held subscriptions.**
@@ -86,10 +99,18 @@ order after any mutation; clients never compute partial reorders.
   `vibe/model_hub_runtime/state.py:135-166`, and owner-vetoable. It corrects only
   the hub-OAuth stable-ref repair invariant; chat messages alone did not unfreeze
   these files.
+- **Targeted v4 process instance trail — entry 3 (v4c).** Review finding
+  `3680338859` proved that the runtime-preserved `permission_error` machine code
+  could be a model- or resource-scoped denial, while the classifier collapsed an
+  otherwise redacted 403 into source-global `credential_revoked`. The
+  orchestrator authorized this owner-vetoable amendment in L3 review round 11:
+  `permission_denied` is an attempt failure, mirrored into provenance and legal
+  only on a switch event; it has no Source-state `detail_key` and never mutates
+  source health.
 - Contract tests (implementation plan §5) validate both directions against
   these schemas.
 
-## Required-vs-optional discipline (v3)
+## Required-vs-optional discipline (v4)
 
 Contracts land before implementation, so v2 fields describe a destination the
 shipped v1 serializers have not reached yet. The rule that keeps that honest:
@@ -246,16 +267,17 @@ loads it and mutation-tests every comparable row.
 
 | # | Vocabulary | Home | Mirrors | Rule |
 | --- | --- | --- | --- | --- |
-| M1 | the ten `detail_key` values (5 cooldown + 4 needs_action + 1 error) | `source.schema.json` → `state`, across all three status branches — the `error` key is pinned as a `const`, which counts | `probe-result.schema.json` → `error` (minus null), and the `examples` list on the home field itself | `equality` |
+| M1 | the ten `detail_key` values (5 cooldown + 4 needs_action + 1 error) | `source.schema.json` → `state`, across all three status branches — the `error` key is pinned as a `const`, which counts | `probe-result.schema.json` → `error` (minus null and its probe-local native readiness key), and the `examples` list on the home field itself | `equality` |
 | M2 | source status → chain health | `source.schema.json` → `state.status` | `agent-chain.schema.json` → `chain[].health` | `projection` |
-| M3 | attempt-failure causes | `resolution-event.schema.json` → `reason` | `turn-provenance.schema.json` → `failed_attempts[].reason` | `partition` |
+| M3 | attempt-failure causes, including request-scoped `permission_denied` | `resolution-event.schema.json` → `reason` | `turn-provenance.schema.json` → `failed_attempts[].reason` | `partition` |
 | M4 | non-self-healing cause ↔ blocking `detail_key` | `resolution-event.schema.json` → `reason` | `source.schema.json` → the `needs_action` and `error` `detail_key` branches | `bijection` |
 | M5 | the supply-state taxonomy | `agent-supply.schema.json` → `supply_status` | `named_agents[].supply_status`; `agent-chain.schema.json` → `supply_state`; `turn-provenance.schema.json` → `model_supply_state` | `projection` |
 | M6 | backend identifiers | `agent-supply.schema.json` → `backend` | `agent-chain.schema.json` and `probe-result.schema.json` → `backend`; `turn-provenance.schema.json` and `resolution-event.schema.json` → `agent` (`system` is the declared event-only extra) | `equality` |
-| M7 | supply channel | `source.schema.json` → `supply_channel` | `agent-supply.schema.json` → `current.channel`; all four turn-provenance attempt slots | `equality` |
+| M7 | supply channel | `source.schema.json` → `supply_channel` | `agent-supply.schema.json` → `current.channel`; `agent-chain.schema.json` → `chain[].channel`; `probe-result.schema.json` → `channel`; all four turn-provenance attempt slots | `equality` |
+| M8 | native CLI process availability | `agent-chain.schema.json` → `chain[].reason` (`native_cli_unavailable`) | `probe-result.schema.json` → native not-ready `error` (`models.probe.native_cli_unavailable`) | `mapping` |
 | N1 | source recommendation rule | `agent-supply.schema.json` → `sources.policy` | — | `none` |
 
-What the rules mean, and why three of them are not equality:
+What the rules mean, and why the non-equality rules differ:
 
 - **`equality`** — the sets are identical, in both directions. M6 carries one declared
   superset: `resolution-event.agent` is the home set plus `system`, used for a
@@ -274,6 +296,12 @@ What the rules mean, and why three of them are not equality:
   on the branch that pins `kind: supply_interrupted` — and `recovery`/`manual`/`mapping`
   are declared, because a resolution that is not a failure has no attempt to report. A
   new `reason` fails the check until it is classified, which is the point.
+  `permission_denied` belongs here because it describes the failed request
+  attempt, but deliberately does not join M4: the preserved machine code does not
+  prove a source-global credential or account state.
+- **`mapping`** — M8 is one concept in two field conventions: a bare classifier in
+  the chain and an i18n key in the probe error slot. The explicit one-to-one map is
+  checked in both directions; adding a spelling on either side fails until paired.
 - **`bijection`** — M4 checks both sets and each explicit cause→detail-key pair;
   a permuted pairing therefore fails even when the two sets still match.
 - **`none`** — registered as non-comparable, with the reason. N1 is a pointer to a
@@ -283,16 +311,16 @@ What the rules mean, and why three of them are not equality:
 
 | File | Consumers |
 | --- | --- |
-| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action` (+ mandatory `detail_key` there, enforced by an `if/then`), +immutable `created_at` (the sort key 跟随推荐 needs) with its **null placement now normative (07-29)** — absent sorts before every stamp, constant-epoch backfill, because a tie-break orders equals and cannot order null against a timestamp — +optional `usage.projected_exhaust_at`. No ordering field, ever. |
-| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. Hub with no pinned selection keeps `selected_model_id`, `current`, and `supply_status` null; the server never invents `builtin_models[0]`. |
-| `agent-chain.schema.json` | **New in v2.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain — cooling members included with `runnable: false` — and per-item `health` only; per-agent role is positional, never a copied `active`/`standby`. **+`supply_state` (07-29):** the three-class taxonomy at the (agent, model) grain, and the ONE field every model-scoped consumer reads (chain drill-in, the probe's `supply` sibling, turn record) so none of them consults the agent rollup for a model it does not describe. Its predicate is not restated here or there — spec §4.5 owns it, after round 3 found two files paraphrasing it into a different rule. |
-| `probe-result.schema.json` | **New in v2.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. **07-29 round 3:** `reachable` now drives conditionals in both directions, so a reachable probe cannot carry null ids or an error; and `probe_no_candidate` moved its structured half out of `detail` into a typed `supply` sibling — the shipped clients declare `detail?: string`, so the object would have rendered as `[object Object]`. It reads the requested model's `supply_state`, never `supply_status`. |
-| `turn-provenance.schema.json` | L2 API, L3 writer. v3 adds the FSM-truth `canceled` outcome and a reason-free `canceled_attempt` slot. Records exist only when attribution is exact; Direct and ambiguous absence are route errors in `api.md`. |
-| `resolution-event.schema.json` | L2 emitter, L4 UI. v3 permits nullable `model_id` only for source-scoped system events, rejects `system` on backend-scoped interruption, and keeps one record with impact derived live. |
+| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action`, immutable `created_at`, optional `usage.projected_exhaust_at`. Targeted v4 audit changes no shape: healthy source state and a lapsed `retry_at` do not assert process-local native CLI availability. No ordering field, ever. |
+| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. Targeted v4 audit changes no shape: `supply_status` is derived from complete process-aware runnability, so unavailable native CLI supply is `interrupted`, not cooldown-only `waiting`. Hub with no pinned selection remains null throughout. |
+| `agent-chain.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain and preserves visibility/order for blocked members. Each item now distinguishes source-global `health` from resolve-time channel availability: `runnable = health-permits AND process-available`; Hub availability is definitionally true, while an unavailable native CLI item at any health stays dimmed in place with `reason: native_cli_unavailable`. Cooldown plus unavailable is `interrupted`, not `waiting`. |
+| `probe-result.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. The probe selects the first runnable item; unavailable chain items are skipped. Hub keeps v3's completed-request truth table. Native CLI re-verifies process readiness, never claims completion evidence, and pins `latency_ms: null` in both directions. It reads the requested model's `supply_state`, never `supply_status`. |
+| `turn-provenance.schema.json` | L2 API, L3 writer. v4 adds request-scoped `permission_denied` to failed attempts without changing the exact-attribution rule. The FSM-truth `canceled` outcome keeps its reason-free `canceled_attempt` slot. Direct and ambiguous absence remain route errors in `api.md`. |
+| `resolution-event.schema.json` | L2 emitter, L4 UI. The versionless feed adds `permission_denied` only for a model-scoped switch; it cannot describe cooldown, recovery, or needs-action source state. The record stays single-grained with impact derived live. |
 | `oauth-flow.schema.json` | L2, L4 UI, L1 engine adapter |
 | `migration-scan.schema.json` | L6, L5 UI. Unchanged by the v2 ruling — native-config import is an onboarding feature, not a priority mechanism. |
 | `runtime-dependency.schema.json` | L1, L2 status API, L7 guards. **URL policy (orchestrator, 07-23 12:05):** the example URLs are placeholders; L1 ships with upstream release URLs + SHA256 integrity verification. Availability guard = L7/orchestrator deliverable BEFORE GA: mirror the pinned assets into Avibe-owned release storage (same manifest-verified backup/recovery pattern as Show Runtime, per repo release rules), then point the manifest at the mirror with upstream recorded as provenance. SHA256s never change (same bytes). L1 must NOT build the mirror or touch the Show Runtime guard. **Platform expansion (07-23 13:13):** linux-arm64 / darwin-x64 assets get pinned (+ schema platform-enum rev) together with the mirror work at L7; until then unsupported hosts fail closed, Direct = escape hatch (L1's `model_hub_engine_platform_unsupported` coverage is the intended behavior). **Cross-vendor note (07-29):** if the v2.1 cross-vendor spike (spec §10.4) concludes that a conversion pair needs a CPA plugin or a different engine build, that lands here as a pin + SHA256 revision with mirrored assets published before the manifest moves — never as user-facing configuration. |
-| `api.md` | All route and envelope contracts. v3 defines Direct errors, named-Agent reads, repair acknowledgement/force, blocked-source re-test, the enabled-mapping guard, and durable pending revocations. |
+| `api.md` | All route and envelope contracts. Targeted v4 keeps the shared envelope at v3 while documenting nested v4 chain/probe channel truth, orthogonal native availability, first-runnable probe selection, and stale readiness re-verification. The remaining route contracts are unchanged. |
 | `opencode-overlay.md` | L3, L7 (identifier-stability tests). Identifiers stay stable across per-agent reordering — a source is never encoded into the provider segment. |
 | `adapter-interface.py` | L1 (implements), L2 (consumes; owns in-repo copy). Dual-copy rule: both lanes copy VERBATIM to `core/handlers/model_hub/adapter.py` in their branches — byte-identical, merge is a no-op. Added 07-23 10:55 after L1 raised the ordering race; **v1.1 07-23 11:05**: +OAuth surface with deterministic source binding (`start_oauth(source_id)` → success carries `credential_ref`), +`allowed_origins`/`invoke(origin)`/`OriginNotAllowedError` (both from L1 review findings). Unchanged by v2: candidate walking and error classification stay Python-side, so moving ordering from global to per-agent needs no adapter or engine change (spec §8). |
 

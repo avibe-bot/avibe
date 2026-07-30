@@ -904,6 +904,67 @@ class SessionTurnManager:
         """
         return {session_id for session_id in list(self.in_flight) if session_id}
 
+    def model_hub_turn_id_for_task(
+        self,
+        task: Optional[asyncio.Task] = None,
+    ) -> Optional[str]:
+        """Return the existing FSM turn token owned by ``task``.
+
+        Model Hub launch resolution runs inside the turn's dispatch task. IM and
+        CLI calls do not enter this registry, so they intentionally return no id.
+        """
+
+        owner = task or asyncio.current_task()
+        if owner is None:
+            return None
+        for turn in list(self.in_flight.values()):
+            if turn.task is not owner or turn.task.done():
+                continue
+            token = str(
+                (getattr(turn.context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            return token or None
+        return None
+
+    def _settle_model_hub_turn(
+        self,
+        context: "MessageContext",
+        settled_by: Optional[str],
+    ) -> None:
+        runtime = getattr(self.controller, "model_hub_runtime", None)
+        settle = getattr(runtime, "settle_turn", None)
+        turn_id = str(
+            (getattr(context, "platform_specific", None) or {}).get("turn_token")
+            or ""
+        ).strip()
+        if not turn_id or not callable(settle):
+            return
+        try:
+            from modules.agents.model_hub import (
+                launch_for_context,
+                turn_mode_for_context,
+            )
+
+            launch = launch_for_context(context)
+            mode = turn_mode_for_context(context)
+            if mode is None and launch is not None:
+                mode = "direct" if launch.channel == "direct" else "hub"
+            settle(
+                turn_id,
+                settled_by=settled_by,
+                ts=_utc_now_iso(),
+                mode=mode,
+            )
+        except Exception:
+            logger.warning(
+                "Model Hub provenance settlement failed for turn=%s",
+                turn_id,
+                exc_info=True,
+            )
+
     def bind_context(self, build_context: Callable[[str], "MessageContext"]) -> None:
         """Inject the routing-context builder (it lives in ``internal_server``) once
         the gate is built, so ``flush_queue`` can rebuild a queued follow-up's
@@ -1161,6 +1222,7 @@ class SessionTurnManager:
                         settled_by = (
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_STOPPED
+                    self._settle_model_hub_turn(context, settled_by)
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before

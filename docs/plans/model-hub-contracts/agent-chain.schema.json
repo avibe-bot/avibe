@@ -2,12 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "v2 (2026-07-29): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id (spec §4.3 step 2; the shipped resolver already enforces it). Deliberately NOT filtered by retry-readiness: a cooling source stays in the chain, dimmed, because the user needs to see it (frame V6 04). The RUNNABLE candidate list of spec §4.3 step 2 is this chain further filtered to `runnable: true`, evaluated per turn — so the two are one definition with one extra filter, not two independent lists. Closes v1's honesty gap: v1 showed one order per agent while N different chains ran underneath it, one per model. Read-only projection, computed per request, never persisted.",
+  "description": "v4 (2026-07-29 targeted amendment): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id (spec §4.3 step 2; the shipped resolver already enforces it). Deliberately NOT filtered by runnability: cooling, source-blocked and process-unavailable native_cli members stay at their positions, dimmed, because the user needs to see supply they own. The RUNNABLE candidate list is this chain further filtered to `runnable: true`, where runnable = health-permits AND process-available. Read-only projection, computed per request, never persisted.",
   "type": "object",
   "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 3 },
+    "contract_version": { "const": 4 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": {
       "type": "string",
@@ -18,11 +18,11 @@
       "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — `supply_state` on this object says which, at this model's grain. TWO STRUCTURAL INVARIANTS the schema cannot state, named here so they are enforced somewhere rather than assumed everywhere (07-29, review round 5): (1) `source_id` is UNIQUE across the chain — this is a FILTER over `sources.order`, which is itself `uniqueItems`, so a repeat means the projection double-counted; the damage is not cosmetic, since `chain.length` is what `AgentSupply.model_supply.chain_length` reports and 「2 个来源可供」 over one duplicated account is a false promise of redundancy, and a duplicate at the head would also make the resolver's fill-first retry the same cooling account twice before moving on. (2) The chain PRESERVES `sources.order` — a projection that filters must not reorder, or position 0 stops meaning 'spend first' and the drill-in shows a different order than the agent row it drilled in from. Draft-07 expresses neither: `uniqueItems` compares whole items, so two entries for one source with different `health` values are 'unique' to it, and no keyword can reference the ordering of another document. Both are therefore mechanical guards on the serializer (api.md → Serializer completeness), not schema keywords.",
       "items": {
         "type": "object",
-        "required": ["source_id", "via_mapping", "resolved_model_id", "health", "runnable", "retry_at"],
+        "required": ["source_id", "channel", "via_mapping", "resolved_model_id", "health", "runnable", "reason", "retry_at"],
         "additionalProperties": false,
         "allOf": [
           {
-            "$comment": "v2 (07-29, review round 4): health ⇒ runnability, as a conditional per health value. Round 3 stated the rule three times in prose — here, in spec §4.3 step 2's runnability filter, and in source.schema.json → retry_at — and enforced it nowhere, so an assembler regression could hand the resolver a `needs_action` source flagged `runnable: true` and pass contract validation. That is the one defect in this file that costs a real turn: the consumer takes the first runnable item, so a known-dead source at the head of the chain burns the turn AND suppresses the `interrupted` state that would have told the user to fix it. `needs_action` and `error` are pinned false and stampless; neither recovers unattended, so a `retry_at` on either would promise a recovery that is never coming.",
+            "$comment": "v4 (07-29, escalations #2+#3): health that does not permit a turn pins runnability false. `needs_action` and `error` are stampless because neither recovers unattended. The orthogonal process-availability marker may still be present for an unavailable native_cli source; truth takes precedence over suppressing a redundant blocker.",
             "if": {
               "properties": { "health": { "enum": ["needs_action", "error"] } },
               "required": ["health"]
@@ -35,20 +35,72 @@
             }
           },
           {
-            "$comment": "v2 (07-29, review round 4): `healthy` is unconditionally runnable — there is no other filter left at this point in the pipeline (eligibility and capability are already applied to build the chain), so a healthy member flagged unrunnable would hide supply the user owns. Stampless for the same reason as above: nothing is being waited for.",
+            "$comment": "v4 (07-29, escalations #2+#3): healthy ∧ hub ⇒ runnable. Hub process availability is definitionally true in v2, so round 4's assembler protection survives unchanged for this channel: a healthy hub member flagged unrunnable would hide supply the user owns. The old claim that no other filter remained was false only for native_cli. Evidence at master 807d1eee: core/handlers/model_hub/service.py:1223-1229 and modules/agents/model_hub.py:359-365 pass process-local unavailable_source_ids; core/handlers/model_hub/resolver.py:83-87 and 267-273 apply that filter after the capability chain is built.",
             "if": {
-              "properties": { "health": { "const": "healthy" } },
-              "required": ["health"]
+              "properties": {
+                "health": { "const": "healthy" },
+                "channel": { "const": "hub" }
+              },
+              "required": ["health", "channel"]
             },
             "then": {
               "properties": {
                 "runnable": { "const": true },
+                "reason": { "type": "null" },
                 "retry_at": { "type": "null" }
               }
             }
           },
           {
-            "$comment": "v2 (07-29, review round 4): `cooldown` is the only health value with a stamp, and it always has one — mirroring source.schema.json → state.retry_at, where `cooldown` is defined as the self-healing status whose recovery time is known. `runnable` is deliberately left free here alone: it is exactly `retry_at` already in the past (the resolver retries a recovered source rather than waiting for a state flip), and a schema cannot compare a timestamp to now.",
+            "$comment": "v4 (07-29, escalations #2+#3): healthy ∧ native_cli pairs runnability with this process's CLI readiness. False requires the one closed reason; true requires null. Readiness is distinct from source-global health and is never persisted into it. Evidence at master 807d1eee: core/handlers/model_hub/resolver.py:252-273 keeps the source in matching_sources while excluding unavailable ids from candidates, and lines 95-116 classifies the resulting no-candidate state as interrupted rather than waiting.",
+            "if": {
+              "properties": {
+                "health": { "const": "healthy" },
+                "channel": { "const": "native_cli" },
+                "runnable": { "const": false }
+              },
+              "required": ["health", "channel", "runnable"]
+            },
+            "then": {
+              "required": ["reason"],
+              "properties": {
+                "reason": { "type": "string" },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "health": { "const": "healthy" },
+                "channel": { "const": "native_cli" },
+                "runnable": { "const": true }
+              },
+              "required": ["health", "channel", "runnable"]
+            },
+            "then": {
+              "properties": {
+                "reason": { "type": "null" },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "$comment": "v4 converse (corrected orchestrator ruling): a non-null availability marker is legal at every health and means this process cannot launch this native_cli source. It therefore always forces runnable false. Hub is definitionally process-available in v2, so the marker is impossible there. Together with the healthy native_cli branches above, this makes healthy ∧ native_cli ∧ runnable:false ⇔ reason=native_cli_unavailable total without collapsing process availability into source-global health.",
+            "if": {
+              "properties": { "reason": { "type": "string" } },
+              "required": ["reason"]
+            },
+            "then": {
+              "required": ["channel", "runnable"],
+              "properties": {
+                "channel": { "const": "native_cli" },
+                "runnable": { "const": false }
+              }
+            }
+          },
+          {
+            "$comment": "v2 (07-29, review round 4), availability-separated in v4: `cooldown` is the only health value with a stamp, and it always has one — mirroring source.schema.json → state.retry_at, where `cooldown` is the self-healing status whose recovery time is known. For an available item, `runnable` remains the v3 dynamic rule: true exactly when `retry_at` is already in the past, which a schema cannot compare to now. Process unavailability has precedence at every health, so a cooldown native_cli item may also carry the marker; the converse above then pins runnable false while retaining the health stamp.",
             "if": {
               "properties": { "health": { "const": "cooldown" } },
               "required": ["health"]
@@ -75,6 +127,10 @@
         ],
         "properties": {
           "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+          "channel": {
+            "enum": ["hub", "native_cli"],
+            "description": "The source's serving channel. `hub` process availability is definitionally true in v2; `native_cli` is additionally gated by whether this serving process can launch the sanctioned CLI under its own login right now. The discriminator mirrors source.schema.json → supply_channel."
+          },
           "via_mapping": {
             "type": "boolean",
             "description": "true when this source supplies the model only because a per-agent mapping rewrote the requested id (spec §4.3 step 1). UI marks the chip 经映射."
@@ -89,7 +145,14 @@
           },
           "runnable": {
             "type": "boolean",
-            "description": "Whether this candidate is usable right now: health `healthy`, OR health `cooldown` whose `retry_at` has already passed — the shipped resolver retries such a source rather than waiting for a state flip, so a contract reading `runnable == (health == healthy)` would understate what the next turn will do. ALWAYS false for `needs_action` and for `error`: the first cannot recover unattended, the second is a source already known to be broken, and retrying either burns a turn. Still shown in the chain, dimmed, in every one of those cases. This is exactly the retry-readiness filter of spec §4.3 step 2."
+            "description": "Whether this candidate is usable right now: health permits the turn AND this process can serve the channel. Health permits `healthy`, or `cooldown` whose `retry_at` has already passed; process availability is definitionally true for `hub` and checked at resolve time for `native_cli`. ALWAYS false for `needs_action` and `error`. An unavailable native item stays visible at its original chain position, dimmed. This is the complete runnability filter used by the shipped resolver."
+          },
+          "reason": {
+            "anyOf": [
+              { "enum": ["native_cli_unavailable"] },
+              { "type": "null" }
+            ],
+            "description": "The process-availability marker, orthogonal to source-global health. VOCABULARY HOME for `native_cli_unavailable`, the only unavailable state in v2. Non-null exactly when this process cannot launch the native_cli source, at any health; it forces runnable=false. Null means process-available. Hub is definitionally available and therefore always null. probe-result.schema.json mirrors this concept in its i18n-key error convention."
           },
           "retry_at": {
             "type": ["string", "null"],
@@ -101,7 +164,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "v2 (07-29, review round 2): the MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair instead of the backend as a whole. The predicate is spec §4.5's, verbatim, and is stated once there: `ok` = at least one `runnable: true` item. Otherwise the chain is blocked, and the split is on whether the user owes an action — `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action` / `error`) — 「需处理」; `waiting` = chain non-empty and EVERY blocker is a cooldown, so it recovers unattended at the earliest `retry_at` — 「稍等即可」. Corrected 07-29 (review round 3): round 2 wrote `interrupted` as 'every member needs the user', which left the mixed chain — one cooling source plus one revoked key — matching neither class, so the (agent, model) grain silently disagreed with `supply_status` (which had 'at least one' all along) and suppressed the action-required state for exactly the case that needs it most. `interrupted` is the OR-branch and `waiting` the AND-branch; in that order the two are total over every blocked chain, and a chain that needs the user is never reported as one that heals itself. Exists because the agent-level rollup answers only for the backend's CURRENT model: a user can inspect, probe, or request a model that is starved while the selected one is perfectly healthy, and consulting the rollup there reports `ok` for a chain that cannot run. Every consumer of a model-scoped answer reads this one field — the chain drill-in, `probe_no_candidate`'s typed `supply` sibling (api.md), and TurnProvenance `model_supply_state` — so 「稍等即可」 vs 「需处理」 has exactly one definition per grain."
+      "description": "The MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair. The predicate is spec §4.5's: `ok` = at least one `runnable: true` item. Otherwise `waiting` iff the chain is non-empty and EVERY member is cooldown, not retry-ready, and process-available; `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action`, `error`, or process-unavailable native_cli at any health). v4 matches the shipped resolver's availability precedence: even cooldown plus native_cli_unavailable is interrupted, never waiting."
     }
   },
   "allOf": [
@@ -127,13 +190,20 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 4): and the waiting/interrupted split, which is where §4.5's asymmetry becomes checkable. `waiting` is the AND-branch — non-empty chain, EVERY blocker a cooldown — so a chain holding one revoked key cannot be reported as one that heals itself, which is exactly the suppressed action_required state the round-3 correction was about. `interrupted` is the OR-branch: empty chain, or at least one member the user has to fix. In that order the two are total over every blocked chain.",
+      "$comment": "v4: waiting remains the AND-branch — non-empty chain and EVERY member a not-retry-ready cooldown that is process-available. The schema cannot compare retry_at to now, but the blocked-state conditional already forbids runnable members; requiring reason:null additionally excludes unavailable native_cli members. This matches core/handlers/model_hub/resolver.py:109-116 at master 807d1eee: waiting requires every source cooldown and not unavailable, otherwise no-candidate supply is interrupted.",
       "if": { "properties": { "supply_state": { "const": "waiting" } }, "required": ["supply_state"] },
       "then": {
         "properties": {
           "chain": {
             "minItems": 1,
-            "not": { "contains": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] } }
+            "items": {
+              "properties": {
+                "health": { "const": "cooldown" },
+                "runnable": { "const": false },
+                "reason": { "type": "null" }
+              },
+              "required": ["health", "runnable", "reason"]
+            }
           }
         }
       }
@@ -145,7 +215,8 @@
           "chain": {
             "anyOf": [
               { "maxItems": 0 },
-              { "contains": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] } }
+              { "contains": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] } },
+              { "contains": { "properties": { "reason": { "type": "string" } }, "required": ["reason"] } }
             ]
           }
         }
@@ -181,51 +252,93 @@
   ],
   "examples": [
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "chain": [
         {
           "source_id": "src_claudepro1",
+          "channel": "native_cli",
           "via_mapping": false,
           "resolved_model_id": null,
           "health": "cooldown",
           "runnable": false,
+          "reason": null,
           "retry_at": "2026-07-29T04:00:00Z"
         },
         {
           "source_id": "src_anthkey01",
+          "channel": "hub",
           "via_mapping": false,
           "resolved_model_id": null,
           "health": "healthy",
           "runnable": true,
+          "reason": null,
           "retry_at": null
         }
       ],
       "supply_state": "ok"
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "chain": [],
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "backend": "codex",
       "model_id": "gpt-5.3-codex",
       "chain": [
         {
           "source_id": "src_codexplus1",
+          "channel": "native_cli",
           "via_mapping": false,
           "resolved_model_id": null,
           "health": "cooldown",
           "runnable": false,
+          "reason": null,
           "retry_at": "2026-07-29T09:15:00Z"
         }
       ],
       "supply_state": "waiting"
+    },
+    {
+      "contract_version": 4,
+      "backend": "codex",
+      "model_id": "gpt-5.6",
+      "chain": [
+        {
+          "source_id": "src_chatgptplus",
+          "channel": "native_cli",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "healthy",
+          "runnable": false,
+          "reason": "native_cli_unavailable",
+          "retry_at": null
+        }
+      ],
+      "supply_state": "interrupted"
+    },
+    {
+      "contract_version": 4,
+      "backend": "claude",
+      "model_id": "claude-sonnet-4-5",
+      "chain": [
+        {
+          "source_id": "src_claudecli1",
+          "channel": "native_cli",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "cooldown",
+          "runnable": false,
+          "reason": "native_cli_unavailable",
+          "retry_at": "2026-07-29T10:30:00Z"
+        }
+      ],
+      "supply_state": "interrupted"
     }
   ]
 }

@@ -40,6 +40,7 @@ from modules.agents.model_hub import (
     opencode_model_for_overlay,
     overlay_identifier_bytes,
     persisted_launch_identity,
+    resolve_model_hub_launch,
     resolve_opencode_overlay_launch,
 )
 from modules.agents.codex.agent import CodexAgent
@@ -229,11 +230,108 @@ def test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn(tmp_path: P
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
     assert (recovered.channel, recovered.source_id) == ("native_cli", native.id)
     kinds = [event["kind"] for event in reversed(service.events.list(limit=20))]
-    assert kinds == ["cooldown", "switch", "channel_switch", "recover", "channel_switch"]
-    assert [event["reason"] for event in service.events.list(limit=20) if event["kind"] == "channel_switch"] == [
-        "recovery",
-        "quota_exhausted",
-    ]
+    assert kinds == ["cooldown", "switch", "recover"]
+
+
+def test_native_failure_is_forwarded_to_turn_correlation(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_native01",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[native], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    correlation = Mock()
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(correlation=correlation),
+        native_cli_ready=lambda _backend: True,
+    )
+    context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_native_failure"}
+    )
+    bind_launch(
+        context,
+        ModelHubLaunch(
+            backend="codex",
+            channel="native_cli",
+            requested_model="gpt-5",
+            target_model="gpt-5",
+            runtime_model="gpt-5",
+            source_id=native.id,
+        ),
+    )
+
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                context,
+                "usage quota exceeded",
+            )
+        )
+        is True
+    )
+    correlation.fail_native_attempt.assert_called_once_with(
+        "turn_native_failure",
+        reason="quota_exhausted",
+    )
+
+    correlation.fail_native_attempt.reset_mock()
+    unclassified_context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_native_unclassified"}
+    )
+    native_launch = launch_for_context(context)
+    assert native_launch is not None
+    bind_launch(unclassified_context, native_launch)
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                unclassified_context,
+                "provider rejected the local request",
+            )
+        )
+        is False
+    )
+    correlation.fail_native_attempt.assert_called_once_with(
+        "turn_native_unclassified",
+        reason="unclassified_error",
+    )
+
+    hub_context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_hub_terminal"}
+    )
+    bind_launch(
+        hub_context,
+        ModelHubLaunch(
+            backend="codex",
+            channel="hub",
+            requested_model="gpt-5",
+            target_model="gpt-5",
+            runtime_model="gpt-5",
+            source_id="src_hub0001",
+        ),
+    )
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                hub_context,
+                "backend rejected the completion",
+            )
+        )
+        is False
+    )
+    correlation.fail_hub_attempt.assert_called_once_with(
+        "turn_hub_terminal"
+    )
 
 
 def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
@@ -317,8 +415,8 @@ def test_mh_chan_001_hub_to_native_switch_keeps_failure_reason(tmp_path: Path) -
     assert asyncio.run(router.record_native_failure(context, "usage quota exceeded")) is True
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "native_cli"
 
-    channel_switch = next(event for event in service.events.list(limit=10) if event["kind"] == "channel_switch")
-    assert channel_switch["reason"] == "quota_exhausted"
+    switch = next(event for event in service.events.list(limit=10) if event["kind"] == "switch")
+    assert switch["reason"] == "quota_exhausted"
 
 
 def test_mh_chan_001_native_launch_replays_pending_revocations(tmp_path: Path) -> None:
@@ -396,7 +494,153 @@ def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
         asyncio.run(_router(service).resolve("codex", "gpt-5"))
 
     assert exc_info.value.code == "mapping_target_unavailable"
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_enabled_source",
+    )
+
+
+def test_hub_with_only_ineligible_sources_names_structural_cause(
+    tmp_path: Path,
+) -> None:
+    native_claude = _source(
+        "src_claudenative",
+        kind="subscription",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(
+            sources=[native_claude],
+            order=[native_claude.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
+        asyncio.run(_router(service).resolve("codex", "gpt-5"))
+
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_eligible_source",
+    )
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_prelaunch_supply_failure_copy_is_shared_across_backends(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[], order=[], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(service),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                backend,
+                "missing-model",
+            )
+        )
+
+    assert str(exc_info.value) == (
+        "模型 missing-model 没有已启用的来源。请前往 Models 配置。"
+    )
+    assert exc_info.value.data["copy_key"] == "no_enabled_source"
+
+
+def test_prelaunch_blocker_details_are_localized(
+    tmp_path: Path,
+) -> None:
+    blocked = _source(
+        "src_blocked01",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    blocked.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.oauth_expired",
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[blocked], agents=_agents()),
+        LaunchAdapter({blocked.id: "route-blocked"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(service),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                "codex",
+                "gpt-5",
+            )
+        )
+
+    assert "凭证已过期" in str(exc_info.value)
+    assert "models.source.needs_action.oauth_expired" not in str(
+        exc_info.value
+    )
+
+
+def test_native_unavailability_blocker_is_localized(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_native01",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[native], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(
+            service,
+            native_cli_ready=lambda _backend: False,
+        ),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                "codex",
+                "gpt-5",
+            )
+        )
+
+    assert "当前进程无法使用 CLI 登录" in str(exc_info.value)
+    assert "src_native01：standby" not in str(exc_info.value)
 
 
 def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
@@ -419,7 +663,11 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     agents["codex"].mode = "hub"
     with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
         asyncio.run(router.resolve("codex", "gpt-5"))
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_enabled_source",
+    )
 
     hub = _source(
         "src_hub_after_direct",
@@ -433,7 +681,8 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     config.agents["codex"].sources.order.append(hub.id)
     adapter.prefixes[hub.id] = "route-hub"
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "hub"
-    assert service.events.list(limit=10)[0]["reason"] == "manual"
+    assert len(service.events.list(limit=10)) == 1
+    assert service.events.list(limit=10)[0]["reason"] == "no_enabled_source"
 
 
 def test_recovered_turn_uses_post_wait_mode_for_events(tmp_path: Path) -> None:
@@ -492,11 +741,7 @@ def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
 
     assert (launch.channel, launch.source_id) == ("hub", hub.id)
     event = service.events.list(limit=10)[0]
-    assert (event["kind"], event["reason"], event["to_source"]) == (
-        "channel_switch",
-        "manual",
-        hub.id,
-    )
+    assert (event["kind"], event["reason"]) == ("mapping_applied", "mapping")
 
 
 def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) -> None:
@@ -554,7 +799,11 @@ def test_agent_projection_matches_interrupted_unmapped_fixed_backend(tmp_path: P
     assert projected["current"] is None
     assert projected["supply_status"] == "interrupted"
     assert adapter.starts == 0
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "model_unsupported",
+    )
 
 
 def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -> None:
@@ -880,11 +1129,31 @@ def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(tmp_path: Path,
     config_path = codex_home / "config.toml"
     auth_path.write_text(json.dumps({"tokens": {"access_token": "fixture-token"}}))
     config_path.write_text("")
+    codex_executable = tmp_path / "codex"
+    codex_executable.write_text("#!/bin/sh\nexit 0\n")
+    codex_executable.chmod(0o755)
+    codex_runtime = SimpleNamespace(
+        enabled=True,
+        cli_path=str(codex_executable),
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(codex=codex_runtime),
+        ),
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         monkeypatch.delenv(key, raising=False)
 
     assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is True
+
+    codex_runtime.enabled = False
+    assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
+    codex_runtime.enabled = True
+    codex_runtime.cli_path = str(tmp_path / "missing-codex")
+    assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
+    codex_runtime.cli_path = str(codex_executable)
 
     config_path.write_text(
         'model_provider = "relay"\n\n[model_providers.relay]\nbase_url = "https://relay.invalid/v1"\n'
@@ -913,6 +1182,39 @@ def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(tmp_path: Path,
     )
 
 
+def test_mh_chan_001_claude_native_runtime_requires_enabled_executable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    claude_executable = tmp_path / "claude"
+    claude_executable.write_text("#!/bin/sh\nexit 0\n")
+    claude_executable.chmod(0o755)
+    claude_runtime = SimpleNamespace(
+        enabled=True,
+        cli_path=str(claude_executable),
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(claude=claude_runtime),
+        ),
+    )
+    monkeypatch.setattr(
+        "vibe.claude_config.read_claude_settings_env",
+        lambda: {},
+    )
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is True
+
+    claude_runtime.enabled = False
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is False
+    claude_runtime.enabled = True
+    claude_runtime.cli_path = str(tmp_path / "missing-claude")
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is False
+
+
 def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     tmp_path: Path,
     monkeypatch,
@@ -922,6 +1224,20 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     codex_home.mkdir()
     (codex_home / "auth.json").write_text("{}")
     (codex_home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+    codex_executable = tmp_path / "codex"
+    codex_executable.write_text("#!/bin/sh\nexit 0\n")
+    codex_executable.chmod(0o755)
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(
+                codex=SimpleNamespace(
+                    enabled=True,
+                    cli_path=str(codex_executable),
+                )
+            ),
+        ),
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         monkeypatch.delenv(key, raising=False)
@@ -1565,6 +1881,66 @@ def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path
     asyncio.run(exercise())
 
 
+def test_mh_inj_codex_hub_to_direct_retires_gateway_scope(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        old_transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="hub:http://127.0.0.1:18443:token-hash",
+            stop=AsyncMock(),
+        )
+        new_transport = SimpleNamespace(
+            start=AsyncMock(),
+            on_notification=Mock(),
+            on_server_request=Mock(),
+            pid=12345,
+        )
+        retire_scope = Mock()
+        agent._transport_locks = {}
+        agent._transports = {str(tmp_path): old_transport}
+        agent._transport_last_activity = {}
+        agent._transport_cwd_inodes = {}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=Mock(return_value=set()),
+            invalidate_thread=Mock(),
+        )
+        agent._turn_registry = SimpleNamespace(clear_session=Mock())
+        agent._clear_thread_developer_instructions = Mock()
+        agent._on_notification = Mock()
+        agent._on_server_request = AsyncMock()
+        agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
+        agent.controller = SimpleNamespace(
+            resource_governor=None,
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            ),
+        )
+        launch = ModelHubLaunch(
+            "codex",
+            "direct",
+            "gpt-5",
+            "gpt-5",
+            "gpt-5",
+        )
+
+        with (
+            patch("modules.agents.codex.agent.CodexTransport", return_value=new_transport),
+            patch(
+                "modules.agents.codex.agent.governor_from_controller",
+                return_value=SimpleNamespace(apply_to_pid=Mock()),
+            ),
+        ):
+            assert await agent._get_or_create_transport(str(tmp_path), launch) is new_transport
+
+        old_transport.stop.assert_awaited_once()
+        new_transport.start.assert_awaited_once()
+        retire_scope.assert_called_once_with("codex", str(tmp_path))
+
+    asyncio.run(exercise())
+
+
 def test_mh_inj_codex_runtime_change_interrupts_current_session_first() -> None:
     async def exercise() -> None:
         agent = object.__new__(CodexAgent)
@@ -1725,7 +2101,10 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
         handler.cleanup_session.assert_not_awaited()
         handler.active_sessions.clear()
         assert await task is None
-        handler.cleanup_session.assert_awaited_once_with(key)
+        handler.cleanup_session.assert_awaited_once_with(
+            key,
+            retire_model_hub_scope=False,
+        )
 
     asyncio.run(exercise())
 
