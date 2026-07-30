@@ -1,7 +1,3 @@
-// The Agent band's two contested behaviours: AC-7 (a Direct backend gets no Hub
-// chain and no order editor, rather than an empty one) and AC-9 (a supply problem
-// is named at the grain the server resolved it to — an Agent, or a model with no
-// Agent, never a whole backend).
 import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -10,25 +6,20 @@ import { describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
+import { ToastProvider } from '@/context/ToastContext';
 import { AgentCard } from './AgentCard';
-import type { AgentSupply, Source, SourceState } from './types';
+import { modelChainKey, type ModelChainIndex } from './modelRows';
+import type { AgentChain, AgentSupply, Source } from './types';
 
-const COPY = zh.settings.models.agents;
+const i18n = createInstance();
+void i18n.use(initReactI18next).init({
+  lng: 'zh',
+  fallbackLng: 'en',
+  resources: { en: { translation: en }, zh: { translation: zh } },
+  interpolation: { escapeValue: false },
+});
 
-const instance = (lng: 'en' | 'zh' = 'zh') => {
-  const i18n = createInstance();
-  void i18n.use(initReactI18next).init({
-    lng,
-    fallbackLng: 'en',
-    resources: { en: { translation: en }, zh: { translation: zh } },
-    interpolation: { escapeValue: false },
-  });
-  return i18n;
-};
-
-const ACTIVE: SourceState = { status: 'active', retry_at: null, detail_key: null };
-
-const source = (id: string, name: string, state: SourceState = ACTIVE): Source => ({
+const source = (id: string, name: string): Source => ({
   id,
   kind: 'api_key',
   vendor: 'anthropic',
@@ -36,153 +27,153 @@ const source = (id: string, name: string, state: SourceState = ACTIVE): Source =
   protocol: 'anthropic',
   supply_channel: 'hub',
   billing: 'metered',
-  state,
-  models: [],
+  state: { status: 'active', retry_at: null, detail_key: null },
+  models: [{ id: 'claude-opus-4-6', provenance: 'discovered' }],
 });
 
-const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
+const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
   mode: 'hub',
   menu_kind: 'fixed',
   selected_by_agent: null,
   selected_model_id: 'claude-opus-4-6',
   current: { model_id: 'claude-opus-4-6', source_id: 'src_a', channel: 'hub' },
-  sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: [] },
+  sources: { policy: 'follow', order: ['src_a'], eligibility: [] },
   supply_status: 'ok',
-  model_supply: [],
+  model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1 }],
   named_agents: [],
   mappings: [],
   menu: null,
-  builtin_models: ['claude-opus-4-6'],
+  builtin_models: ['claude-opus-4-6', 'claude-sonnet-4-6'],
   standard_vendors: null,
   ...over,
 });
 
-const SOURCES = [source('src_a', 'Claude Pro 订阅'), source('src_b', 'Anthropic API Key')];
+const chain = (modelId: string, over: Partial<AgentChain> = {}): AgentChain => ({
+  contract_version: 4,
+  backend: 'claude',
+  model_id: modelId,
+  supply_state: 'ok',
+  chain: [{
+    source_id: 'src_a',
+    channel: 'hub',
+    via_mapping: false,
+    resolved_model_id: null,
+    health: 'healthy',
+    runnable: true,
+    reason: null,
+    retry_at: null,
+  }],
+  ...over,
+});
 
-const render = (agents: AgentSupply[], sources: Source[] = SOURCES, lng: 'en' | 'zh' = 'zh') =>
-  renderToStaticMarkup(
-    <MemoryRouter>
-      <I18nextProvider i18n={instance(lng)}>
+const chains = (...rows: AgentChain[]): ModelChainIndex => Object.fromEntries(
+  rows.map((row) => [modelChainKey(row.backend, row.model_id), { kind: 'ready', chain: row }]),
+);
+
+const render = (agents: AgentSupply[], reads: ModelChainIndex, issuesOnly = false) => renderToStaticMarkup(
+  <MemoryRouter>
+    <I18nextProvider i18n={i18n}>
+      <ToastProvider>
         <AgentCard
           agents={agents}
-          sources={sources}
+          sources={[source('src_a', 'Anthropic API Key'), source('src_b', 'OpenAI API Key')]}
+          chains={reads}
+          runtime={null}
+          issuesOnly={issuesOnly}
+          pendingBackends={new Set()}
           onConnectHub={vi.fn()}
           onOpenOrder={vi.fn()}
+          onOpenModels={vi.fn()}
+          onSetRoute={vi.fn()}
+          onAddModel={vi.fn()}
+          onRepair={vi.fn()}
+          onProbeSettled={vi.fn()}
           connectingBackend={null}
         />
-      </I18nextProvider>
-    </MemoryRouter>,
-  );
+      </ToastProvider>
+    </I18nextProvider>
+  </MemoryRouter>,
+);
 
-describe('AgentCard — Hub row', () => {
-  it('draws the numbered chain in this backend’s order', () => {
-    const html = render([hubAgent()]);
-    expect(html).toContain('Claude Pro 订阅');
-    expect(html).toContain('Anthropic API Key');
-    expect(html.indexOf('Claude Pro 订阅')).toBeLessThan(html.indexOf('Anthropic API Key'));
-    expect(html).toContain(COPY.sourceOrder);
-  });
-
-  it('says whether the chain is recommended or hand-picked', () => {
-    expect(render([hubAgent()])).toContain(COPY.policy.follow);
-    expect(render([hubAgent({ sources: { policy: 'custom', order: ['src_a'], eligibility: [] } })])).toContain(
-      COPY.policy.custom,
+describe('AgentCard model list', () => {
+  it('shows every model, the current marker, and the actual serving source', () => {
+    const html = render(
+      [agent()],
+      chains(chain('claude-opus-4-6'), chain('claude-sonnet-4-6')),
     );
+    expect(html).toContain('claude-opus-4-6');
+    expect(html).toContain('claude-sonnet-4-6');
+    expect(html).toContain(zh.settings.models.current);
+    expect(html).toContain('当前由 Anthropic API Key 供给');
   });
 
-  it('admits it when Hub is on but nothing can supply the backend', () => {
-    const html = render([hubAgent({ sources: { policy: 'custom', order: [], eligibility: [] } })]);
-    expect(html).toContain(COPY.hubNoSupply);
-  });
-
-  // The row used to reassure the reader that the turn 「会继续走直连」. It will not:
-  // `model_hub.resolve()` returns a Direct launch only when the backend's own mode
-  // is direct, so an empty Hub order reaches `source is None` and raises
-  // `mapping_target_unavailable`. Promising a fallback that does not exist is worse
-  // than saying nothing, because the user then has no reason to go fix it.
-  it('promises no Direct fallback it cannot deliver, in either locale', () => {
-    expect(COPY.hubNoSupply).not.toContain('直连');
-    expect(en.settings.models.agents.hubNoSupply).not.toMatch(/\bDirect\b/);
-    expect(zh.settings.models.order.enabledEmpty).toContain('失败');
-    expect(en.settings.models.order.enabledEmpty).toMatch(/\bfail/);
-  });
-});
-
-describe('AgentCard — Direct row (AC-7)', () => {
-  const direct = hubAgent({
-    backend: 'opencode',
-    mode: 'direct',
-    current: null,
-    sources: null,
-    supply_status: null,
-    model_supply: null,
-    named_agents: [{ name: 'opencode', effective_model_id: null, supply_status: null }],
-  });
-
-  it('offers 接入中枢 instead of the order editor', () => {
-    const html = render([direct]);
-    expect(html).toContain(COPY.connectHub);
-    expect(html).not.toContain(COPY.sourceOrder);
-  });
-
-  it('draws no chain and no policy badge, and says why', () => {
-    const html = render([direct]);
-    expect(html).toContain(COPY.directNote);
-    expect(html).not.toContain('Claude Pro 订阅');
-    expect(html).not.toContain(COPY.policy.follow);
-    expect(html).not.toContain(COPY.policy.custom);
-  });
-});
-
-describe('AgentCard — attribution line (AC-9)', () => {
-  it('names the interrupted and waiting Agents from the server’s projection', () => {
-    const html = render([
-      hubAgent({
-        named_agents: [
-          { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
-          { name: 'pm', effective_model_id: 'claude-sonnet-4-6', supply_status: 'waiting' },
-          { name: 'reviewer', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
-        ],
-      }),
-    ]);
-    expect(html).toContain('claude 供给中断');
-    expect(html).toContain('pm 正在等待来源恢复');
-    expect(html).not.toContain('reviewer');
-  });
-
-  it('names a ticked-but-unassigned model WITHOUT naming an Agent', () => {
-    const html = render([
-      hubAgent({
-        named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }],
-        model_supply: [
-          { model_id: 'claude-opus-4-6', chain_length: 2 },
-          { model_id: 'claude-haiku-4-5', chain_length: 0 },
-        ],
-      }),
-    ]);
-    expect(html).toContain('claude-haiku-4-5 暂无来源可供给');
-    expect(html).not.toContain('供给中断');
-  });
-
-  // Two names need a separator, and a literal 、 in the component shipped Chinese
-  // punctuation into the English UI ("No supply for agent-a、agent-b").
-  it('separates several names in the reader’s own punctuation', () => {
-    const agent = hubAgent({
-      named_agents: [
-        { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
-        { name: 'pm', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
+  it('explains an automatic switch on the current model row', () => {
+    const failedOver = chain('claude-opus-4-6', {
+      chain: [
+        {
+          source_id: 'src_a',
+          channel: 'hub',
+          via_mapping: false,
+          resolved_model_id: null,
+          health: 'needs_action',
+          runnable: false,
+          reason: null,
+          retry_at: null,
+        },
+        {
+          source_id: 'src_b',
+          channel: 'hub',
+          via_mapping: true,
+          resolved_model_id: 'gpt-5.5',
+          health: 'healthy',
+          runnable: true,
+          reason: null,
+          retry_at: null,
+        },
       ],
     });
-    expect(render([agent], SOURCES, 'zh')).toContain('claude、pm');
-    expect(render([agent], SOURCES, 'en')).toContain('claude, pm');
+    const html = render([agent()], chains(failedOver, chain('claude-sonnet-4-6')));
+    expect(html).toContain('当前已自动换到 OpenAI API Key');
   });
 
-  it('stays silent when every named Agent is fine', () => {
-    const html = render([
-      hubAgent({ named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }] }),
-    ]);
-    expect(html).not.toContain('供给中断');
-    expect(html).not.toContain('暂无来源可供给');
+  it('renders an honest row-zero state when no model is selected', () => {
+    const html = render([agent({ selected_model_id: null, current: null })], chains(chain('claude-opus-4-6')));
+    expect(html).toContain(zh.settings.models.emptySelection.title);
+    expect(html).toContain(zh.settings.models.emptySelection.action);
+  });
+
+  it('gives an interrupted model its route door', () => {
+    const broken = chain('claude-opus-4-6', { chain: [], supply_state: 'interrupted' });
+    const html = render([agent()], chains(broken, chain('claude-sonnet-4-6')));
+    expect(html).toContain(zh.settings.models.modelStatus.needsAction);
+    expect(html).toContain(zh.settings.models.routes.manual);
+  });
+
+  it('filters to affected rows without leaving healthy siblings behind', () => {
+    const html = render(
+      [agent()],
+      chains(chain('claude-opus-4-6', { chain: [], supply_state: 'interrupted' }), chain('claude-sonnet-4-6')),
+      true,
+    );
+    expect(html).toContain('claude-opus-4-6');
+    expect(html).not.toContain('claude-sonnet-4-6');
+  });
+
+  it('gives a chain read failure a retry door', () => {
+    const html = render([agent()], {
+      [modelChainKey('claude', 'claude-opus-4-6')]: { kind: 'error' },
+      [modelChainKey('claude', 'claude-sonnet-4-6')]: { kind: 'ready', chain: chain('claude-sonnet-4-6') },
+    });
+    expect(html).toContain(zh.settings.models.modelStatus.needsAction);
+    expect(html).toContain(zh.settings.models.modelStatus.retry);
+  });
+
+  it('keeps Direct honest and offers the managed-mode action instead of order editing', () => {
+    const html = render([agent({ mode: 'direct', sources: null, current: null })], {});
+    expect(html).toContain(zh.settings.models.modelStatus.direct);
+    expect(html).toContain(zh.settings.models.agents.enableManaged);
+    expect(html).not.toContain(zh.settings.models.agents.sourceOrder);
+    expect(html).not.toContain(zh.settings.models.routes.expand);
   });
 });

@@ -577,7 +577,7 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
   });
 });
 
-describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', () => {
+describe('dryRunOutcome — what the per-model probe came back with', () => {
   it('names the source the server actually started from', () => {
     // Not the first row in the order: the point of a dry run is which source the
     // chain resolved to, which can differ from what the list suggests.
@@ -585,6 +585,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       kind: 'ok',
       sourceName: 'Key B',
       latencyMs: 412,
+      channel: 'hub',
     });
   });
 
@@ -595,6 +596,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       kind: 'ok',
       sourceName: 'src_gone',
       latencyMs: 412,
+      channel: 'hub',
     });
   });
 
@@ -609,6 +611,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       kind: 'ok',
       sourceName: 'Key A',
       latencyMs: null,
+      channel: 'native_cli',
     });
   });
 
@@ -623,7 +626,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
         probe({ channel: 'native_cli', reachable: false, latency_ms: null, error: 'models.probe.native_cli_unavailable' }),
         [source()],
       ),
-    ).toEqual({ kind: 'failed', sourceName: 'Key A', detailKey: 'models.probe.native_cli_unavailable' });
+    ).toEqual({ kind: 'failed', sourceName: 'Key A', detailKey: 'models.probe.native_cli_unavailable', channel: 'native_cli' });
   });
 
   it('carries the server’s reason through on a failure', () => {
@@ -631,7 +634,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       dryRunOutcome(probe({ reachable: false, latency_ms: null, error: 'models.source.needs_action.credential_revoked' }), [
         source(),
       ]),
-    ).toEqual({ kind: 'failed', sourceName: 'Key A', detailKey: 'models.source.needs_action.credential_revoked' });
+    ).toEqual({ kind: 'failed', sourceName: 'Key A', detailKey: 'models.source.needs_action.credential_revoked', channel: 'hub' });
   });
 
   it('still reports a failure when the server named no reason', () => {
@@ -642,6 +645,7 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
       kind: 'failed',
       sourceName: 'Key A',
       detailKey: null,
+      channel: 'hub',
     });
   });
 });
@@ -748,15 +752,15 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     );
   });
 
-  it('is how the drawer reads its own probe, at both arrivals', () => {
+  it('is how each model row reads its own probe, at both arrivals', () => {
     // The regression this replaces was a `return` on the staleness guard ABOVE the
     // refetch, so the shape matters as much as the rule: no early exit may sit
     // between a probe arriving and the page being corrected.
-    const drawer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'SourceOrderDrawer.tsx'), 'utf8');
+    const drawer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'AgentCard.tsx'), 'utf8');
 
     expect(drawer).not.toMatch(/if \(seq\.current !== mine\) return;/);
     expect((drawer.match(/probeArrival\(/g) ?? []).length).toBe(2);
-    expect(drawer).toMatch(/if \(arrival\.reread\) reread\(\);/);
+    expect(drawer).toMatch(/if \(arrival\.reread\) onSettled\(\);/);
     // And takes `serverNamed` from the error rather than inferring it from 「is it
     // one of ours?」 — `bad_response` is one of ours and names nothing, so that
     // inference skipped the reread in the one case it was added for.
@@ -976,9 +980,8 @@ describe('the class: no component decides a repair for itself', () => {
   it('leaves the chain key to its owner', () => {
     const offenders = files.filter((f) => INLINE_CHAIN_KEY.test(read(f)));
     expect(offenders).toEqual([]);
-    expect(read('SourceOrderDrawer.tsx')).toMatch(
-      /chainKey=\{dryRunChainKey\(agent, policy, order, sources\)\}/,
-    );
+    expect(read('AgentCard.tsx')).toMatch(/modelsApi\.probeAgent\(agent\.backend, modelId\)/);
+    expect(read('SourceOrderDrawer.tsx')).not.toMatch(/probeAgent|dryRunChainKey/);
   });
 
   /**
@@ -994,11 +997,11 @@ describe('the class: no component decides a repair for itself', () => {
   });
 
   it('keeps the dry-run failure as a reason, three states and all', () => {
-    const src = read('SourceOrderDrawer.tsx');
+    const src = read('AgentCard.tsx');
     // `{ key: null }` is not the same as `null`: 「it failed and nobody named why」
     // has a sentence (the generic line), 「nothing ran yet」 has none.
     expect(src).toMatch(/useState<\{ key: string \| null \} \| null>\(null\)/);
     expect(src).toMatch(/setErrorReason\(\{ key: failure\?\.detail \?\? null \}\)/);
-    expect(src).toMatch(/errorReason && serverText\(t, errorReason\.key, 'settings\.models\.dryRun\.error'\)/);
+    expect(src).toMatch(/serverText\(t, errorReason\.key, 'settings\.models\.probe\.error'\)/);
   });
 });

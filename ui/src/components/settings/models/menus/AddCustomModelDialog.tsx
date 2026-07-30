@@ -112,13 +112,15 @@ export const AddCustomModelDialog: React.FC<{
   /** Server-populated standard OpenCode vendor prefixes (agent-supply v1.2),
    *  so the live identifier preview byte-matches the backend. */
   standardVendors: StandardVendors;
+  /** Optional source door that opened the shared action. */
+  initialSourceId?: string | null;
   /** When set, prefill for editing an existing custom entry. */
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
   /** Fired after a custom model is removed (edit mode only). */
   onDeleted?: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onDeleted }) => {
+}> = ({ open, sources, standardVendors, initialSourceId, edit, onClose, onSaved, onDeleted }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -133,7 +135,8 @@ export const AddCustomModelDialog: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     const editing = edit ? sources.find((s) => s.id === edit.sourceId) ?? null : null;
-    const preferred = editing ?? sources.find((s) => s.kind === 'api_key') ?? sources[0] ?? null;
+    const requested = initialSourceId ? sources.find((s) => s.id === initialSourceId) ?? null : null;
+    const preferred = editing ?? requested ?? sources.find((s) => s.kind === 'api_key') ?? sources[0] ?? null;
     setSource(preferred);
     setModelId(edit?.modelId ?? '');
     setDisplayName(edit?.displayName ?? '');

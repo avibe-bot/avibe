@@ -1,16 +1,12 @@
-// 设置 · 模型 — the Model Hub main page (design.pen 「产品改造 V6 01」, failover
-// state 「V6 04」, mobile 「V6 M01」). Owns data fetching; composes the 来源 band,
-// Agent band, 最近切换 feed and the 高级 row, plus the add-source dialogs, the
-// per-Agent 来源顺序 drawer and the L5 menu drawers. Talks to the hub through
-// modelsApi (mock fixtures until L2's REST API is live — see featureFlags.ts).
+// Model-centric settings surface. The page reads model chains from the server,
+// hosts shared source repair journeys, and serializes Agent writes by backend.
 import * as React from 'react';
-import { CheckCircle2, Info, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, ListFilter, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { useToast } from '@/context/ToastContext';
 import { SettingsPageShell } from '../SettingsPageShell';
-import { MODEL_MENUS_ENABLED } from './featureFlags';
 import { SourcesCard } from './SourcesCard';
 import { AgentCard } from './AgentCard';
 import { MigrationBanner } from './MigrationBanner';
@@ -28,57 +24,56 @@ import {
   feedTailCursor,
   type EventFeed,
 } from './eventFeed';
-import { MappingDrawer } from './menus/MappingDrawer';
+import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
-import { pageStatus, type PageStatus } from './supply';
+import { listedModelIds, modelChainKey, modelIssueCount, type ModelChainIndex } from './modelRows';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
-/**
- * The header pill — the one line that says whether the Hub is doing its job.
- *
- * V6 04 is why it can't be a boolean: a source ran out of quota, the chain covered
- * for it, and the honest headline is 「已自动切换，恢复后切回」 — a warning about
- * something already handled, which neither 一切正常 nor 需要处理 can express. The
- * ladder itself lives in supply.ts (a rule, unit-tested); this only renders it.
- */
-const StatusPill: React.FC<{ status: PageStatus }> = ({ status }) => {
+const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick: () => void }> = ({
+  issueCount,
+  active,
+  onClick,
+}) => {
   const { t } = useTranslation();
-  const k = `settings.models.statusPill.${status.kind}`;
-  const text =
-    status.kind === 'ok'
-      ? (t(k, { count: status.hubCount }) as string)
-      : status.kind === 'interrupted' || status.kind === 'waiting'
-        ? (t(k, { count: status.count }) as string)
-        : status.kind === 'needsAction' || status.kind === 'cooldown'
-          ? [
-              t(k, {
-                source: status.source.display_name,
-                // `detail_key` is required on needs_action / error but optional on
-                // cooldown, so a missing one falls back to the status label rather
-                // than interpolating an empty segment.
-                detail: t(
-                  status.source.state.detail_key ?? `settings.models.state.${status.source.state.status}`,
-                ) as string,
-              }) as string,
-              // 「另有 N 个来源」 — one shared suffix instead of a per-branch
-              // singular/plural pair. The pill names the worst source; the count
-              // says the list has more of them.
-              status.others > 0 ? (t('settings.models.statusPill.andMore', { count: status.others }) as string) : '',
-            ]
-              .filter(Boolean)
-              .join(' · ')
-          : (t(k) as string);
-
-  const variant = status.tone === 'ok' ? 'success' : status.tone === 'warn' ? 'warning' : 'secondary';
-  const Icon = status.tone === 'ok' ? CheckCircle2 : status.tone === 'warn' ? TriangleAlert : Info;
+  const healthy = issueCount === 0;
+  const Icon = healthy ? CheckCircle2 : TriangleAlert;
   return (
-    <Badge variant={variant} className="gap-1.5 rounded-full px-3 py-1.5 text-[12px]">
+    <Button
+      variant={healthy ? 'secondary' : 'outline'}
+      size="sm"
+      className={healthy ? 'h-9 text-mint' : 'h-9 border-destructive/35 text-destructive'}
+      onClick={onClick}
+      aria-pressed={active}
+    >
       <Icon className="size-3.5" />
-      {text}
-    </Badge>
+      {healthy ? t('settings.models.status.allHealthy') : t('settings.models.status.needsAction', { count: issueCount })}
+      {!healthy && <ListFilter className="size-3.5" />}
+    </Button>
   );
+};
+
+const readModelChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => {
+  const pairs = agents
+    .filter((agent) => agent.mode === 'hub')
+    .flatMap((agent) => listedModelIds(agent).map((modelId) => ({ agent, modelId })));
+  const reads = await Promise.all(
+    pairs.map(async ({ agent, modelId }) => {
+      const key = modelChainKey(agent.backend, modelId);
+      try {
+        return [key, { kind: 'ready' as const, chain: await modelsApi.getAgentChain(agent.backend, modelId) }] as const;
+      } catch {
+        return [key, { kind: 'error' as const }] as const;
+      }
+    }),
+  );
+  return Object.fromEntries(reads);
+};
+
+const readModelSurface = async (): Promise<[Source[], AgentSupply[], ModelChainIndex]> => {
+  const [sources, agents] = await Promise.all([modelsApi.listSources(), modelsApi.listAgents()]);
+  return [sources, agents, await readModelChains(agents)];
 };
 
 // 最近切换 is a cursor feed, not a fixed window: `/events` pages with `before`,
@@ -92,6 +87,7 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [sources, setSources] = React.useState<Source[]>([]);
   const [agents, setAgents] = React.useState<AgentSupply[]>([]);
+  const [chains, setChains] = React.useState<ModelChainIndex>({});
   // Rows and end-of-feed as ONE value: every read moves both, and the transition
   // that moved only the rows is what made 加载更早 lie. `EventFeed` owns the rules.
   const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
@@ -100,6 +96,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
+  const [issuesOnly, setIssuesOnly] = React.useState(false);
+  const agentSectionRef = React.useRef<HTMLDivElement>(null);
 
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
@@ -112,6 +110,7 @@ export const SettingsModelsPage: React.FC = () => {
   // freshest agent.
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
+  const [customModelRequest, setCustomModelRequest] = React.useState<{ sourceId?: string } | null>(null);
 
   // Which backends have a 来源顺序 write outstanding. Held HERE and not in the
   // drawer that issues it, because the drawer does not outlive its own write:
@@ -119,8 +118,12 @@ export const SettingsModelsPage: React.FC = () => {
   // read-back are in flight, and closing unmounts the drawer, so a flag inside it
   // is re-created reading 「idle」 by the reopen — which is exactly when the
   // hand-off below must still be shut. See `createPendingWrites`.
-  const [orderWrites, setOrderWrites] = React.useState<ReadonlySet<string>>(() => new Set());
-  const [orderWriteRegistry] = React.useState(() => createPendingWrites(setOrderWrites));
+  const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
+  const agentsRef = React.useRef(agents);
+  React.useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
 
   // Guards event-handler async writes (refresh / connect) from landing after
   // the page unmounts — the whole class of stale-async writes the review flagged.
@@ -151,11 +154,13 @@ export const SettingsModelsPage: React.FC = () => {
   // this refresh's job. A feed left one write behind is not wrong, only not newer,
   // and the next mutation or reload catches it up.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null]>(
-      ([nextSources, nextAgents, headEvents]) => {
+    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null, ModelChainIndex]>(
+      ([nextSources, nextAgents, headEvents, nextChains]) => {
         if (!aliveRef.current) return;
         setSources(nextSources);
         setAgents(nextAgents);
+        agentsRef.current = nextAgents;
+        setChains(nextChains);
         // Merged, not replaced: 加载更早 pages tail-ward, and a head re-read must
         // not silently drop the rows it never asked for. See `feedAfterHeadRead`
         // for the one case merging is wrong, and for what that costs 加载更早.
@@ -167,16 +172,13 @@ export const SettingsModelsPage: React.FC = () => {
   React.useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([
-      modelsApi.listSources(),
-      modelsApi.listAgents(),
-      modelsApi.listEvents(EVENT_PAGE),
-      modelsApi.getRuntimeStatus(),
-    ])
-      .then(([s, a, e, r]) => {
+    Promise.all([readModelSurface(), modelsApi.listEvents(EVENT_PAGE), modelsApi.getRuntimeStatus()])
+      .then(([[s, a, nextChains], e, r]) => {
         if (cancelled) return;
         setSources(s);
         setAgents(a);
+        agentsRef.current = a;
+        setChains(nextChains);
         // The first page is a tail read as much as a head one: it reaches the end
         // of the feed exactly when it comes back short, and its cursor is `null`
         // because it asked for the top. Applied to `prev` rather than to
@@ -197,13 +199,13 @@ export const SettingsModelsPage: React.FC = () => {
 
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
-      await refreshAuthority.run(() =>
-        Promise.all([
-          modelsApi.listSources(),
-          modelsApi.listAgents(),
+      await refreshAuthority.run(async () => {
+        const [[nextSources, nextAgents, nextChains], headEvents] = await Promise.all([
+          readModelSurface(),
           modelsApi.listEvents(EVENT_PAGE).catch(() => null),
-        ]),
-      );
+        ]);
+        return [nextSources, nextAgents, headEvents, nextChains];
+      });
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
       // the user the view might be stale rather than silently swallowing it.
@@ -225,10 +227,42 @@ export const SettingsModelsPage: React.FC = () => {
    */
   const agentSaved = React.useCallback(
     (echoed: AgentSupply) => {
-      setAgents((prev) => agentsWithEcho(prev, echoed));
+      setAgents((prev) => {
+        const next = agentsWithEcho(prev, echoed);
+        agentsRef.current = next;
+        return next;
+      });
       return refreshSourcesAgents();
     },
     [refreshSourcesAgents],
+  );
+
+  const setModelRoute = React.useCallback(
+    (
+      backend: AgentBackend,
+      modelId: string,
+      targetModelId: string | null,
+      onCommitted: (before: AgentSupply, after: AgentSupply) => void,
+    ) => {
+      void agentWriteRegistry.track(backend, async () => {
+        const current = agentsRef.current.find((agent) => agent.backend === backend);
+        if (!current || current.menu_kind !== 'fixed') return;
+        const byModel = new Map((current.mappings ?? []).map((mapping) => [mapping.builtin_id, mapping]));
+        if (targetModelId) {
+          byModel.set(modelId, { builtin_id: modelId, target_model_id: targetModelId, enabled: true });
+        } else {
+          byModel.delete(modelId);
+        }
+        try {
+          const echoed = await modelsApi.putMappings(backend, [...byModel.values()].filter((mapping) => mapping.enabled));
+          onCommitted(current, echoed);
+          await agentSaved(echoed);
+        } catch {
+          showToast(t('settings.models.menus.saveFailed') as string, 'error');
+        }
+      });
+    },
+    [agentSaved, agentWriteRegistry, showToast, t],
   );
 
   const loadOlderEvents = React.useCallback(async () => {
@@ -286,14 +320,29 @@ export const SettingsModelsPage: React.FC = () => {
   // instead of leaving an editor open over an order nothing reads.
   const orderAgent = agents.find((a) => a.backend === orderBackend && a.mode === 'hub') ?? null;
 
-  const status = pageStatus(sources, agents, runtime);
+  const issueCount = modelIssueCount(agents, chains, runtime);
+  const standardVendors = new Set(agents.flatMap((agent) => agent.standard_vendors ?? []));
+
+  React.useEffect(() => {
+    if (issueCount === 0) setIssuesOnly(false);
+  }, [issueCount]);
+
+  const focusIssues = () => {
+    if (issueCount > 0) setIssuesOnly((value) => !value);
+    else setIssuesOnly(false);
+    requestAnimationFrame(() => agentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
 
   return (
     <SettingsPageShell
       activeTab="models"
       title={t('settings.models.title')}
       subtitle={t('settings.models.subtitle')}
-      actions={!loading && !loadError ? <StatusPill status={status} /> : undefined}
+      actions={
+        !loading && !loadError ? (
+          <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={focusIssues} />
+        ) : undefined
+      }
     >
       {loading ? (
         <div className="text-[13px] text-muted">{t('common.loading')}</div>
@@ -305,6 +354,24 @@ export const SettingsModelsPage: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-5">
           <MigrationBanner onApplied={() => void refreshSourcesAgents()} />
+          <div ref={agentSectionRef} className="scroll-mt-6">
+            <AgentCard
+              agents={agents}
+              sources={sources}
+              chains={chains}
+              runtime={runtime}
+              issuesOnly={issuesOnly}
+              pendingBackends={agentWrites}
+              onConnectHub={(agent) => void connectHub(agent)}
+              onOpenOrder={(agent) => setOrderBackend(agent.backend)}
+              onOpenModels={(agent) => setMenuBackend(agent.backend)}
+              onSetRoute={setModelRoute}
+              onAddModel={() => setCustomModelRequest({})}
+              onRepair={(source, kind) => setRepairTarget({ source, kind })}
+              onProbeSettled={() => void refreshSourcesAgents()}
+              connectingBackend={connecting}
+            />
+          </div>
           <SourcesCard
             sources={sources}
             onConnectClaude={() => setOauthVendor('anthropic')}
@@ -312,13 +379,7 @@ export const SettingsModelsPage: React.FC = () => {
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
             onRepair={(source, kind) => setRepairTarget({ source, kind })}
-          />
-          <AgentCard
-            agents={agents}
-            sources={sources}
-            onConnectHub={connectHub}
-            onOpenOrder={(agent) => setOrderBackend(agent.backend)}
-            connectingBackend={connecting}
+            onAddModel={(source) => setCustomModelRequest({ sourceId: source.id })}
           />
           <RecentSwitchesCard
             events={feed.events}
@@ -356,25 +417,10 @@ export const SettingsModelsPage: React.FC = () => {
           // makes the baseline it hands over CORRECT is the echo `agentSaved` takes
           // — the re-read is allowed to fail here without leaving one behind.
           onSaved={agentSaved}
-          // 试跑's own re-read. It is not this drawer's write, so there is no echo
-          // to take — the probe moves source state and answers with a probe result.
-          onReread={() => void refreshSourcesAgents()}
           orderWrite={{
-            pending: orderWrites.has(orderAgent.backend),
-            track: (work) => orderWriteRegistry.track(orderAgent.backend, work),
+            pending: agentWrites.has(orderAgent.backend),
+            track: (work) => agentWriteRegistry.track(orderAgent.backend, work),
           }}
-          // 模型菜单与映射 hands off to the menu drawer: the two answer adjacent
-          // questions (which sources, which models), and V6 02's footer is the only
-          // way into the menu now that the row's action is 来源顺序. Withheld while
-          // the menus are flagged off, rather than opening onto nothing.
-          onOpenMenu={
-            MODEL_MENUS_ENABLED
-              ? () => {
-                  setOrderBackend(null);
-                  setMenuBackend(orderAgent.backend);
-                }
-              : undefined
-          }
         />
       )}
 
@@ -388,16 +434,16 @@ export const SettingsModelsPage: React.FC = () => {
           // A custom model is a SOURCE write: it echoes the source, not the Agent.
           onRefresh={() => void refreshSourcesAgents()}
         />
-      ) : menuAgent && (menuAgent.backend === 'claude' || menuAgent.backend === 'codex') ? (
-        <MappingDrawer
-          open
-          backend={menuAgent.backend}
-          agent={menuAgent}
-          sources={sources}
-          onClose={() => setMenuBackend(null)}
-          onSaved={(echoed) => void agentSaved(echoed)}
-        />
       ) : null}
+
+      <AddCustomModelDialog
+        open={customModelRequest !== null}
+        sources={sources}
+        standardVendors={standardVendors}
+        initialSourceId={customModelRequest?.sourceId}
+        onClose={() => setCustomModelRequest(null)}
+        onSaved={() => void refreshSourcesAgents()}
+      />
     </SettingsPageShell>
   );
 };
