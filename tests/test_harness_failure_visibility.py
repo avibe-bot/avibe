@@ -1730,6 +1730,59 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         f"a genuinely paused cron task keeps the resume copy: {control!r}"
     )
 
+    # THE TIMEZONE SPLIT: a naive ``run_at`` in a non-UTC task timezone reads
+    # differently to ``compute_next_run_at`` (which resolves it in the task's
+    # zone) and to the lifecycle badge (SQLite compares ``datetime(run_at)`` with
+    # its UTC clock). This instant is 4 hours in the FUTURE on the badge's clock
+    # and 4 hours in the PAST on the Python read (Asia/Shanghai is UTC+8), so a
+    # copy inferred from ``compute_next_run_at`` says FINISHED while the badge the
+    # user is looking at says PAUSED. The copy must consume the badge's own
+    # answer. Both readings are hours from the boundary, so the premise cannot
+    # flake across the test's runtime.
+    from datetime import datetime, timedelta, timezone
+
+    naive_future_utc = (datetime.now(timezone.utc) + timedelta(hours=4)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    _task(
+        sqlite,
+        "task-tz",
+        name="tz one shot",
+        schedule_type="at",
+        cron=None,
+        run_at=naive_future_utc,
+        timezone="Asia/Shanghai",
+        enabled=False,
+    )
+    store.load()
+    # The premise, asserted so a clock/parse change fails loudly: the badge reads
+    # this row as PAUSED (the named instant is ahead of the UTC clock), while the
+    # Python inference reads the same instant as already passed.
+    assert sqlite.definition_lifecycle_state("task-tz", definition_type="task") == "paused"
+    from storage.background import compute_next_run_at as _next_run
+
+    assert (
+        _next_run(
+            enabled=True,
+            schedule_type="at",
+            cron=None,
+            run_at=naive_future_utc,
+            timezone_name="Asia/Shanghai",
+        )
+        is None
+    ), "the divergence premise: the task-zone read must place this instant in the past"
+
+    tz_body = service._failure_notice_body(
+        {"id": "run-tz", "task_id": "task-tz", "error": "boom"},
+        {"failure_id": "failure:run-tz", "interrupt_reason": None},
+    )
+    assert i18n_t("harness.notice.taskFinished", "en") not in tz_body, (
+        f"the copy must not say FINISHED while the badge says PAUSED: {tz_body!r}"
+    )
+    assert "vibe task resume task-tz" in tz_body, (
+        f"the copy must agree with the badge the user is looking at: {tz_body!r}"
+    )
+
 
 # --- group 2d: crash/exception ordering in the delivery protocol -----------
 #

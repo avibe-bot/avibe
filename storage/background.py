@@ -2947,6 +2947,34 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
 
+    def definition_lifecycle_state(
+        self, definition_id: str, *, definition_type: str = "task"
+    ) -> Optional[str]:
+        """One definition's canonical lifecycle state, from the shared expression.
+
+        ``definition_lifecycle_expression`` evaluated for a single row — the same
+        CASE every list and count surface reads, so a consumer rendering copy
+        beside the badge cannot reach a different answer by re-deriving the state
+        in Python. That is not hypothetical: a naive ``run_at`` in a non-UTC task
+        timezone reads differently to ``compute_next_run_at`` (which resolves it in
+        the task's zone) and to this expression (SQLite compares ``datetime(run_at)``
+        with its UTC clock), and any Python twin inherits one side of that split.
+        ``None`` when the definition row does not exist.
+        """
+
+        resolved = str(definition_id or "").strip()
+        if not resolved:
+            return None
+        statement = (
+            select(definition_lifecycle_expression(definition_type))
+            .select_from(run_definitions)
+            .where(run_definitions.c.id == resolved)
+            .limit(1)
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).first()
+        return None if row is None else str(row[0])
+
     def run_callback_state(self, run_id: str) -> Optional[str]:
         """This run's callback delivery status, or ``None`` when it has no callback.
 
