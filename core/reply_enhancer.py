@@ -165,13 +165,26 @@ def strip_file_links(text: str) -> str:
 
 
 def strip_silent_blocks(text: str) -> str:
-    """Remove all ``<silent>...</silent>`` blocks from agent-visible output."""
+    """Remove silent directives outside Markdown code spans and fences."""
     if not text:
         return text
     if "<silent" not in text.lower():
         return text
-    stripped = _SILENT_BLOCK_RE.sub("", text)
-    return _UNTERMINATED_SILENT_RE.sub("", stripped).strip()
+
+    masked = _mask_markdown_code(text)
+    complete_ranges = [match.span() for match in _SILENT_BLOCK_RE.finditer(masked)]
+    stripped = _remove_ranges(text, complete_ranges) if complete_ranges else text
+
+    # Preserve the existing recovery contract: after complete blocks are gone, an
+    # unmatched real directive consumes the rest of the reply. Re-scan Markdown
+    # because removing a real block can also remove backticks contained inside it.
+    unterminated = _UNTERMINATED_SILENT_RE.search(_mask_markdown_code(stripped))
+    if unterminated:
+        stripped = stripped[: unterminated.start()]
+
+    if not complete_ranges and unterminated is None:
+        return text
+    return stripped.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +246,155 @@ def _extract_secret_requests(text: str) -> List[SecretRequest]:
             seen.add(name)
             out.append(SecretRequest(name=name))
     return out
+
+
+def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
+    """Remove sorted, non-overlapping character ranges from *text*."""
+    if not ranges:
+        return text
+    parts: List[str] = []
+    cursor = 0
+    for start, end in ranges:
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _mask_markdown_code(text: str) -> str:
+    """Blank Markdown code regions without changing string offsets."""
+    fenced_ranges = _fenced_code_ranges(text)
+    ranges = sorted([*fenced_ranges, *_inline_code_ranges(text, fenced_ranges)])
+    if not ranges:
+        return text
+
+    parts: List[str] = []
+    cursor = 0
+    for start, end in ranges:
+        parts.append(text[cursor:start])
+        parts.append(" " * (end - start))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
+    """Return CommonMark-style backtick and tilde fence ranges."""
+    ranges: List[Tuple[int, int]] = []
+    active: Tuple[int, str, int] | None = None
+    offset = 0
+
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        delimiter = _fence_delimiter(content)
+        if active is None:
+            if delimiter is not None:
+                marker, length, remainder = delimiter
+                # A backtick fence cannot contain another backtick in its info
+                # string. Tilde info strings have no equivalent restriction.
+                if marker != "`" or "`" not in remainder:
+                    active = (offset, marker, length)
+        else:
+            start, marker, opening_length = active
+            if delimiter is not None:
+                closing_marker, closing_length, remainder = delimiter
+                if (
+                    closing_marker == marker
+                    and closing_length >= opening_length
+                    and not remainder.strip(" \t")
+                ):
+                    ranges.append((start, offset + len(line)))
+                    active = None
+        offset += len(line)
+
+    if active is not None:
+        ranges.append((active[0], len(text)))
+    return ranges
+
+
+def _fence_delimiter(line: str) -> Tuple[str, int, str] | None:
+    """Parse a fence delimiter after at most three leading spaces."""
+    indent = 0
+    while indent < len(line) and line[indent] == " ":
+        indent += 1
+    if indent > 3 or indent == len(line):
+        return None
+
+    marker = line[indent]
+    if marker not in {"`", "~"}:
+        return None
+    end = indent
+    while end < len(line) and line[end] == marker:
+        end += 1
+    length = end - indent
+    if length < 3:
+        return None
+    return marker, length, line[end:]
+
+
+def _inline_code_ranges(
+    text: str,
+    fenced_ranges: List[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    """Return inline code spans outside fenced code blocks."""
+    ranges: List[Tuple[int, int]] = []
+    fence_index = 0
+    index = 0
+
+    while index < len(text):
+        while fence_index < len(fenced_ranges) and fenced_ranges[fence_index][1] <= index:
+            fence_index += 1
+        if fence_index < len(fenced_ranges):
+            fence_start, fence_end = fenced_ranges[fence_index]
+            if fence_start <= index < fence_end:
+                index = fence_end
+                continue
+
+        if text[index] != "`" or _is_backslash_escaped(text, index):
+            index += 1
+            continue
+
+        opening_end = index
+        while opening_end < len(text) and text[opening_end] == "`":
+            opening_end += 1
+        delimiter_length = opening_end - index
+        search = opening_end
+        closing_end: int | None = None
+
+        while search < len(text):
+            if fence_index < len(fenced_ranges):
+                fence_start, _ = fenced_ranges[fence_index]
+                # Inline spans do not cross a fenced block boundary.
+                if search >= fence_start:
+                    break
+            if text[search] != "`":
+                search += 1
+                continue
+            run_end = search
+            while run_end < len(text) and text[run_end] == "`":
+                run_end += 1
+            if run_end - search == delimiter_length:
+                closing_end = run_end
+                break
+            search = run_end
+
+        if closing_end is None:
+            index = opening_end
+            continue
+        ranges.append((index, closing_end))
+        index = closing_end
+
+    return ranges
+
+
+def _is_backslash_escaped(text: str, index: int) -> bool:
+    """Return whether the character at *index* has an odd backslash prefix."""
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return bool(backslashes % 2)
 
 
 def _extract_buttons(text: str) -> Tuple[List[QuickReplyButton], str]:

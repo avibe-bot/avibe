@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.reply_enhancer import process_reply
+from core.reply_enhancer import process_reply, strip_silent_blocks
 from core.system_prompt_injection import build_system_prompt_injection
 from config import paths
 from modules.im import MessageContext
@@ -228,6 +228,80 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, "Visible\n\nDone")
         self.assertEqual(reply.files, [])
         self.assertEqual(reply.buttons, [])
+
+    def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
+        trailing_report = "\n".join(
+            [
+                "2. Keep queue and cancellation work in their existing lanes.",
+                "3. Persist the complete terminal message and callback payload.",
+                "4. Re-run the exact-head review and CI gates.",
+            ]
+        )
+        text = (
+            "Intermediate assistant text must not leave its Session; "
+            "the literal directive is `<silent>`.\n\n"
+            f"{trailing_report}"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_fenced_code_byte_for_byte(self):
+        text = (
+            "Examples:\n\n"
+            "```markdown\n"
+            "<silent>complete example</silent>\n"
+            "<silent>\n"
+            "substantial text after the unmatched literal\n"
+            "```\n\n"
+            "~~~text\n"
+            "<SILENT data-example=\"true\">\n"
+            "more literal text\n"
+            "~~~\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_removes_real_blocks_while_preserving_code_examples(self):
+        text = (
+            "Start\n"
+            "<silent>remove one</silent>\n"
+            "Inline `<silent>literal one</silent>` stays.\n"
+            "<SILENT reason=\"hidden\">remove two</silent >\n"
+            "````markdown\n"
+            "```nested fence```\n"
+            "<silent>literal two</silent>\n"
+            "````\n"
+            "End"
+        )
+        expected = (
+            "Start\n"
+            "\n"
+            "Inline `<silent>literal one</silent>` stays.\n"
+            "\n"
+            "````markdown\n"
+            "```nested fence```\n"
+            "<silent>literal two</silent>\n"
+            "````\n"
+            "End"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_handles_backtick_and_escape_edges(self):
+        protected = "Double ``literal `<silent>` marker`` remains."
+        escaped = r"Before \`<silent>remove me</silent>\` after"
+
+        self.assertEqual(strip_silent_blocks(protected), protected)
+        self.assertEqual(strip_silent_blocks(escaped), r"Before \`\` after")
+
+    def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
+        text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
+
+        self.assertEqual(strip_silent_blocks(text), "Visible result")
+
+    def test_silent_parser_keeps_all_silent_response_empty(self):
+        self.assertEqual(strip_silent_blocks("<silent>internal only</silent>"), "")
 
     def test_process_reply_can_disable_quick_reply_button_parsing_only(self):
         reply = process_reply(

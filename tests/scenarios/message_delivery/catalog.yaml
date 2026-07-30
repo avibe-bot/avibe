@@ -49,6 +49,12 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_show_git_turn_entrypoints.py::test_all_turn_entrypoints_reach_checkpoint_subscriber
+  - id: MESSAGE-DELIVERY-007
+    name: Markdown code examples survive terminal result and callback persistence
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_scheduled_tasks.py::test_base_agent_terminal_markdown_example_persists_complete_run_and_callback
 next_priority:
   - MESSAGE-DELIVERY-101
   - MESSAGE-DELIVERY-102
