@@ -2098,6 +2098,48 @@ def test_failed_hub_create_consumes_known_ref_without_fabricating_source_state(
     assert service.revocations.list() == []
 
 
+def test_failed_hub_create_keeps_flow_when_ref_cleanup_is_not_durable(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start(
+            {
+                "vendor": "anthropic",
+                "channel": "hub",
+                "experimental_consent": True,
+            }
+        )
+    )["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "retained_credential_ref": "cred_create_flow",
+        }
+    )
+
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    async def fail_revocation(credential_ref):
+        adapter.revoked.append(credential_ref)
+        raise RuntimeError("engine is unavailable")
+
+    service.revocations.add = fail_journal_write
+    adapter.revoke_credential = fail_revocation
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "engine_down"
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_create_flow"]
+    assert service.revocations.list() == []
+    assert service.oauth_flows.binding(flow["flow_id"]) is not None
+
+
 @pytest.mark.parametrize(
     ("terminal_state", "disposition", "retained_credential_ref"),
     [

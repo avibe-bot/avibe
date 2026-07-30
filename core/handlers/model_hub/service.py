@@ -671,7 +671,11 @@ class ModelHubService:
             # Resolution telemetry is best effort and must never affect routing.
             logger.warning("Failed to persist Model Hub resolution event")
 
-    async def _rollback_credential(self, source_id: str, credential_ref: str) -> None:
+    async def _rollback_credential(
+        self,
+        source_id: str,
+        credential_ref: str,
+    ) -> bool:
         journaled = False
         try:
             self.revocations.add(source_id, credential_ref)
@@ -682,14 +686,15 @@ class ModelHubService:
         try:
             await self.adapter.revoke_credential(credential_ref)
         except Exception:
-            return
+            return journaled
         if not journaled:
-            return
+            return True
         try:
             self.revocations.remove(source_id, credential_ref)
         except OSError:
             # A replayed revoke is safer than losing the only durable ref.
             pass
+        return True
 
     async def _rollback_replacement(
         self,
@@ -1335,10 +1340,12 @@ class ModelHubService:
                 or flow.retained_credential_ref is None
             ):
                 raise ModelHubError("engine_down", status=503)
-            await self._rollback_credential(
+            cleanup_secured = await self._rollback_credential(
                 binding.source_id,
                 flow.retained_credential_ref,
             )
+            if not cleanup_secured:
+                raise ModelHubError("engine_down", status=503)
             return config
         if (
             flow.retained_material_disposition
