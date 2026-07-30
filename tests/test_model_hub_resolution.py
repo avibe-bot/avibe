@@ -917,6 +917,45 @@ def test_failover_uses_each_sources_effective_native_alias(tmp_path):
     }
 
 
+def test_runtime_alias_blocker_event_uses_requested_menu_id(tmp_path):
+    adapter = FakeAdapter(
+        [
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    config.sources[1].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20250929",
+            provenance="discovered",
+        )
+    ]
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-5",
+            request={},
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    blocker = next(
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] == "needs_action"
+    )
+    assert blocker["model_id"] == "claude-opus-4-5"
+
+
 def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)

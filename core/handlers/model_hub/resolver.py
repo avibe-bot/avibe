@@ -125,6 +125,10 @@ def effective_model_for_source(
     """Return the upstream id this source can actually supply for one menu id."""
 
     if not explicit_mapping:
+        if source.supply_channel == "native_cli" and any(
+            model.id == requested_model for model in source.models
+        ):
+            return requested_model
         native_alias = _native_alias_for_source(
             backend,
             requested_model,

@@ -512,6 +512,43 @@ def test_runtime_launch_uses_discovered_native_alias_target(tmp_path: Path) -> N
     assert launch.runtime_model == "route-alias/claude-opus-4-5-20251101"
 
 
+@pytest.mark.parametrize("requested_model", ["opus", "sonnet[1m]"])
+def test_native_cli_preserves_exact_cli_alias(
+    tmp_path: Path,
+    requested_model: str,
+) -> None:
+    native = _source(
+        "src_native_alias",
+        kind="subscription",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="native_cli",
+        model_ids=(
+            requested_model,
+            "claude-opus-5",
+            "claude-sonnet-5",
+        ),
+    )
+    config = _hub_config(
+        sources=[native],
+        order=[native.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+
+    launch = asyncio.run(_router(service).resolve("claude", requested_model))
+
+    assert launch.channel == "native_cli"
+    assert launch.source_id == native.id
+    assert launch.target_model == requested_model
+    assert launch.runtime_model == requested_model
+
+
 def test_runtime_alias_failover_correlates_by_requested_menu_id(tmp_path: Path) -> None:
     requested_model = "claude-opus-4-5"
     primary = _source(

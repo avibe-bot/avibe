@@ -63,7 +63,9 @@ Ordering is backend-owned through the sources routes.
   version; `opus`, `sonnet`, `haiku`, `opus[1m]`, and `sonnet[1m]` select the latest
   discovered id in their family. A dated request remains exact. Alias candidates come
   only from that source's discovered inventory; manual models, foreign-vendor sources,
-  and undiscovered passthrough ids do not qualify. Explicit mappings take precedence.
+  and undiscovered passthrough ids do not qualify. A native CLI source preserves an
+  exact CLI alias instead of replacing it with a bundled-catalog model. Explicit
+  mappings take precedence.
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 

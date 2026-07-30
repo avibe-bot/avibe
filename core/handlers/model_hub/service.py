@@ -3413,7 +3413,7 @@ class ModelHubService:
                     await self._set_source_blocker(
                         source.id,
                         backend=cast(BackendName, backend),
-                        model_id=target_model,
+                        model_id=model_id,
                         detail_key=detail_key,
                         reason=event_reason,
                     )
