@@ -8,16 +8,17 @@ Failure envelope:
 `detail` is always a string. Structured error data lives in a named sibling.
 Authentication and CSRF rules are the existing UI-server rules.
 
-The shared envelope remains v3. The targeted v4 amendment changes only the nested
-`AgentChain` and `ProbeResult` objects, whose own `contract_version` is 4; untouched
-schema objects and every unrelated route remain at version 3.
+The shared envelope remains v3. Targeted v4 amendments version their changed nested
+schema objects independently; the channel class pass also tightens the service-side
+OAuth seam and adds derived fields to the existing AgentSupply/source-creation
+responses without changing the envelope version.
 
 ## Route table
 
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Array order is never a spend order. |
-| POST `/api/models/sources` | `SourceCreate` → `{source: Source, adopted_by: AdoptedBy[]}` | The server assigns `id` and immutable `created_at`; plaintext keys are transient. |
+| POST `/api/models/sources` | `SourceCreate` → `{source: Source, adopted_by: AdoptedBy[], skipped_by: SkippedBy[]}` | The server assigns `id` and immutable `created_at`; plaintext keys are transient. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?}` → `{source: Source}` | Metadata only. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → `{source, recovered, interrupted_pairs}` | API-key replacement. The optional `force` is a JSON body field, never a query parameter. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
@@ -72,8 +73,8 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
   "selected_model_id": "claude-opus-4-6",
   "current": {
     "model_id": "claude-opus-4-6",
-    "source_id": "src_claudepro1",
-    "channel": "native_cli"
+    "source_id": "src_anthkey01",
+    "channel": "hub"
   },
   "sources": {
     "policy": "follow",
@@ -82,11 +83,27 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
       {
         "source_id": "src_claudepro1",
         "eligible": true,
-        "reason_key": null
+        "reason_key": null,
+        "in_current_model_chain": true,
+        "process_availability_reason": "native_cli_unavailable"
+      },
+      {
+        "source_id": "src_anthkey01",
+        "eligible": true,
+        "reason_key": null,
+        "in_current_model_chain": true,
+        "process_availability_reason": null
+      },
+      {
+        "source_id": "src_otherkey1",
+        "eligible": true,
+        "reason_key": null,
+        "in_current_model_chain": false,
+        "process_availability_reason": null
       }
     ]
   },
-  "supply_status": "ok",
+  "supply_status": "degraded",
   "model_supply": [
     {"model_id": "claude-opus-4-6", "chain_length": 2}
   ],
@@ -94,7 +111,7 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
     {
       "name": "pm",
       "effective_model_id": "claude-opus-4-6",
-      "supply_status": "ok"
+      "supply_status": "degraded"
     },
     {
       "name": "reviewer",
@@ -114,6 +131,21 @@ which is a list of bare names inside a mutation result.
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
 
+The `sources.eligibility` inventory is also the one complete source-signal
+projection. Every existing source remains represented, including a source outside
+the selected model's capability chain. `in_current_model_chain` is true or false
+when `selected_model_id` is non-null and is null when no selection exists.
+`process_availability_reason` is `native_cli_unavailable` or null independently of
+membership and source-global health; a Hub source always carries null. This one
+mechanism therefore serves both the Agent row and the all-sources drawer.
+
+The rejected alternative was to embed only the current `AgentChain`: an in-order
+source that does not supply the selected model is absent from that chain, so its
+process-availability fact vanishes at exactly the drawer grain that still renders
+the source. Evidence at master `05f72ae5`: `service.py:1843-1891` computes the
+per-backend unavailable set beside the complete eligibility inventory, while
+`model_supply` carries only `chain_length`.
+
 ### Honest null selection
 
 Hub mode does not invent a default. When neither the routed Vibe Agent nor the
@@ -131,7 +163,8 @@ backend configuration pins a model:
 
 This means “no pinned selection.” Each turn still resolves against the model carried
 by that request, including the CLI's own default. `sources`, `model_supply`, and
-`named_agents` remain present and non-null in Hub mode.
+`named_agents` remain present and non-null in Hub mode. Each eligibility row keeps
+its process availability but carries `in_current_model_chain: null`.
 
 ## Per-backend source order
 
@@ -157,6 +190,19 @@ Request shapes are total:
 Eligibility is server-authoritative. An ineligible row carries exactly one closed
 `reason_key` from `agent-supply.schema.json`; an eligible row carries null.
 
+### Mapping and menu enrollment
+
+A mapping or open-menu target is accepted only when its selected source is enrolled
+in the backend's post-mutation effective order. Selecting a target from an eligible
+but non-enrolled source auto-appends that source to the order in the same accepted
+mutation. This is an order edit: `follow` forks to `custom`, an existing `custom`
+order remains `custom`, and the confirm step must surface the appended source before
+acceptance. An ineligible source is never auto-enrolled and the request fails with
+`mapping_target_unavailable`. Evidence at master `05f72ae5`:
+`service.py:1955-1985` validates targets against eligible inventory but does not
+yet require or edit effective-order enrollment; the follow-up consumer lane owns
+that acceptance change.
+
 ## Source creation outcome
 
 `AdoptedBy` is:
@@ -169,6 +215,20 @@ Eligibility is server-authoritative. An ineligible row carries exactly one close
 eligible `follow` backends that actually adopted the source and is frozen with the
 source response. `custom` backends are absent and retain their prior order.
 
+`SkippedBy` is:
+
+```json
+{"backend": "codex", "reason": "custom_order"}
+```
+
+Its closed backend vocabulary is `claude | codex | opencode`; its reason vocabulary
+has one v2 member, `custom_order`. The array contains every eligible custom backend
+that did not adopt the new source. Ineligible backends appear in neither array, so a
+consumer can distinguish “eligible but deliberately skipped” from “cannot use this
+source” without reimplementing the compatibility matrix. Evidence at master
+`05f72ae5`: `service.py:767-783` emits only follow-policy adoption, collapsing
+eligible custom skips into the same absence as ineligibility.
+
 The terminal result of both ordinary API-key creation and OAuth creation is:
 
 ```json
@@ -178,6 +238,9 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
   "source": {"id": "src_anthkey01", "kind": "api_key"},
   "adopted_by": [
     {"backend": "claude", "policy": "follow", "position": 2}
+  ],
+  "skipped_by": [
+    {"backend": "codex", "reason": "custom_order"}
   ]
 }
 ```
@@ -275,6 +338,30 @@ differently only if all invariants remain true:
    returning success. A reconstructed service reads the same journal and retries it.
    The source remains usable; no state is allowed where the old handle is live and no
    durable record names it. Successful reconciliation removes the record.
+8. **Channel-aware OAuth retained-material partition.** A failed Hub flow reports
+   one total `retained_material_disposition` from the adapter seam. `none` preserves
+   the prior source strictly. `flow_source_ref` is the irreversible v4b case:
+   persist `state.status: needs_action` with
+   `state.detail_key: models.source.needs_action.oauth_expired`, clear discovered
+   supply, and never route silently. `orphan_ref` preserves the prior source and
+   records a ref-keyed invariant-7 retry through `retained_credential_ref` and
+   `EngineAdapter.cleanup_orphaned_oauth_material`: the operation returns true
+   only after both auth-file deletions are confirmed and the retained ref is
+   revoked; only then may the journal entry be cleared. `foreign_source_ref`
+   preserves the prior source and
+   schedules neither revocation nor a journal entry; the same-account refresh
+   belongs to the other source's record, whose health reports at its own grain,
+   while this flow retains `models.oauth.binding_failed`. `unknown` treats the flow
+   source like the irreversible case but touches no refs: no handle can be named
+   safely, so loud re-auth is the convergent remedy.
+
+   The consumer does not infer this partition by comparing refs. Hub success pins
+   `flow_source_ref` and equality of `credential_ref` and
+   `retained_credential_ref`. Native CLI success pins `credential_ref: null`,
+   disposition `none`, and a null retained ref because CLI-owned material never
+   enters the engine seam. A two-ref transactional OAuth swap remains a deliberate
+   v2 non-goal: the owner accepted one additional re-auth for this rare, already
+   interactive failure window; revisit only with field evidence.
 
 API-key success:
 
@@ -304,7 +391,7 @@ does not add a second “recover” endpoint.
 `OAuthFlow.intent` makes the terminal shape a function of the flow:
 
 - non-terminal, failed, or canceled → `{flow}`;
-- terminal `intent: "create"` → `{flow, source, adopted_by}`;
+- terminal `intent: "create"` → `{flow, source, adopted_by, skipped_by}`;
 - terminal `intent: "reauth"` → `{flow, source, recovered, interrupted_pairs}`.
 
 Status and submit return the same terminal shape:
@@ -322,7 +409,8 @@ Status and submit return the same terminal shape:
   "source": {"id": "src_claudepro1", "kind": "subscription"},
   "adopted_by": [
     {"backend": "claude", "policy": "follow", "position": 1}
-  ]
+  ],
+  "skipped_by": []
 }
 ```
 
@@ -518,13 +606,15 @@ contract harness and API-boundary tests enforce:
 | every non-null `then` constraint has matching `required`, except a declared fail-safe legacy-example exception | contract harness |
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
+| every AgentSupply eligibility row carries `in_current_model_chain` and `process_availability_reason`; membership nullability follows `selected_model_id`, and only a native source may carry `native_cli_unavailable` | AgentSupply assembler |
 | `AgentChain.chain` source ids are unique and preserve effective order, including process-unavailable native CLI items | chain assembler |
 | `model_supply` has one row per menu model with unique ids | AgentSupply assembler |
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `sources`, `supply_status`, `model_supply`, and `named_agents` | API payload test |
+| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `sources`, `supply_status`, `model_supply`, and `named_agents`; source creation returns both `adopted_by` and `skipped_by` | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
+| contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must
 round-trip through config serialization. Derived fields are exempt from persistence

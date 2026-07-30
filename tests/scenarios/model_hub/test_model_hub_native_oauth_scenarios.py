@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from core.handlers.model_hub.adapter import RetainedMaterialDisposition
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
     NativeOAuthScenarioHarness,
@@ -45,6 +48,11 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         "expects": "paste_code",
         "instructions_key": "settings.models.oauth.pasteCode.hint",
     }
+    started_seam = asyncio.run(harness.adapter.oauth_status(started["flow_id"]))
+    assert started_seam.channel == "native_cli"
+    assert started_seam.credential_ref is None
+    assert started_seam.retained_material_disposition is RetainedMaterialDisposition.NONE
+    assert started_seam.retained_credential_ref is None
 
     invalid = client.post(
         "/api/models/oauth/submit",
@@ -66,6 +74,12 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert harness.agent_auth.submissions == [(started["flow_id"], "code-value#state-value")]
 
     harness.agent_auth.complete(started["flow_id"])
+    completed_seam = asyncio.run(harness.adapter.oauth_status(started["flow_id"]))
+    assert completed_seam.state == "success"
+    assert completed_seam.channel == "native_cli"
+    assert completed_seam.credential_ref is None
+    assert completed_seam.retained_material_disposition is RetainedMaterialDisposition.NONE
+    assert completed_seam.retained_credential_ref is None
     completed = client.get(
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,

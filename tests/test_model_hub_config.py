@@ -84,12 +84,18 @@ def _validate_mirror_entry(entry: dict, schemas: dict[str, dict]) -> None:
             schemas[entry["home"]["schema"]],
             [entry["home"]["path"]],
         )
-        target = _vocabulary(
-            schemas[entry["target"]["schema"]],
-            [entry["target"]["path"]],
-        )
-        assert home == set(entry["mapping"])
-        assert target == set(entry["mapping"].values())
+        targets = entry.get("targets")
+        if targets is None:
+            targets = [{**entry["target"], "mapping": entry["mapping"]}]
+        for item in targets:
+            target = _vocabulary(
+                schemas[item["schema"]],
+                [item["path"]],
+                exclude=item.get("exclude", ()),
+            )
+            mapping = item["mapping"]
+            assert home == set(mapping)
+            assert target == set(mapping.values())
         return
     if rule == "partition":
         home = _vocabulary(
@@ -216,22 +222,40 @@ def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
     for entry in registry["entries"]:
         if entry["rule"] == "none":
             continue
-        mutated = copy.deepcopy(schemas)
         if entry["rule"] == "bijection":
-            location = entry["target_sets"][0]
-            pointer = location["paths"][0]
+            locations = [(location, location["paths"][0]) for location in entry["target_sets"]]
         elif entry["rule"] == "equality":
-            location = entry["sets"][0]
-            pointer = location["paths"][0]
+            locations = [(location, pointer) for location in entry["sets"] for pointer in location["paths"][:1]]
+        elif entry["rule"] == "mapping":
+            targets = entry.get("targets")
+            if targets is None:
+                targets = [entry["target"]]
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                *[(location, location["path"]) for location in targets],
+            ]
+        elif entry["rule"] == "partition":
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                (entry["member"], entry["member"]["path"]),
+            ]
         else:
-            location = entry["home"]
-            pointer = location["path"]
-        node = _json_pointer(mutated[location["schema"]], pointer)
-        assert "enum" in node, entry["id"]
-        node["enum"].append(f"mutation_{entry['id'].lower()}")
+            locations = [
+                (entry["home"], entry["home"]["path"]),
+                *[(location, location["path"]) for location in entry["targets"]],
+            ]
 
-        with pytest.raises(AssertionError):
-            _validate_mirror_entry(entry, mutated)
+        for location, pointer in locations:
+            mutated = copy.deepcopy(schemas)
+            node = _json_pointer(mutated[location["schema"]], pointer)
+            if "enum" in node:
+                node["enum"].append(f"mutation_{entry['id'].lower()}")
+            else:
+                assert "const" in node, entry["id"]
+                node["const"] = f"mutation_{entry['id'].lower()}"
+
+            with pytest.raises(AssertionError):
+                _validate_mirror_entry(entry, mutated)
 
 
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
@@ -323,6 +347,57 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
     ]
     with pytest.raises(ValidationError):
         supply_validator.validate(invalid_reason)
+
+    signal_supply = copy.deepcopy(base_supply)
+    signal_supply.update(
+        {
+            "selected_model_id": "claude-opus-4-6",
+            "current": {
+                "model_id": "claude-opus-4-6",
+                "source_id": "src_anthkey01",
+                "channel": "hub",
+            },
+            "supply_status": "degraded",
+        }
+    )
+    signal_supply["sources"] = {
+        "policy": "custom",
+        "order": ["src_anthkey01"],
+        "eligibility": [
+            {
+                "source_id": "src_claudepro1",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": True,
+                "process_availability_reason": "native_cli_unavailable",
+            },
+            {
+                "source_id": "src_anthkey01",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": True,
+                "process_availability_reason": None,
+            },
+            {
+                "source_id": "src_otherkey1",
+                "eligible": True,
+                "reason_key": None,
+                "in_current_model_chain": False,
+                "process_availability_reason": None,
+            },
+        ],
+    }
+    supply_validator.validate(signal_supply)
+
+    invalid_availability = copy.deepcopy(signal_supply)
+    invalid_availability["sources"]["eligibility"][0]["process_availability_reason"] = "gateway_down"
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_availability)
+
+    invalid_membership = copy.deepcopy(signal_supply)
+    invalid_membership["sources"]["eligibility"][2]["in_current_model_chain"] = "not_supplying"
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_membership)
 
     event_validator = Draft7Validator(_schema("resolution-event.schema.json"))
     source_wide = _schema("resolution-event.schema.json")["examples"][1]
