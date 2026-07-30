@@ -23,6 +23,7 @@ import {
   sessionReadOnlyReason,
   showPageControlActions,
   transcriptSelectionActions,
+  WORKSPACE_NOTICE_SESSION_ID,
 } from './sessionArchived';
 import { SecretRequestCard } from '../ui/secret-request-card';
 
@@ -460,6 +461,30 @@ describe('a runtime-owned system session is read-only for its own reason', () =>
     expect(sessionReadOnlyReason(null)).toBeNull();
     // Terminal lifecycle outranks ownership when a system row is somehow archived.
     expect(sessionReadOnlyReason(session({ visibility: 'system', status: 'archived' }))).toBe('archived');
+  });
+
+  it('recognizes the reserved session by IDENTITY when its visibility has drifted', () => {
+    // The server's ``session_is_runtime_owned`` is two tests OR'd: the visibility
+    // projection AND the reserved identity, because the reserved row heals its
+    // visibility only lazily — on the next notice. Between an out-of-band update
+    // and that heal, the Inbox (which admits foreground) still reaches the row as
+    // ``foreground``; a visibility-only client predicate would render the
+    // composer, route picker and fork controls just to collect
+    // ``403 reserved_session`` on every one. Identity must lock it alone.
+    const drifted = session({
+      id: WORKSPACE_NOTICE_SESSION_ID,
+      visibility: 'foreground',
+      agent_name: null,
+      agent_backend: '',
+    });
+    expect(drifted.status).toBe('active');
+    expect(sessionReadOnlyReason(drifted)).toBe('system');
+    expect(isSessionReadOnly(drifted)).toBe(true);
+    // And the identity constant mirrors the server's, character for character —
+    // a drifted copy of THIS string is the whole point of the check.
+    expect(WORKSPACE_NOTICE_SESSION_ID).toBe('ses-workspace-notices');
+    // An ordinary foreground session with an ordinary id stays writable.
+    expect(sessionReadOnlyReason(session({ id: 'sesordinary01', visibility: 'foreground' }))).toBeNull();
   });
 
   it('withdraws every session write the same way archive does', () => {

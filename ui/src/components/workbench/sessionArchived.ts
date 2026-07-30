@@ -22,11 +22,27 @@
 // page just reads the answers.
 import type { WorkbenchSession } from '../../context/ApiContext';
 
+/** The reserved workspace-notifications session's id — the server's
+ *  ``WORKSPACE_NOTICE_SESSION_ID`` (``storage/agent_session_rows.py``), whose primary
+ *  key is deliberately outside ``SESSION_ID_ALPHABET`` so no ordinary session can ever
+ *  collide with it. Mirrored here because the server's ``session_is_runtime_owned``
+ *  refuses this row by IDENTITY as well as by visibility, and the UI must reach the
+ *  same answer from the same two tests. */
+export const WORKSPACE_NOTICE_SESSION_ID = 'ses-workspace-notices';
+
 /** Why the chat surface is read-only, or ``null`` when it is writable.
  *
  *  ``archived`` is checked FIRST: it is the terminal lifecycle state, so it wins over
  *  ownership if a system row is ever also archived (the reserved row heals itself back
- *  out of that, but only on the next notice). */
+ *  out of that, but only on the next notice).
+ *
+ *  ``system`` is TWO TESTS, OR'd, mirroring the server's
+ *  ``session_is_runtime_owned``: the ``visibility`` projection (so a future
+ *  system-owned row inherits the lock), and the reserved IDENTITY — which covers the
+ *  states where the projection is momentarily wrong. The reserved row heals lazily,
+ *  on the next notice, so a drifted ``foreground`` copy of it stays reachable through
+ *  the Inbox in the meantime; without the identity half the composer, route picker
+ *  and fork controls would render there just to collect ``403 reserved_session``. */
 export type SessionReadOnlyReason = 'archived' | 'system';
 
 export const sessionReadOnlyReason = (
@@ -34,7 +50,9 @@ export const sessionReadOnlyReason = (
 ): SessionReadOnlyReason | null => {
   if (!session) return null;
   if (session.status === 'archived') return 'archived';
-  if (session.visibility === 'system') return 'system';
+  if (session.visibility === 'system' || session.id === WORKSPACE_NOTICE_SESSION_ID) {
+    return 'system';
+  }
   return null;
 };
 
