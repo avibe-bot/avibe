@@ -459,6 +459,60 @@ async def test_claude_preserves_receiver_when_ambiguous_input_half_close_fails()
         client._transport.end_input.assert_awaited_once_with()
         client.disconnect.assert_not_awaited()
         assert not receiver_task.done()
+        assert agent.steering_native_turn_id(
+            ActiveSteerTarget(
+                runtime_key="runtime-key",
+                logical_turn_id="logical-turn",
+                context=primary.context,
+                agent_request=primary,
+                agent=agent,
+            )
+        ) is None
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
+async def test_shared_boundary_finishes_native_reconciliation_before_propagating_cancel() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+
+    class _BlockingClaudeClient(_ClaudeClient):
+        async def query(self, text: str, *, session_id: str) -> None:
+            self.queries.append((text, session_id))
+            query_started.set()
+            await release_query.wait()
+
+    client = _BlockingClaudeClient()
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+        caller = asyncio.create_task(
+            steer_active_turn(controller, "claude", _steer_request(identity[1]))
+        )
+        await query_started.wait()
+
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done()
+
+        release_query.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert agent._steering_generation("runtime-key") == 1
+        assert agent._next_terminal_barrier("runtime-key") == "accepted"
+        assert agent._pending_requests["runtime-key"] == [primary]
+        assert not receiver_task.done()
     finally:
         await _cancel_tasks(gate_task, receiver_task)
 

@@ -1024,7 +1024,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         failure_ready = asyncio.Event()
         failure_generation_captured = asyncio.Event()
         paired_result_ready = asyncio.Event()
-        final_result_ready = asyncio.Event()
+        first_steered_result_ready = asyncio.Event()
+        second_steered_result_ready = asyncio.Event()
 
         class _SteeringClient:
             async def query(self, _text, *, session_id):
@@ -1039,10 +1040,14 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     failed = _ResultMessage()
                     failed.result = "primary failed"
                     yield failed
-                    await final_result_ready.wait()
-                    final = _ResultMessage()
-                    final.result = "steered result"
-                    yield final
+                    await first_steered_result_ready.wait()
+                    first_steered = _ResultMessage()
+                    first_steered.result = "first steered result"
+                    yield first_steered
+                    await second_steered_result_ready.wait()
+                    second_steered = _ResultMessage()
+                    second_steered.result = "second steered result"
+                    yield second_steered
 
                 return _iterate()
 
@@ -1097,16 +1102,24 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         self.assertIn(composite_key, agent._suppressed_synthetic_results)
 
+        second_receipt = await agent.steer_active_turn(request, target)
+        self.assertIs(second_receipt.outcome, SteerOutcome.ACCEPTED)
+
         paired_result_ready.set()
         await paired_result_consumed.wait()
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         agent.emit_result_message.assert_not_awaited()
 
-        final_result_ready.set()
+        first_steered_result_ready.set()
+        await asyncio.sleep(0)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        second_steered_result_ready.set()
         await receiver_task
 
         agent.emit_result_message.assert_awaited_once()
-        self.assertEqual(agent.emit_result_message.await_args.args[1], "steered result")
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "second steered result")
         self.assertFalse(agent._has_pending_requests(composite_key))
 
     async def test_emit_failure_still_marks_session_idle(self):

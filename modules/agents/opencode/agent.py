@@ -202,6 +202,7 @@ class _SteeringAwareOpenCodeServer:
                                 message.get("info", {}).get("role") == "assistant"
                                 and message.get("info", {}).get("id")
                                 not in self._state.baseline_message_ids
+                                and message.get("info", {}).get("time", {}).get("completed")
                                 for message in messages
                             ):
                                 return self._terminal_reconciliation_failure(

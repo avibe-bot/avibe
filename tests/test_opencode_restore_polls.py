@@ -294,6 +294,45 @@ def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> Non
     }
 
 
+def test_restore_settles_incomplete_assistant_when_unknown_status_recovers_idle() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []},
+        {"info": {"id": "partial-assistant", "role": "assistant", "time": {}}, "parts": []},
+    ]
+    agent._test_server.status = {"type": "idle"}
+    agent._test_server.status_error = TimeoutError("status unavailable")
+    reconciled_messages: list[dict] = []
+
+    class _ReconcilePollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            agent._test_server.status_error = None
+            server = await agent._get_server()
+            reconciled_messages.extend(
+                await server.list_messages(
+                    poll_info.opencode_session_id,
+                    poll_info.working_path,
+                )
+            )
+
+        async def remove_restored_ack(self, poll_info):
+            return None
+
+    agent._poll_loop = _ReconcilePollLoop()
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert removed == []
+    assert reconciled_messages[-1]["info"]["error"]["name"] == (
+        "NativeSessionEndedBeforeResult"
+    )
+
+
 def test_restored_avibe_poll_marks_session_running():
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     agent, status_writes, _, _ = _build_agent({"oc-1": poll})

@@ -696,9 +696,11 @@ class ClaudeAgent(BaseAgent):
         end_input,
     ) -> None:
         """Half-close native input so delivered work finishes before a durable EOF."""
+        # Once a write is ambiguous, this runtime cannot safely accept another
+        # steer until its sole receiver reaches a durable terminal boundary.
+        self._ambiguous_input_shutdown_keys().add(composite_key)
         try:
             await end_input()
-            self._ambiguous_input_shutdown_keys().add(composite_key)
         except Exception:  # noqa: BLE001 - the existing receiver keeps ownership
             logger.warning(
                 "Failed to half-close ambiguous Claude steering input for %s; preserving the live receiver",
@@ -1371,6 +1373,16 @@ class ClaudeAgent(BaseAgent):
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
                         async with self._steering_lock(composite_key):
+                            self._pending_assistant_message.pop(composite_key, None)
+                            if self._consume_suppressed_synthetic_result(
+                                composite_key,
+                                message,
+                                raw_result_text,
+                            ):
+                                self._last_assistant_text.pop(composite_key, None)
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                continue
                             if (
                                 not settling_ambiguous_primary
                                 and self._next_terminal_barrier(composite_key) == "unknown"
@@ -1399,17 +1411,6 @@ class ClaudeAgent(BaseAgent):
                                     "Ignoring Claude terminal result superseded by steering or teardown for %s",
                                     composite_key,
                                 )
-                                continue
-
-                            self._pending_assistant_message.pop(composite_key, None)
-                            if self._consume_suppressed_synthetic_result(
-                                composite_key,
-                                message,
-                                raw_result_text,
-                            ):
-                                self._last_assistant_text.pop(composite_key, None)
-                                self._foreground_tool_use_ids.pop(composite_key, None)
-                                self._turns_with_foreground_tools.discard(composite_key)
                                 continue
 
                             failure_disposition = await self._handle_terminal_failure_result(

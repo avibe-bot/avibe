@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping
@@ -188,7 +189,26 @@ async def steer_active_turn(
     steer = getattr(target.agent, "steer_active_turn", None)
     if not callable(steer):
         return result(SteerOutcome.REFUSED, reason="unsupported", backend=backend)
-    receipt = await steer(request, target)
+    attempt = asyncio.create_task(steer(request, target))
+    try:
+        receipt = await asyncio.shield(attempt)
+    except asyncio.CancelledError:
+        # Cancellation of the surface caller must not cancel an adapter after
+        # its native write may have started. Let it establish terminal
+        # ownership/reconciliation, then preserve the caller's cancellation.
+        while not attempt.done():
+            try:
+                await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if attempt.done() and not attempt.cancelled():
+            try:
+                attempt.result()
+            except BaseException:
+                pass
+        raise
     if not isinstance(receipt, SteerResult):
         return result(SteerOutcome.UNKNOWN, reason="invalid_adapter_receipt", backend=backend)
     return receipt
