@@ -2259,7 +2259,22 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
         {"state": "pending", "attempts": 1, "next_attempt_at": "2026-07-29T00:00:30+00:00"},
         {"state": "pending", "attempts": "not-a-number", "next_attempt_at": "2026-07-29T00:00:30+00:00"},
         {"state": "sent", "attempts": 2, "next_attempt_at": "2026-07-29T00:10:00+00:00"},
+        {"state": "pending", "attempts": 1, "next_attempt_at": " 9999-01-01T00:00:00+00:00"},
+        # ...and every JSON type it cannot legally hold. These are not curiosities: the
+        # eligibility predicate ADMITS all of them (SQLite sorts every number before
+        # every ISO instant), so an expectation SQL cannot match is a row the drain
+        # reads and can never write — a batch slot held for good. ``0`` and ``false``
+        # are the ones an ``or ""`` read got wrong, and the reals are the ones whose
+        # SQLite text cannot be reproduced in Python at all.
         {"state": "pending", "attempts": 1, "next_attempt_at": 5},
+        {"state": "pending", "attempts": 1, "next_attempt_at": 0},
+        {"state": "pending", "attempts": 1, "next_attempt_at": True},
+        {"state": "pending", "attempts": 1, "next_attempt_at": False},
+        {"state": "pending", "attempts": 1, "next_attempt_at": 3.5},
+        {"state": "pending", "attempts": 1, "next_attempt_at": 1e25},
+        {"state": "pending", "attempts": 1, "next_attempt_at": -1.5063173670565552e-212},
+        {"state": "pending", "attempts": 1, "next_attempt_at": {"a": 1}},
+        {"state": "pending", "attempts": 1, "next_attempt_at": [1]},
     ]
 
     import json as _json
@@ -2302,6 +2317,170 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
                     ).rowcount
                     == 0
                 ), f"{wrong!r} must not match a notice whose expectation is {expect!r}"
+
+    # The non-text branch asserts a TYPE, so it needs its own negative control: an
+    # expectation read from a numeric instant must not match a row that now holds a
+    # real one. That transition is exactly what the third element exists to catch — a
+    # concurrent DEFERRAL writes an ISO string — so a guard that ignored it would let a
+    # stale claim erase the deferral it never saw.
+    numeric = {"state": "pending", "attempts": 1, "next_attempt_at": 5}
+    from_numeric = notice_write_expectation(numeric)
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == run.id)
+            .values(
+                metadata_json=_json.dumps(
+                    {
+                        OWED_FAILURE_NOTICE_KEY: {
+                            "state": "pending",
+                            "attempts": 1,
+                            "next_attempt_at": "2026-07-29T00:00:30+00:00",
+                        }
+                    }
+                )
+            )
+        )
+    with sqlite.engine.connect() as conn:
+        assert (
+            conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .where(*owed_notice_state_unchanged(from_numeric))
+                .values(updated_at="2026-07-01T00:00:00+00:00")
+            ).rowcount
+            == 0
+        ), (
+            f"{from_numeric!r} matched a row whose retry instant became TEXT; a "
+            "concurrent deferral would be erased by a claim that never saw it"
+        )
+
+
+def test_the_eligibility_predicate_reads_the_same_in_python_and_in_sql(tmp_path: Path) -> None:
+    """Subordinate to HFR-076 — the eligibility twins may not drift over ANY JSON shape.
+
+    ``owed_notice_eligible`` is the Python twin of the two expressions
+    ``list_owed_failure_notices`` seeks on, and the seek applies ``LIMIT`` BEFORE the
+    Python re-check runs. So a shape SQL admits and Python rejects is not a harmless
+    difference of opinion: the row consumes one of the ten slots, is dropped with no
+    state transition, and is selected again on the next tick forever. Ten of them
+    starve every valid notice behind them — silently, in a drain that looks busy and
+    healthy. Same defect class as HFR-085 and as the malformed ``attempts`` that
+    ``notice_write_expectation`` degrades instead of wedging.
+
+    ``next_attempt_at`` is stamped only by this module's own writers, always as an ISO
+    string, so the shapes below need a foreign writer or a hand-edited row to arrive.
+    That is exactly the argument that made the earlier drift invisible for two rounds,
+    so the predicate is pinned over every JSON type instead: null, text, integer, real,
+    true/false, object and array, and the paddings that make a string sort against
+    ``now`` differently before and after a ``strip()``.
+
+    The comparison SQLite makes is a STORAGE CLASS comparison, and this test exists
+    because that is not the comparison Python makes:  every INTEGER and REAL sorts
+    before every TEXT in SQLite, so a numeric ``next_attempt_at`` is ``<= now`` for
+    any instant, while ``str(9999) <= "2026-..."`` is false. And SQLite does not strip,
+    so ``" 9999-01-01..."`` sorts before ``now`` on the leading space while a stripped
+    copy sorts after it.
+    """
+
+    from sqlalchemy import and_, literal_column
+    from sqlalchemy import select as sa_select
+    from sqlalchemy import update as sa_update
+
+    from storage.background import (
+        NOTICE_PENDING,
+        OWED_NOTICE_NEXT_ATTEMPT_SQL,
+        OWED_NOTICE_STATE_SQL,
+    )
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-eligible-twin")
+    run = requests.enqueue_task_run("task-eligible-twin")
+    claimed = requests.claim(run.id)
+    requests.complete(claimed, ok=False, error="boom", task_id="task-eligible-twin")
+
+    now = "2026-07-29T00:00:00+00:00"
+    # The two expressions VERBATIM, combined exactly as the listing query combines
+    # them, so this compares against the predicate that actually applies the limit.
+    in_sql = and_(
+        literal_column(OWED_NOTICE_STATE_SQL) == NOTICE_PENDING,
+        literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL) <= now,
+    )
+
+    shapes: list[Any] = [
+        # ``next_attempt_at`` as TEXT, which is the only shape a stamper writes.
+        {"state": "pending"},
+        {"state": "pending", "next_attempt_at": None},
+        {"state": "pending", "next_attempt_at": ""},
+        {"state": "pending", "next_attempt_at": "2026-07-28T23:59:59+00:00"},
+        {"state": "pending", "next_attempt_at": "2099-01-01T00:00:00+00:00"},
+        {"state": "pending", "next_attempt_at": " 2020-01-01T00:00:00+00:00"},
+        {"state": "pending", "next_attempt_at": " 9999-01-01T00:00:00+00:00"},
+        {"state": "pending", "next_attempt_at": "2026-07-28T23:59:59+00:00 "},
+        # ...and a numeric-looking STRING, which is still text and still compares as
+        # text on both sides — the negative control for the numeric rows below.
+        {"state": "pending", "next_attempt_at": "9999"},
+        # Every other JSON type.
+        {"state": "pending", "next_attempt_at": 0},
+        {"state": "pending", "next_attempt_at": 1},
+        {"state": "pending", "next_attempt_at": 3},
+        {"state": "pending", "next_attempt_at": 9999},
+        {"state": "pending", "next_attempt_at": -5},
+        {"state": "pending", "next_attempt_at": 1.5},
+        {"state": "pending", "next_attempt_at": 3.5},
+        {"state": "pending", "next_attempt_at": 1e25},
+        {"state": "pending", "next_attempt_at": True},
+        {"state": "pending", "next_attempt_at": False},
+        {"state": "pending", "next_attempt_at": {"a": 1}},
+        {"state": "pending", "next_attempt_at": [1]},
+        # The state half of the predicate, including the shapes that make the notice
+        # unreadable rather than merely ineligible.
+        {"state": "sent", "next_attempt_at": None},
+        {"state": "skipped"},
+        {"state": "failed"},
+        {"state": "PENDING"},
+        {"state": None},
+        {},
+        None,
+        "pending",
+        5,
+    ]
+
+    import json as _json
+
+    answers: list[bool] = []
+    drift: list[str] = []
+    for stored in shapes:
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .values(metadata_json=_json.dumps({OWED_FAILURE_NOTICE_KEY: stored}))
+            )
+        with sqlite.engine.connect() as conn:
+            listed = bool(
+                conn.execute(
+                    sa_select(in_sql).select_from(agent_runs).where(agent_runs.c.id == run.id)
+                ).scalar()
+            )
+        answers.append(listed)
+        if owed_notice_eligible(stored, now) is not listed:
+            drift.append(f"{stored!r}: SQL={listed} python={not listed}")
+    # Reported as one list rather than one failure: the shapes that drift are the
+    # inventory of ways a row can hold a batch slot forever, and seeing them together
+    # is what makes the normalization rule obvious.
+    assert not drift, (
+        "owed_notice_eligible disagreed with the SQL the LIMIT is applied to for "
+        + str(len(drift))
+        + " shape(s); each is a row SQL admits and Python drops, which holds one of "
+        "the ten batch slots forever with no state transition:\n  "
+        + "\n  ".join(drift)
+    )
+
+    # A predicate that answered the same thing to everything would satisfy the loop
+    # above without pinning anything.
+    assert any(answers) and not all(answers), "the shapes must exercise both answers"
 
 
 def test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt(
@@ -4668,6 +4847,132 @@ def test_one_backed_off_definition_does_not_starve_every_other_notice(tmp_path: 
     assert sqlite.owed_failure_notice("run-quiet")["state"] == "sent", (
         "an unrelated definition's notice was starved by a deferred streak; "
         f"delivered={delivered}"
+    )
+
+
+def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
+    tmp_path: Path,
+) -> None:
+    """HFR-085 — a row the SQL admits and Python drops must not hold a batch slot.
+
+    The same starvation as the test above, reached through the OTHER half of the
+    eligibility contract. ``list_owed_failure_notices`` seeks and LIMITS in SQL and
+    then re-checks the decoded blob in Python, so a ``next_attempt_at`` the two sides
+    read differently is a row that is selected, dropped, and never written — the one
+    thing that guarantees it is selected again next tick.
+
+    A JSON number is the sharpest shape: SQLite compares storage classes, so every
+    INTEGER sorts before every TEXT and the row is both ELIGIBLE and FIRST in
+    ``ORDER BY next_attempt_at``. Ten of them therefore fill the batch of ten ahead of
+    every legitimately eligible notice, on every tick, forever.
+
+    The fix is not to make the drain skip them harder: it is that a row admitted by
+    the listing must be advanced by the pass that reads it. Degrade and advance, as
+    ``notice_write_expectation`` already does for a malformed ``attempts`` — the claim
+    stamps a real ISO instant over the unreadable one, so the poisoned row leaves the
+    front of the queue by being HANDLED rather than by being avoided.
+    """
+
+    from types import SimpleNamespace
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-poisoned", deliver_key="slack::channel::C1")
+    _task(sqlite, "task-behind", deliver_key="slack::channel::C2")
+
+    # Exactly one batch worth of rows whose retry instant is not a string. Every one is
+    # ``<= now`` in SQL and sorts ahead of every ISO instant and ahead of the empty
+    # string a freshly stamped notice reads as.
+    for index in range(10):
+        _pending_failure(
+            sqlite,
+            f"run-poisoned-{index:02d}",
+            "task-poisoned",
+            created_at=f"2026-07-27T00:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 0,
+                "next_attempt_at": 30000 + index,
+                "failure_id": f"run-poisoned-{index:02d}",
+            },
+        )
+    # ...and one ordinary notice behind them, eligible now.
+    _pending_failure(
+        sqlite,
+        "run-behind",
+        "task-behind",
+        created_at="2026-07-27T02:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": "run-behind",
+        },
+    )
+
+    # The batch the SQL LIMIT filled must not arrive HOLLOW. Ten rows were admitted
+    # before the limit; if the Python re-check drops them afterwards the drain gets an
+    # empty pass while eleven notices are owed, and gets the same empty pass forever.
+    listed = [item["id"] for item in sqlite.list_owed_failure_notices(limit=10)]
+    assert len(listed) == 10, (
+        "the limited batch came back short while eleven notices were owed: the rows SQL "
+        "admitted were dropped by the Python re-check AFTER the limit, so the batch is a "
+        f"hole rather than a queue (listed={listed})"
+    )
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    delivered: list[str] = []
+
+    async def _spy_emit(controller, context, backend, diagnostic, **kwargs):
+        delivered.append(str(kwargs.get("failure_id")))
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
+        service = ScheduledTaskService.__new__(ScheduledTaskService)
+        service.store = store
+        service.request_store = requests
+        service._drain_dirty = False
+        service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+        service._owns_service_instance = lambda: True
+        service.validate_platform = lambda platform: None
+        service._t = lambda key, **kwargs: key
+        for _ in range(4):
+            asyncio.run(service._drain_failure_notices())
+
+    assert sqlite.owed_failure_notice("run-behind")["state"] == "sent", (
+        "a notice was starved by ten rows the listing admitted and the drain dropped; "
+        f"delivered={delivered}"
+    )
+    # ...and every poisoned row was ADVANCED rather than skipped over: settled, or
+    # deferred to a real instant. None of them is still immediately eligible, so none
+    # can re-occupy the front of the queue on the next tick. That — not the field's
+    # final value — is the anti-starvation property, and it is asserted through the
+    # very predicate the listing seeks on.
+    from datetime import datetime, timezone
+
+    later = datetime.now(timezone.utc).isoformat()
+    stuck = {
+        f"run-poisoned-{index:02d}": sqlite.owed_failure_notice(f"run-poisoned-{index:02d}")
+        for index in range(10)
+    }
+    stuck = {
+        run_id: notice for run_id, notice in stuck.items() if owed_notice_eligible(notice, later)
+    }
+    assert not stuck, (
+        "rows the listing admitted are still immediately eligible after being read by "
+        f"four passes; each holds a batch slot for good: {stuck}"
     )
 
 

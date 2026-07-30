@@ -750,6 +750,41 @@ NOTICE_FAILED = "failed"
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
 
 
+class _UnstampableInstant(str):
+    """A ``next_attempt_at`` that is not JSON text, carried through an expectation.
+
+    A ``str`` subclass so the expectation stays a ``tuple[str, int, str]`` and every
+    caller that only passes it through, prints it or compares it keeps working, while
+    ``owed_notice_state_unchanged`` can recognize it by TYPE and re-assert the stored
+    value the only way SQLite makes reproducible: by its JSON type.
+
+    Why a JSON number cannot be re-asserted by its text. The guard compares
+    ``cast(json_extract(...) AS TEXT)`` against a Python string, and SQLite renders a
+    REAL with its own 15-significant-digit formatter: ``1e25`` reads back as
+    ``'1.0e+25'`` where Python's ``str`` gives ``'1e+25'``, and at the 15th digit the
+    two round differently (``-1.5063173670565552e-212`` -> ``...655`` in SQLite,
+    ``...656`` in Python). Guessing that text would refuse the write, and a refused
+    write on a row the listing ADMITS is the starvation this whole pair exists to
+    prevent: the row is selected first every tick — every numeric sorts before every
+    ISO instant — consumes a batch slot, and never transitions.
+
+    Asserting the TYPE is not a loosening of what the third element is FOR. It exists
+    to catch a concurrent DEFERRAL, which writes an ISO string
+    (``notice_write_expectation``'s docstring records why), so "still not text" catches
+    every deferral there can be. ``state`` and ``attempts`` are unchanged and still
+    carry single-flight: a competing claim consumes the attempt, so only one owner can
+    win regardless of how this element compares.
+    """
+
+    __slots__ = ()
+
+
+#: The expectation's ``next_attempt_at`` when the stored value is not JSON text — a
+#: shape no stamper writes, so it can only arrive from a hand-edited row or a foreign
+#: writer. Interned as one value so the guard has a single spelling to recognize.
+_NEXT_ATTEMPT_NOT_TEXT = _UnstampableInstant("<next_attempt_at:not-text>")
+
+
 def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int, str]:
     """The ``(state, attempts, next_attempt_at)`` an owed-notice write was decided from.
 
@@ -789,10 +824,33 @@ def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int
         attempts = int(source.get("attempts") or 0)
     except (TypeError, ValueError):
         attempts = 0
-    # NOT ``.strip()``, unlike ``owed_notice_eligible``: this value is compared against
-    # the stored blob by SQLite, which does not strip, so stripping here would refuse a
-    # write over a padded instant that nobody raced.
-    return (str(source.get("state") or ""), attempts, str(source.get("next_attempt_at") or ""))
+    return (str(source.get("state") or ""), attempts, _expected_next_attempt_at(source))
+
+
+def _expected_next_attempt_at(source: dict[str, Any]) -> str:
+    """``next_attempt_at`` as SQLite will read it back for the guard's comparison.
+
+    Text is taken VERBATIM — not stripped, not re-formatted — because the guard
+    compares it against the stored blob through SQLite, which does neither; a stripped
+    copy would refuse a write over a padded instant that nobody raced. Missing and
+    null both read as ``""``, mirroring the ``coalesce(..., '')`` in
+    ``OWED_NOTICE_NEXT_ATTEMPT_SQL``.
+
+    Anything else — a JSON number, ``true``/``false``, an object, an array — is a shape
+    no stamper writes and whose SQLite text is not reproducible in Python, so it is
+    carried as ``_NEXT_ATTEMPT_NOT_TEXT`` and re-asserted by JSON type instead. Note
+    the falsiness traps this avoids by testing the raw value rather than ``or ""``:
+    a stored ``0`` is ``'0'`` to SQLite, not ``''``, and a stored ``true`` is ``'1'``,
+    not ``'True'`` — both of which read as an unraceable guard on the eligible row
+    they belong to.
+    """
+
+    raw = source.get("next_attempt_at")
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, str):
+        return raw
+    return _NEXT_ATTEMPT_NOT_TEXT
 
 
 def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
@@ -813,6 +871,20 @@ def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
     ``<=``. String comparison, for the same reason every other timestamp comparison
     here is: ISO-8601 in UTC sorts lexicographically.
 
+    Agreement means agreeing with the comparison SQLITE makes, which for a value that
+    is not text is not the comparison Python makes. The indexed expression is compared
+    RAW, so SQLite compares STORAGE CLASSES: every INTEGER and REAL sorts before every
+    TEXT, making a numeric ``next_attempt_at`` eligible at every instant, and SQLite
+    never strips, so ``" 9999-01-01..."`` sorts before ``now`` on its leading space.
+    Reading those through ``str(...).strip() <= now`` said the opposite, and the
+    disagreement is not a difference of opinion the drain absorbs: the seek applies
+    ``LIMIT`` BEFORE this re-check, so such a row is selected, dropped without any
+    state transition, and selected again on the next tick forever — and because it
+    sorts FIRST, ten of them starve every valid notice behind them, silently, in a
+    drain that looks busy. So the shapes SQL admits are admitted here too, and the
+    drain ADVANCES them: the claim stamps a real instant over the unreadable one.
+    Degrade and advance, as ``notice_write_expectation`` does for ``attempts``.
+
     The field carries two things that are one thing to this predicate: the retry
     BACKOFF after a failed attempt, and the LEASE a claimant arms before it performs
     the external send (see ``core.failure_notices.CLAIM_LEASE_SECONDS``). Both mean
@@ -823,8 +895,20 @@ def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
 
     if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
         return False
-    next_attempt_at = str(notice.get("next_attempt_at") or "").strip()
-    return not next_attempt_at or next_attempt_at <= now
+    raw = notice.get("next_attempt_at")
+    if raw is None or raw == "":
+        return True
+    if isinstance(raw, str):
+        return raw <= now
+    if isinstance(raw, (int, float)):
+        # Numeric storage class, so SQLite sorts it before every TEXT: eligible at any
+        # ``now``. ``bool`` is an ``int`` here and is one in SQLite too — ``json_extract``
+        # reads JSON ``true``/``false`` back as 1/0.
+        return True
+    # An object or an array reads back as its JSON TEXT, which starts with a brace or a
+    # bracket and therefore sorts after every digit — ineligible on both sides for any
+    # instant this century, and spelled out rather than assumed.
+    return _json_dumps(raw) <= now
 
 
 #: ``attempts``, read in SQL. Unlike ``OWED_NOTICE_STATE_SQL`` this one is NOT pinned
@@ -839,6 +923,19 @@ def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
 _OWED_NOTICE_ATTEMPTS_SQL = (
     "CASE WHEN (json_valid(metadata_json) = 1) "
     "THEN json_extract(metadata_json, '$.owed_failure_notice.attempts') END"
+)
+
+#: ``next_attempt_at``'s JSON TYPE, read in SQL. The only reproducible way to
+#: re-assert a stored value whose TEXT rendering is SQLite's own — see
+#: ``_UnstampableInstant``. Not index-pinned, for the reason
+#: ``_OWED_NOTICE_ATTEMPTS_SQL`` gives: this is a filter on a row already located by
+#: primary key, so no query plan depends on its text.
+#:
+#: Same ``CASE json_valid`` guard, same reason: ``json_type`` raises ``malformed JSON``
+#: on an unparseable blob and would fail the whole statement.
+_OWED_NOTICE_NEXT_ATTEMPT_TYPE_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_type(metadata_json, '$.owed_failure_notice.next_attempt_at') END"
 )
 
 
@@ -858,7 +955,17 @@ def owed_notice_state_unchanged(expect: tuple[str, int, str]) -> list[Any]:
     resolve differently on the two sides; when they do, SQL is the STRICTER one, so
     the residue is a refused write and a retried notice, never a lost one.
 
-    The third predicate reuses ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` VERBATIM under the
+    THAT ARGUMENT DOES NOT EXTEND TO ``next_attempt_at``, and the exception is why the
+    third predicate has two forms. A refused write is harmless only for a row that is
+    also ineligible; a row this guard can never match while ``owed_notice_eligible``
+    keeps admitting it is selected first by every tick — every JSON number sorts before
+    every ISO instant — occupies a batch slot, and never transitions. So for a stored
+    value that is not JSON text, whose SQLite TEXT rendering is not reproducible in
+    Python, the guard re-asserts the JSON TYPE instead of the text. See
+    ``_UnstampableInstant`` for the rendering evidence and for why the type is a
+    faithful substitute here.
+
+    The text form reuses ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` VERBATIM under the
     same outer ``coalesce``/``CAST`` shape as the other two, for the reason
     ``owed_notice_absent`` gives: this is a filter on a row located by primary key so
     no plan depends on its text, but a divergent copy of an indexed expression is
@@ -866,11 +973,24 @@ def owed_notice_state_unchanged(expect: tuple[str, int, str]) -> list[Any]:
     """
 
     state, attempts, next_attempt_at = expect
+    if isinstance(next_attempt_at, _UnstampableInstant):
+        # The stored value is not JSON text, so its TEXT rendering is SQLite's own and
+        # not reproducible here (see ``_UnstampableInstant``): re-assert the type
+        # instead. ``coalesce`` to ``'null'`` because an absent key and a malformed blob
+        # both read as NULL, and NULL is not false — either would pass a bare
+        # ``NOT IN`` and let this guard match a row the caller never read.
+        third: Any = cast(
+            func.coalesce(literal_column(_OWED_NOTICE_NEXT_ATTEMPT_TYPE_SQL), "null"), Text
+        ).notin_(["text", "null"])
+    else:
+        third = (
+            cast(func.coalesce(literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL), ""), Text)
+            == next_attempt_at
+        )
     return [
         cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == state,
         cast(func.coalesce(literal_column(_OWED_NOTICE_ATTEMPTS_SQL), 0), Integer) == attempts,
-        cast(func.coalesce(literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL), ""), Text)
-        == next_attempt_at,
+        third,
     ]
 
 
@@ -3735,7 +3855,12 @@ class SQLiteBackgroundTaskStore:
 
         The Python re-check below is kept as a second layer: it tolerates a notice
         stored as something other than a dict, and it is now cheap because only
-        eligible rows reach it.
+        eligible rows reach it. It may only re-decide rows whose BLOB CHANGED between
+        the seek and the read — it may never be narrower than the predicate above.
+        Narrower means a row that is selected inside the limit and dropped outside it,
+        with no state transition to stop it being selected again: a permanent hole in
+        the batch. ``owed_notice_eligible`` is therefore normalized to the comparison
+        SQLite makes here, storage classes and all.
         """
 
         instant = now or _utc_now_iso()
