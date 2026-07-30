@@ -225,8 +225,19 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
     async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
+        from config.v2_compat import to_app_config
+        from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+
         controller = _StubController()
-        controller.config.agents.codex.auth_mode = "api_key"
+        v2_config = V2Config(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(),
+            runtime=RuntimeConfig(default_cwd="."),
+            agents=AgentsConfig(),
+        )
+        v2_config.agents.codex.auth_mode = "api_key"
+        controller.config = to_app_config(v2_config)
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 

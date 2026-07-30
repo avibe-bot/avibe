@@ -45,6 +45,7 @@ class CodexCompatConfig:
     extra_args: list[str]
     default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    auth_mode: str = "oauth"
 
 
 @dataclass
@@ -123,6 +124,7 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             extra_args=[],
             default_model=v2.agents.codex.default_model,
             idle_timeout_seconds=v2.agents.codex.idle_timeout_seconds,
+            auth_mode=v2.agents.codex.auth_mode,
         )
     opencode = None
     if v2.agents.opencode.enabled:
