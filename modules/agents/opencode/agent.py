@@ -22,7 +22,6 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
     memory_cli_prompt_admitted,
-    memory_proactive_capture_enabled,
 )
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
@@ -385,7 +384,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_memory_cli=memory_cli_admitted,
-                include_memory_proactive=memory_proactive_capture_enabled(self.controller),
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,

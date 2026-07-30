@@ -904,10 +904,6 @@ def _embedding_configuration_changed(current: MemoryConfig, candidate: MemoryCon
 _SETTLEMENT_IRRELEVANT_FIELDS = {
     # The marker this comparison exists to settle.
     "embedding_change_pending": False,
-    # Selects which Memory guidance the next system prompt carries and reaches
-    # no runtime state, so an owner toggling it while a pending embedding change
-    # settles must not make the candidate look like a different configuration.
-    "proactive_capture": False,
 }
 
 

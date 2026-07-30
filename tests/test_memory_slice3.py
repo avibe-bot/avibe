@@ -437,13 +437,11 @@ def test_slack_manifest_has_no_native_memory_command() -> None:
 def _memory_config(
     *,
     enabled: bool = True,
-    proactive_capture: bool = False,
     llm_model: str = "chat",
     embedding_change_pending: bool = False,
 ) -> MemoryConfig:
     return MemoryConfig(
         enabled=enabled,
-        proactive_capture=proactive_capture,
         embedding_change_pending=embedding_change_pending,
         processing=MemoryProcessingConfig(
             llm=MemoryEndpointConfig(
@@ -480,181 +478,25 @@ def _reconcile_controller(current: MemoryConfig) -> Controller:
     return controller
 
 
-def test_toggling_proactive_capture_never_touches_the_memory_runtime() -> None:
-    """The prompt-only flag must not be held hostage by provider health.
-
-    Reconciling probes the provider and swaps the sidecar, and a failed probe
-    rolls the save back — which would leave an owner unable to turn
-    Agent-initiated writes off while their endpoint is down.
-    """
-
-    controller = _reconcile_controller(_memory_config(proactive_capture=False))
-    target = _memory_config(proactive_capture=True)
-
-    result = asyncio.run(controller.reconcile_memory(target))
-
-    assert result["ok"] is True
-    assert controller.memory_runtime.calls == 0
-    assert controller.config.memory is target
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        _memory_config(enabled=False),
-        _memory_config(llm_model="chat-2"),
-        _memory_config(embedding_change_pending=True),
-        # A runtime-relevant change riding along with the flag still reconciles.
-        _memory_config(enabled=False, proactive_capture=True),
-    ],
-)
-def test_runtime_relevant_memory_changes_still_reconcile(target: MemoryConfig) -> None:
+def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() -> None:
     controller = _reconcile_controller(_memory_config())
 
-    result = asyncio.run(controller.reconcile_memory(target))
+    result = asyncio.run(controller.reconcile_memory(_memory_config(enabled=False)))
 
     assert result["ok"] is False
     assert controller.memory_runtime.calls == 1
-    # A failed reconciliation must not adopt the candidate config.
     assert controller.config.memory.enabled is True
-    assert controller.config.memory.proactive_capture is False
 
 
-def test_unreadable_current_memory_config_falls_back_to_full_reconciliation() -> None:
-    """Fail safe: what cannot be compared is reconciled, not skipped."""
-
-    controller = _reconcile_controller(_memory_config())
-    controller.config.memory = None
-
-    result = asyncio.run(controller.reconcile_memory(_memory_config(proactive_capture=True)))
-
-    assert result["ok"] is False
-    assert controller.memory_runtime.calls == 1
-
-
-class _GatedReconcileRuntime:
-    """A runtime whose reconciliation blocks until the test releases it."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-        self.module = object()
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def reconcile(self, _config):
-        self.calls += 1
-        self.started.set()
-        await self.release.wait()
-        return {"ok": True, "state": "ready"}
-
-
-def _gated_controller(current: MemoryConfig) -> Controller:
-    controller = _reconcile_controller(current)
-    controller.memory_runtime = _GatedReconcileRuntime()
-    return controller
-
-
-def test_a_slow_reconciliation_cannot_resurrect_a_revoked_opt_in() -> None:
-    """Avibe's startup reconciliation captures the config as it was at boot.
-
-    While it awaits the sidecar the owner can revoke `proactive_capture`, and
-    publishing the boot candidate on completion would turn Agent-initiated
-    writes back on for the life of the process while disk and UI both showed
-    them revoked.
-    """
-
-    async def scenario() -> MemoryConfig:
-        controller = _gated_controller(_memory_config(proactive_capture=True))
-        runtime = controller.memory_runtime
-
-        startup = asyncio.create_task(
-            controller.reconcile_memory(_memory_config(proactive_capture=True))
-        )
-        await runtime.started.wait()
-
-        revoked = await controller.reconcile_memory(_memory_config(proactive_capture=False))
-        assert revoked["ok"] is True
-        assert runtime.calls == 1, "the revoke must not wait on, or repeat, the reconciliation"
-        assert controller.config.memory.proactive_capture is False
-
-        runtime.release.set()
-        assert (await startup)["ok"] is True
-        return controller.config.memory
-
-    assert asyncio.run(scenario()).proactive_capture is False
-
-
-def test_a_revoke_after_a_reconciliation_completes_is_still_the_final_word() -> None:
-    """The opposite completion order, which the sequence check must leave alone.
-
-    This one passes with or without the fix -- nothing can overwrite a write
-    that lands last. It is here so a future ordering rule cannot make the
-    ordinary case regress while the raced case keeps passing.
-    """
-
-    async def scenario() -> MemoryConfig:
-        controller = _gated_controller(_memory_config(proactive_capture=True))
-        runtime = controller.memory_runtime
-
-        startup = asyncio.create_task(
-            controller.reconcile_memory(_memory_config(proactive_capture=True))
-        )
-        await runtime.started.wait()
-        runtime.release.set()
-        assert (await startup)["ok"] is True
-        assert controller.config.memory.proactive_capture is True
-
-        await controller.reconcile_memory(_memory_config(proactive_capture=False))
-        return controller.config.memory
-
-    assert asyncio.run(scenario()).proactive_capture is False
-
-
-def test_a_superseded_reconciliation_still_publishes_the_settings_it_applied() -> None:
-    """Only the prompt-only fields defer to the newer request.
-
-    The sidecar really is running the endpoints this call reconciled, so
-    discarding them would leave the live config describing a runtime that no
-    longer exists.
-    """
-
-    async def scenario() -> MemoryConfig:
-        controller = _gated_controller(_memory_config(llm_model="chat", proactive_capture=True))
-        runtime = controller.memory_runtime
-
-        # A runtime-relevant change, so this takes the full reconcile path.
-        rotating = asyncio.create_task(
-            controller.reconcile_memory(_memory_config(llm_model="chat-2", proactive_capture=True))
-        )
-        await runtime.started.wait()
-
-        # Classified against the still-current config, so this stays prompt-only.
-        await controller.reconcile_memory(_memory_config(llm_model="chat", proactive_capture=False))
-
-        runtime.release.set()
-        assert (await rotating)["ok"] is True
-        return controller.config.memory
-
-    memory = asyncio.run(scenario())
-    assert memory.proactive_capture is False
-    assert memory.processing.llm.model == "chat-2"
-
-
-def test_settling_a_pending_embedding_change_ignores_the_prompt_only_flag():
-    """A concurrent opt-in toggle must not look like a different configuration.
-
-    `_settle_embedding_change_pending` clears the persisted marker only when the
-    candidate still matches what is on disk. `proactive_capture` reaches no
-    runtime state, so an owner toggling it while a pending embedding change is
-    settling would otherwise fail the settlement, report
-    `memory_runtime_install_failed`, and leave both the marker and the runtime
-    unreconciled.
-    """
+def test_settling_a_pending_embedding_change_ignores_the_marker_itself():
+    """`_settle_embedding_change_pending` clears the persisted marker only when
+    the candidate still matches what is on disk, so the marker being set cannot
+    itself make the candidate look like a different configuration."""
 
     from core.memory.runtime import _same_memory_configuration
 
-    persisted = _memory_config(proactive_capture=True, embedding_change_pending=True)
-    candidate = _memory_config(proactive_capture=False)
+    persisted = _memory_config(embedding_change_pending=True)
+    candidate = _memory_config()
 
     assert _same_memory_configuration(persisted, candidate) is True
     assert (

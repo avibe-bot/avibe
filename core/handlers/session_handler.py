@@ -47,7 +47,6 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
     memory_cli_prompt_admitted,
-    memory_proactive_capture_enabled,
 )
 from vibe import backend_model_catalog
 
@@ -1209,7 +1208,6 @@ class SessionHandler(BaseHandler):
             include_quick_replies=quick_replies_on and platform != "wechat",
             include_show_pages=getattr(self.config, "show_pages_prompt", True),
             include_memory_cli=memory_cli_admitted,
-            include_memory_proactive=memory_proactive_capture_enabled(self.controller),
             avibe_cloud_connected=avibe_cloud_url_available(self.config),
             context=context,
             fallback_platform=platform,
