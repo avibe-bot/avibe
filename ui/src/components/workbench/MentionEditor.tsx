@@ -167,12 +167,13 @@ function serializeCurrentEditor(): { text: string; references: MentionReference[
 const serializedNodeLength = (node: LexicalNode): number => nodeToMarkerText(node, []).length;
 
 // Mention markers and their visible chip titles use different coordinate
-// systems. Keep leaf ranges in marker offsets while retaining visible text for
-// language-aware spacing at a captured selection boundary.
+// systems. Keep leaf ranges in marker offsets and use visible text only when a
+// captured boundary touches a mention chip.
 type SerializedVisibleSegment = {
   start: number;
   end: number;
   visibleText: string;
+  mention: boolean;
 };
 
 function serializedVisibleSegments(): SerializedVisibleSegment[] {
@@ -182,7 +183,12 @@ function serializedVisibleSegments(): SerializedVisibleSegment[] {
       const visibleText = $isBeautifulMentionNode(node)
         ? node.getValue()
         : node.getTextContent();
-      segments.push({ start: base, end: base + serializedNodeLength(node), visibleText });
+      segments.push({
+        start: base,
+        end: base + serializedNodeLength(node),
+        visibleText,
+        mention: $isBeautifulMentionNode(node),
+      });
       return;
     }
     if (!$isElementNode(node)) return;
@@ -192,7 +198,7 @@ function serializedVisibleSegments(): SerializedVisibleSegment[] {
       visit(children[index], offset);
       offset += serializedNodeLength(children[index]);
       if (rootLevel && index < children.length - 1) {
-        segments.push({ start: offset, end: offset + 1, visibleText: '\n' });
+        segments.push({ start: offset, end: offset + 1, visibleText: '\n', mention: false });
         offset += 1;
       }
     }
@@ -201,12 +207,13 @@ function serializedVisibleSegments(): SerializedVisibleSegment[] {
   return segments;
 }
 
-function visibleBoundaryAtOffset(target: number, side: 'left' | 'right'): string {
+function visibleBoundaryAtOffset(target: number, side: 'left' | 'right'): string | undefined {
   const segments = serializedVisibleSegments();
   const ordered = side === 'left' ? [...segments].reverse() : segments;
   for (const segment of ordered) {
     if (side === 'left' && target <= segment.start) continue;
     if (side === 'right' && target >= segment.end) continue;
+    if (!segment.mention) return undefined;
     if (segment.end - segment.start === segment.visibleText.length) {
       const offset = Math.max(0, Math.min(target - segment.start, segment.visibleText.length));
       return side === 'left'
@@ -216,7 +223,7 @@ function visibleBoundaryAtOffset(target: number, side: 'left' | 'right'): string
     const characters = Array.from(segment.visibleText);
     return side === 'left' ? (characters.at(-1) ?? '') : (characters[0] ?? '');
   }
-  return '';
+  return undefined;
 }
 
 type SerializedPoint = {

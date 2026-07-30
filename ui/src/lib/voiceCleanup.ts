@@ -135,7 +135,12 @@ export const voiceInsertionText = (
   if (currentText !== snapshot.text) return null;
   const normalized = transcript.trim();
   if (!normalized) return '';
-  if (snapshot.start !== snapshot.end) return normalized;
+  if (snapshot.start !== snapshot.end) {
+    const selected = currentText.slice(snapshot.start, snapshot.end);
+    const leadingWhitespace = selected.match(/^\s+/u)?.[0] ?? '';
+    const trailingWhitespace = selected.match(/\s+$/u)?.[0] ?? '';
+    return `${leadingWhitespace}${normalized}${trailingWhitespace}`;
+  }
   const left = currentText.slice(0, snapshot.start);
   const right = currentText.slice(snapshot.end);
   const leftBoundary = snapshot.leftBoundary

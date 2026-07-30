@@ -24,6 +24,16 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(snapshot.text, snapshot, 'new plan')).toBe('Write new plan today');
   });
 
+  it('preserves whitespace consumed by a selected range', () => {
+    const trailingSpace = voiceInsertionSnapshot('Write old today', 6, 10);
+    const surroundingSpaces = voiceInsertionSnapshot('Write old today', 5, 10);
+
+    expect(applyVoiceInsertion(trailingSpace.text, trailingSpace, 'new')).toBe('Write new today');
+    expect(applyVoiceInsertion(surroundingSpaces.text, surroundingSpaces, 'new')).toBe(
+      'Write new today',
+    );
+  });
+
   it('does not add spaces at CJK boundaries', () => {
     const snapshot = voiceInsertionSnapshot('请旧内容确认', 1, 4);
 
