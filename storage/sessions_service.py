@@ -1283,6 +1283,17 @@ class SQLiteSessionsService:
                         )
                         skip_mapping = False
                         while existing_anchor_row is not None:
+                            if str(existing_anchor_row["status"] or "") == "archived":
+                                logger.warning(
+                                    "Skipping legacy session import because an archived row owns the anchor "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
                             observed_backend = str(existing_anchor_row["agent_backend"] or "")
                             observed_variant = str(existing_anchor_row["agent_variant"] or "")
                             observed_agent_id = str(existing_anchor_row["agent_id"] or "")
@@ -2182,10 +2193,10 @@ def _find_scope_anchor_row(
                 agent_sessions.c.model,
                 agent_sessions.c.reasoning_effort,
                 agent_sessions.c.metadata_json,
+                agent_sessions.c.status,
             )
             .where(agent_sessions.c.scope_id == scope_id)
             .where(agent_sessions.c.session_anchor == str(session_anchor))
-            .where(agent_sessions.c.status != "archived")
             .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
             .limit(1)
         )

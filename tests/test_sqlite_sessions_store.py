@@ -301,6 +301,62 @@ def test_save_state_does_not_relabel_existing_anchor_row_to_different_backend(tm
         service.close()
 
 
+def test_save_state_skips_import_when_archived_row_owns_anchor(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            archived_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="archived-native",
+                status="archived",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "codex": {
+                            "slack_171717.123": "codex-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        with service.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    agent_sessions.c.id,
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.agent_variant,
+                    agent_sessions.c.native_session_id,
+                    agent_sessions.c.status,
+                ).where(agent_sessions.c.scope_id == scope_id)
+            ).mappings().all()
+
+        assert rows == [
+            {
+                "id": archived_id,
+                "agent_backend": "claude",
+                "agent_variant": "claude",
+                "native_session_id": "archived-native",
+                "status": "archived",
+            }
+        ]
+    finally:
+        service.close()
+
+
 def test_save_state_allows_legacy_default_anchor_row_to_adopt_imported_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
