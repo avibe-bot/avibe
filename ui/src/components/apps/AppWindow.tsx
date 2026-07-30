@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
@@ -54,6 +54,14 @@ export const AppWindow: React.FC<{
   // maximize/restore don't animate at all.
   const [dragging, setDragging] = useState(false);
   const [annotateOpen, setAnnotateOpen] = useState(false);
+  const focusWindow = wm.focus;
+  const handleAnnotateOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) focusWindow(win.id);
+      setAnnotateOpen(open);
+    },
+    [focusWindow, win.id],
+  );
 
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
@@ -311,10 +319,7 @@ export const AppWindow: React.FC<{
                 onEnable={annotationHost.annotation.enable}
                 onDisable={annotationHost.annotation.disable}
                 onSetMode={annotationHost.annotation.setMode}
-                onPopoverOpenChange={(open) => {
-                  if (open) wm.focus(win.id);
-                  setAnnotateOpen(open);
-                }}
+                onPopoverOpenChange={handleAnnotateOpenChange}
                 ownerWindowId={win.id}
               />
             </div>
