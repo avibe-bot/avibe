@@ -64,8 +64,9 @@ const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
 const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
 const MENTION_AT_START = /^[@#]<([^>\n]+)>/u;
 const MENTION_AT_END = /[@#]<([^>\n]+)>$/u;
-const LEADING_OUTER_PUNCTUATION = /^[\p{Ps}\p{Pi}"'“‘]+/u;
-const TRAILING_OUTER_PUNCTUATION = /[\p{Pe}\p{Pf}.!,?:;…，。！？：；、"'’”]+$/u;
+const LEADING_SENTENCE_PUNCTUATION = /^[.,!?:;…，。！？：；、](?:\s|$)/u;
+const LEADING_OUTER_BOUNDARY = /^[\p{P}\p{S}]+/u;
+const TRAILING_OUTER_BOUNDARY = /[\p{P}\p{S}]+$/u;
 
 const edgeCharacter = (text: string, side: 'start' | 'end'): string => {
   const characters = Array.from(text);
@@ -73,9 +74,11 @@ const edgeCharacter = (text: string, side: 'start' | 'end'): string => {
 };
 
 const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
+  const directMention = side === 'start' ? text.match(MENTION_AT_START) : text.match(MENTION_AT_END);
+  if (directMention) return edgeCharacter(directMention[1], side);
   const boundaryText = side === 'start'
-    ? text.replace(LEADING_OUTER_PUNCTUATION, '')
-    : text.replace(TRAILING_OUTER_PUNCTUATION, '');
+    ? (LEADING_SENTENCE_PUNCTUATION.test(text) ? text : text.replace(LEADING_OUTER_BOUNDARY, ''))
+    : text.replace(TRAILING_OUTER_BOUNDARY, '');
   const mention = side === 'start'
     ? boundaryText.match(MENTION_AT_START)
     : boundaryText.match(MENTION_AT_END);

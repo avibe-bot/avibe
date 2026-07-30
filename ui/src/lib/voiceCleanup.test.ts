@@ -74,6 +74,20 @@ describe('voice cleanup', () => {
     );
   });
 
+  it('adds spaces outside symbol-delimited code and command tokens', () => {
+    const beforeWord = voiceInsertionSnapshot('Use today', 4, 4);
+    const betweenWords = voiceInsertionSnapshot('Runnow', 3, 3);
+    const sentencePunctuation = voiceInsertionSnapshot('Say hello', 3, 3);
+
+    expect(applyVoiceInsertion(beforeWord.text, beforeWord, 'C++')).toBe('Use C++ today');
+    expect(applyVoiceInsertion(betweenWords.text, betweenWords, '--verbose')).toBe(
+      'Run --verbose now',
+    );
+    expect(applyVoiceInsertion(sentencePunctuation.text, sentencePunctuation, ', actually')).toBe(
+      'Say, actually hello',
+    );
+  });
+
   it('replaces selected token text without introducing spaces', () => {
     const snapshot = voiceInsertionSnapshot('v12beta', 1, 3);
 
