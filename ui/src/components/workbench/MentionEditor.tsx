@@ -21,6 +21,7 @@ import {
   $getSelection,
   $isElementNode,
   $isLineBreakNode,
+  $isNodeSelection,
   $isRangeSelection,
   $isTextNode,
   $setSelection,
@@ -265,6 +266,30 @@ function serializedPointAtOffset(target: number): SerializedPoint | null {
   return visit($getRoot(), 0, true);
 }
 
+function serializedRangeForNodes(nodes: LexicalNode[]): { start: number; end: number } | null {
+  const selectedKeys = new Set(nodes.map((node) => node.getKey()));
+  let start = Number.POSITIVE_INFINITY;
+  let end = Number.NEGATIVE_INFINITY;
+  const visit = (node: LexicalNode, base: number, rootLevel = false) => {
+    const length = serializedNodeLength(node);
+    if (selectedKeys.has(node.getKey())) {
+      start = Math.min(start, base);
+      end = Math.max(end, base + length);
+      return;
+    }
+    if (!$isElementNode(node)) return;
+    let offset = base;
+    const children = node.getChildren();
+    for (let index = 0; index < children.length; index += 1) {
+      visit(children[index], offset);
+      offset += serializedNodeLength(children[index]);
+      if (rootLevel && index < children.length - 1) offset += 1;
+    }
+  };
+  visit($getRoot(), 0, true);
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
 // Enter submits — except Shift+Enter (newline), mid-IME composition (CJK), while
 // the on-screen keyboard is open (mobile: Enter = newline, send via button), or
 // while the mention menu is open (Enter picks the highlighted suggestion).
@@ -375,6 +400,10 @@ function BootstrapPlugin({
       captureSelection: () => editor.getEditorState().read(() => {
         const { text } = serializeCurrentEditor();
         const selection = $getSelection();
+        if ($isNodeSelection(selection)) {
+          const range = serializedRangeForNodes(selection.getNodes());
+          if (range) return voiceInsertionSnapshot(text, range.start, range.end);
+        }
         if (!$isRangeSelection(selection)) {
           return voiceInsertionSnapshot(text, text.length, text.length);
         }

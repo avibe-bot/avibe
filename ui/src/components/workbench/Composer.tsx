@@ -573,14 +573,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Expose file staging so a chat-page-wide drop zone (ChatPage) can hand off
   // files dropped onto the transcript — the picker + chips still live here. No
   // deps array → always runs the latest uploadFiles closure for this session.
+  const voiceDraftLocked = () => (
+    recordingStartRef.current
+    || recordingSessionRef.current !== null
+    || transcribingRef.current
+    || (
+      sessionId != null
+      && ['recording', 'transcribing'].includes(voiceSessionsById.get(sessionId)?.status ?? '')
+    )
+  );
   useImperativeHandle(ref, () => ({
     addFiles: (files: File[]) => void uploadFiles(files),
     insertSessionReference: (refSessionId: string, title?: string | null) => {
+      if (voiceDraftLocked()) return;
       // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
       // carries the stable sessionId → serializes to `#<id>` + a session ref.
       mentionRef.current?.insertMention('#', title?.trim() || refSessionId, { sessionId: refSessionId });
     },
-    appendText: (text: string) => mentionRef.current?.append(text),
+    appendText: (text: string) => {
+      if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
   }));
 
   const captureVoiceInsertion = useCallback((): VoiceInsertionSnapshot => {

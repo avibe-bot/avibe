@@ -30,6 +30,20 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(snapshot.text, snapshot, '后天发布')).toBe('请后天发布确认');
   });
 
+  it('adds spaces at Latin mention boundaries without changing CJK boundaries', () => {
+    const beforeLatinMention = voiceInsertionSnapshot('Ask @<Alice>', 4, 4);
+    const afterLatinMention = voiceInsertionSnapshot('Ask @<Alice>', 12, 12);
+    const beforeCjkMention = voiceInsertionSnapshot('问@<小明>', 1, 1);
+
+    expect(applyVoiceInsertion(beforeLatinMention.text, beforeLatinMention, 'please tell')).toBe(
+      'Ask please tell @<Alice>',
+    );
+    expect(applyVoiceInsertion(afterLatinMention.text, afterLatinMention, 'now')).toBe(
+      'Ask @<Alice> now',
+    );
+    expect(applyVoiceInsertion(beforeCjkMention.text, beforeCjkMention, '一下')).toBe('问一下@<小明>');
+  });
+
   it('refuses to insert when the draft no longer matches the snapshot', () => {
     const snapshot = voiceInsertionSnapshot('original', 8, 8);
 

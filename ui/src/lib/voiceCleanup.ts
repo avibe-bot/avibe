@@ -52,10 +52,18 @@ export const voiceInsertionSnapshot = (
 
 const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
 const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const MENTION_AT_START = /^[@#]<([^>\n]+)>/u;
+const MENTION_AT_END = /[@#]<([^>\n]+)>$/u;
+
+const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
+  const mention = side === 'start' ? text.match(MENTION_AT_START) : text.match(MENTION_AT_END);
+  if (mention) return side === 'start' ? (mention[1].at(0) ?? '') : (mention[1].at(-1) ?? '');
+  return side === 'start' ? (text.at(0) ?? '') : (text.at(-1) ?? '');
+};
 
 const needsBoundarySpace = (left: string, right: string): boolean => {
-  const leftChar = left.at(-1) ?? '';
-  const rightChar = right.at(0) ?? '';
+  const leftChar = boundaryCharacter(left, 'end');
+  const rightChar = boundaryCharacter(right, 'start');
   return (
     WORD_CHARACTER.test(leftChar)
     && WORD_CHARACTER.test(rightChar)
