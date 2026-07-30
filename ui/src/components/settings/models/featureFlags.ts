@@ -31,13 +31,13 @@ export const MODEL_MENUS_ENABLED = true;
 /**
  * Offers 试跑 in the 来源顺序 drawer — one real turn through the chain.
  *
- * OFF because the route it calls, `POST /api/models/agents/<backend>/probe`, is
- * not on master yet: it ships with the provenance/channel-aware-probe lane. A
- * button that 404s is worse than no button, and this is a one-line flip in the
- * rebase that brings the route in — the same way MODEL_MENUS_ENABLED above waited
- * for the drawers it opens.
+ * ON: `POST /api/models/agents/<backend>/probe` landed with the
+ * provenance/channel-aware-probe lane, which is the merge this flip was waiting
+ * for — the same way MODEL_MENUS_ENABLED above waited for the drawers it opens.
+ * The route answers per channel: hub attempts the request upstream and times it,
+ * native_cli re-verifies the CLI's readiness and times nothing.
  */
-export const DRY_RUN_ENABLED = false;
+export const DRY_RUN_ENABLED = true;
 
 /**
  * Offers the consent-gated hub-held subscription option (`subscription_hub_

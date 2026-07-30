@@ -11,6 +11,7 @@
 import type {
   AgentBackend,
   AgentSupply,
+  ProbeErrorKey,
   ProbeResult,
   Source,
   SourceDetailKey,
@@ -317,7 +318,10 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  */
 export type DryRunOutcome =
   | { kind: 'ok'; sourceName: string; latencyMs: number | null }
-  | { kind: 'failed'; sourceName: string; detailKey: SourceDetailKey | null };
+  /** v4 widened the key set past `state.detail_key`: the native branch reports
+   *  process unavailability, the case the paragraph above is about, and no
+   *  source-state key can express it. */
+  | { kind: 'failed'; sourceName: string; detailKey: ProbeErrorKey | null };
 
 export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutcome {
   const sourceName = nameOf(sources, probe.source_id);

@@ -1081,10 +1081,19 @@
       "consent_required": "Needs your consent for experimental hub supply first"
     },
     "oauth": {
-      "binding_failed": "That account is already used by another source"
+      "upstream_failed": "The vendor didn't complete this sign-in, please retry",
+      "engine_unavailable": "The Hub isn't responding, please retry",
+      "submission_failed": "Couldn't submit what you pasted, please retry",
+      "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
+      "binding_failed": "That account is already used by another source",
+      "expired": "Authorization timed out, please reconnect"
     },
     "probe": {
-      "native_cli_unavailable": "Can't use the CLI's sign-in"
+      "native_cli_unavailable": "Can't use the CLI's sign-in",
+      "no_candidate": {
+        "waiting": "Every source is cooling down",
+        "interrupted": "No source can serve this model right now"
+      }
     },
     "source": {
       "cooldown": {

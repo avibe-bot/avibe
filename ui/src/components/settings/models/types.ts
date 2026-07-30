@@ -2,10 +2,19 @@
 // (`avibe/docs/plans/model-hub-contracts/*`). Field names are exact
 // (case included); the UI consumes these types and never edits the schemas.
 //
-// Contract version pinned to the frozen v3. If the orchestrator bumps a
-// contract, this file changes in lockstep — never ahead of it.
+// Contract versions are PER OBJECT, not per file. `_model_hub_success` stamps
+// the envelope and nests the payload, so one response carries both numbers: the
+// envelope is still v3 while the two payload schemas below moved to v4. Mirrored
+// under the backend's own constant names (`core/handlers/model_hub/service.py`
+// spells them CONTRACT_VERSION / AGENT_CHAIN_CONTRACT_VERSION /
+// PROBE_RESULT_CONTRACT_VERSION) so a bump is greppable across the boundary.
+// Never bump one of these to cover another: a shared constant would claim v4
+// for every route that did not move. This file changes in lockstep with the
+// schemas — never ahead of them.
 
 export const CONTRACT_VERSION = 3 as const;
+export const AGENT_CHAIN_CONTRACT_VERSION = 4 as const;
+export const PROBE_RESULT_CONTRACT_VERSION = 4 as const;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
@@ -300,15 +309,32 @@ export type ResolutionEvent = {
 // ── agent-chain.schema.json ─────────────────────────────────────────────
 export type ChainHealth = 'healthy' | 'cooldown' | 'needs_action' | 'error';
 
+/** v4: the only process-unavailability state in v2. `chain[].reason` is its
+ *  VOCABULARY HOME; `ProbeResult.error` carries the i18n spelling of the same
+ *  fact (`models.probe.native_cli_unavailable`), a mapping registered as M8 in
+ *  mirror-registry.json. */
+export type ChainUnavailableReason = 'native_cli_unavailable';
+
 export type AgentChainLink = {
   source_id: string;
+  /** v4: the source's serving channel, mirroring `Source.supply_channel`. `hub`
+   *  is definitionally process-available; `native_cli` is additionally gated by
+   *  whether this process can launch the sanctioned CLI under its own login. */
+  channel: SupplyChannel;
   via_mapping: boolean;
   /** The id actually sent upstream. Non-null whenever `via_mapping` is true. */
   resolved_model_id: string | null;
   health: ChainHealth;
-  /** false for cooldown / needs_action / error; true only for healthy. */
+  /** Health permits the turn AND this process can serve the channel. Always
+   *  false for needs_action / error, and whenever `reason` is non-null; true for
+   *  healthy, and for a cooldown whose `retry_at` has already passed. */
   runnable: boolean;
-  /** Non-null only on `cooldown`. */
+  /** v4: process availability, orthogonal to the source-global `health`.
+   *  Non-null exactly when this process cannot launch the native_cli source — at
+   *  ANY health — and it forces `runnable: false`. Hub is always null. */
+  reason: ChainUnavailableReason | null;
+  /** Non-null only on `cooldown`. Retained once the stamp has passed, so a
+   *  non-null `retry_at` does not imply `runnable: false`. */
   retry_at: string | null;
 };
 
@@ -317,26 +343,43 @@ export type AgentChainLink = {
  *  `chain: []` would be a false Hub-starvation alarm about a backend whose
  *  native CLI runs the model fine (AC-7). */
 export type AgentChain = {
-  contract_version: typeof CONTRACT_VERSION;
+  contract_version: typeof AGENT_CHAIN_CONTRACT_VERSION;
   backend: AgentBackend;
   model_id: string;
   chain: AgentChainLink[];
+  /** v4 pins this to the array it summarises: `ok` iff some member is runnable,
+   *  the two blocked values iff none is. */
   supply_state: 'ok' | 'waiting' | 'interrupted';
 };
 
 // ── probe-result.schema.json ────────────────────────────────────────────
+/** v4 widened this beyond `state.detail_key`: the native_cli branch reports
+ *  process unavailability, which no source-state key can express. */
+export type ProbeErrorKey = SourceDetailKey | 'models.probe.native_cli_unavailable';
+
 /** POST /api/models/agents/<backend>/probe — hub mode only, same reason as the
  *  chain route: there is no `src_*` identity to report in direct mode. */
 export type ProbeResult = {
-  contract_version: typeof CONTRACT_VERSION;
+  contract_version: typeof PROBE_RESULT_CONTRACT_VERSION;
   backend: AgentBackend;
+  /** v4: which channel's truth this result reports. The two halves are not
+   *  comparable — see `reachable` and `latency_ms`. */
+  channel: SupplyChannel;
+  /** Channel-scoped usability right now. hub: the upstream request succeeded.
+   *  native_cli: process READINESS only — this process can launch the CLI under
+   *  its own login — which is never completion evidence. */
   reachable: boolean;
   source_id: string;
   model_id: string;
+  /** Hub round trip of the minimal upstream request; null there means the attempt
+   *  never completed. ALWAYS null for native_cli, in both readiness outcomes,
+   *  because nothing upstream is timed — a local number would impersonate
+   *  completion evidence. */
   latency_ms: number | null;
   via_mapping: boolean;
-  /** Mirrors the `state.detail_key` vocabulary; null iff reachable. */
-  error: SourceDetailKey | null;
+  /** Closed vocabulary, null on every reachable result. hub: the ten
+   *  `state.detail_key` values. native_cli: only the unavailability key. */
+  error: ProbeErrorKey | null;
 };
 
 /** api.md — returned by the source-creation routes: which backends adopted the

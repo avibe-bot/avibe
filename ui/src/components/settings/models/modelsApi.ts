@@ -45,7 +45,7 @@ import type {
   SupplyChannel,
   SupplyGap,
 } from './types';
-import { CONTRACT_VERSION } from './types';
+import { AGENT_CHAIN_CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
 
 /**
  * The terminal result of BOTH creation paths (api.md 「The terminal result of both
@@ -643,12 +643,14 @@ class MockStore {
     return delay(structuredClone(agent), 380);
   }
 
-  getAgentChain(backend: AgentBackend, model: string) {
-    this.syncAgents();
-    const agent = this.agentOr404(backend);
-    // AC-7: direct mode has no src_* identity to report, so the route refuses
-    // rather than answering with an empty (falsely alarming) chain.
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+  /**
+   * The chain both hub-only routes answer from, shared the way the server shares
+   * it: `probe_agent` calls `_agent_chain` and takes its first runnable member.
+   * Deriving the head a second time is how the mock's probe and chain would
+   * disagree about the same supply — and `supply_state` is a rollup the v4 schema
+   * now pins to this very array, so it cannot be restated per route either.
+   */
+  private chainFor(agent: AgentSupply, model: string) {
     const byId = new Map(this.sources.map((s) => [s.id, s]));
     const mapping = agent.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
     const resolved = mapping ? mapping.target_model_id : model;
@@ -657,19 +659,42 @@ class MockStore {
       .filter((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved))
       .map((s) => ({
         source_id: s.id,
+        channel: s.supply_channel,
         via_mapping: Boolean(mapping),
         resolved_model_id: mapping ? resolved : null,
         health: chainHealth(s),
         runnable: isRunnable(s),
+        // v4: process availability is a fact about the serving process — which
+        // native CLI it can launch under its own login — and a browser mock has
+        // no way to observe it. So it stands in for a runtime where every
+        // configured CLI is launchable, rather than inventing an outage. The
+        // unavailable branch is asserted in the unit tests, which can state the
+        // fact instead of guessing it.
+        reason: null,
         retry_at: s.state.status === 'cooldown' ? s.state.retry_at ?? null : null,
       }));
-    const runnable = chain.some((l) => l.runnable);
-    const supply_state: AgentChain['supply_state'] = runnable
+    const supply_state: AgentChain['supply_state'] = chain.some((l) => l.runnable)
       ? 'ok'
-      : chain.length > 0 && chain.every((l) => l.health === 'cooldown')
+      : chain.length > 0 && chain.every((l) => l.health === 'cooldown' && l.reason === null)
         ? 'waiting'
         : 'interrupted';
-    return delay({ contract_version: CONTRACT_VERSION, backend, model_id: model, chain, supply_state });
+    return { chain, supply_state };
+  }
+
+  getAgentChain(backend: AgentBackend, model: string) {
+    this.syncAgents();
+    const agent = this.agentOr404(backend);
+    // AC-7: direct mode has no src_* identity to report, so the route refuses
+    // rather than answering with an empty (falsely alarming) chain.
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const { chain, supply_state } = this.chainFor(agent, model);
+    return delay({
+      contract_version: AGENT_CHAIN_CONTRACT_VERSION,
+      backend,
+      model_id: model,
+      chain,
+      supply_state,
+    });
   }
 
   probeAgent(backend: AgentBackend, model?: string) {
@@ -678,27 +703,36 @@ class MockStore {
     if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
     const modelId = model ?? agent.selected_model_id;
     if (!modelId) throw new ApiCallError('model_unsupported');
-    const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const mapping = agent.mappings?.find((x) => x.builtin_id === modelId && x.enabled && x.target_model_id);
-    const resolved = mapping ? mapping.target_model_id : modelId;
-    const head = (agent.sources?.order ?? [])
-      .map((id) => byId.get(id))
-      .find((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved) && isRunnable(s));
+    const { chain, supply_state } = this.chainFor(agent, modelId);
+    const head = chain.find((l) => l.runnable);
     // `probe_no_candidate` is the contract's code for this; `no_runnable_source`
     // was invented here and is in no error vocabulary, so the L5 dry-run button
-    // would have been written against a code the server never sends.
-    if (!head) throw new ApiCallError('probe_no_candidate');
+    // would have been written against a code the server never sends. The server
+    // also names WHICH blocked family it is in the 409's detail, and the drawer
+    // renders that key — a detail-less throw would leave it unreachable here.
+    // `ok` cannot occur on this branch: it is the rollup's word for "some member
+    // is runnable", which is exactly what failing to find a head rules out.
+    if (!head) throw new ApiCallError('probe_no_candidate', `models.probe.no_candidate.${supply_state}`);
+    // The native_cli half is a readiness answer, not a request: nothing upstream
+    // is attempted, so there is no latency to report and a measured local number
+    // would impersonate completion evidence. Readiness itself follows `reason`
+    // above — every configured CLI is launchable in the mock.
+    const native = head.channel === 'native_cli';
     const probe: ProbeResult = {
-      contract_version: CONTRACT_VERSION,
+      contract_version: PROBE_RESULT_CONTRACT_VERSION,
       backend,
+      channel: head.channel,
       reachable: true,
-      source_id: head.id,
-      model_id: modelId,
-      latency_ms: 180 + Math.floor(Math.random() * 420),
-      via_mapping: Boolean(mapping),
+      source_id: head.source_id,
+      // The resolved id, mapping applied — what the server reports, and not the
+      // requested id it was rewritten from.
+      model_id: head.resolved_model_id ?? modelId,
+      latency_ms: native ? null : 180 + Math.floor(Math.random() * 420),
+      via_mapping: head.via_mapping,
       error: null,
     };
-    return delay(probe, 1200); // one real request takes a real moment
+    // A real upstream request takes a real moment; a local readiness check does not.
+    return delay(probe, native ? 400 : 1200);
   }
 
   setAgentMode(backend: AgentBackend, mode: AgentMode) {

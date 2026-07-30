@@ -1081,10 +1081,19 @@
       "consent_required": "需要先同意实验性中枢供给"
     },
     "oauth": {
-      "binding_failed": "该账号已被另一来源使用"
+      "upstream_failed": "厂商没有完成这次登录，请重试",
+      "engine_unavailable": "中枢没有响应，请重试",
+      "submission_failed": "粘贴的内容没能提交，请重试",
+      "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
+      "binding_failed": "该账号已被另一来源使用",
+      "expired": "授权超时，请重新连接"
     },
     "probe": {
-      "native_cli_unavailable": "用不上 CLI 的登录"
+      "native_cli_unavailable": "用不上 CLI 的登录",
+      "no_candidate": {
+        "waiting": "所有来源都在冷却",
+        "interrupted": "现在没有来源能提供这个模型"
+      }
     },
     "source": {
       "cooldown": {

@@ -26,7 +26,7 @@ import {
   repairSettles,
 } from './repair';
 import type { RepairOutcome } from './repair';
-import { CONTRACT_VERSION } from './types';
+import { PROBE_RESULT_CONTRACT_VERSION } from './types';
 import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SupplyGap } from './types';
 
 /** A healthy hub api_key with a credential to replace — the base every case
@@ -314,8 +314,12 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
 });
 
 const probe = (over: Partial<ProbeResult> = {}): ProbeResult => ({
-  contract_version: CONTRACT_VERSION,
+  contract_version: PROBE_RESULT_CONTRACT_VERSION,
   backend: 'claude',
+  // v4's conditionals are channel-scoped, so the default has to name a channel:
+  // a reachable `hub` result owes an integer latency, and only `native_cli` may
+  // answer with none. The cases below that vary the latency vary this with it.
+  channel: 'hub',
   reachable: true,
   source_id: 'src_a',
   model_id: 'claude-opus-4-6',
@@ -369,12 +373,29 @@ describe('dryRunOutcome — what the probe came back with (SourceOrderDrawer)', 
   it('keeps a null latency null instead of inventing a zero', () => {
     // This is the native_cli answer: the server reports the CLI's readiness and
     // measures nothing, because it never sent a request. 「可用」 without a number
-    // is the honest line; a 0 ms would be a measurement nobody took.
-    expect(dryRunOutcome(probe({ latency_ms: null }), [source()])).toEqual({
+    // is the honest line; a 0 ms would be a measurement nobody took. The channel
+    // travels with it — v4 makes null latency the native branch's ALWAYS and the
+    // reachable-hub branch's never, so a hub fixture here would assert the copy
+    // over a result the contract cannot produce.
+    expect(dryRunOutcome(probe({ channel: 'native_cli', latency_ms: null }), [source()])).toEqual({
       kind: 'ok',
       sourceName: 'Key A',
       latencyMs: null,
     });
+  });
+
+  it('carries the native unavailability key, which no source-state key spells', () => {
+    // v4's other native outcome, and the reason `detailKey` is widened past
+    // `state.detail_key`: process unavailability is a fact about this serving
+    // process, not about the account, so the ten source-state keys cannot say it.
+    // Typing it is not enough — a mirror that is only `cast` is exactly how the
+    // last drift got through, so the value is asserted end to end here.
+    expect(
+      dryRunOutcome(
+        probe({ channel: 'native_cli', reachable: false, latency_ms: null, error: 'models.probe.native_cli_unavailable' }),
+        [source()],
+      ),
+    ).toEqual({ kind: 'failed', sourceName: 'Key A', detailKey: 'models.probe.native_cli_unavailable' });
   });
 
   it('carries the server’s reason through on a failure', () => {
