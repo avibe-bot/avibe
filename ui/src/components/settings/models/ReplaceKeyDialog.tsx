@@ -31,7 +31,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { apiFailure, modelsApi } from './modelsApi';
 import { FieldLabel, IconField } from './dialogFields';
-import { repairOutcome, repairSettles, type RepairOutcome } from './repair';
+import { REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { SupplyGapNote } from './SupplyGapNote';
 import type { Source, SupplyGap } from './types';
 
@@ -165,7 +165,7 @@ export const ReplaceKeyDialog: React.FC<{
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
               <CheckCircle2 className="size-4 shrink-0" />
-              <span>{t(`settings.models.repair.${outcome.kind}`)}</span>
+              <span>{t(REPAIR_LINE_KEY[outcome.kind])}</span>
             </div>
           )
         ) : null}

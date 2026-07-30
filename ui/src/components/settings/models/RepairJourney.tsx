@@ -12,16 +12,20 @@
 // the whole journey. The page holds the object it was handed; it does not re-find
 // it in the refreshed list.
 //
-// The re-auth confirm is UNCONDITIONAL (AC-13): the server refuses the route
-// without `acknowledge_irreversible`, and the reason is that the old login stops
-// working the moment the flow starts — whether or not this one ends in a success.
-// So the question is asked before anything is sent, every time, with no
-// remember-my-choice and no skip for a source that is already broken.
+// The re-auth confirm is UNCONDITIONAL (AC-13): asked before anything is sent,
+// every time, with no remember-my-choice and no skip for a source that is already
+// broken. Both channels can lose the source to this journey — a native login pays
+// at 「开始」 and a hub login pays if the sign-in fails — so both are asked.
+//
+// What they are NOT asked is the same sentence. `reauthCost` (repair.ts) owns that
+// split, because a warning that is false on the channel reading it teaches the
+// user to click past the one that is true.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
+import { reauthBodyKey } from './repair';
 import { ReplaceKeyDialog } from './ReplaceKeyDialog';
 import type { RaisedRepair } from './SourceRowMenu';
 import type { Source } from './types';
@@ -59,7 +63,10 @@ export const RepairJourney: React.FC<{
         open={reauthTarget !== null && !acknowledged}
         onOpenChange={(v) => !v && closeAll()}
         title={t('settings.models.repair.reauthTitle', { name: reauthTarget?.display_name ?? '' })}
-        description={t('settings.models.repair.reauthBody')}
+        // The question is unconditional; its BODY is not the same sentence on both
+        // channels, and `reauthCost` owns which one is true (a native login is
+        // irreversible at 「开始」, a hub login only costs the source if it fails).
+        description={reauthTarget ? t(reauthBodyKey(reauthTarget)) : ''}
         confirmLabel={t('settings.models.repair.reauthConfirm') as string}
         onConfirm={() => setAcknowledged(true)}
       />

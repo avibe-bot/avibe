@@ -91,6 +91,54 @@ export function repairAction(source: Source): RepairKind | null {
   return canRetest(source) ? 'retest' : null;
 }
 
+/**
+ * A remedy's label key. A Record over the union, never a template literal:
+ * `t(`settings.models.repair.${kind}`)` compiles for every member and then
+ * renders the raw key path for the one the bundle spells differently
+ * (`replace_key` → `replaceKey`), which is what a blocked api_key row showed. As
+ * a Record the compiler refuses a new RepairKind that has no label, and
+ * `repair.test.ts` proves each one is translated in both locales.
+ */
+export const REPAIR_LABEL_KEY: Record<RepairKind, string> = {
+  reauth: 'settings.models.repair.reauth',
+  replace_key: 'settings.models.repair.replaceKey',
+  retest: 'settings.models.repair.retest',
+};
+
+/**
+ * What STARTING a re-login costs on this source's channel — the confirm's whole
+ * subject, and the one thing about it the two channels do not share.
+ *
+ * `immediate`: a native re-login is irreversible up front.
+ * `mark_native_irreversible_start` runs as the login spawns and rewrites every
+ * native source of that vendor's backend to 需要处理 with its discovered models
+ * stripped; it is rolled back only when the login fails to SPAWN. The price is
+ * paid on 「开始」, whatever happens next.
+ *
+ * `on_failure`: a hub re-login writes nothing at start — the held credential goes
+ * on working while the user signs in. The cost arrives only if the flow comes
+ * back `failed`, where `_fail_closed_hub_reauth` marks the source 需要处理 because
+ * Avibe cannot tell whether the vendor invalidated the old grant. Closing the
+ * dialog cancels the flow, and a cancelled flow is not a failed one.
+ *
+ * Two costs, two sentences. One sentence over both is false on one of them, and
+ * 「the old sign-in stops working as soon as you start」 is false on hub in the
+ * direction that matters: it warns about a loss that does not happen, and says
+ * nothing about the one that does.
+ */
+export type ReauthCost = 'immediate' | 'on_failure';
+
+export const reauthCost = (source: Source): ReauthCost =>
+  source.supply_channel === 'native_cli' ? 'immediate' : 'on_failure';
+
+const REAUTH_BODY_KEY: Record<ReauthCost, string> = {
+  immediate: 'settings.models.repair.reauthBody.immediate',
+  on_failure: 'settings.models.repair.reauthBody.onFailure',
+};
+
+/** The confirm body that is TRUE for this source. */
+export const reauthBodyKey = (source: Source): string => REAUTH_BODY_KEY[reauthCost(source)];
+
 // ── What the server's repair answer MEANS ────────────────────────────────
 
 /**
@@ -150,6 +198,22 @@ export const repairOutcome = (tail: SourceRepaired): RepairOutcome =>
  */
 export const repairSettles = (outcome: RepairOutcome): boolean =>
   outcome.kind === 'repaired' || outcome.kind === 'refreshed';
+
+/**
+ * A verdict's one line, by the same rule as `REPAIR_LABEL_KEY` above: the key is
+ * looked up, never assembled.
+ *
+ * `gaps` is absent deliberately, and the type says so — a gap report is a heading
+ * (`gapsDone`) over a list of pairs, not a sentence, so every caller branches on
+ * it before reaching this map and the compiler holds them to it.
+ */
+export type RepairLine = Exclude<RepairOutcome['kind'], 'gaps'>;
+
+export const REPAIR_LINE_KEY: Record<RepairLine, string> = {
+  repaired: 'settings.models.repair.repaired',
+  refreshed: 'settings.models.repair.refreshed',
+  unresolved: 'settings.models.repair.unresolved',
+};
 
 // ── 试跑 (dry run) ───────────────────────────────────────────────────────
 

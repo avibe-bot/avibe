@@ -27,13 +27,14 @@ import {
   createFlowAuthority,
   initialFlowView,
   isDone,
+  startNeedsStatusRead,
   type FlowAuthority,
   type FlowView,
 } from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { apiFailure, modelsApi, type OAuthResult } from './modelsApi';
-import { repairOutcome, repairSettles, type RepairOutcome } from './repair';
+import { REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { serverText } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
 import { SupplyGapNote } from './SupplyGapNote';
@@ -124,21 +125,25 @@ export const OAuthConnectDialog: React.FC<{
   const isReauth = reauthId !== null;
 
   /**
-   * One owner for 「this reauth failed」, reached from all three failure paths.
+   * One owner for 「this reauth already reached the server」, reached from EVERY
+   * path that ends the journey without a terminal success.
    *
-   * A failed reauth is not a no-op the way a failed connect is. The row was
-   * already rewritten before the login page opened — `mark_native_irreversible_start`
-   * writes 需处理 across that vendor's native sources and only rolls it back when
-   * the login fails to SPAWN — and `_materialize_reauth` clears the source and
-   * marks it unavailable before answering `discovery_failed`. So the list the page
-   * is showing is stale from here on and gets re-read.
+   * The question at each call site is deliberately that one, not 「did it fail?」.
+   * A reauth is not a no-op the way a connect is: the row is rewritten as the flow
+   * starts — `mark_native_irreversible_start` writes 需要处理 across that vendor's
+   * native sources and rolls it back only when the login fails to SPAWN — and
+   * `_materialize_reauth` clears the source and marks it unavailable before
+   * answering `discovery_failed`. So the list the page is showing is stale from
+   * the start call onward, whether the journey then failed, or was simply
+   * abandoned. Asking 「did it fail?」 is what left the abandoned case behind.
    *
    * The pairs travel on the error for the same reason `adopted_by` travels with a
    * creation: no later read of `/agents` reproduces them. They name who the
    * irreversible half left without a source, which is the one thing the user
-   * cannot find out anywhere else on the page.
+   * cannot find out anywhere else on the page. A path with no error carries none,
+   * and passing nothing is how it says so.
    */
-  const reauthFailed = (failure: ReturnType<typeof apiFailure>) => {
+  const reauthLeftRowsStale = (failure?: ReturnType<typeof apiFailure>) => {
     if (!isReauth) return;
     setStranded(failure?.interrupted ?? []);
     onConnectedRef.current();
@@ -194,7 +199,7 @@ export const OAuthConnectDialog: React.FC<{
         onConnectedRef.current();
         showToast(
           (verdict && verdict.kind !== 'gaps'
-            ? t(`settings.models.repair.${verdict.kind}`)
+            ? t(REPAIR_LINE_KEY[verdict.kind])
             : t('settings.models.oauth.status.success')) as string,
           // 「仍然不可用」 in a green toast would contradict its own text. The call
           // succeeded and the source is still stopped, which is this page's gold
@@ -248,7 +253,7 @@ export const OAuthConnectDialog: React.FC<{
         // yes and the Source still doesn't exist. Naming that separately is the
         // difference between 「重试授权」 and 「授权成功但没能建立来源」.
         const failure = apiFailure(err);
-        reauthFailed(failure);
+        reauthLeftRowsStale(failure);
         transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
       }
     };
@@ -279,6 +284,20 @@ export const OAuthConnectDialog: React.FC<{
           // next reauth would find that flow still pending. Cancel it where it is
           // known instead of dropping it.
           modelsApi.cancelOAuth(started.flow_id).catch(() => {});
+          // And re-read, because this response is the PROOF that the write landed.
+          // The close path refetches too, but it does so while this request is
+          // still in flight: that read can return the row as it was before
+          // `mark_native_irreversible_start` committed, and nothing afterwards
+          // would correct it. The abandoned journey is the one case where the user
+          // is no longer looking at a dialog that could tell them.
+          reauthLeftRowsStale();
+          return;
+        }
+        // A reused pending flow can arrive already finished. Read its status
+        // instead of latching it (`startNeedsStatusRead`), so the terminal lands
+        // through `settle` with the repair tail the start envelope does not carry.
+        if (startNeedsStatusRead(started)) {
+          await poll(started.flow_id);
           return;
         }
         transition({ kind: 'response', flow: started });
@@ -290,7 +309,7 @@ export const OAuthConnectDialog: React.FC<{
         // A reauth that fails to START can still have written the row: the
         // irreversible marking is rolled back only for a login that fails to
         // spawn, not for the flow-binding failures after it.
-        reauthFailed(failure);
+        reauthLeftRowsStale(failure);
         const code = failure?.code;
         transition({
           kind: 'error',
@@ -349,7 +368,7 @@ export const OAuthConnectDialog: React.FC<{
       // Submit reaches the same materialization as the poll, so it can fail the
       // same way — including after the credential change has committed.
       const failure = apiFailure(err);
-      reauthFailed(failure);
+      reauthLeftRowsStale(failure);
       authority.transition({ kind: 'error', errorKey: errorKeyFor(failure?.code) });
     } finally {
       if (isCurrent()) setSubmitting(false);
@@ -443,7 +462,7 @@ export const OAuthConnectDialog: React.FC<{
               <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
                 <CheckCircle2 className="size-4 shrink-0" />
                 {repair
-                  ? t(`settings.models.repair.${repair.kind}`)
+                  ? t(REPAIR_LINE_KEY[repair.kind])
                   : t('settings.models.oauth.connected')}
               </div>
             )

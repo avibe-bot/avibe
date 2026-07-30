@@ -31,7 +31,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
 import { apiFailure, modelsApi } from './modelsApi';
-import { canReauth, canReplaceKey, repairAction, type RepairKind } from './repair';
+import { canReauth, canReplaceKey, reauthCost, repairAction, REPAIR_LABEL_KEY, type RepairKind } from './repair';
 import { SupplyGapNote } from './SupplyGapNote';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type { Source, SupplyGap } from './types';
@@ -248,7 +248,7 @@ export const SourceRowMenu: React.FC<{
           className="h-7 shrink-0 rounded-md px-3 text-[11.5px] font-semibold"
           // Composed rather than a per-kind string: the label already says what
           // happens, and every row on the page repeats it.
-          aria-label={`${t(`settings.models.repair.${inlineRemedy}`)} · ${source.display_name}`}
+          aria-label={`${t(REPAIR_LABEL_KEY[inlineRemedy])} · ${source.display_name}`}
           disabled={testing}
           onClick={() => runRepair(inlineRemedy)}
         >
@@ -257,7 +257,7 @@ export const SourceRowMenu: React.FC<{
           ) : (
             <RemedyIcon className="size-3" />
           )}
-          {t(`settings.models.repair.${inlineRemedy}`)}
+          {t(REPAIR_LABEL_KEY[inlineRemedy])}
         </Button>
       ) : null}
 
@@ -329,7 +329,12 @@ export const SourceRowMenu: React.FC<{
           <MenuAction
             Icon={LogIn}
             label={t('settings.models.sourceActions.reauth') as string}
-            description={hint('reauthHint')}
+            // Only the native channel pays at 「开始」, so only it has something to
+            // warn about before the confirm does. On a hub source the same line
+            // would promise a loss that does not happen — and the confirm one tap
+            // later states that channel's real cost. Deleting the sentence beats
+            // qualifying it.
+            description={reauthCost(source) === 'immediate' ? hint('reauthHint') : undefined}
             onClick={() => runRepair('reauth')}
           />
         )}

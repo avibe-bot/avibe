@@ -13,7 +13,17 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { dryRunOutcome, dryRunPlan, repairAction, repairOutcome, repairSettles } from './repair';
+import {
+  dryRunOutcome,
+  dryRunPlan,
+  reauthBodyKey,
+  reauthCost,
+  repairAction,
+  REPAIR_LABEL_KEY,
+  REPAIR_LINE_KEY,
+  repairOutcome,
+  repairSettles,
+} from './repair';
 import type { RepairOutcome } from './repair';
 import { CONTRACT_VERSION } from './types';
 import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SupplyGap } from './types';
@@ -39,6 +49,14 @@ const blocked = (detail_key: SourceDetailKey, over: Partial<Source> = {}): Sourc
 
 const subscription = { kind: 'subscription', vendor: 'anthropic', account_label: 'me@example.com' } as const;
 const native = { supply_channel: 'native_cli', credential_ref: null } as const;
+
+/** A locale leaf by its full dotted key — the same path the components hand to
+ *  `t`, so a key that only exists as a prefix fails the same way it would there. */
+const translated = (bundle: unknown, key: string): unknown =>
+  key.split('.').reduce<unknown>((node, part) => {
+    if (!node || typeof node !== 'object') return undefined;
+    return (node as Record<string, unknown>)[part];
+  }, bundle);
 
 describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', () => {
   it('offers nothing to a source that is running', () => {
@@ -172,30 +190,47 @@ describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog, ReplaceK
   });
 
   /**
-   * Both dialogs render this verdict through an INTERPOLATED key
-   * (`settings.models.repair.${kind}`), which has no compile-time link to the
-   * bundles — a fourth kind could ship with no string and print its own key at the
-   * user. This record must be exhaustive over the union, so a new kind fails the
-   * typecheck here first, and the assertion then proves the copy exists in both
-   * locales.
+   * The verdict a dialog renders has no compile-time link to the bundles, so a
+   * fourth kind could ship with no string. `REPAIR_LINE_KEY` is exhaustive over
+   * the union by type — a new kind fails the typecheck at its definition — and
+   * this proves each key it names is actually translated, in both locales.
+   *
+   * `gaps` is absent from the map by design (a heading over a list, not a line),
+   * which the `Exclude` in its type states and the union check below re-proves.
    */
-  const RENDERED: Record<RepairOutcome['kind'], string | null> = {
-    repaired: 'repaired',
-    refreshed: 'refreshed',
-    unresolved: 'unresolved',
-    // Not interpolated: a gap report renders `gapsDone` above the pair list.
-    gaps: null,
-  };
+  it.each(Object.entries(REPAIR_LINE_KEY))('has copy in both locales for the %s verdict', (_kind, key) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
+  });
 
-  const repairCopy = (bundle: unknown) =>
-    (bundle as { settings: { models: { repair: Record<string, string | undefined> } } }).settings.models.repair;
+  it('covers every verdict that renders as one line', () => {
+    const kinds: RepairOutcome['kind'][] = ['repaired', 'refreshed', 'unresolved', 'gaps'];
+    expect(kinds.filter((k) => k !== 'gaps').sort()).toEqual(Object.keys(REPAIR_LINE_KEY).sort());
+  });
+});
 
-  it.each(Object.entries(RENDERED).filter(([, key]) => key !== null))(
-    'has copy in both locales for the %s verdict',
-    (_kind, key) => {
-      for (const bundle of [en, zh]) expect(typeof repairCopy(bundle)[key as string]).toBe('string');
-    },
-  );
+describe('the copy each remedy names', () => {
+  // The bug this replaces: `t(`settings.models.repair.${kind}`)` compiled for
+  // every RepairKind and rendered the literal key path for `replace_key`, whose
+  // bundle spelling is `replaceKey` — on the inline button AND its aria-label, so
+  // a screen reader read out the key path too.
+  it.each(Object.entries(REPAIR_LABEL_KEY))('has a %s label in both locales', (_kind, key) => {
+    for (const bundle of [en, zh]) expect(typeof translated(bundle, key)).toBe('string');
+  });
+
+  it('warns up front on a native re-login and only about failure on a hub one', () => {
+    // `mark_native_irreversible_start` rewrites every native source of that
+    // vendor's backend to 需要处理 as the login spawns, so 「开始后旧的登录立即失效」
+    // is true there. The hub route writes NOTHING at start — the held credential
+    // keeps working — and only `_fail_closed_hub_reauth` marks the source, on a
+    // flow that came back `failed`. One sentence over both is false on one.
+    expect(reauthCost(source({ ...subscription, ...native }))).toBe('immediate');
+    expect(reauthCost(source(subscription))).toBe('on_failure');
+  });
+
+  it('has both confirm bodies in both locales', () => {
+    for (const s of [source({ ...subscription, ...native }), source(subscription)])
+      for (const bundle of [en, zh]) expect(typeof translated(bundle, reauthBodyKey(s))).toBe('string');
+  });
 });
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
@@ -328,5 +363,25 @@ describe('the class: no component decides a repair for itself', () => {
   it('leaves the gap verdict to its owner', () => {
     const offenders = files.filter((f) => f !== 'repair.ts' && GAP_PROXY.test(read(f)));
     expect(offenders).toEqual([]);
+  });
+
+  /**
+   * An ASSEMBLED repair locale key. This is the class round 2 caught: a template
+   * literal over a union typechecks for every member, so the one member the bundle
+   * spells differently (`replace_key` → `replaceKey`) shipped as a raw key path on
+   * screen. `REPAIR_LABEL_KEY` / `REPAIR_LINE_KEY` are the versions the compiler
+   * checks and the tests above prove translated; the maps are where a repair key
+   * gets composed, and nowhere else.
+   *
+   * A LITERAL `t('settings.models.repair.gapsDone')` is not this bug and stays
+   * allowed: the failure mode is the substitution, not the namespace.
+   *
+   * `repair.ts` is exempt because its own docs QUOTE the bad form to explain why
+   * the maps exist, and it holds no `t` to render one with.
+   */
+  const ASSEMBLED_KEY = /settings\.models\.repair\.\$\{/;
+
+  it.each(files.filter((f) => f !== 'repair.ts'))('%s looks a repair key up instead of building it', (name) => {
+    expect(read(name)).not.toMatch(ASSEMBLED_KEY);
   });
 });

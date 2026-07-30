@@ -985,7 +985,10 @@
         "replaceKey": "更换 Key",
         "retest": "重试",
         "reauthTitle": "重新登录「{{name}}」？",
-        "reauthBody": "开始后旧的登录立即失效，完成前用它登录的来源都不可用。",
+        "reauthBody": {
+          "immediate": "开始后旧的登录立即失效，完成前用它登录的来源都不可用。",
+          "onFailure": "这次登录如果没成功，这个来源会需要处理，直到你重新登录。"
+        },
         "reauthConfirm": "开始登录",
         "replaceTitle": "更换「{{name}}」的 API Key",
         "replaceBody": "填入新的 Key，其他设置不变。",

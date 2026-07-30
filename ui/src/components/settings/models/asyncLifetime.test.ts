@@ -27,6 +27,7 @@ import {
   savedMenuKey,
   savedSourcesKey,
   seedStep,
+  startNeedsStatusRead,
   type FlowView,
 } from './asyncLifetime';
 import type { AgentSupply, OAuthFlow } from './types';
@@ -274,5 +275,28 @@ describe('flow authority', () => {
       settled: true,
     });
     expect(landed.at(-1)).toEqual(authority.current());
+  });
+});
+
+describe('startNeedsStatusRead — a start response that is already terminal', () => {
+  it('sends an already-successful start to the status route', () => {
+    // `POST …/reauth` reuses a live pending flow rather than opening a second one,
+    // so the start can answer `success` — carrying the flow ALONE. Latching it
+    // would settle the dialog on the one arrival that has no
+    // `recovered`/`interrupted_pairs` beside it, and `flowStep` would then be
+    // right to ignore the status read that does.
+    expect(startNeedsStatusRead(flow('success'))).toBe(true);
+  });
+
+  it('latches a terminal failure where it lands', () => {
+    // The other terminals need no second call: their `error_key` IS the answer,
+    // and a status read of a cancelled flow adds nothing to show.
+    expect(startNeedsStatusRead(flow('failed'))).toBe(false);
+    expect(startNeedsStatusRead(flow('cancelled'))).toBe(false);
+  });
+
+  it('leaves a running start to the poll it already schedules', () => {
+    expect(startNeedsStatusRead(flow('awaiting_action'))).toBe(false);
+    expect(startNeedsStatusRead(flow('verifying'))).toBe(false);
   });
 });

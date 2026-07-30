@@ -142,6 +142,23 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   return { view: { flow, errorKey: null, settled: false }, action: 'continue' };
 };
 
+/**
+ * Whether a START response has to be re-read through the status route before it
+ * may settle the dialog.
+ *
+ * `POST …/reauth` REUSES a live pending flow — it only opens a new one once the
+ * old one failed or was cancelled — so a start can come back already `success`,
+ * and the start envelope carries the flow alone. Everything the dialog then has
+ * to show (which source was repaired, whether that cleared the blocker, what it
+ * stranded) exists only on the status/submit response. Latching the start would
+ * settle the terminal on the one arrival that cannot answer the question, and
+ * `flowStep` then correctly ignores the status read that could.
+ *
+ * A start that comes back `failed`/`cancelled` is not in this case: its
+ * `error_key` IS the whole answer, so it latches like any other terminal arrival.
+ */
+export const startNeedsStatusRead = (flow: OAuthFlow): boolean => flow.state === 'success';
+
 export type FlowAuthority = {
   current: () => FlowView;
   transition: (event: FlowEvent) => ReturnType<typeof flowStep>;
