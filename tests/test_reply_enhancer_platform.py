@@ -276,6 +276,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.secret_requests, [])
 
+    def test_process_reply_uses_shared_code_mask_for_quick_replies(self):
+        text = (
+            "```markdown\n"
+            "<silent>literal</silent>\n"
+            "---\n"
+            "[Yes] | [No]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
         trailing_report = "\n".join(
             [
@@ -362,6 +375,47 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
+    def test_silent_parser_tracks_empty_ordered_list_item(self):
+        text = (
+            "10.\n"
+            "    ```text\n"
+            "    <silent>empty-item continuation literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_tracks_quote_nested_inside_list(self):
+        text = (
+            "- > ```text\n"
+            "  > <silent>list quote literal</silent>\n"
+            "  > ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_rejects_non_one_list_interrupting_paragraph(self):
+        text = (
+            "Paragraph\n"
+            "10. Not a list interruption\n"
+            "    ```text\n"
+            "    <silent>remove outside code</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+        expected = (
+            "Paragraph\n"
+            "10. Not a list interruption\n"
+            "    ```text\n"
+            "    \n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
     def test_silent_parser_stops_unclosed_fence_at_container_boundary(self):
         text = (
             "- ```text\n"
@@ -417,9 +471,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
     def test_silent_parser_handles_backtick_and_escape_edges(self):
         protected = "Double ``literal `<silent>` marker`` remains."
         escaped = r"Before \`<silent>remove me</silent>\` after"
+        partial_escape = "\\``<silent>literal</silent>`"
 
         self.assertEqual(strip_silent_blocks(protected), protected)
         self.assertEqual(strip_silent_blocks(escaped), r"Before \`\` after")
+        self.assertEqual(strip_silent_blocks(partial_escape), partial_escape)
 
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
         unmatched_runs = " ".join("`" * length for length in range(2, 502))
@@ -431,6 +487,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         text = "    ```\n<silent>remove outside code</silent>\n    ```\nTail remains."
 
         self.assertEqual(strip_silent_blocks(text), "```\n\n    ```\nTail remains.")
+
+    def test_silent_parser_does_not_pair_inline_spans_across_cr_lines(self):
+        text = "    ```\r<silent>remove outside code</silent>\r    ```\rTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), "```\r\r    ```\rTail remains.")
+
+    def test_silent_parser_closes_real_block_before_parsing_hidden_markdown(self):
+        text = "Before\n<silent>\n```\nhidden\n</silent>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), "Before\n\nTail remains.")
 
     def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
         text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
