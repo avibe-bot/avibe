@@ -1,5 +1,6 @@
 // Async ownership rules extracted from the Models components so interleavings can
-// be exercised directly: which request may land, when a drawer re-seeds, and
+// be exercised directly: which request may land, what speaks for a row when no
+// read does, how long a write counts as outstanding, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
 import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
@@ -25,6 +26,138 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
       }
     },
   };
+};
+
+// ── What speaks for a row when no read does ────────────────────────────────
+/**
+ * Takes a write's echoed Agent row into the page's list.
+ *
+ * A mutation here is followed by a re-read, and for a while the re-read was the
+ * only thing that updated the row it moved. That is a read landing in the middle
+ * of the two things it must not be confused with: it can FAIL (the page toasts
+ * 「视图可能不是最新的」 and carries on), and it can be superseded — the authority
+ * above lands only the latest request and reports the rest `stale`. Either way the
+ * mutation returns normally over a row that still shows the pre-write state, which
+ * for 来源顺序 means the enrollment baseline 模型菜单与映射 diffs against is one
+ * write behind, and the menu's own save reports an append the ORDER write made.
+ *
+ * So the write's own answer is taken directly. Every one of these routes replies
+ * with the same `_agent_payload` projection the list read returns
+ * (`service.py:1972` returns it straight out of `set_agent_sources`), computed
+ * under the mutation lock after the commit — it is not a client-side prediction of
+ * what the write did, it is the server's own statement of what the row now is, and
+ * it cannot fail separately from the write that produced it.
+ *
+ * It does not make the re-read redundant: the echo is one Agent, and an order
+ * change also moves the source rows, the other Agents' ● 当前 and the event feed.
+ * It makes the re-read's LANDING stop being the only way the row can catch up.
+ *
+ * What it is not is a way to order two writes. An echo is the server's word about
+ * the row as of ONE commit, so it may speak for the row only while it is the
+ * newest word there is — and that is a fact about the writes, not something this
+ * function can check: two responses do not say which of them committed second.
+ * `createPendingWrites` below is where it is made true, by running the writes on
+ * a backend one at a time.
+ *
+ * A backend the page has no row for is left alone rather than appended. A write
+ * echo is an update to a row; which rows exist is the list read's to say.
+ */
+export const agentsWithEcho = (
+  agents: readonly AgentSupply[],
+  echoed: AgentSupply,
+): AgentSupply[] => agents.map((agent) => (agent.backend === echoed.backend ? echoed : agent));
+
+// ── A write that outlives the drawer that issued it ────────────────────────
+/**
+ * Which keys have a write outstanding, where 「outstanding」 spans the read-back
+ * and not merely the request.
+ *
+ * It lives above the drawers rather than inside one because a drawer is not
+ * alive for the whole of its own write. 完成, the close X, Escape and the overlay
+ * all stay live while a PUT is in flight, the page unmounts the drawer when it
+ * closes, and reopening mints a fresh component whose local flag reads 「idle」
+ * over a write that is still outstanding. A flag with that lifetime is not a
+ * guard — it can be false while the fact is true — so everything it gates is
+ * ungated for exactly the user who closed and reopened, which for the order
+ * drawer means a hand-off to 模型菜单与映射 leaving on a baseline the page has not
+ * read back. `seedStep` below is the same lifetime fact met from the other side:
+ * the drawer's seed has to survive that reopen too, and does it by re-deriving
+ * from props instead of by remembering.
+ *
+ * Writes on one key run ONE AT A TIME, in the order the user made them, and the
+ * key stays pending from the moment an edit joins the queue until the last one
+ * has read back.
+ *
+ * Queued rather than concurrent, because 「the later edit wins」 is a claim about
+ * COMMIT order, and two PUTs in flight together settle in whatever order they
+ * reach the server's mutation lock. Each carries the whole list, so the loser is
+ * not merged into the winner, it is discarded — and the order left on disk can
+ * be the user's second-to-last edit while the drawer shows their last. The same
+ * ambiguity decides which of the two echoed rows is the newest word about the
+ * Agent, and nothing in the two responses says which commit came first. A queue
+ * makes issue order and commit order the same order, which is what the drawer's
+ * optimistic list and `agentsWithEcho` above were both already assuming.
+ *
+ * Counted rather than a flag per key, because 「pending」 is a property of the SET
+ * of writes on the key — the one running plus any waiting behind it — and the
+ * first to finish must not clear the key while the next is still to go.
+ *
+ * Keyed by backend because that is the write's own grain: `PUT
+ * /agents/<backend>/sources` moves one backend's order, so a claude write says
+ * nothing about codex and has no business gating or delaying it.
+ */
+export const createPendingWrites = (land: (keys: ReadonlySet<string>) => void) => {
+  const outstanding = new Map<string, number>();
+  const tail = new Map<string, Promise<void>>();
+  const publish = () => land(new Set(outstanding.keys()));
+
+  return {
+    /**
+     * Runs `work` after every write already queued on `key`, and marks the key
+     * pending for the whole of it — including whatever `work` awaits after its
+     * own request returns. Pairing is not the caller's to get right: there is no
+     * way to begin one without ending it.
+     */
+    track: async (key: string, work: () => Promise<void>): Promise<void> => {
+      outstanding.set(key, (outstanding.get(key) ?? 0) + 1);
+      publish();
+      const mine = (tail.get(key) ?? Promise.resolve()).then(work);
+      // A rejected write must not break the queue behind it. The edit waiting is
+      // the user's newer intent and still has to reach the server — and the one
+      // that failed rolled its own optimistic display back, so there is nothing
+      // for its successor to inherit.
+      tail.set(
+        key,
+        mine.then(
+          () => {},
+          () => {},
+        ),
+      );
+      try {
+        await mine;
+      } finally {
+        const left = (outstanding.get(key) ?? 1) - 1;
+        if (left > 0) outstanding.set(key, left);
+        else {
+          outstanding.delete(key);
+          // Nothing is queued, so the next write starts a fresh chain rather than
+          // hanging off a promise whose only remaining job is to be already done.
+          tail.delete(key);
+        }
+        publish();
+      }
+    },
+  };
+};
+
+/** One key's slot in the registry above, as the component issuing writes sees it. */
+export type PendingWrite = {
+  /** Whether a write on this key is outstanding — possibly one this component
+   *  never issued, because the component that did may already be gone. */
+  pending: boolean;
+  /** Queues `work` behind any write already outstanding on this key, and marks
+   *  the key pending until it has read back. */
+  track: (work: () => Promise<void>) => Promise<void>;
 };
 
 // ── The drawers' seed ──────────────────────────────────────────────────────

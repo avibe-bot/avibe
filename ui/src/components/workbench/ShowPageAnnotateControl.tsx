@@ -128,7 +128,11 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
         type="button"
         variant={compact ? 'ghost' : 'outline'}
         size="icon"
-        className={clsx(compact ? 'size-6 shrink-0 border-0 shadow-none' : 'size-7 shrink-0')}
+        className={clsx(
+          compact
+            ? 'size-6 shrink-0 rounded-md border-0 text-muted shadow-none hover:bg-foreground/[0.06] hover:text-foreground'
+            : 'size-7 shrink-0',
+        )}
         disabled
         aria-label={t('chat.showPage.annotate.unavailable')}
         title={t('chat.showPage.annotate.unavailable')}
@@ -205,9 +209,13 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
           <PopoverTrigger asChild>
             <Button
               type="button"
-              variant={enabled ? 'default' : compact ? 'ghost' : 'outline'}
+              variant={compact ? 'ghost' : enabled ? 'default' : 'outline'}
               size="icon"
-              className={clsx(compact ? 'size-6 shrink-0 rounded-md' : 'size-7 shrink-0')}
+              className={clsx(
+                compact
+                  ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+                  : 'size-7 shrink-0',
+              )}
               aria-label={toggleLabel}
               title={toggleLabel}
             >

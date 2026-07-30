@@ -9,6 +9,7 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
+import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
@@ -21,6 +22,10 @@ import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
+import { downloadFile, fileMeta } from '../../lib/filesApi';
+import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/filePreview';
+import { recentPathLabel } from '../../lib/editorRecents';
+import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import {
   activityItemKind,
@@ -58,7 +63,7 @@ import { Button } from '../ui/button';
 import { ChatImage } from '../ui/chat-image';
 import { FileCard } from '../ui/file-card';
 import { ImageViewerProvider } from '../ui/image-viewer';
-import { FileViewerProvider } from '../ui/file-viewer';
+import { FileViewerProvider, useFileViewer } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -2855,6 +2860,44 @@ const Transcript: React.FC<TranscriptProps> = ({
   footer,
 }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { openApp } = useWindowManager();
+  const fileViewer = useFileViewer();
+  const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
+    const pathLabel = recentPathLabel(target.path);
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
+      if (desktop) {
+        openApp('preview', { title: name, params: { path: target.path, name } });
+      } else if (fileViewer) {
+        fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
+      } else {
+        downloadFile(target.path);
+      }
+    };
+    const openEditor = (filename: string, mtime: number | null) => {
+      const launch = { ...target, filename, mtime };
+      if (desktop) openApp('editor', { title: filename, params: launch });
+      else navigate('/apps/editor', { state: launch });
+    };
+
+    try {
+      const meta = await fileMeta(target.path);
+      if (previewOverlayKind(meta)) {
+        openPreview(meta.name || pathLabel, meta.size, meta.mime, meta.ext);
+      } else if (isEditableMeta(meta)) {
+        openEditor(meta.name || pathLabel, meta.mtime);
+      } else {
+        downloadFile(target.path);
+      }
+    } catch {
+      // Mirror the File Browser's name-only fallback when metadata is unavailable.
+      const fallback = { kind: 'file', name: pathLabel, size: null };
+      if (previewOverlayKind(fallback)) openPreview(pathLabel, null, null, null);
+      else if (isEditableFile(fallback)) openEditor(pathLabel, null);
+      else downloadFile(target.path);
+    }
+  }, [fileViewer, navigate, openApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const forkSourceSessionId =
     typeof session.metadata?.fork_source_session_id === 'string'
@@ -3233,6 +3276,7 @@ const Transcript: React.FC<TranscriptProps> = ({
                   onQuickReply={onQuickReply}
                   vaultRequests={provisionRequestsByMessage.get(message.id)}
                   onVaultRequestResolved={onVaultRequestResolved}
+                  onOpenLocalFile={openLocalFile}
                   readOnly={readOnly}
                   highlighted={message.id === highlightedId}
                 />
@@ -3333,6 +3377,7 @@ type MessageRowProps = {
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
   vaultRequests?: VaultRequest[];
   onVaultRequestResolved?: () => void;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
   // Archived session: the row still renders in full — including the quick-reply
   // group and which option was chosen, which is part of the transcript — but the
   // group is frozen, so an old quick reply can no longer POST a doomed message.
@@ -3354,7 +3399,17 @@ type MessageRowProps = {
 // useCallback), so the default shallow compare is correct here.
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders a single row rather than mounting the whole page.
-export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, vaultRequests, onVaultRequestResolved, readOnly, highlighted }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({
+  message,
+  session,
+  messageFontSize,
+  onQuickReply,
+  vaultRequests,
+  onVaultRequestResolved,
+  onOpenLocalFile,
+  readOnly,
+  highlighted,
+}: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
@@ -3465,6 +3520,8 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
       // keeps the card it had before that row had its own type.
       secretRequests={agentAuthored}
+      localFileWorkdir={agentAuthored ? session.workdir : undefined}
+      onOpenLocalFile={agentAuthored ? onOpenLocalFile : undefined}
       // …and on an archived transcript the card is locked: archiving EXPIRED the
       // session's provision requests, so an enabled Provide button would tell the
       // reader an agent is waiting for this secret when none is.

@@ -10,8 +10,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { AdoptionNote } from './AdoptionNote';
-import type { SkippedBy } from './sufficiency';
-import type { AdoptedBy } from './types';
+import type { AdoptedBy, SkippedBy } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
   const i18n = createInstance();
@@ -64,11 +63,11 @@ describe('AdoptionNote', () => {
     expect(render([entry('futurecli', 2)])).toContain('futurecli');
   });
 
-  // 「谁没有」 is the answer this note exists for, and it is the one today's payload
-  // cannot give: `_adopted_by` filters `policy == "follow"`, so a `custom` backend
-  // that skipped the source is absent for the same reason an ineligible one is. The
-  // note therefore says only what it can prove — and names the omission the moment
-  // the server sends it.
+  // 「谁没有」 is the answer this note exists for, and `adopted_by` alone cannot give
+  // it: `_adopted_by` filters `policy == "follow"`, so a `custom` backend that
+  // skipped the source is absent for the same reason an ineligible one is. That is
+  // what `skipped_by` is for — and a response that omits it is still a response that
+  // did not answer, so the note keeps saying only what it can prove.
   it('claims nothing about who skipped it while the server does not say', () => {
     const html = render([entry('claude', 1)]);
     expect(text(html)).toContain('Claude Code');
@@ -77,11 +76,22 @@ describe('AdoptionNote', () => {
   });
 
   it('names the skipped backends once the server sends them', () => {
-    const html = render([entry('claude', 1)], [{ backend: 'codex', reason: 'custom-order-omission' }]);
+    const html = render([entry('claude', 1)], [{ backend: 'codex', reason: 'custom_order' }]);
     const body = text(html);
     expect(body).toContain('Claude Code');
     expect(body).toContain('Codex');
     expect(body).toContain('自定义顺序');
+  });
+
+  it('names them even when nobody adopted it at all', () => {
+    // `adopted_by: []` with a non-empty complement — every eligible backend keeps a
+    // hand-picked order. The generic 「还没有 Agent 启用它」 is true here but throws
+    // away the one thing the payload knows: which orders to go edit. And the adopted
+    // half must NOT appear: there is no list to name.
+    const body = text(render([], [{ backend: 'codex', reason: 'custom_order' }]));
+    expect(body).toContain('Codex');
+    expect(body).toContain('自定义顺序');
+    expect(body).not.toContain('已自动加入');
   });
 
   it('says nothing at all when the creation reported no adoption result', () => {

@@ -635,6 +635,327 @@ def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):
     assert agents["codex"].mappings == []
 
 
+@pytest.mark.parametrize(
+    ("requested_model", "discovered_models", "expected_model"),
+    [
+        (
+            "claude-opus-4-5",
+            [
+                "claude-opus-4-5",
+                "claude-opus-4-5-20250929",
+                "claude-opus-4-5-20251101",
+            ],
+            "claude-opus-4-5-20251101",
+        ),
+        (
+            "opus",
+            ["opus", "claude-opus-4-8-20260601", "claude-opus-5-20260724"],
+            "claude-opus-5-20260724",
+        ),
+        (
+            "opus[1m]",
+            ["claude-opus-4-8-20260601", "claude-opus-5-20260724"],
+            "claude-opus-5-20260724",
+        ),
+        (
+            "sonnet",
+            ["claude-sonnet-4-6-20260301", "claude-sonnet-5-20260720"],
+            "claude-sonnet-5-20260720",
+        ),
+        (
+            "sonnet[1m]",
+            ["claude-sonnet-4-6-20260301", "claude-sonnet-5-20260720"],
+            "claude-sonnet-5-20260720",
+        ),
+        (
+            "haiku",
+            ["claude-haiku-4-20250101", "claude-haiku-4-5-20251001"],
+            "claude-haiku-4-5-20251001",
+        ),
+        (
+            "claude-opus-4-5-20250929",
+            ["claude-opus-4-5-20250929", "claude-opus-4-5-20251101"],
+            "claude-opus-4-5-20250929",
+        ),
+    ],
+)
+def test_native_claude_aliases_resolve_only_to_discovered_inventory(
+    tmp_path,
+    requested_model,
+    discovered_models,
+    expected_model,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(id=model_id, provenance="discovered")
+        for model_id in discovered_models
+    ]
+    config.sources[1].models = []
+
+    resolution = resolve_model_hub_turn(config, "claude", requested_model)
+
+    assert resolution.source is config.sources[0]
+    assert resolution.target_model == expected_model
+    assert resolution.mapping_applied is False
+
+
+def test_native_aliases_do_not_blind_passthrough_or_use_manual_or_foreign_inventory(
+    tmp_path,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    relay = config.sources[0]
+    relay.base_url = "https://glm-relay.example.test"
+    relay.models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        ),
+        ModelHubModelConfig(
+            id="claude-fable-5-20260701",
+            provenance="manual",
+        ),
+    ]
+    foreign = config.sources[1]
+    foreign.vendor = "custom"
+    foreign.models = [
+        ModelHubModelConfig(
+            id="claude-sonnet-5-20260720",
+            provenance="discovered",
+        )
+    ]
+
+    resolved = resolve_model_hub_turn(config, "claude", "claude-opus-4-5")
+    fictional = resolve_model_hub_turn(config, "claude", "claude-fable-5")
+    foreign_only = resolve_model_hub_turn(config, "claude", "claude-sonnet-5")
+
+    assert resolved.target_model == "claude-opus-4-5-20251101"
+    assert [source.id for source in resolved.matching_sources] == [relay.id]
+    assert fictional.matching_sources == ()
+    assert foreign_only.matching_sources == ()
+
+
+def test_explicit_mapping_overrides_native_alias_resolution(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        ),
+        ModelHubModelConfig(id="glm-5.2", provenance="discovered"),
+    ]
+    config.sources[1].models = []
+    config.agents["claude"].mappings = [
+        ModelHubMappingConfig(
+            builtin_id="claude-opus-4-5",
+            target_model_id="glm-5.2",
+            enabled=True,
+        )
+    ]
+
+    resolution = resolve_model_hub_turn(config, "claude", "claude-opus-4-5")
+
+    assert resolution.target_model == "glm-5.2"
+    assert resolution.mapping_applied is True
+
+
+def test_wall_drawers_chain_probe_and_resolver_share_native_alias_supply_truth(
+    tmp_path,
+):
+    effective_model = "claude-opus-4-5-20251101"
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(id=effective_model, provenance="discovered")
+    ]
+    config.sources[1].models = []
+    service.store.requested_models["claude"] = "claude-opus-4-5"
+
+    agent = service.get_agent_sources("claude")
+    chain = service.agent_chain("claude", "claude-opus-4-5")
+    resolution = resolve_model_hub_turn(
+        config,
+        "claude",
+        "claude-opus-4-5",
+        now=service.now(),
+    )
+    probe = asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
+
+    # The row wall consumes model_supply/current. Both drawers consume the chain
+    # endpoint. Probe and live resolution must carry those exact same bytes.
+    wall = next(
+        row
+        for row in agent["model_supply"]
+        if row["model_id"] == "claude-opus-4-5"
+    )
+    assert wall["chain_length"] == len(chain["chain"]) == 1
+    assert (
+        agent["current"]["model_id"]
+        == chain["chain"][0]["resolved_model_id"]
+        == resolution.target_model
+        == probe["model_id"]
+        == effective_model
+    )
+    assert chain["chain"][0]["via_mapping"] is False
+    assert adapter.invocations == [
+        ("src_primary01", effective_model, "claude")
+    ]
+
+
+def test_probe_flips_from_no_candidate_to_reachable_after_discovered_alias_arrives(
+    tmp_path,
+):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = []
+    config.sources[1].models = []
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
+    assert exc_info.value.code == "probe_no_candidate"
+
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    probe = asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
+
+    assert probe["reachable"] is True
+    assert probe["model_id"] == "claude-opus-4-5-20251101"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_kind"),
+    [
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+            "cooldown",
+        ),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403),
+            "needs_action",
+        ),
+    ],
+)
+def test_probe_alias_failure_events_use_requested_menu_id(
+    tmp_path,
+    outcome,
+    expected_kind,
+):
+    adapter = FakeAdapter([outcome])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    config.sources[1].models = []
+
+    probe = asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
+
+    assert probe["reachable"] is False
+    assert probe["model_id"] == "claude-opus-4-5-20251101"
+    event = next(
+        item
+        for item in service.events.list(limit=20)
+        if item["kind"] == expected_kind
+    )
+    assert event["model_id"] == "claude-opus-4-5"
+
+
+def test_failover_uses_each_sources_effective_native_alias(tmp_path):
+    adapter = FakeAdapter(
+        [
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    config.sources[1].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20250929",
+            provenance="discovered",
+        )
+    ]
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-5",
+            request={},
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    assert result.model_id == "claude-opus-4-5-20250929"
+    assert adapter.invocations == [
+        ("src_primary01", "claude-opus-4-5-20251101", "claude"),
+        ("src_backup001", "claude-opus-4-5-20250929", "claude"),
+    ]
+    failover_events = [
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] in {"cooldown", "switch"}
+    ]
+    assert {event["model_id"] for event in failover_events} == {
+        "claude-opus-4-5"
+    }
+
+
+def test_runtime_alias_blocker_event_uses_requested_menu_id(tmp_path):
+    adapter = FakeAdapter(
+        [
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20251101",
+            provenance="discovered",
+        )
+    ]
+    config.sources[1].models = [
+        ModelHubModelConfig(
+            id="claude-opus-4-5-20250929",
+            provenance="discovered",
+        )
+    ]
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-5",
+            request={},
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    blocker = next(
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] == "needs_action"
+    )
+    assert blocker["model_id"] == "claude-opus-4-5"
+
+
 def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)

@@ -166,7 +166,7 @@ class ModelHubTurnGateway:
             if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
                 terminalizer.fail("invalid_parameter")
                 return self._error_response(status=400, code="invalid_request_error")
-            terminalizer.bind_request_model(model_id)
+            resolution_model = terminalizer.resolution_model(model_id)
 
             def observe_attempt(
                 source_id: str,
@@ -197,7 +197,7 @@ class ModelHubTurnGateway:
                 }
                 resolved = await self.service.resolve(
                     backend=backend,
-                    model_id=model_id,
+                    model_id=resolution_model,
                     request=ModelHubRequest(
                         payload,
                         protocol=_REQUEST_PROTOCOLS[endpoint],

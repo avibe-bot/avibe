@@ -12,13 +12,14 @@
 // copy is exactly where the two drifted into saying different things.
 //
 // Which of those two answers can be given is `adoptionVerdict`'s call, not this
-// component's: 「who did not」 is only answerable once the server sends the
-// eligible-but-skipped complement, and until then the note says what it can prove.
+// component's: 「who did not」 is only answerable from the server's own
+// eligible-but-skipped complement, and a response that omits it still gets the
+// sentence the note can prove rather than a guess at the missing half.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { adoptionVerdict, type SkippedBy } from './sufficiency';
-import type { AdoptedBy } from './types';
+import { adoptionVerdict } from './sufficiency';
+import type { AdoptedBy, SkippedBy } from './types';
 
 export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] | null; skippedBy?: SkippedBy[] | null }> = ({
   adoptedBy,
@@ -32,10 +33,21 @@ export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] | null; skippedBy?:
   const backendName = (backend: string) =>
     t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
 
-  if (verdict.kind === 'adopted_none') {
+  if (verdict.kind === 'adopted_none' || verdict.kind === 'skipped_all') {
     // Not an error — the source exists and is healthy. It is a pointer to the one
-    // action that makes it serve traffic, on the page the user is already on.
-    return <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.adoption.none')}</p>;
+    // action that makes it serve traffic, on the page the user is already on. And
+    // it points AT the orders whenever the server named them: 「nobody took it」 and
+    // 「these hand-picked orders left it out」 want the same edit in two very
+    // different amounts of hunting.
+    return (
+      <p className="text-[12px] leading-relaxed text-muted">
+        {verdict.kind === 'skipped_all'
+          ? t('settings.models.adoption.noneSkipped', {
+              skipped: verdict.backends.map(backendName).join(' · '),
+            })
+          : t('settings.models.adoption.none')}
+      </p>
+    );
   }
 
   // Position order, not response order: 「第 1 位」 before 「第 3 位」 reads as a

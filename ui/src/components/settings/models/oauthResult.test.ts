@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { oauthResult, type OAuthResultResponse } from './modelsApi';
-import type { AdoptedBy, OAuthFlow, Source } from './types';
+import type { AdoptedBy, OAuthFlow, SkippedBy, Source } from './types';
 
 const flow = (over: Partial<OAuthFlow> = {}): OAuthFlow => ({
   flow_id: 'oaf_1',
@@ -26,18 +26,41 @@ const flow = (over: Partial<OAuthFlow> = {}): OAuthFlow => ({
 
 const source = { id: 'src_1', vendor: 'anthropic', kind: 'subscription' } as unknown as Source;
 const adopted: AdoptedBy[] = [{ backend: 'claude', policy: 'follow', position: 1 }];
+const skipped: SkippedBy[] = [{ backend: 'codex', reason: 'custom_order' }];
 
 describe('oauthResult', () => {
   it('keeps the creation the terminal response reports', () => {
-    const r = { flow: flow(), source, adopted_by: adopted } as OAuthResultResponse;
-    expect(oauthResult(r)).toEqual({ flow: r.flow, created: { source, adopted_by: adopted }, repaired: null });
+    const r = { flow: flow(), source, adopted_by: adopted, skipped_by: skipped } as OAuthResultResponse;
+    expect(oauthResult(r)).toEqual({
+      flow: r.flow,
+      created: { source, adopted_by: adopted, skipped_by: skipped },
+      repaired: null,
+    });
   });
 
   it('reads an absent adopted_by beside a source as nothing adopted it', () => {
     // Distinct from a response that reports no creation at all: here the source
     // exists, so 「没有 Agent 采用」 is a true statement and must be rendered.
     const { created } = oauthResult({ flow: flow(), source } as OAuthResultResponse);
-    expect(created).toEqual({ source, adopted_by: [] });
+    expect(created?.adopted_by).toEqual([]);
+  });
+
+  it('reads an absent skipped_by the OTHER way, as a question left unanswered', () => {
+    // The two halves of the tail default in opposite directions, and this is the
+    // one the dialog's auto-close hangs on. `adopted_by` lists things that
+    // happened, so absent can only mean none did. `skipped_by` answers 「who was
+    // left out」, where `[]` is a positive claim of full coverage — a server that
+    // never sent the field has not made it, so silence stays null and `covered`
+    // stays out of reach.
+    const { created } = oauthResult({ flow: flow(), source, adopted_by: adopted } as OAuthResultResponse);
+    expect(created?.skipped_by).toBeNull();
+  });
+
+  it('keeps an empty skipped_by as the claim it is', () => {
+    // The counterpart: `[]` here IS the server saying 「nobody was left out」, and
+    // collapsing it back to null would strand the one arrival that can settle.
+    const r = { flow: flow(), source, adopted_by: adopted, skipped_by: [] } as OAuthResultResponse;
+    expect(oauthResult(r).created?.skipped_by).toEqual([]);
   });
 
   it('reports no creation while the flow is still running', () => {

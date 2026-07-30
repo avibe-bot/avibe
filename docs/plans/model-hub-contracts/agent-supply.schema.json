@@ -32,7 +32,7 @@
       "properties": {
         "model_id": {
           "type": "string",
-          "description": "The RESOLVED upstream model id, mapping applied — what actually gets sent (e.g. `glm-5.2`). A property of this attempt, not of the selection, which is why it stays here while the selection moved out. NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), so passing this value through would miss. Use the top-level `selected_model_id` for that. Equal to `selected_model_id` whenever no mapping applied and the menu is fixed — the two differing is the 「我选的模型」 vs 「实际跑的模型」 distinction the UI surfaces, so they are never collapsed."
+          "description": "The RESOLVED upstream model id — what actually gets sent (e.g. `glm-5.2` or `claude-opus-4-5-20251101`). A property of this attempt, not of the selection, which is why it stays here while the selection moved out. NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), while a fixed-menu native alias may be source-specific, so passing this value through would miss. Use the top-level `selected_model_id` for that. It equals `selected_model_id` only when neither an explicit mapping nor built-in native alias resolution changes the upstream id. Native alias resolution is automatic supply truth and does not create a mapping entry."
         },
         "source_id": { "type": "string" },
         "channel": { "enum": ["native_cli", "hub"] }

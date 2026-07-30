@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppWindow,
-  ChevronRight,
   ExternalLink,
   Loader2,
   MessageSquare,
   Presentation,
-  SquareArrowOutUpRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -54,7 +52,6 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   const dock = useDock();
   const { begin: beginShowPageDrag, end: endShowPageDrag } = useShowPageDrag();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [dragCue, setDragCue] = useState<ViewportPoint | null>(null);
   const dragRef = useRef<ActiveDrag | null>(null);
   const suppressClickRef = useRef(false);
   const hoverTimerRef = useRef<number | null>(null);
@@ -145,18 +142,15 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       if (!active) return;
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest(SHOW_PAGE_DOCK_DROP_SELECTOR)) {
-        setDragCue(null);
         return;
       }
       const point = { x: event.clientX, y: event.clientY };
       if (!isShowPageWindowDrop(active.start, point)) {
-        setDragCue(null);
         if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
         return;
       }
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
-      setDragCue(point);
     };
 
     const onDrop = (event: DragEvent) => {
@@ -168,7 +162,6 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       if (!isShowPageWindowDrop(active.start, point)) return;
       event.preventDefault();
       dragRef.current = null;
-      setDragCue(null);
       endShowPageDrag();
       setGestureActive(false);
       void openWindow(point);
@@ -184,7 +177,6 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
 
   const endDrag = () => {
     dragRef.current = null;
-    setDragCue(null);
     endShowPageDrag();
     setGestureActive(false);
     window.setTimeout(() => {
@@ -266,7 +258,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
           align="end"
           side="bottom"
           sideOffset={6}
-          className="w-44 p-1"
+          className="w-fit min-w-32 p-1"
           onMouseEnter={clearHoverTimer}
           onMouseLeave={closeHoverMenu}
           onOpenAutoFocus={(event) => event.preventDefault()}
@@ -300,35 +292,24 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               type="button"
               role="menuitem"
               onClick={() => void openWindow()}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
+              className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
             >
               <AppWindow className="size-3.5 shrink-0 text-cyan" />
-              <span className="flex-1">{t('chat.showPage.newWindow')}</span>
-              <ChevronRight className="size-3.5 shrink-0 text-muted" />
+              <span>{t('chat.showPage.newWindow')}</span>
             </button>
             <button
               type="button"
               role="menuitem"
               onClick={() => void openLink()}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
+              className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
             >
               <ExternalLink className="size-3.5 shrink-0 text-mint" />
-              <span className="flex-1">{t('chat.showPage.newLink')}</span>
-              <ChevronRight className="size-3.5 shrink-0 text-muted" />
+              <span>{t('chat.showPage.newLink')}</span>
             </button>
           </div>
         </PopoverContent>
       </Popover>
 
-      {dragCue && (
-        <span
-          aria-hidden
-          style={{ left: dragCue.x + 14, top: dragCue.y + 14 }}
-          className="pointer-events-none fixed z-[80] grid size-8 place-items-center rounded-md border border-cyan/60 bg-surface-3 text-cyan shadow-lg"
-        >
-          <SquareArrowOutUpRight className="size-4" />
-        </span>
-      )}
     </>
   );
 };

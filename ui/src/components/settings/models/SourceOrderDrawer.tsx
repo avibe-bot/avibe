@@ -41,7 +41,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
-import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
+import { initialSeedState, savedSourcesKey, seedStep, type PendingWrite } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
 import { eligibilityOf } from './eligibility';
 import { DRY_RUN_ENABLED } from './featureFlags';
@@ -59,7 +59,7 @@ import {
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
-import { isUnhealthy, needsAttention } from './supply';
+import { healthyButUnrunnable, isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
 import type { AgentBackend, AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
 
@@ -123,12 +123,23 @@ export const SourceOrderDrawer: React.FC<{
   agents: AgentSupply[];
   sources: Source[];
   onClose: () => void;
-  /** Re-read sources + agents: an order change moves ● 当前 on the page too. */
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed, and re-reads what else the
+   *  order moved (● 当前 elsewhere, the source rows, the feed). Returning that
+   *  read's promise lets the pending mark span it — see `persist`. */
+  onSaved: (echoed: AgentSupply) => void | Promise<void>;
+  /** Re-reads the rows behind the drawer, claiming nothing about them. Separate
+   *  from `onSaved` because only a write can hand over an echo: 试跑 is a probe
+   *  that moves source state (a cooldown, a 需处理) and echoes no Agent, so a read
+   *  is genuinely all there is to do about it. */
+  onReread: () => void;
+  /** This backend's slot in the page's pending-write registry. Held by the page
+   *  because every close path stays live during a write and closing unmounts this
+   *  drawer — see `createPendingWrites` in asyncLifetime.ts. */
+  orderWrite: PendingWrite;
   /** Desktop footer 模型菜单与映射 — hand off to this backend's menu drawer.
    *  Omitted while the menus are flagged off. */
   onOpenMenu?: () => void;
-}> = ({ open, agent, agents, sources, onClose, onSaved, onOpenMenu }) => {
+}> = ({ open, agent, agents, sources, onClose, onSaved, onReread, orderWrite, onOpenMenu }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(agent.backend);
@@ -144,7 +155,9 @@ export const SourceOrderDrawer: React.FC<{
 
   const [policy, setPolicy] = React.useState<SourcePolicy>(agent.sources?.policy ?? 'follow');
   const [order, setOrder] = React.useState<string[]>(agent.sources?.order ?? []);
-  const [saving, setSaving] = React.useState(false);
+  // Deliberately not this component's state: the user can close this drawer —
+  // which unmounts it — and reopen it while the write is still outstanding.
+  const saving = orderWrite.pending;
   /** Last state the server confirmed — the revert target and the no-op test.
    *  `order` alone can serve neither: a drag has already moved it by the time
    *  the commit fires. */
@@ -181,7 +194,7 @@ export const SourceOrderDrawer: React.FC<{
   const enabledIds = enabledSources.map((s) => s.id);
   // Asked about the order the user is CURRENTLY editing, not about the saved one —
   // the warning is about what pressing 保存 would leave this backend with.
-  const orderVerdict = orderSufficiency(order, sources);
+  const orderVerdict = orderSufficiency(order, sources, agent);
   const rest = sources.filter((s) => !order.includes(s.id));
   const disabledSources = rest.filter((s) => eligibilityOf(agent, s.id).eligible);
   const ineligible = rest
@@ -194,6 +207,10 @@ export const SourceOrderDrawer: React.FC<{
    *   启用    `me@gmail.com · 供 Claude 全系`, `key …9c1 · 47 分后重试`
    *   未启用  `供 GLM 全系 · 经模型菜单改写后可供 Claude 使用`
    *   不适用  the server's eligibility reason, alone
+   *
+   * 启用 and 未启用 share one retraction: a healthy source this machine cannot
+   * launch the Agent's process against says so instead of naming what it supplies
+   * — see `healthyButUnrunnable`.
    *
    * The 供 segment names a model FAMILY, which is a vendor label, so a source with
    * no family (a relay / custom endpoint) omits it rather than inventing one. The
@@ -211,6 +228,22 @@ export const SourceOrderDrawer: React.FC<{
   const identity = (source: Source) => source.account_label ?? source.masked_credential ?? '';
   const join = (parts: (string | false)[]) => parts.filter(Boolean).join(' · ');
 
+  /**
+   * The second segment answers 「why is this row not the one serving」, and there
+   * are two independent answers competing for it. Health first — a cooling or
+   * broken source is the one the user can act on, and its state chip has already
+   * raised the question this segment answers. A HEALTHY source that this machine
+   * cannot launch gets the segment instead, and it must not be spent on 供 … 全系
+   * there: a model count is a promise, and this is the row that cannot keep it.
+   *
+   * Only a per-Agent surface may say it at all (it is per (source, backend)), and
+   * only in muted grey: `needsAttention` is false for a healthy source, so the
+   * line stays the same colour as the chain strip's dim dot rather than borrowing
+   * the gold that means 「and it needs you」.
+   */
+  const nativeUnavailable = () =>
+    t('settings.models.order.nativeUnavailable', { backend: backendName }) as string;
+
   const enabledSubline = (source: Source): string =>
     join([
       identity(source),
@@ -220,10 +253,26 @@ export const SourceOrderDrawer: React.FC<{
         ? (t('settings.models.source.retryIn', { minutes: cooldownEtaMinutes(source.state.retry_at) }) as string)
         : isUnhealthy(source.state)
           ? ''
-          : supplies(source),
+          : healthyButUnrunnable(agent, source)
+            ? nativeUnavailable()
+            : supplies(source),
     ]);
 
+  /**
+   * The 未启用 row says what turning this source on would get — so it owes the
+   * same retraction the 启用 row owes, and owes it EARLIER. Availability is per
+   * (source, backend) and has nothing to do with where the source sits in the
+   * order, so a row that only admits it once enabled has told the user one step
+   * after the step it was about; `chainChips` already promises that 「the
+   * all-sources drawer keeps the ungated fact」, and this is half of that drawer.
+   *
+   * It replaces the whole line rather than joining it, in both branches: 供 … 全系
+   * is the promise being retracted, and 经模型菜单改写后可供 X 使用 is the same
+   * promise routed through a rewrite — neither survives a process that cannot be
+   * launched, and the sub-line is two segments wide.
+   */
   const disabledSubline = (source: Source): string => {
+    if (healthyButUnrunnable(agent, source)) return join([identity(source), nativeUnavailable()]);
     // Only a fixed-menu backend rewrites ids through mappings; the open-menu
     // backend picks a supplied id directly, so the note would be false there.
     const viaMapping =
@@ -272,42 +321,59 @@ export const SourceOrderDrawer: React.FC<{
    * `follow` the server owns the order outright, so 恢复推荐顺序 learns the
    * recommended order from the response and nowhere else.
    *
-   * Two edits in flight resolve last-write-wins, which is correct here because
-   * every PUT carries the whole list rather than a delta.
+   * Two edits made in quick succession resolve later-edit-wins, which every PUT
+   * carrying the whole list rather than a delta makes possible and `orderWrite`'s
+   * per-backend queue makes true: sent together they would settle in whichever
+   * order they reached the server's lock, and the discarded one is a whole list.
    *
    * Runs to completion even if the drawer closes mid-flight, and deliberately so.
-   * Both of the things this does on the way out belong to components that stay
-   * mounted — `onSaved()` re-reads the page whose ● 当前 the write just moved, and
-   * the failure toast lives at the app root — so a mounted-ref guard here would
-   * not be protecting anything, it would be dropping the only report that a
-   * rejected reorder ever gets. (The setState calls need no guard either: since
-   * React 18 they are a no-op on an unmounted component, not a warning.)
+   * Everything this does on the way out belongs to something that outlives the
+   * drawer — the pending mark to the page, `onSaved()` to the page whose ● 当前 the
+   * write just moved, the failure toast to the app root — so a mounted-ref guard
+   * here would not be protecting anything, it would be dropping the only report
+   * that a rejected reorder ever gets. (The setState calls need no guard either:
+   * since React 18 they are a no-op on an unmounted component, not a warning.)
+   *
+   * Which is also why `orderWrite.track` and not a local flag. The drawer is not
+   * alive for the whole of its own write: 完成, the X, Escape and the overlay all
+   * stay live while this runs, and closing UNMOUNTS this component. A flag in here
+   * would then be re-created reading 「idle」 by the reopen, over a write still
+   * outstanding, and the gate below would be off for exactly the user who closed
+   * and reopened. The page holds it instead — see `createPendingWrites`.
    */
-  const persist = async (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) => {
-    const previous = saved.current;
-    setPolicy(next.policy);
-    setOrder(next.order);
-    setSaving(true);
-    try {
-      // No `contract_version` in the body — the route rejects unknown keys.
-      const echoed = await modelsApi.putAgentSources(agent.backend, body);
-      const adopted = {
-        policy: echoed.sources?.policy ?? next.policy,
-        order: echoed.sources?.order ?? next.order,
-      };
-      saved.current = adopted;
-      setPolicy(adopted.policy);
-      setOrder(adopted.order);
-      onSaved();
-    } catch {
-      saved.current = previous;
-      setPolicy(previous.policy);
-      setOrder([...previous.order]);
-      showToast(t('settings.models.toast.reorderFailed') as string, 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const persist = (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) =>
+    // Marked pending for the whole hand-back and not merely until the PUT returns,
+    // because the mark is what keeps 模型菜单与映射 shut while this runs, and the
+    // drawer it hands off to reads its enrollment baseline out of the page's Agent
+    // list. What the mark cannot do is make that baseline right: `onSaved` finishes
+    // whether the page's re-read landed, failed or was superseded. So the baseline
+    // travels with the hand-back — the echo below IS the server's post-write row —
+    // and the mark only has to cover the window in which the write is in flight.
+    orderWrite.track(async () => {
+      const previous = saved.current;
+      setPolicy(next.policy);
+      setOrder(next.order);
+      try {
+        // No `contract_version` in the body — the route rejects unknown keys.
+        const echoed = await modelsApi.putAgentSources(agent.backend, body);
+        const adopted = {
+          policy: echoed.sources?.policy ?? next.policy,
+          order: echoed.sources?.order ?? next.order,
+        };
+        saved.current = adopted;
+        setPolicy(adopted.policy);
+        setOrder(adopted.order);
+        // A failed re-read belongs to the page that made it and is not this write's
+        // to roll back: the server accepted the order either way. Which is why the
+        // echo goes over with it rather than being left for that read to rediscover.
+        await Promise.resolve(onSaved(echoed)).catch(() => {});
+      } catch {
+        saved.current = previous;
+        setPolicy(previous.policy);
+        setOrder([...previous.order]);
+        showToast(t('settings.models.toast.reorderFailed') as string, 'error');
+      }
+    });
 
   // Any manual edit is a fork to `custom`: the user just said which sources, in
   // which order — that is the definition of a user-owned subset.
@@ -359,9 +425,21 @@ export const SourceOrderDrawer: React.FC<{
             )}
             {/* Desktop home for 模型菜单与映射 (V6 02's footer). The phone's home is
                 the row at the end of the list — M02 gives this footer to 恢复推荐
-                顺序 + 完成, and there is no width where the flow may be missing. */}
+                顺序 + 完成, and there is no width where the flow may be missing.
+
+                Disabled while an order write is unsettled, for the same reason as
+                the two 恢复推荐顺序 buttons and one more: the hand-off closes this
+                drawer and opens one whose enrollment notice is a diff against the
+                page's copy of this order. Leaving on the way out of an edit the page
+                has not read back is how that diff acquires someone else's append. */}
             {onOpenMenu && (
-              <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onOpenMenu}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="hidden sm:inline-flex"
+                onClick={onOpenMenu}
+                disabled={saving}
+              >
                 <List className="size-3.5" />
                 {t('settings.models.order.openMenu')}
               </Button>
@@ -476,7 +554,7 @@ export const SourceOrderDrawer: React.FC<{
             sources={sources}
             chainKey={dryRunChainKey(agent, policy, order, sources)}
             saving={saving}
-            reread={onSaved}
+            reread={onReread}
           />
         )}
 
@@ -490,6 +568,7 @@ export const SourceOrderDrawer: React.FC<{
             variant="outline"
             className="mt-1 h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold sm:hidden"
             onClick={onOpenMenu}
+            disabled={saving}
           >
             <span className="flex items-center gap-2">
               <List className="size-4" />
@@ -535,10 +614,11 @@ const DryRunRow: React.FC<{
    *  chain the server still holds, filed under the one the user already sees —
    *  `dryRunRowView` owns that rule. */
   saving: boolean;
-  /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
+  /** Re-read sources + agents, the drawer's own `onReread`: a failing 试跑 is a
    *  write, so the page it sits on is stale until this runs — and `probeArrival`
    *  owns the part that is easy to get wrong, that this is owed even for an answer
-   *  the row will not draw. */
+   *  the row will not draw. A read and not an echo: the probe writes SOURCE state
+   *  and hands back no Agent row to take. */
   reread: () => void;
 }> = ({ agent, sources, chainKey, saving, reread }) => {
   const { t } = useTranslation();

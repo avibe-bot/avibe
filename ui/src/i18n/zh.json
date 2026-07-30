@@ -667,7 +667,8 @@
           "kimi": "Kimi",
           "xai": "Grok"
         },
-        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。"
+        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。",
+        "nativeUnavailable": "本机无法使用 {{backend}} CLI 登录"
       },
       "billing": {
         "monthly": "包月",
@@ -852,12 +853,14 @@
         "enabled": "已自动加入 {{list}} 的来源顺序",
         "entry": "{{name}}（第 {{position}} 位）",
         "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
+        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用",
         "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用"
       },
       "menus": {
         "done": "完成",
         "resetAll": "恢复全部默认",
         "saveFailed": "保存失败，请重试",
+        "enrolled": "已自动把「{{sources}}」加入 {{backend}} 的来源顺序，你选的模型才有来源可用",
         "mapping": {
           "title": "{{backend}} · 模型菜单",
           "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",
@@ -3032,6 +3035,7 @@
       "voiceEmpty": "这段录音中没有检测到语音。",
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
+      "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加"
     },

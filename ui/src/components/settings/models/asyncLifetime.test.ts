@@ -41,14 +41,31 @@
 //      the rows, but it did so while that request was still in flight, so it can
 //      have read them before the write — and the rejection path returned without a
 //      second read, leaving healthy rows on a page whose source is 需处理.
+//
+//   7. reopen-clears-the-guard. Interleaving 1's other half. The order drawer marks
+//      itself busy for the span of its write, which shuts the hand-off to 模型菜单与
+//      映射 — whose enrollment notice diffs against the page's copy of that order. But
+//      every way out of the drawer stays live while the write runs, and closing
+//      unmounts it, so the reopen re-creates the mark reading 「idle」 over a write
+//      still outstanding. The user then walks into the menu on a stale baseline and
+//      the menu's own save reports the ORDER write's append as its own.
+//
+//   8. write-lands-read-does-not. Interleaving 7 once more, and the last place it
+//      can hide: the mark now spans the re-read, but a re-read is not an outcome.
+//      `refreshSourcesAgents` swallows a failure into a toast and the authority
+//      drops a superseded run, so the await finishes either way and clears the mark
+//      over rows that never moved — the same stale baseline, reached by waiting for
+//      exactly the right thing and being told nothing about how it went.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  agentsWithEcho,
   createFlowAuthority,
   createLatestAsyncAuthority,
+  createPendingWrites,
   failureLanded,
   flowLetGo,
   flowStateTerminal,
@@ -107,6 +124,266 @@ describe('latest async authority', () => {
     await olderRun;
 
     expect(landed).toEqual(['server order: b,a']);
+  });
+
+  // Interleaving 8, at its source. These are the two ways a re-read finishes with
+  // the rows exactly where they were, and the mutation awaiting it cannot tell
+  // either one from success — which is what makes 「the re-read finished」 a
+  // different fact from 「the row is current」.
+  it('reports a superseded run rather than landing it, and hands a failed one back', async () => {
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthority<string>((value) => landed.push(value));
+    const older = deferred<string>();
+
+    const olderRun = authority.run(() => older.promise);
+    await authority.run(() => Promise.resolve('newest'));
+    older.resolve('older');
+
+    expect(await olderRun).toBe('stale');
+    await expect(authority.run(() => Promise.reject(new Error('read failed')))).rejects.toThrow('read failed');
+    expect(landed).toEqual(['newest']);
+  });
+});
+
+describe('agentsWithEcho — what speaks for a row when no read does', () => {
+  const claude = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a'] } });
+  const codex = agent({ backend: 'codex', sources: { policy: 'follow', order: ['src_b'] } });
+
+  it('takes the write’s echo into the row it is about', () => {
+    const echoed = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a', 'src_c'] } });
+
+    expect(agentsWithEcho([claude, codex], echoed)).toEqual([echoed, codex]);
+  });
+
+  it('leaves every other Agent to the read that owns it', () => {
+    // An order write is per backend; it says nothing about the others, so it may
+    // not answer for them either.
+    const echoed = agent({ backend: 'codex', sources: { policy: 'custom', order: ['src_b', 'src_c'] } });
+
+    expect(agentsWithEcho([claude, codex], echoed)[0]).toBe(claude);
+  });
+
+  it('does not invent a row the page has not read', () => {
+    // Which Agents exist is the list read's to say. A write echo is an update.
+    const echoed = agent({ backend: 'opencode' });
+
+    expect(agentsWithEcho([claude], echoed)).toEqual([claude]);
+  });
+
+  it('does not mutate the list it was handed', () => {
+    const before = [claude, codex];
+    agentsWithEcho(before, agent({ backend: 'claude', sources: { policy: 'follow', order: [] } }));
+
+    expect(before).toEqual([claude, codex]);
+  });
+
+  // Interleaving 8. TypeScript already forces every drawer to hand its echo over —
+  // `onSaved` takes one — so what is left to guard is the page: that it TAKES the
+  // echo rather than dropping it beside a re-read, and that no Agent write reports
+  // itself any other way.
+  it('is how every Agent write on the page reports itself', () => {
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(page).toMatch(/setAgents\(\(prev\) => agentsWithEcho\(prev, echoed\)\)/);
+    // The mode PATCH echoes the same row the drawers' writes do.
+    expect(page).toMatch(/await agentSaved\(echoed\)/);
+
+    const handlers = [...page.matchAll(/onSaved=\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(handlers.length).toBeGreaterThanOrEqual(3);
+    expect(handlers.filter((h) => !h.includes('agentSaved'))).toEqual([]);
+  });
+});
+
+describe('createPendingWrites — a write that outlives the drawer that issued it', () => {
+  /** The published set, as the page would hold it in state. */
+  const registry = () => {
+    let keys: ReadonlySet<string> = new Set();
+    const writes = createPendingWrites((next) => {
+      keys = next;
+    });
+    return { writes, pending: (key: string) => keys.has(key) };
+  };
+
+  /** Lets the queue's own chaining run, without settling any of the work. */
+  const flush = async () => {
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  };
+
+  it('holds the mark for the whole of the work, not just its request', async () => {
+    const put = deferred<void>();
+    const reread = deferred<void>();
+    const { writes, pending } = registry();
+
+    const run = writes.track('claude', async () => {
+      await put.promise;
+      await reread.promise;
+    });
+
+    expect(pending('claude')).toBe(true);
+    put.resolve();
+    await Promise.resolve();
+    // The PUT has returned and the page has NOT read it back yet — the gap the
+    // hand-off may not leave through.
+    expect(pending('claude')).toBe(true);
+    reread.resolve();
+    await run;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('survives the drawer that issued the write', async () => {
+    // Interleaving 7. Nothing here is the drawer: the write is issued, the drawer
+    // that issued it is gone (closed → unmounted), a fresh one opens and asks
+    // whether a write is outstanding. It gets the truth, because the fact was
+    // never the drawer's to hold.
+    const put = deferred<void>();
+    const { writes, pending } = registry();
+
+    const run = writes.track('claude', () => put.promise);
+    const reopened = pending('claude');
+
+    put.resolve();
+    await run;
+
+    expect(reopened).toBe(true);
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('stays pending until the LAST of two overlapping writes finishes', async () => {
+    // Two drags in quick succession. 「Pending」 is a property of the SET of writes on
+    // the key, so the first to return must not report the second one finished.
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const { writes, pending } = registry();
+
+    const runFirst = writes.track('claude', () => first.promise);
+    const runSecond = writes.track('claude', () => second.promise);
+
+    first.resolve();
+    await runFirst;
+    expect(pending('claude')).toBe(true);
+
+    second.resolve();
+    await runSecond;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('runs two edits on one key in the order the user made them', async () => {
+    // 「The later edit wins」 is a claim about COMMIT order. Sent together, two PUTs
+    // settle in whichever order they reach the server's mutation lock — and each
+    // carries the WHOLE list, so the loser is discarded rather than merged into the
+    // winner. The order left on disk could be the user's second-to-last edit while
+    // the drawer shows their last.
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const started: string[] = [];
+    const { writes } = registry();
+
+    const runFirst = writes.track('claude', () => {
+      started.push('first');
+      return first.promise;
+    });
+    const runSecond = writes.track('claude', () => {
+      started.push('second');
+      return second.promise;
+    });
+
+    await flush();
+    expect(started).toEqual(['first']);
+
+    first.resolve();
+    await runFirst;
+    expect(started).toEqual(['first', 'second']);
+
+    second.resolve();
+    await runSecond;
+  });
+
+  it('does not strand the edit waiting behind a rejected write', async () => {
+    // The edit behind it is the user's newer intent and still has to reach the
+    // server — and the write that failed rolled its own optimistic display back, so
+    // there is nothing for its successor to inherit.
+    const second = deferred<void>();
+    let ran = false;
+    const { writes, pending } = registry();
+
+    const runFirst = writes.track('claude', () => Promise.reject(new Error('put rejected')));
+    const runSecond = writes.track('claude', () => {
+      ran = true;
+      return second.promise;
+    });
+
+    await expect(runFirst).rejects.toThrow('put rejected');
+    await flush();
+    expect(ran).toBe(true);
+    expect(pending('claude')).toBe(true);
+
+    second.resolve();
+    await runSecond;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('does not let one backend’s write gate another', async () => {
+    // `PUT /agents/<backend>/sources` moves one backend's order, so this is the
+    // write's own grain: a claude order edit says nothing about codex's menu — and
+    // so has no business making codex's own edit wait for it either.
+    const claude = deferred<void>();
+    const codex = deferred<void>();
+    const started: string[] = [];
+    const { writes, pending } = registry();
+
+    const runClaude = writes.track('claude', () => {
+      started.push('claude');
+      return claude.promise;
+    });
+    const runCodex = writes.track('codex', () => {
+      started.push('codex');
+      return codex.promise;
+    });
+
+    expect(pending('claude')).toBe(true);
+    expect(pending('opencode')).toBe(false);
+    await flush();
+    expect(started).toEqual(['claude', 'codex']);
+
+    claude.resolve();
+    codex.resolve();
+    await Promise.all([runClaude, runCodex]);
+    expect(pending('claude')).toBe(false);
+    expect(pending('codex')).toBe(false);
+  });
+
+  it('clears the mark when the work throws', async () => {
+    const { writes, pending } = registry();
+
+    await expect(
+      writes.track('claude', async () => {
+        throw new Error('put rejected');
+      }),
+    ).rejects.toThrow('put rejected');
+
+    // A rejected write is a finished one. Leaving it marked would disable the
+    // drawer's controls for the rest of the session.
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('is where the order drawer’s busy flag actually lives', () => {
+    // The guard the round-1 fix put in the drawer was real and still incomplete:
+    // it was component state, and 完成 / the X / Escape / the overlay all stay live
+    // while the write runs. So the assertion is not 「the drawer disables things」
+    // but 「the drawer does not OWN the fact it disables them on」.
+    const drawer = readFileSync(join(__dirname, 'SourceOrderDrawer.tsx'), 'utf8');
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(drawer).toMatch(/const saving = orderWrite\.pending;/);
+    expect(drawer).not.toMatch(/setSaving/);
+    // And the mark spans the whole of `persist`, read-back included, because
+    // `track` is what opens and closes it.
+    expect(drawer).toMatch(/orderWrite\.track\(async \(\) => \{/);
+    expect(drawer).toMatch(/await Promise\.resolve\(onSaved\(echoed\)\)\.catch\(\(\) => \{\}\);/);
+
+    expect(page).toMatch(/createPendingWrites\(setOrderWrites\)/);
+    expect(page).toMatch(/pending: orderWrites\.has\(orderAgent\.backend\)/);
+    expect(page).toMatch(/track: \(work\) => orderWriteRegistry\.track\(orderAgent\.backend, work\)/);
   });
 });
 

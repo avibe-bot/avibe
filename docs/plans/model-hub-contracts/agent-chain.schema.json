@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "v4 (2026-07-29 targeted amendment): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id (spec §4.3 step 2; the shipped resolver already enforces it). Deliberately NOT filtered by runnability: cooling, source-blocked and process-unavailable native_cli members stay at their positions, dimmed, because the user needs to see supply they own. The RUNNABLE candidate list is this chain further filtered to `runnable: true`, where runnable = health-permits AND process-available. Read-only projection, computed per request, never persisted.",
+  "description": "v4 (2026-07-30 targeted amendment): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by the server's one per-source supply derivation. That derivation applies an explicit mapping first, otherwise resolves a vendor-native fixed-menu alias against discovered inventory only, then tests source capability. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id. Deliberately NOT filtered by runnability: cooling, source-blocked and process-unavailable native_cli members stay at their positions, dimmed, because the user needs to see supply they own. The RUNNABLE candidate list is this chain further filtered to `runnable: true`, where runnable = health-permits AND process-available. Read-only projection, computed per request, never persisted.",
   "type": "object",
   "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
   "additionalProperties": false,
@@ -133,11 +133,11 @@
           },
           "via_mapping": {
             "type": "boolean",
-            "description": "true when this source supplies the model only because a per-agent mapping rewrote the requested id (spec §4.3 step 1). UI marks the chip 经映射."
+            "description": "true only when an explicit per-agent mapping rewrote the requested id (spec §4.3 step 1). A built-in vendor-native alias remains false, so UI can distinguish an owner-authored override from the default native resolution rule."
           },
           "resolved_model_id": {
             "type": ["string", "null"],
-            "description": "The id actually sent upstream (e.g. glm-5.2 for a requested claude-opus-4-6); null only when it is byte-identical to `model_id`. For open menus that never happens — the request is prefixed and the upstream id is bare — so this is non-null for every opencode chain, pinned by the conditional at the end of this file. Also non-null whenever `via_mapping` is true, since a mapping by definition produced a different id."
+            "description": "The id actually sent upstream (e.g. glm-5.2 for an explicit mapping, or claude-opus-4-5-20251101 for a native claude-opus-4-5 alias); null only when it is byte-identical to `model_id`. For open menus that never happens — the request is prefixed and the upstream id is bare — so this is non-null for every opencode chain. Also non-null whenever `via_mapping` is true, since a mapping by definition produced a different id."
           },
           "health": {
             "enum": ["healthy", "cooldown", "needs_action", "error"],
@@ -232,8 +232,8 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 5): the converse of the item-level `via_mapping: true ⇒ resolved_model_id: string` rule, which completes it into a biconditional — but ONLY for fixed menus, and the scoping is the substance of the finding rather than a caveat on it. `resolved_model_id` is documented as 'null only when byte-identical to model_id', and for claude/codex the menu identifier IS the upstream id, so a mapping is the only thing that can make them differ (spec §4.3 step 1 is the sole rewrite mechanism at this grain). A fixed-menu item reporting `via_mapping: false` with a non-null resolved id therefore claims a rewrite that nothing performed, and the UI marks that chip 经映射 off `via_mapping` while rendering 实际跑的模型 off this field — so the two disagreeing puts a different model in the chip and in the label. The blanket converse would be WRONG and is deliberately not written: opencode resolves a prefixed request to a bare upstream id (`zhipuai/glm-5.2` → `glm-5.2`) with no mapping involved, so `via_mapping: false` with a non-null resolved id is the normal, required shape there — already pinned by the member above. Stated per backend family, the two members leave no combination undefined: open menus always carry a resolved id, fixed menus carry one exactly when a mapping produced it.",
-      "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
+      "$comment": "v4 (07-30 native-alias amendment): Codex has no built-in upstream-id rewrite today, so `via_mapping:false` still means byte-identical and therefore null for that backend. Claude differs: its fixed menu includes stable aliases that may resolve to a dated discovered id without becoming an explicit user mapping.",
+      "if": { "properties": { "backend": { "const": "codex" } }, "required": ["backend"] },
       "then": {
         "properties": {
           "chain": {
@@ -242,6 +242,33 @@
                 {
                   "if": { "properties": { "via_mapping": { "const": false } }, "required": ["via_mapping"] },
                   "then": { "properties": { "resolved_model_id": { "type": "null" } } }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v4 (07-30 native-alias amendment): a non-mapped Claude rewrite is legal only in the vendor-native Claude identifier family. The server additionally proves same-family/version selection against discovered inventory; JSON Schema cannot compare the requested model_id with each row or inspect the source inventory.",
+      "if": { "properties": { "backend": { "const": "claude" } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "items": {
+              "allOf": [
+                {
+                  "if": { "properties": { "via_mapping": { "const": false } }, "required": ["via_mapping"] },
+                  "then": {
+                    "properties": {
+                      "resolved_model_id": {
+                        "anyOf": [
+                          { "type": "null" },
+                          { "type": "string", "pattern": "^claude-(opus|sonnet|haiku|fable)-[0-9]+(?:-[0-9]+)*(?:-[0-9]{8})?$" }
+                        ]
+                      }
+                    }
+                  }
                 }
               ]
             }
@@ -271,6 +298,24 @@
           "channel": "hub",
           "via_mapping": false,
           "resolved_model_id": null,
+          "health": "healthy",
+          "runnable": true,
+          "reason": null,
+          "retry_at": null
+        }
+      ],
+      "supply_state": "ok"
+    },
+    {
+      "contract_version": 4,
+      "backend": "claude",
+      "model_id": "claude-opus-4-5",
+      "chain": [
+        {
+          "source_id": "src_glmrelay01",
+          "channel": "hub",
+          "via_mapping": false,
+          "resolved_model_id": "claude-opus-4-5-20251101",
           "health": "healthy",
           "runnable": true,
           "reason": null,

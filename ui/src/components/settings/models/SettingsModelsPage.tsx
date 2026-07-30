@@ -20,7 +20,7 @@ import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
-import { createLatestAsyncAuthority } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites } from './asyncLifetime';
 import {
   emptyFeed,
   feedAfterHeadRead,
@@ -113,6 +113,15 @@ export const SettingsModelsPage: React.FC = () => {
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
 
+  // Which backends have a 来源顺序 write outstanding. Held HERE and not in the
+  // drawer that issues it, because the drawer does not outlive its own write:
+  // 完成, the close X, Escape and the overlay all stay live while the PUT and its
+  // read-back are in flight, and closing unmounts the drawer, so a flag inside it
+  // is re-created reading 「idle」 by the reopen — which is exactly when the
+  // hand-off below must still be shut. See `createPendingWrites`.
+  const [orderWrites, setOrderWrites] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [orderWriteRegistry] = React.useState(() => createPendingWrites(setOrderWrites));
+
   // Guards event-handler async writes (refresh / connect) from landing after
   // the page unmounts — the whole class of stale-async writes the review flagged.
   //
@@ -202,6 +211,26 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [refreshAuthority, showToast, t]);
 
+  /**
+   * The one way an Agent write reports itself: hand back the row the server
+   * echoed, then re-read everything else the write moved.
+   *
+   * Taking the echo is not an optimization of the re-read, it is the part that
+   * cannot fail. `refreshSourcesAgents` swallows a failed read into a toast and
+   * `refreshAuthority` drops a superseded one, so `await`ing it proves an attempt
+   * finished and never that the page caught up — and the drawers seed, diff and
+   * gate off these rows. `agentsWithEcho` explains why the echo is allowed to
+   * speak for one; the re-read still runs because the echo is one Agent and the
+   * write moved source rows, the other Agents and the feed too.
+   */
+  const agentSaved = React.useCallback(
+    (echoed: AgentSupply) => {
+      setAgents((prev) => agentsWithEcho(prev, echoed));
+      return refreshSourcesAgents();
+    },
+    [refreshSourcesAgents],
+  );
+
   const loadOlderEvents = React.useCallback(async () => {
     const oldest = feedTailCursor(feed);
     if (!oldest) return;
@@ -232,8 +261,9 @@ export const SettingsModelsPage: React.FC = () => {
       // see connectOutcome, which exists because `current: null` conflates four
       // unrelated states and the copy behind it promised a Direct fallback the
       // resolver does not perform.
-      const outcome = connectOutcome(await modelsApi.setAgentMode(agent.backend, 'hub'), sources);
-      await refreshSourcesAgents();
+      const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
+      const outcome = connectOutcome(echoed, sources);
+      await agentSaved(echoed);
       if (!aliveRef.current) return;
       if (outcome === 'failed') {
         showToast(t('settings.models.toast.connectFailed') as string, 'error');
@@ -321,7 +351,18 @@ export const SettingsModelsPage: React.FC = () => {
           agents={agents}
           sources={sources}
           onClose={() => setOrderBackend(null)}
-          onSaved={() => void refreshSourcesAgents()}
+          // Returned, not discarded: the write stays marked pending for the whole
+          // of this, so the hand-off to the menu drawer cannot open mid-write. What
+          // makes the baseline it hands over CORRECT is the echo `agentSaved` takes
+          // — the re-read is allowed to fail here without leaving one behind.
+          onSaved={agentSaved}
+          // 试跑's own re-read. It is not this drawer's write, so there is no echo
+          // to take — the probe moves source state and answers with a probe result.
+          onReread={() => void refreshSourcesAgents()}
+          orderWrite={{
+            pending: orderWrites.has(orderAgent.backend),
+            track: (work) => orderWriteRegistry.track(orderAgent.backend, work),
+          }}
           // 模型菜单与映射 hands off to the menu drawer: the two answer adjacent
           // questions (which sources, which models), and V6 02's footer is the only
           // way into the menu now that the row's action is 来源顺序. Withheld while
@@ -343,7 +384,8 @@ export const SettingsModelsPage: React.FC = () => {
           agent={menuAgent}
           sources={sources}
           onClose={() => setMenuBackend(null)}
-          onSaved={() => void refreshSourcesAgents()}
+          onSaved={(echoed) => void agentSaved(echoed)}
+          // A custom model is a SOURCE write: it echoes the source, not the Agent.
           onRefresh={() => void refreshSourcesAgents()}
         />
       ) : menuAgent && (menuAgent.backend === 'claude' || menuAgent.backend === 'codex') ? (
@@ -353,7 +395,7 @@ export const SettingsModelsPage: React.FC = () => {
           agent={menuAgent}
           sources={sources}
           onClose={() => setMenuBackend(null)}
-          onSaved={() => void refreshSourcesAgents()}
+          onSaved={(echoed) => void agentSaved(echoed)}
         />
       ) : null}
     </SettingsPageShell>

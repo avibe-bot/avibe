@@ -261,15 +261,18 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    launches backends per request; switching never happens mid-process.
    `native_cli` sources are eligible only for their sanctioned client (Claude sub
    → Claude Code); enforced in code via `allowed_origins`-style binding.
-1. **Mapping** — requested model ID → actual model. Identity by default.
+1. **Mapping** — requested model ID → explicit target, when one exists.
    Only fixed-menu agents (Claude Code / Codex) can override, per-agent
    (e.g. Claude Code's `claude-opus-4-6` → `glm-5.2`). Mapping is an explicit,
-   deterministic user choice.
+   deterministic user choice and always takes precedence. No mapping means the
+   caller-facing menu ID stays intact for the next, per-source derivation; it does
+   not promise blind identity passthrough to an upstream.
 2. **Candidates (v2)** — start from **this agent's ordered subset** (§4.2), in
    its order, then filter in two stages:
-   - **capability** (structural, stable): a. the source supplies the (mapped)
-     model id; b. the source is eligible for this backend and channel (§4.4);
-     c. for open menus, the source's vendor matches the **provider segment** of the
+   - **capability** (structural, stable): a. derive this source's **effective
+     upstream model id**, then require the source to supply it; b. the source is
+     eligible for this backend and channel (§4.4); c. for open menus, the source's
+     vendor matches the **provider segment** of the
      requested identifier. Predicate c does not fold into a: sources advertise bare
      model ids, so `zhipuai/glm-5.2` and `custom/glm-5.2` present the *same* bare id,
      and without the vendor predicate the agent's source order alone would decide
@@ -278,6 +281,21 @@ cooldown pool keyed on the shared source row, `_cooldown` in
      (`opencode_provider_id(source.vendor) == provider`,
      `core/handlers/model_hub/resolver.py`); v2 keeps it, and keeps it in the
      *capability* stage, because a vendor is structural and not momentary.
+     The effective-id derivation has one precedence order. An explicit mapping
+     requires its target id exactly. Without one, a `native_cli` source first
+     preserves an exact CLI alias such as `opus` or `sonnet[1m]`; the installed CLI
+     owns that alias's compatibility. For every other fixed-menu source on its
+     backend-native vendor, built-in aliases resolve against **that source's
+     discovered inventory only**: a Claude version alias chooses the latest dated id
+     for that exact version; `opus`, `sonnet`, `haiku`, `opus[1m]`, and
+     `sonnet[1m]` choose the latest version/date in the same family; a dated request
+     remains exact. If no automatic native alias applies, exact identity is accepted
+     when the source advertises the menu id.
+     Manual inventory, a foreign vendor, and an undiscovered id never satisfy this
+     automatic branch. Therefore two Hub sources may derive different dated ids for
+     one menu id. The caller-facing menu id
+     remains the stable chain, probe, gateway, and event correlation key; only the
+     upstream attempt carries the per-source effective id.
      What survives is the *capability chain* for this (agent, model) pair — what
      §4.6 defines and what the UI displays, cooling members included.
    - **runnability** (momentary, per turn): d. the source is retry-ready —

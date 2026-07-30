@@ -581,7 +581,7 @@ class ModelHubRuntimeRouter:
         route_events = [
             event
             for event in self.service.events.list(limit=100)
-            if event.get("agent") == current.backend and event.get("model_id") == current.target_model
+            if event.get("agent") == current.backend and event.get("model_id") == current.requested_model
         ]
         pending_source: ModelHubSourceConfig | None = None
         pending_reason: EventReason | None = None
@@ -650,7 +650,7 @@ class ModelHubRuntimeRouter:
         ):
             self.service._emit_switch(
                 agent=cast(EventAgent, current.backend),
-                model_id=current.target_model,
+                model_id=current.requested_model,
                 failed_source=failed_source,
                 failed_reason=failed_reason,
                 source=current_source,
@@ -673,7 +673,7 @@ class ModelHubRuntimeRouter:
         self.service._record_event(
             agent=cast(EventAgent, current.backend),
             kind="channel_switch",
-            model_id=current.target_model,
+            model_id=current.requested_model,
             reason=reason,
             from_source=previous.source_id,
             to_source=previous.source_id,
@@ -1030,7 +1030,7 @@ class ModelHubRuntimeRouter:
             source,
             decision,
             agent=cast(EventAgent, launch.backend),
-            model_id=launch.target_model,
+            model_id=launch.requested_model,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
         return True

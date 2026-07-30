@@ -6,10 +6,11 @@ import { useTranslation } from 'react-i18next';
 import { Check, Copy } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
-import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
+import { ChatImage, LinkedImageContent, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
+import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
 import {
   MENTION_LINK_SCHEME,
   linkifyMentions,
@@ -71,8 +72,12 @@ function linkifySecretRequests(text: string): string {
 
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
 // only http/https/mailto/tel/relative by default).
-function mentionUrlTransform(url: string): string {
-  if (url.startsWith(`${MENTION_LINK_SCHEME}:`) || url.startsWith(`${SECRET_LINK_SCHEME}:`)) return url;
+function mentionUrlTransform(url: string, allowLocalFiles: boolean): string {
+  if (
+    url.startsWith(`${MENTION_LINK_SCHEME}:`)
+    || url.startsWith(`${SECRET_LINK_SCHEME}:`)
+    || (allowLocalFiles && isAbsoluteWindowsFileHref(url))
+  ) return url;
   return defaultUrlTransform(url);
 }
 
@@ -108,6 +113,57 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   );
 };
 
+const MarkdownImage: React.FC<{
+  src?: string;
+  alt?: string;
+  interactive: boolean;
+  localFileWorkdir?: string | null;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
+}> = ({ src, alt, interactive, localFileWorkdir, onOpenLocalFile }) => {
+  if (!src) return null;
+
+  const url = String(src);
+  if (interactive && isProxyMediaUrl(url)) {
+    // Pixel dimensions ride on the proxy URL (``?w=&h=``) so the image's
+    // box is reserved before it loads — no scroll shift on the transcript.
+    const { width, height } = readMediaDims(url);
+    return <ChatImage src={url} alt={alt || ''} width={width} height={height} />;
+  }
+
+  const label = `🖼 ${alt || url}`;
+  const localFile = interactive && onOpenLocalFile
+    ? resolveLocalFileLink(url, localFileWorkdir)
+    : null;
+  let unlinked: React.ReactNode;
+  if (localFile) {
+    unlinked = (
+      <a
+        href={url}
+        data-local-file-link="true"
+        onClick={(event) => {
+          event.preventDefault();
+          void onOpenLocalFile?.(localFile);
+        }}
+        onAuxClick={(event) => event.preventDefault()}
+      >
+        {label}
+      </a>
+    );
+  } else {
+    unlinked = interactive ? (
+      <a href={url} target="_blank" rel="noopener noreferrer nofollow">
+        {label}
+      </a>
+    ) : (
+      <span>{label}</span>
+    );
+  }
+
+  // The surrounding Markdown link owns the click. Rendering another anchor
+  // here would create invalid nested links and invoke both local-file handlers.
+  return <LinkedImageContent linked={<span>{label}</span>} unlinked={unlinked} />;
+};
+
 export const Markdown: React.FC<{
   content: string;
   className?: string;
@@ -121,6 +177,10 @@ export const Markdown: React.FC<{
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
    *  secret on click. */
   secretRequests?: boolean;
+  /** Agent-reply opt-in: `/abs/path` and `./relative/path` Markdown links open
+   *  in Avibe's Editor. Relative paths resolve from the owning Session workdir. */
+  localFileWorkdir?: string | null;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
   /** The surface can never accept another write (an archived session's transcript).
    *  Narrow by design: it locks the interactive markers this renderer can mint —
    *  today the secret-request cards — and deliberately does NOT touch reads
@@ -134,6 +194,8 @@ export const Markdown: React.FC<{
   softBreaks = false,
   references,
   secretRequests = false,
+  localFileWorkdir,
+  onOpenLocalFile,
   readOnly = false,
 }) => {
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
@@ -160,24 +222,15 @@ export const Markdown: React.FC<{
       // render a real inline <img> for our OWN same-origin media proxy; every
       // other URL stays a click-through link (or plain text when
       // non-interactive) so nothing is fetched without an explicit action.
-      img: ({ src, alt }) => {
-        if (!src) return null;
-        const url = String(src);
-        if (interactive && isProxyMediaUrl(url)) {
-          // Pixel dimensions ride on the proxy URL (``?w=&h=``) so the image's
-          // box is reserved before it loads — no scroll shift on the transcript.
-          const { width, height } = readMediaDims(url);
-          return <ChatImage src={url} alt={alt || ''} width={width} height={height} />;
-        }
-        const label = `🖼 ${alt || url}`;
-        return interactive ? (
-          <a href={url} target="_blank" rel="noopener noreferrer nofollow">
-            {label}
-          </a>
-        ) : (
-          <span>{label}</span>
-        );
-      },
+      img: ({ src, alt }) => (
+        <MarkdownImage
+          src={src ? String(src) : undefined}
+          alt={alt || undefined}
+          interactive={interactive}
+          localFileWorkdir={localFileWorkdir}
+          onOpenLocalFile={onOpenLocalFile}
+        />
+      ),
       // Links to our media proxy are agent-produced files → render the
       // download card (filename + type + download / preview). Other links keep
       // the normal anchor (interactive) or collapse to plain text inside a
@@ -210,6 +263,24 @@ export const Markdown: React.FC<{
         }
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;
+        }
+        const localFile = interactive && onOpenLocalFile
+          ? resolveLocalFileLink(url, localFileWorkdir)
+          : null;
+        if (localFile) {
+          return (
+            <a
+              href={url}
+              data-local-file-link="true"
+              onClick={(event) => {
+                event.preventDefault();
+                void onOpenLocalFile?.(localFile);
+              }}
+              onAuxClick={(event) => event.preventDefault()}
+            >
+              <LinkedImageProvider>{children}</LinkedImageProvider>
+            </a>
+          );
         }
         if (!interactive) return <span>{children}</span>;
         // Wrap children so a nested ChatImage (``[![](media)](href)``) renders
@@ -244,7 +315,7 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests, readOnly],
+    [interactive, secretRequests, readOnly, localFileWorkdir, onOpenLocalFile],
   );
 
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees
@@ -254,12 +325,13 @@ export const Markdown: React.FC<{
   // (secretRequests) — user bubbles / previews / docs keep them as plain text.
   let rendered = references && references.length ? linkifyMentions(content, references) : content;
   if (secretRequests) rendered = linkifySecretRequests(rendered);
+  const urlTransform = (url: string) => mentionUrlTransform(url, Boolean(onOpenLocalFile));
   return (
     <div className={cn('vr-markdown', className)}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         components={components}
-        urlTransform={mentionUrlTransform}
+        urlTransform={urlTransform}
       >
         {rendered}
       </ReactMarkdown>

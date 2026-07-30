@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
@@ -15,6 +16,21 @@ BackendName = Literal["claude", "codex", "opencode"]
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
 
+_NATIVE_VENDOR_BY_BACKEND: dict[BackendName, str] = {
+    "claude": "anthropic",
+    "codex": "openai",
+}
+_CLAUDE_FAMILY_ALIASES = {
+    "opus": "opus",
+    "opus[1m]": "opus",
+    "sonnet": "sonnet",
+    "sonnet[1m]": "sonnet",
+    "haiku": "haiku",
+}
+_CLAUDE_MODEL_ID = re.compile(
+    r"^claude-(?P<family>opus|sonnet|haiku|fable)-(?P<version>\d+(?:-\d+)*?)(?:-(?P<date>\d{8}))?$"
+)
+
 
 @dataclass(frozen=True)
 class ModelHubTurnResolution:
@@ -25,10 +41,104 @@ class ModelHubTurnResolution:
     source: ModelHubSourceConfig | None
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
+    source_model_ids: tuple[tuple[str, str], ...] = ()
     provider: str | None = None
     mapping_applied: bool = False
     recoverable_source_ids: tuple[str, ...] = ()
     supply_status: SupplyStatus | None = None
+
+    def model_for_source(self, source: ModelHubSourceConfig | str) -> str | None:
+        source_id = source if isinstance(source, str) else source.id
+        return next(
+            (
+                model_id
+                for candidate_source_id, model_id in self.source_model_ids
+                if candidate_source_id == source_id
+            ),
+            None,
+        )
+
+
+def _parsed_claude_model_id(
+    model_id: str,
+) -> tuple[str, tuple[int, ...], int | None] | None:
+    match = _CLAUDE_MODEL_ID.fullmatch(model_id)
+    if match is None:
+        return None
+    return (
+        match.group("family"),
+        tuple(int(part) for part in match.group("version").split("-")),
+        int(match.group("date")) if match.group("date") else None,
+    )
+
+
+def _native_claude_alias(
+    requested_model: str,
+    source: ModelHubSourceConfig,
+) -> str | None:
+    family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
+    requested_version: tuple[int, ...] | None = None
+    if family is None:
+        parsed_request = _parsed_claude_model_id(requested_model)
+        if parsed_request is None:
+            return None
+        family, requested_version, requested_date = parsed_request
+        if requested_date is not None:
+            return None
+
+    matches: list[tuple[tuple[int, ...], int, str]] = []
+    for model in source.models:
+        if model.provenance != "discovered":
+            continue
+        parsed = _parsed_claude_model_id(model.id)
+        if parsed is None:
+            continue
+        candidate_family, candidate_version, candidate_date = parsed
+        if candidate_family != family:
+            continue
+        if requested_version is not None and candidate_version != requested_version:
+            continue
+        matches.append((candidate_version, candidate_date or 0, model.id))
+    return max(matches)[2] if matches else None
+
+
+def _native_alias_for_source(
+    backend: BackendName,
+    requested_model: str,
+    source: ModelHubSourceConfig,
+) -> str | None:
+    if source.vendor != _NATIVE_VENDOR_BY_BACKEND.get(backend):
+        return None
+    if backend == "claude":
+        return _native_claude_alias(requested_model, source)
+    return None
+
+
+def effective_model_for_source(
+    *,
+    backend: BackendName,
+    requested_model: str,
+    target_model: str,
+    source: ModelHubSourceConfig,
+    explicit_mapping: bool,
+) -> str | None:
+    """Return the upstream id this source can actually supply for one menu id."""
+
+    if not explicit_mapping:
+        if source.supply_channel == "native_cli" and any(
+            model.id == requested_model for model in source.models
+        ):
+            return requested_model
+        native_alias = _native_alias_for_source(
+            backend,
+            requested_model,
+            source,
+        )
+        if native_alias is not None:
+            return native_alias
+    if any(model.id == target_model for model in source.models):
+        return target_model
+    return None
 
 
 def allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
@@ -249,17 +359,32 @@ def resolve_model_hub_turn(
         )
 
     by_id = {source.id: source for source in config.sources}
-    matching_sources = tuple(
-        source
-        for source in (by_id[source_id] for source_id in config.effective_source_order(backend))
-        if source_eligible_for_backend(source, backend)
-        and (provider is None or opencode_provider_id(source.vendor) == provider)
-        and any(model.id == target_model for model in source.models)
-    )
+    source_model_ids: list[tuple[str, str]] = []
+    matching_sources: list[ModelHubSourceConfig] = []
+    for source in (
+        by_id[source_id]
+        for source_id in config.effective_source_order(backend)
+    ):
+        if not source_eligible_for_backend(source, backend) or (
+            provider is not None and opencode_provider_id(source.vendor) != provider
+        ):
+            continue
+        effective_model = effective_model_for_source(
+            backend=backend,
+            requested_model=requested_model,
+            target_model=target_model,
+            source=source,
+            explicit_mapping=mapping is not None,
+        )
+        if effective_model is None:
+            continue
+        matching_sources.append(source)
+        source_model_ids.append((source.id, effective_model))
+    matching_source_tuple = tuple(matching_sources)
 
     candidates: list[ModelHubSourceConfig] = []
     recoverable_source_ids: list[str] = []
-    for source in matching_sources:
+    for source in matching_source_tuple:
         if supply_channel is not None and source.supply_channel != supply_channel:
             continue
         if source.state.status == "cooldown" and source_retry_ready(source, now):
@@ -274,19 +399,27 @@ def resolve_model_hub_turn(
 
     source = candidates[0] if candidates else None
     candidate_tuple = tuple(candidates)
+    target_source = source or (
+        matching_source_tuple[0] if matching_source_tuple else None
+    )
+    effective_target = dict(source_model_ids).get(
+        target_source.id if target_source is not None else "",
+        target_model,
+    )
     return ModelHubTurnResolution(
         backend=backend,
         channel=source.supply_channel if source is not None else "unavailable",
         requested_model=requested_model,
-        target_model=target_model,
+        target_model=effective_target,
         source=source,
-        matching_sources=matching_sources,
+        matching_sources=matching_source_tuple,
         candidates=candidate_tuple,
+        source_model_ids=tuple(source_model_ids),
         provider=provider,
         mapping_applied=mapping_applied,
         recoverable_source_ids=tuple(recoverable_source_ids),
         supply_status=_supply_status(
-            matching_sources,
+            matching_source_tuple,
             candidate_tuple,
             now=now,
             unavailable_source_ids=unavailable_source_ids,
