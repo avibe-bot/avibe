@@ -43,7 +43,7 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
 import { initialSeedState, savedSourcesKey, seedStep, type PendingWrite } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
-import { eligibilityOf, processAvailabilityOf } from './eligibility';
+import { eligibilityOf } from './eligibility';
 import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
@@ -59,7 +59,7 @@ import {
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
-import { isUnhealthy, needsAttention } from './supply';
+import { healthyButUnrunnable, isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
 import type { AgentBackend, AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
 
@@ -208,6 +208,10 @@ export const SourceOrderDrawer: React.FC<{
    *   未启用  `供 GLM 全系 · 经模型菜单改写后可供 Claude 使用`
    *   不适用  the server's eligibility reason, alone
    *
+   * 启用 and 未启用 share one retraction: a healthy source this machine cannot
+   * launch the Agent's process against says so instead of naming what it supplies
+   * — see `healthyButUnrunnable`.
+   *
    * The 供 segment names a model FAMILY, which is a vendor label, so a source with
    * no family (a relay / custom endpoint) omits it rather than inventing one. The
    * mapping note is read off the payload — none of this backend's own built-in ids
@@ -237,6 +241,9 @@ export const SourceOrderDrawer: React.FC<{
    * line stays the same colour as the chain strip's dim dot rather than borrowing
    * the gold that means 「and it needs you」.
    */
+  const nativeUnavailable = () =>
+    t('settings.models.order.nativeUnavailable', { backend: backendName }) as string;
+
   const enabledSubline = (source: Source): string =>
     join([
       identity(source),
@@ -246,12 +253,26 @@ export const SourceOrderDrawer: React.FC<{
         ? (t('settings.models.source.retryIn', { minutes: cooldownEtaMinutes(source.state.retry_at) }) as string)
         : isUnhealthy(source.state)
           ? ''
-          : processAvailabilityOf(agent, source.id).runnable
-            ? supplies(source)
-            : (t('settings.models.order.nativeUnavailable', { backend: backendName }) as string),
+          : healthyButUnrunnable(agent, source)
+            ? nativeUnavailable()
+            : supplies(source),
     ]);
 
+  /**
+   * The 未启用 row says what turning this source on would get — so it owes the
+   * same retraction the 启用 row owes, and owes it EARLIER. Availability is per
+   * (source, backend) and has nothing to do with where the source sits in the
+   * order, so a row that only admits it once enabled has told the user one step
+   * after the step it was about; `chainChips` already promises that 「the
+   * all-sources drawer keeps the ungated fact」, and this is half of that drawer.
+   *
+   * It replaces the whole line rather than joining it, in both branches: 供 … 全系
+   * is the promise being retracted, and 经模型菜单改写后可供 X 使用 is the same
+   * promise routed through a rewrite — neither survives a process that cannot be
+   * launched, and the sub-line is two segments wide.
+   */
   const disabledSubline = (source: Source): string => {
+    if (healthyButUnrunnable(agent, source)) return join([identity(source), nativeUnavailable()]);
     // Only a fixed-menu backend rewrites ids through mappings; the open-menu
     // backend picks a supplied id directly, so the note would be false there.
     const viaMapping =
@@ -300,8 +321,10 @@ export const SourceOrderDrawer: React.FC<{
    * `follow` the server owns the order outright, so 恢复推荐顺序 learns the
    * recommended order from the response and nowhere else.
    *
-   * Two edits in flight resolve last-write-wins, which is correct here because
-   * every PUT carries the whole list rather than a delta.
+   * Two edits made in quick succession resolve later-edit-wins, which every PUT
+   * carrying the whole list rather than a delta makes possible and `orderWrite`'s
+   * per-backend queue makes true: sent together they would settle in whichever
+   * order they reached the server's lock, and the discarded one is a whole list.
    *
    * Runs to completion even if the drawer closes mid-flight, and deliberately so.
    * Everything this does on the way out belongs to something that outlives the

@@ -204,6 +204,11 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     return { writes, pending: (key: string) => keys.has(key) };
   };
 
+  /** Lets the queue's own chaining run, without settling any of the work. */
+  const flush = async () => {
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  };
+
   it('holds the mark for the whole of the work, not just its request', async () => {
     const put = deferred<void>();
     const reread = deferred<void>();
@@ -244,8 +249,8 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
   });
 
   it('stays pending until the LAST of two overlapping writes finishes', async () => {
-    // Two drags in quick succession. Last-write-wins is fine — each PUT carries the
-    // whole list — but the first to return must not report the second one finished.
+    // Two drags in quick succession. 「Pending」 is a property of the SET of writes on
+    // the key, so the first to return must not report the second one finished.
     const first = deferred<void>();
     const second = deferred<void>();
     const { writes, pending } = registry();
@@ -262,18 +267,89 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     expect(pending('claude')).toBe(false);
   });
 
-  it('does not let one backend’s write gate another', async () => {
-    // `PUT /agents/<backend>/sources` moves one backend's order, so this is the
-    // write's own grain: a claude order edit says nothing about codex's menu.
-    const claude = deferred<void>();
+  it('runs two edits on one key in the order the user made them', async () => {
+    // 「The later edit wins」 is a claim about COMMIT order. Sent together, two PUTs
+    // settle in whichever order they reach the server's mutation lock — and each
+    // carries the WHOLE list, so the loser is discarded rather than merged into the
+    // winner. The order left on disk could be the user's second-to-last edit while
+    // the drawer shows their last.
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const started: string[] = [];
+    const { writes } = registry();
+
+    const runFirst = writes.track('claude', () => {
+      started.push('first');
+      return first.promise;
+    });
+    const runSecond = writes.track('claude', () => {
+      started.push('second');
+      return second.promise;
+    });
+
+    await flush();
+    expect(started).toEqual(['first']);
+
+    first.resolve();
+    await runFirst;
+    expect(started).toEqual(['first', 'second']);
+
+    second.resolve();
+    await runSecond;
+  });
+
+  it('does not strand the edit waiting behind a rejected write', async () => {
+    // The edit behind it is the user's newer intent and still has to reach the
+    // server — and the write that failed rolled its own optimistic display back, so
+    // there is nothing for its successor to inherit.
+    const second = deferred<void>();
+    let ran = false;
     const { writes, pending } = registry();
 
-    const run = writes.track('claude', () => claude.promise);
+    const runFirst = writes.track('claude', () => Promise.reject(new Error('put rejected')));
+    const runSecond = writes.track('claude', () => {
+      ran = true;
+      return second.promise;
+    });
+
+    await expect(runFirst).rejects.toThrow('put rejected');
+    await flush();
+    expect(ran).toBe(true);
     expect(pending('claude')).toBe(true);
-    expect(pending('codex')).toBe(false);
+
+    second.resolve();
+    await runSecond;
+    expect(pending('claude')).toBe(false);
+  });
+
+  it('does not let one backend’s write gate another', async () => {
+    // `PUT /agents/<backend>/sources` moves one backend's order, so this is the
+    // write's own grain: a claude order edit says nothing about codex's menu — and
+    // so has no business making codex's own edit wait for it either.
+    const claude = deferred<void>();
+    const codex = deferred<void>();
+    const started: string[] = [];
+    const { writes, pending } = registry();
+
+    const runClaude = writes.track('claude', () => {
+      started.push('claude');
+      return claude.promise;
+    });
+    const runCodex = writes.track('codex', () => {
+      started.push('codex');
+      return codex.promise;
+    });
+
+    expect(pending('claude')).toBe(true);
+    expect(pending('opencode')).toBe(false);
+    await flush();
+    expect(started).toEqual(['claude', 'codex']);
 
     claude.resolve();
-    await run;
+    codex.resolve();
+    await Promise.all([runClaude, runCodex]);
+    expect(pending('claude')).toBe(false);
+    expect(pending('codex')).toBe(false);
   });
 
   it('clears the mark when the work throws', async () => {

@@ -119,6 +119,29 @@ export function chainChips(agent: AgentSupply, sources: Source[]): ChainChip[] {
   });
 }
 
+/**
+ * Is this row's 供 … 全系 a promise this machine cannot keep — healthy, and still
+ * not something the Agent's process can be launched against?
+ *
+ * A model count is a promise, and the two answers that can retract it compete for
+ * one segment of copy. Health wins, exactly as it does in the strip above: a
+ * cooling or broken source is the one the user can act on, and its state chip has
+ * already raised the question. So this is only about the row that looks fine.
+ *
+ * Ungated by route membership, and deliberately so — unlike `unavailable` in
+ * `chainChips`, where the gate exists because that marker blames a FAILOVER on a
+ * cause and must not name one for a position the resolver was walking past
+ * anyway. A row in a source list is not explaining a move; it is answering 「what
+ * would I get by turning this on」. And a 未启用 source sits outside
+ * `agent.sources.order`, which is the only list `in_current_model_chain` is an
+ * answer about, so a gate there would read an ORDER fact as a MODEL one.
+ *
+ * Per (source, backend), like `processAvailabilityOf` it reads — never a property
+ * of the source row on its own.
+ */
+export const healthyButUnrunnable = (agent: Pick<AgentSupply, 'sources'>, source: Source): boolean =>
+  !isUnhealthy(source.state) && !processAvailabilityOf(agent, source.id).runnable;
+
 // ── AC-9: who a supply problem is about ─────────────────────────────────
 export type SupplyAttribution = {
   /** Named Agents whose effective model cannot be served at all. */

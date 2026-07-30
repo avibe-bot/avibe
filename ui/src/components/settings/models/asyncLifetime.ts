@@ -52,6 +52,13 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
  * change also moves the source rows, the other Agents' ● 当前 and the event feed.
  * It makes the re-read's LANDING stop being the only way the row can catch up.
  *
+ * What it is not is a way to order two writes. An echo is the server's word about
+ * the row as of ONE commit, so it may speak for the row only while it is the
+ * newest word there is — and that is a fact about the writes, not something this
+ * function can check: two responses do not say which of them committed second.
+ * `createPendingWrites` below is where it is made true, by running the writes on
+ * a backend one at a time.
+ *
  * A backend the page has no row for is left alone rather than appended. A write
  * echo is an update to a row; which rows exist is the list read's to say.
  */
@@ -77,34 +84,66 @@ export const agentsWithEcho = (
  * the drawer's seed has to survive that reopen too, and does it by re-deriving
  * from props instead of by remembering.
  *
+ * Writes on one key run ONE AT A TIME, in the order the user made them, and the
+ * key stays pending from the moment an edit joins the queue until the last one
+ * has read back.
+ *
+ * Queued rather than concurrent, because 「the later edit wins」 is a claim about
+ * COMMIT order, and two PUTs in flight together settle in whatever order they
+ * reach the server's mutation lock. Each carries the whole list, so the loser is
+ * not merged into the winner, it is discarded — and the order left on disk can
+ * be the user's second-to-last edit while the drawer shows their last. The same
+ * ambiguity decides which of the two echoed rows is the newest word about the
+ * Agent, and nothing in the two responses says which commit came first. A queue
+ * makes issue order and commit order the same order, which is what the drawer's
+ * optimistic list and `agentsWithEcho` above were both already assuming.
+ *
  * Counted rather than a flag per key, because 「pending」 is a property of the SET
- * of outstanding writes: two edits can overlap (last-write-wins is fine — each
- * PUT carries the whole list), and the first to finish would otherwise clear the
- * key while the second is still running.
+ * of writes on the key — the one running plus any waiting behind it — and the
+ * first to finish must not clear the key while the next is still to go.
  *
  * Keyed by backend because that is the write's own grain: `PUT
  * /agents/<backend>/sources` moves one backend's order, so a claude write says
- * nothing about codex and has no business gating it.
+ * nothing about codex and has no business gating or delaying it.
  */
 export const createPendingWrites = (land: (keys: ReadonlySet<string>) => void) => {
   const outstanding = new Map<string, number>();
+  const tail = new Map<string, Promise<void>>();
   const publish = () => land(new Set(outstanding.keys()));
 
   return {
     /**
-     * Marks `key` pending for the whole of `work`, including whatever `work`
-     * awaits after its own request returns. Pairing is not the caller's to get
-     * right: there is no way to begin one without ending it.
+     * Runs `work` after every write already queued on `key`, and marks the key
+     * pending for the whole of it — including whatever `work` awaits after its
+     * own request returns. Pairing is not the caller's to get right: there is no
+     * way to begin one without ending it.
      */
     track: async (key: string, work: () => Promise<void>): Promise<void> => {
       outstanding.set(key, (outstanding.get(key) ?? 0) + 1);
       publish();
+      const mine = (tail.get(key) ?? Promise.resolve()).then(work);
+      // A rejected write must not break the queue behind it. The edit waiting is
+      // the user's newer intent and still has to reach the server — and the one
+      // that failed rolled its own optimistic display back, so there is nothing
+      // for its successor to inherit.
+      tail.set(
+        key,
+        mine.then(
+          () => {},
+          () => {},
+        ),
+      );
       try {
-        await work();
+        await mine;
       } finally {
         const left = (outstanding.get(key) ?? 1) - 1;
         if (left > 0) outstanding.set(key, left);
-        else outstanding.delete(key);
+        else {
+          outstanding.delete(key);
+          // Nothing is queued, so the next write starts a fresh chain rather than
+          // hanging off a promise whose only remaining job is to be already done.
+          tail.delete(key);
+        }
         publish();
       }
     },
@@ -116,6 +155,8 @@ export type PendingWrite = {
   /** Whether a write on this key is outstanding — possibly one this component
    *  never issued, because the component that did may already be gone. */
   pending: boolean;
+  /** Queues `work` behind any write already outstanding on this key, and marks
+   *  the key pending until it has read back. */
   track: (work: () => Promise<void>) => Promise<void>;
 };
 

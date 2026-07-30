@@ -4,11 +4,15 @@
 // otherwise "simplify" back into a boolean.
 import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   attribution,
   chainChips,
   chainRoles,
   hasAttribution,
+  healthyButUnrunnable,
   isUnhealthy,
   needsAttention,
   pageStatus,
@@ -242,6 +246,61 @@ describe('chainChips', () => {
     });
     const chips = chainChips(agent, [nativeSource('src_a', DEAD), source('src_b', ACTIVE)]);
     expect(chips[0]).toMatchObject({ unhealthy: true, unavailable: false, tone: 'skipped' });
+  });
+});
+
+describe('healthyButUnrunnable', () => {
+  const agentWith = (eligibility: NonNullable<AgentSupply['sources']>['eligibility']) =>
+    hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility } });
+
+  it('retracts a healthy row’s promise this machine cannot keep', () => {
+    // 供 … 全系 is a promise, and the source looks fine — nothing else on the row
+    // would tell the user that turning it on gets them nothing here.
+    expect(healthyButUnrunnable(agentWith(cannotLaunch('src_b')), nativeSource('src_b', ACTIVE))).toBe(true);
+  });
+
+  it('leaves the segment to health when the source is not serving', () => {
+    // Two answers compete for one segment of copy. A cooling or broken source is
+    // the one the user can act on, and its state chip has already raised it.
+    const agent = agentWith(cannotLaunch('src_b'));
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', COOLING))).toBe(false);
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', DEAD))).toBe(false);
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', EXHAUSTED))).toBe(false);
+  });
+
+  it('says nothing about a source this machine can launch', () => {
+    // Silence is runnable — the server names only what it has ruled out.
+    expect(healthyButUnrunnable(agentWith([]), nativeSource('src_b', ACTIVE))).toBe(false);
+    expect(healthyButUnrunnable(agentWith(cannotLaunch('src_a')), nativeSource('src_b', ACTIVE))).toBe(false);
+    expect(healthyButUnrunnable(hubAgent({ sources: null }), nativeSource('src_b', ACTIVE))).toBe(false);
+  });
+
+  it('does not read the route’s answer as the model’s', () => {
+    // Deliberately ungated, unlike `unavailable` in `chainChips`: that marker blames
+    // a FAILOVER on a cause. A source row answers 「what would I get by turning this
+    // on」, and `in_current_model_chain` is only an answer about `sources.order` — so
+    // every 未启用 row reads `false` there, and a gate would silence exactly the rows
+    // that need it earliest.
+    expect(healthyButUnrunnable(agentWith(cannotLaunchOffRoute('src_c')), nativeSource('src_c', ACTIVE))).toBe(true);
+    // The server builds `eligibility` over every configured source, not just the
+    // ordered ones, so a row outside the order still carries its own verdict.
+    const offOrder = hubAgent({ sources: { policy: 'follow', order: ['src_a'], eligibility: cannotLaunch('src_c') } });
+    expect(healthyButUnrunnable(offOrder, nativeSource('src_c', ACTIVE))).toBe(true);
+  });
+
+  it('is what BOTH of the order drawer’s source lines ask', () => {
+    // Round 4. The retraction was in the 启用 line only, so a row admitted it one
+    // step after the step it was about: availability is per (source, backend) and
+    // has nothing to do with where the source sits in the order.
+    const drawer = readFileSync(join(__dirname, 'SourceOrderDrawer.tsx'), 'utf8');
+
+    expect([...drawer.matchAll(/healthyButUnrunnable\(agent, source\)/g)].length).toBe(2);
+    // The 未启用 branch REPLACES the line rather than joining it: both 供 … 全系 and
+    // its rewritten form are the promise being retracted, and the line is two
+    // segments wide.
+    expect(drawer).toMatch(/if \(healthyButUnrunnable\(agent, source\)\) return join\(\[identity\(source\), nativeUnavailable\(\)\]\);/);
+    // And nothing reaches around the shared predicate to the raw reader.
+    expect(drawer).not.toMatch(/processAvailabilityOf/);
   });
 });
 
