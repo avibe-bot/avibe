@@ -920,6 +920,50 @@ async def test_opencode_status_reconciliation_failures_are_bounded() -> None:
 
 
 @pytest.mark.anyio
+async def test_restored_opencode_status_reconciliation_becomes_terminal_snapshot() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status_error=ConnectionError("status unavailable"),
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+        repeated = await poll_server.list_messages(
+            "opencode-session",
+            primary.working_path,
+        )
+
+        assert state.closing is True
+        assert server.list_calls == 3
+        assert repeated == messages
+        assert messages[-1]["info"]["finish"] == "tool-calls"
+        assert messages[-1]["info"]["error"] == {
+            "name": "StatusReconciliationError",
+            "data": {"message": "status unavailable"},
+        }
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "expected"),
     [

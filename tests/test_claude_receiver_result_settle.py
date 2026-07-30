@@ -290,6 +290,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                 return _iterate()
 
         client = _AmbiguousClient()
+        client._transport = SimpleNamespace(end_input=AsyncMock())
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -328,6 +329,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receipt = await steer_task
         await asyncio.sleep(0)
         self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
+        client._transport.end_input.assert_awaited_once_with()
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         agent.emit_result_message.assert_not_awaited()
 
@@ -346,9 +348,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
         agent.emit_result_message = AsyncMock(return_value=None)
-        agent.AMBIGUOUS_STEER_RECONCILIATION_SECONDS = 0.01
         result_ready = asyncio.Event()
-        no_followup = asyncio.Event()
+        input_ended = asyncio.Event()
 
         class _UndeliveredClient:
             async def query(self, _text, *, session_id):
@@ -360,11 +361,14 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     primary = _ResultMessage()
                     primary.result = "primary result"
                     yield primary
-                    await no_followup.wait()
+                    await input_ended.wait()
 
                 return _iterate()
 
         client = _UndeliveredClient()
+        client._transport = SimpleNamespace(
+            end_input=AsyncMock(side_effect=lambda: input_ended.set())
+        )
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -395,6 +399,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         receipt = await agent.steer_active_turn(request, target)
         self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
+        client._transport.end_input.assert_awaited_once_with()
+        self.assertTrue(input_ended.is_set())
 
         result_ready.set()
         await receiver_task
@@ -427,9 +433,13 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.claude_sessions[composite_key] = client
         agent.receiver_tasks[composite_key] = receiver_task
         agent.session_handler.active_sessions = {composite_key}
-        registry = SimpleNamespace(has_completed_output=Mock(return_value=True))
+        activity = SimpleNamespace()
+        registry = SimpleNamespace(
+            has_completed_output=Mock(return_value=True),
+            requeue_completed_outputs=Mock(),
+        )
         agent._activity_registry = lambda: registry
-        agent._claim_activity_batch_for_turns = Mock()
+        agent._claim_activity_batch_for_turns = Mock(return_value=[activity])
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
         target = ActiveSteerTarget(
             runtime_key=composite_key,
@@ -458,11 +468,35 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         await flush_task
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
-        agent._claim_activity_batch_for_turns.assert_not_called()
+        agent._claim_activity_batch_for_turns.assert_called_once()
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
         agent.emit_result_message.assert_not_awaited()
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_unmatched_activity_flush_does_not_consume_terminal_barrier(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-unmatched-activity:/tmp/work"
+        primary_request = SimpleNamespace(context=context, output_activities=[])
+        agent._pending_requests[composite_key] = [primary_request]
+        registry = SimpleNamespace(has_completed_output=Mock(return_value=True))
+        agent._activity_registry = lambda: registry
+        agent._claim_activity_batch_for_turns = Mock(return_value=[])
+        expected_generation = agent._steering_generation(composite_key)
+        agent._advance_steering_generation(composite_key)
+
+        retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+            expected_steering_generation=expected_generation,
+        )
+
+        self.assertTrue(retry)
+        self.assertEqual(agent._next_terminal_barrier(composite_key), "accepted")
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
 
     async def test_concurrent_receiver_eof_makes_steering_ack_ambiguous(self):
         mark_idle_calls: list[str] = []

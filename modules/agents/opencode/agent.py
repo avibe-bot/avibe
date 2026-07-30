@@ -75,6 +75,8 @@ class _OpenCodeSteerState:
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
     restored: bool = False
+    status_reconciliation_failures: int = 0
+    terminal_status_failure_messages: list[Dict[str, Any]] | None = None
 
     @property
     def native_turn_id(self) -> str:
@@ -126,10 +128,11 @@ class _SteeringAwareOpenCodeServer:
         )
 
     async def list_messages(self, session_id: str, directory: str) -> list[Dict[str, Any]]:
-        status_failures = 0
         while True:
             wait_for_insert = False
             async with self._state.lock:
+                if self._state.terminal_status_failure_messages is not None:
+                    return self._state.terminal_status_failure_messages
                 messages = await self._server.list_messages(session_id, directory)
                 if self._has_pending_question_tool(messages):
                     self._state.closing = True
@@ -142,13 +145,38 @@ class _SteeringAwareOpenCodeServer:
                 if unchanged_since_insert or final_snapshot:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
-                    except Exception:
-                        status_failures += 1
-                        if status_failures >= _STATUS_RECONCILIATION_FAILURE_LIMIT:
+                    except Exception as exc:
+                        self._state.status_reconciliation_failures += 1
+                        if (
+                            self._state.status_reconciliation_failures
+                            >= _STATUS_RECONCILIATION_FAILURE_LIMIT
+                        ):
+                            if self._state.restored:
+                                self._state.closing = True
+                                failure = {
+                                    "info": {
+                                        "id": f"avibe-status-reconciliation:{session_id}",
+                                        "role": "assistant",
+                                        "time": {"completed": time.time()},
+                                        # Keep the restored poll in its bounded error
+                                        # path until it emits the terminal failure.
+                                        "finish": "tool-calls",
+                                        "error": {
+                                            "name": "StatusReconciliationError",
+                                            "data": {"message": str(exc)},
+                                        },
+                                    },
+                                    "parts": [],
+                                }
+                                self._state.terminal_status_failure_messages = [
+                                    *messages,
+                                    failure,
+                                ]
+                                return self._state.terminal_status_failure_messages
                             raise
                         wait_for_insert = True
                     else:
-                        status_failures = 0
+                        self._state.status_reconciliation_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
                             wait_for_insert = True
                         else:

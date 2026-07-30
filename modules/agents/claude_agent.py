@@ -52,7 +52,6 @@ class ClaudeAgent(BaseAgent):
     # Preserve the usual task-notification -> assistant/result association while
     # bounding terminal-only notifications on the otherwise long-lived stream.
     ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 30.0
-    AMBIGUOUS_STEER_RECONCILIATION_SECONDS = 2.0
 
     # AskUserQuestion support is disabled - SDK cannot respond programmatically
     # Set to True when SDK adds support (see issue #10168)
@@ -79,6 +78,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
         self._steering_terminal_barriers: dict[str, list[str]] = {}
+        self._ambiguous_primary_results: dict[str, object] = {}
         self._steering_closing: set[str] = set()
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
@@ -614,6 +614,9 @@ class ClaudeAgent(BaseAgent):
         barriers = getattr(self, "_steering_terminal_barriers", None)
         if barriers is not None:
             barriers.pop(composite_key, None)
+        ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
+        if ambiguous_results is not None:
+            ambiguous_results.pop(composite_key, None)
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
@@ -667,6 +670,26 @@ class ClaudeAgent(BaseAgent):
         if callable(touch_session_activity):
             touch_session_activity(composite_key)
 
+    async def _end_ambiguous_steering_input(self, client, composite_key: str) -> None:
+        """Half-close native input so delivered work finishes before a durable EOF."""
+        end_input = getattr(client, "end_input", None)
+        if not callable(end_input):
+            end_input = getattr(getattr(client, "_transport", None), "end_input", None)
+        if not callable(end_input):
+            logger.warning(
+                "Claude transport cannot half-close ambiguous steering input for %s",
+                composite_key,
+            )
+            return
+        try:
+            await end_input()
+        except Exception:  # noqa: BLE001 - reconciliation remains receiver-owned
+            logger.warning(
+                "Failed to half-close ambiguous Claude steering input for %s",
+                composite_key,
+                exc_info=True,
+            )
+
     async def steer_active_turn(
         self,
         request: SteerRequest,
@@ -718,6 +741,7 @@ class ClaudeAgent(BaseAgent):
                         barrier="unknown",
                     )
                     self._touch_steering_activity(composite_key)
+                    await self._end_ambiguous_steering_input(client, composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="acknowledgement_ambiguous",
@@ -745,6 +769,7 @@ class ClaudeAgent(BaseAgent):
                             barrier="unknown",
                         )
                         self._touch_steering_activity(composite_key)
+                        await self._end_ambiguous_steering_input(client, composite_key)
                         return steer_result(
                             SteerOutcome.UNKNOWN,
                             reason="acknowledgement_ambiguous",
@@ -771,6 +796,7 @@ class ClaudeAgent(BaseAgent):
                         barrier="unknown",
                     )
                     self._touch_steering_activity(composite_key)
+                    await self._end_ambiguous_steering_input(client, composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="unclassified_transport_failure",
@@ -937,16 +963,31 @@ class ClaudeAgent(BaseAgent):
             )
 
             message_stream = client.receive_messages().__aiter__()
-            buffered_message = None
             while True:
+                settling_ambiguous_primary = False
                 try:
-                    if buffered_message is not None:
-                        message = buffered_message
-                        buffered_message = None
-                    else:
-                        message = await anext(message_stream)
+                    message = await anext(message_stream)
                 except StopAsyncIteration:
-                    break
+                    message = self._ambiguous_primary_results.pop(composite_key, None)
+                    if message is None:
+                        break
+                    settling_ambiguous_primary = True
+                except Exception:
+                    message = self._ambiguous_primary_results.pop(composite_key, None)
+                    if message is None:
+                        raise
+                    settling_ambiguous_primary = True
+                    logger.warning(
+                        "Settling buffered Claude primary result after receiver failure for %s",
+                        composite_key,
+                        exc_info=True,
+                    )
+                if settling_ambiguous_primary:
+                    await self._cleanup_runtime_session_state(
+                        composite_key,
+                        current_receiver_task=asyncio.current_task(),
+                        preserve_pending_request_state=True,
+                    )
                 try:
                     touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
                     if callable(touch_session_activity):
@@ -1296,41 +1337,25 @@ class ClaudeAgent(BaseAgent):
                                 )
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
-                        ambiguous_without_followup = False
                         async with self._steering_lock(composite_key):
-                            if self._next_terminal_barrier(composite_key) == "unknown":
-                                try:
-                                    buffered_message = await asyncio.wait_for(
-                                        anext(message_stream),
-                                        timeout=self.AMBIGUOUS_STEER_RECONCILIATION_SECONDS,
-                                    )
-                                except (asyncio.TimeoutError, StopAsyncIteration):
-                                    self._consume_terminal_barrier(composite_key)
-                                    ambiguous_without_followup = True
-                                else:
-                                    self._consume_terminal_barrier(composite_key)
-                                    logger.info(
-                                        "Reconciled ambiguous Claude steering from a follow-up native frame for %s",
-                                        composite_key,
-                                    )
-                                    continue
+                            if (
+                                not settling_ambiguous_primary
+                                and self._next_terminal_barrier(composite_key) == "unknown"
+                            ):
+                                self._consume_terminal_barrier(composite_key)
+                                self._ambiguous_primary_results[composite_key] = message
+                                logger.info(
+                                    "Deferring Claude primary result until ambiguous steering reaches native EOF or a later result for %s",
+                                    composite_key,
+                                )
+                                continue
+                            if not settling_ambiguous_primary:
+                                self._ambiguous_primary_results.pop(composite_key, None)
 
-                        if ambiguous_without_followup:
-                            logger.info(
-                                "Settling the primary Claude result after ambiguous steering produced no follow-up for %s",
-                                composite_key,
-                            )
-                            await self._cleanup_runtime_session(
-                                composite_key,
-                                current_receiver_task=asyncio.current_task(),
-                                preserve_pending_request_state=True,
-                            )
-
-                        async with self._steering_lock(composite_key):
                             if (
                                 composite_key in self._steering_closing_keys()
                                 or (
-                                    not ambiguous_without_followup
+                                    not settling_ambiguous_primary
                                     and self._terminal_claim_superseded(
                                         composite_key,
                                         terminal_steering_generation,
@@ -1468,7 +1493,7 @@ class ClaudeAgent(BaseAgent):
                                 )
                             if emit_failed:
                                 self._release_service_runtime_turn(context)
-                        if ambiguous_without_followup:
+                        if settling_ambiguous_primary:
                             return
                         continue
 
@@ -2532,13 +2557,7 @@ class ClaudeAgent(BaseAgent):
             expected_steering_generation = self._steering_generation(composite_key)
         while True:
             async with self._steering_lock(composite_key):
-                if (
-                    (composite_key in self._steering_closing_keys() and not allow_closing)
-                    or self._terminal_claim_superseded(
-                        composite_key,
-                        expected_steering_generation,
-                    )
-                ):
+                if composite_key in self._steering_closing_keys() and not allow_closing:
                     logger.info(
                         "Ignoring Claude Activity terminal output superseded by steering for %s",
                         composite_key,
@@ -2555,6 +2574,17 @@ class ClaudeAgent(BaseAgent):
                     )
                     if not activities:
                         return registry.has_completed_output(self.name, composite_key)
+
+                    if self._terminal_claim_superseded(
+                        composite_key,
+                        expected_steering_generation,
+                    ):
+                        self._requeue_activities(registry, activities)
+                        logger.info(
+                            "Ignoring Claude Activity terminal output superseded by steering for %s",
+                            composite_key,
+                        )
+                        return False
 
                     self._attach_request_activities(pending_request, activities)
                     matched_request = self._pop_pending_request(composite_key)
