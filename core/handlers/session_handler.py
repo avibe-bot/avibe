@@ -203,7 +203,10 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
             await self._wait_for_claude_session_idle(composite_key)
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
 
         next_system_prompt = self._build_claude_system_prompt(
@@ -219,7 +222,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because avibe system prompt changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
 
         caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
@@ -228,7 +234,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because caller context env changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
         git_path_state = self._claude_git_path_state(working_path)
         if getattr(client, "_vibe_git_path_state", None) != git_path_state:
@@ -236,7 +245,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude SDK client for %s because Git PATH changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
 
         try:
@@ -273,7 +285,10 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
             logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
             await self._wait_for_claude_session_idle(composite_key)
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
         self.ensure_agent_session_id(
             context,
@@ -287,7 +302,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
         git_path_state = self._claude_git_path_state(working_path)
         if getattr(client, "_vibe_git_path_state", None) != git_path_state:
@@ -295,7 +313,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because Git PATH changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self.cleanup_session(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
         if desired_model:
             try:
@@ -1131,6 +1152,7 @@ class SessionHandler(BaseHandler):
                 label="claude",
             )
         except Exception as exc:
+            self._retire_model_hub_process_scope(composite_key)
             stderr_text = "\n".join(claude_stderr_lines)
             match = CLAUDE_NO_CONVERSATION_RE.search(stderr_text) or CLAUDE_NO_CONVERSATION_RE.search(str(exc))
             if match:
@@ -1414,10 +1436,24 @@ class SessionHandler(BaseHandler):
             return False
         return bool(agent and getattr(agent, "backend", None) == backend)
 
-    async def cleanup_session(self, composite_key: str, *, current_receiver_task=None):
+    def _retire_model_hub_process_scope(self, composite_key: str) -> None:
+        router = getattr(self.controller, "model_hub_runtime", None)
+        retire = getattr(router, "retire_process_scope", None)
+        if callable(retire):
+            retire("claude", composite_key)
+
+    async def cleanup_session(
+        self,
+        composite_key: str,
+        *,
+        current_receiver_task=None,
+        retire_model_hub_scope: bool = True,
+    ):
         """Clean up a specific session by composite key"""
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
+        if client is not None and retire_model_hub_scope:
+            self._retire_model_hub_process_scope(composite_key)
         cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
         native_session_id = getattr(client, "_vibe_native_session_id", None)
         keep_pid = get_claude_client_pid(client)

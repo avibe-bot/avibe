@@ -33,6 +33,7 @@ _MODEL_SURFACE_PATTERNS = re.compile(
     r"unknown[_ -]?model|no[_ -]?such[_ -]?model)",
     re.IGNORECASE,
 )
+_MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",
@@ -91,9 +92,12 @@ def classify_outcome(
             "fallback",
             reason="balance_exhausted",
         )
-    if _SURFACE_PATTERNS.search(error_text) or _MODEL_SURFACE_PATTERNS.search(
-        error_text
-    ):
+    model_not_found = _MODEL_SURFACE_PATTERNS.search(error_text) or (
+        outcome.http_status == 404
+        and str(outcome.error_code or "").strip().lower()
+        in _MODEL_NOT_FOUND_ERROR_CODES
+    )
+    if _SURFACE_PATTERNS.search(error_text) or model_not_found:
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):

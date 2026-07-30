@@ -87,6 +87,13 @@ The transition rules are:
    attempt to any provenance record.
 
 The registry never serializes the bearer token or exposes it through an API.
+When a Claude client cache entry or Codex cwd transport is evicted, its backend
+lifecycle hook retires the matching registry scope and bearer token. A later
+runtime for the same scope mints a new token. Retirement during a stuck active
+turn marks that trace ambiguous before settlement, so eviction cannot turn
+partial process traffic into an exact provenance record. In-process
+replacement keeps the scope only when the replacement launch has already
+registered the current turn against that same Claude session or Codex cwd.
 
 ## Attempt Capture And Settlement
 

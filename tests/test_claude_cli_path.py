@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1796,6 +1797,48 @@ def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path:
     assert events == ["disconnect", "cancel"]
     assert composite_key not in controller.receiver_tasks
     assert composite_key not in controller.claude_sessions
+
+
+def test_cleanup_session_retires_model_hub_process_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeAgentOptions",
+        _StubClaudeAgentOptions,
+    )
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeSDKClient",
+        _StubClaudeSDKClient,
+    )
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    retired: list[tuple[str, str]] = []
+    controller.model_hub_runtime = SimpleNamespace(
+        retire_process_scope=lambda backend, scope: retired.append(
+            (backend, scope)
+        )
+    )
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert retired == [("claude", composite_key)]
 
 
 def test_cleanup_session_swallows_receiver_task_failure(monkeypatch, tmp_path: Path) -> None:

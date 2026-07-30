@@ -7,7 +7,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -313,6 +313,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_auth_state_stops_transports_and_invalidates_threads(self):
         agent = object.__new__(CodexAgent)
         stop_calls = []
+        retire_scope = Mock()
 
         async def stop_a():
             stop_calls.append("a")
@@ -337,7 +338,10 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             release_calls.append((backend, set(base_session_ids)))
 
         agent.controller = SimpleNamespace(
-            session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh)
+            session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh),
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            ),
         )
 
         await agent.refresh_auth_state()
@@ -347,10 +351,18 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transports, {})
         self.assertEqual(invalidated, ["session-1", "session-2"])
         self.assertEqual(cleared_sessions, ["session-1", "session-2"])
+        self.assertEqual(
+            retire_scope.call_args_list,
+            [
+                call("codex", "/tmp/a"),
+                call("codex", "/tmp/b"),
+            ],
+        )
 
     async def test_prepare_resume_binding_restarts_unshared_transport(self):
         agent = object.__new__(CodexAgent)
         stop_calls = []
+        retire_scope = Mock()
 
         async def stop_transport():
             stop_calls.append("stop")
@@ -364,6 +376,11 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
         )
         agent._turn_registry = SimpleNamespace(clear_session=lambda base_session_id: cleared_sessions.append(base_session_id))
+        agent.controller = SimpleNamespace(
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            )
+        )
 
         await agent.prepare_resume_binding(
             base_session_id="session-1",
@@ -376,6 +393,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity, {})
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared_sessions, ["session-1"])
+        retire_scope.assert_called_once_with("codex", "/tmp/work")
 
     async def test_prepare_resume_binding_skips_shared_transport(self):
         agent = object.__new__(CodexAgent)
@@ -408,6 +426,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         stop_calls = []
         invalidated_sessions = []
         cleared_turns = []
+        retire_scope = Mock()
 
         async def stop_transport():
             stop_calls.append("stop")
@@ -425,6 +444,11 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        agent.controller = SimpleNamespace(
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            )
+        )
 
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
@@ -437,6 +461,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transports, {})
         self.assertIn("/tmp/work", agent._transport_locks)
         self.assertEqual(agent._transport_last_activity, {})
+        retire_scope.assert_called_once_with("codex", "/tmp/work")
 
     async def test_evict_idle_transports_keeps_active_codex_runtime(self):
         agent = object.__new__(CodexAgent)

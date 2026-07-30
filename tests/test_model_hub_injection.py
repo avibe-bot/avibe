@@ -577,6 +577,44 @@ def test_prelaunch_blocker_details_are_localized(
     )
 
 
+def test_native_unavailability_blocker_is_localized(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_native01",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[native], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(
+            service,
+            native_cli_ready=lambda _backend: False,
+        ),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                "codex",
+                "gpt-5",
+            )
+        )
+
+    assert "当前进程无法使用 CLI 登录" in str(exc_info.value)
+    assert "src_native01：standby" not in str(exc_info.value)
+
+
 def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
     """MH-EVT-002: mode history does not suppress or duplicate degradation."""
 
@@ -1908,7 +1946,10 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
         handler.cleanup_session.assert_not_awaited()
         handler.active_sessions.clear()
         assert await task is None
-        handler.cleanup_session.assert_awaited_once_with(key)
+        handler.cleanup_session.assert_awaited_once_with(
+            key,
+            retire_model_hub_scope=False,
+        )
 
     asyncio.run(exercise())
 

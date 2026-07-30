@@ -248,6 +248,20 @@ class TurnCorrelationRegistry:
                 authorized = authorized or (matches and key[0] == backend)
             return authorized
 
+    def retire_scope(self, backend: str, process_scope: str) -> None:
+        """Invalidate a process credential when its owning runtime is evicted."""
+
+        key = self._scope_key(backend, process_scope)
+        with self._lock:
+            scope = self._scopes.pop(key, None)
+            if scope is None:
+                return
+            self._token_scopes.pop(scope.token, None)
+            for turn_id in scope.active_turns:
+                trace = self._traces.get(turn_id)
+                if trace is not None:
+                    trace.ambiguous = True
+
     def _exact_turn(self, backend: str, token: str) -> tuple[str, ScopeKey] | None:
         key = self._token_scopes.get(token)
         if key is None or key[0] != backend:

@@ -238,12 +238,19 @@ def _localized_launch_error(
                 continue
             source = str(blocker.get("source") or "")
             detail_key = str(blocker.get("detail_key") or "")
-            reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
-            detail = (
-                i18n_t(f"modelHub.events.reason.{reason}", language)
-                if reason is not None
-                else str(blocker.get("status") or "")
-            )
+            blocker_reason = str(blocker.get("reason") or "")
+            if blocker_reason == "native_cli_unavailable":
+                detail = i18n_t(
+                    "modelHub.launch.native_cli_unavailable",
+                    language,
+                )
+            else:
+                reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
+                detail = (
+                    i18n_t(f"modelHub.events.reason.{reason}", language)
+                    if reason is not None
+                    else str(blocker.get("status") or "")
+                )
             rendered_blockers.append(f"{source}: {detail}")
         blockers = ", ".join(rendered_blockers)
     else:
@@ -692,11 +699,21 @@ class ModelHubRuntimeRouter:
                 "retry_at": recovery,
             }
         if resolution.matching_sources:
+            candidate_ids = {
+                source.id for source in resolution.candidates
+            }
             blockers = [
                 {
                     "source": source.display_name,
                     "status": source.state.status,
                     "detail_key": source.state.detail_key,
+                    "reason": (
+                        "native_cli_unavailable"
+                        if source.supply_channel == "native_cli"
+                        and source.state.status in {"active", "standby"}
+                        and source.id not in candidate_ids
+                        else None
+                    ),
                 }
                 for source in resolution.matching_sources
             ]
@@ -777,6 +794,17 @@ class ModelHubRuntimeRouter:
                     settled_by=settled_by,
                     ts=ts,
                 )
+
+    def retire_process_scope(
+        self,
+        backend: BackendName,
+        process_scope: str,
+    ) -> None:
+        if self.turn_gateway is not None:
+            self.turn_gateway.correlation.retire_scope(
+                backend,
+                process_scope,
+            )
 
     async def resolve(
         self,

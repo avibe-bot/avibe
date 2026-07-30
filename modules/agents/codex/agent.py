@@ -403,9 +403,12 @@ class CodexAgent(BaseAgent):
                 )
             except Exception:
                 logger.warning("Failed to release Workbench turns during Codex refresh", exc_info=True)
-        transports = list(self._transports.values())
+        transport_items = list(self._transports.items())
+        transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
+        for cwd, _ in transport_items:
+            self._retire_model_hub_process_scope(cwd)
 
         for transport in transports:
             try:
@@ -457,6 +460,7 @@ class CodexAgent(BaseAgent):
 
         self._transports.pop(working_path, None)
         self._transport_last_activity.pop(working_path, None)
+        self._retire_model_hub_process_scope(working_path)
         self._session_mgr.invalidate_thread(base_session_id)
         self._turn_registry.clear_session(base_session_id)
         self._clear_thread_developer_instructions(base_session_id)
@@ -470,10 +474,13 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
-        transports = list(self._transports.values())
+        transport_items = list(self._transports.items())
+        transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
         self._transport_locks.clear()
+        for cwd, _ in transport_items:
+            self._retire_model_hub_process_scope(cwd)
 
         for transport in transports:
             try:
@@ -567,6 +574,7 @@ class CodexAgent(BaseAgent):
                 self._transports.pop(cwd, None)
                 self._transport_last_activity.pop(cwd, None)
                 self._cwd_inodes().pop(cwd, None)
+                self._retire_model_hub_process_scope(cwd)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
                     # A force-evicted stuck-active turn never emitted a terminal
@@ -585,6 +593,13 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    def _retire_model_hub_process_scope(self, cwd: str) -> None:
+        controller = getattr(self, "controller", None)
+        router = getattr(controller, "model_hub_runtime", None)
+        retire = getattr(router, "retire_process_scope", None)
+        if callable(retire):
+            retire("codex", cwd)
 
     async def _settle_stuck_active_request(self, base_session_id: str) -> None:
         """Settle a turn we are about to force-reap.

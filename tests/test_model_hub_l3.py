@@ -274,6 +274,48 @@ def test_process_credentials_record_only_exact_turns(tmp_path: Path) -> None:
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_retired_process_scope_revokes_token_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "retired-scope.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("codex", "/repo", "turn_evicted")
+    turn_id = registry.begin_gateway_request(
+        backend="codex",
+        token=token,
+        requested_model_id="shared-model",
+    )
+    registry.begin_attempt(
+        turn_id,
+        source_id="src_primary01",
+        resolved_model_id="shared-model",
+        channel="hub",
+        via_mapping=False,
+    )
+
+    registry.retire_scope("codex", "/repo")
+
+    assert registry.authenticates("codex", token) is False
+    replacement = registry.credentials("codex", "/repo", "turn_replacement")
+    assert replacement != token
+    assert registry.authenticates("codex", replacement) is True
+    registry.settle(
+        "turn_evicted",
+        settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    assert store.get("turn_evicted") is None
+
+    registry.settle(
+        "turn_replacement",
+        settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    registry.retire_scope("codex", "/repo")
+    assert registry._scopes == {}
+    assert registry._token_scopes == {}
+
+
 def test_gateway_provenance_retains_pre_mapping_model_identity(
     tmp_path: Path,
 ) -> None:
@@ -845,6 +887,28 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     )
     assert request_error_service.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", request_error)
+
+    anthropic_not_found = _service(
+        tmp_path / "anthropic-not-found",
+        sources=[_source("src_primary01", "Primary")],
+        outcomes=[
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=404,
+                code="not_found_error",
+            )
+        ],
+    )
+    not_found = asyncio.run(
+        anthropic_not_found.probe_agent("claude", "shared-model")
+    )
+    assert not_found["reachable"] is False
+    assert (
+        anthropic_not_found.store.load().sources[0].state.status
+        == "standby"
+    )
+    assert anthropic_not_found.events.list(limit=10) == []
+    _assert_valid("probe-result.schema.json", not_found)
 
 
 def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
