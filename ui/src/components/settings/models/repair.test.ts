@@ -14,9 +14,11 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import {
+  disprovedDrawnHead,
   dryRunOutcome,
   dryRunPlan,
   dryRunRowView,
+  mayHaveWritten,
   probeArrival,
   probeWroteState,
   reauthBodyKey,
@@ -478,10 +480,13 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
   });
 
   it('trusts a throw the server NAMED to have written nothing', () => {
-    // `probe_no_candidate` is raised before any write, and an engine failure
-    // propagates out above the write block — the outcomes `probeWroteState` checked
-    // one by one, and every one of them arrives as a structured failure.
-    expect(probeArrival({ kind: 'thrown', serverNamed: true }, true)).toEqual({ report: true, reread: false });
+    // An engine failure propagates out above the write block — one of the outcomes
+    // `probeWroteState` checked one by one, and every one of them arrives as a
+    // structured failure.
+    expect(probeArrival({ kind: 'thrown', serverNamed: true, code: 'engine_down' }, true)).toEqual({
+      report: true,
+      reread: false,
+    });
   });
 
   it('re-reads a throw the server did not name', () => {
@@ -489,8 +494,35 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     // body. The probe may have run and written with the answer lost on the way
     // back, and unknown is not the same as no. Owed even when the row is stale and
     // will draw no error line.
-    expect(probeArrival({ kind: 'thrown', serverNamed: false }, true)).toEqual({ report: true, reread: true });
-    expect(probeArrival({ kind: 'thrown', serverNamed: false }, false)).toEqual({ report: false, reread: true });
+    const unnamed = { kind: 'thrown', serverNamed: false, code: 'bad_response' } as const;
+    expect(probeArrival(unnamed, true)).toEqual({ report: true, reread: true });
+    expect(probeArrival(unnamed, false)).toEqual({ report: false, reread: true });
+  });
+
+  it('re-reads a refusal that wrote nothing and disproved the head anyway', () => {
+    // The second, independent reason. `probe_no_candidate` is raised before any
+    // write — so 「did it write?」 says no, correctly — and yet the 试跑 button the
+    // user pressed was drawn from a chain WITH a runnable head, so the refusal is
+    // the server reporting that head gone. Left un-reread, the chip keeps naming a
+    // source and the button keeps inviting a run that cannot happen.
+    expect(probeArrival({ kind: 'thrown', serverNamed: true, code: 'probe_no_candidate' }, true)).toEqual({
+      report: true,
+      reread: true,
+    });
+    // `direct_mode` is the same sentence about the mode the drawer believes it is in.
+    expect(probeArrival({ kind: 'thrown', serverNamed: true, code: 'direct_mode' }, false)).toEqual({
+      report: false,
+      reread: true,
+    });
+  });
+
+  it('keeps the two reasons independent', () => {
+    // Neither subsumes the other: an unnamed failure with no code still re-reads,
+    // and a named refusal that is not state-precondition still does not.
+    expect(probeArrival({ kind: 'thrown', serverNamed: false, code: null }, true).reread).toBe(true);
+    expect(probeArrival({ kind: 'thrown', serverNamed: true, code: 'source_last_supplier' }, true).reread).toBe(
+      false,
+    );
   });
 
   it('is how the drawer reads its own probe, at both arrivals', () => {
@@ -507,6 +539,66 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     // inference skipped the reread in the one case it was added for.
     expect(drawer).toMatch(/serverNamed: failure\?\.serverNamed \?\? false/);
     expect(drawer).not.toMatch(/serverNamed: failure !== null/);
+    // The code rides along so the second reason can be asked at all.
+    expect(drawer).toMatch(/code: failure\?\.code \?\? null/);
+  });
+});
+
+describe('disprovedDrawnHead — a refusal that is news about the chain', () => {
+  it('names the two state-precondition refusals', () => {
+    expect(disprovedDrawnHead('probe_no_candidate')).toBe(true);
+    expect(disprovedDrawnHead('direct_mode')).toBe(true);
+  });
+
+  it('leaves every other refusal alone', () => {
+    // A supply refusal or an engine outage says nothing about whether the head this
+    // page drew is still there.
+    expect(disprovedDrawnHead('source_last_supplier')).toBe(false);
+    expect(disprovedDrawnHead('engine_down')).toBe(false);
+    expect(disprovedDrawnHead(null)).toBe(false);
+  });
+
+  it('matches the codes the server actually raises', () => {
+    // Both are `ModelHubError` codes on the probe route (`probe_no_candidate` at the
+    // no-runnable-candidate branch, `direct_mode` from `_direct_mode_error`), so a
+    // rename server-side has a test here to fail against.
+    expect(['probe_no_candidate', 'direct_mode'].every((code) => disprovedDrawnHead(code))).toBe(true);
+  });
+});
+
+describe('mayHaveWritten — the same unknown, wherever it is caught', () => {
+  it('calls a named refusal a decided outcome', () => {
+    expect(mayHaveWritten({ serverNamed: true })).toBe(false);
+  });
+
+  it('calls an unnamed failure unknown', () => {
+    // `bad_response` / `http_<n>`: minted by the transport for an answer that never
+    // said what happened, which is as consistent with 「committed」 as with 「never ran」.
+    expect(mayHaveWritten({ serverNamed: false })).toBe(true);
+  });
+
+  it('calls a throw that is not ours unknown too', () => {
+    // Reaching it means our own code threw AFTER the await, which puts the write
+    // strictly in the past.
+    expect(mayHaveWritten(null)).toBe(true);
+  });
+
+  it('is what 更换 API Key re-reads on', () => {
+    // The write is atomic and re-discovers on commit, so a lost answer leaves the
+    // row showing the old key's state while 更换 would provision a second
+    // replacement. Reporting the error and re-reading the rows are not alternatives.
+    const dialog = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'ReplaceKeyDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/if \(mayHaveWritten\(failure\)\) onReplaced\(\);\n\s*setPhase\('error'\);/);
+    // The named refusal above it still returns before this, and still writes nothing.
+    expect(dialog).toMatch(/failure\?\.code === 'source_last_supplier' && !force/);
+  });
+
+  it('is one owner, not a predicate re-derived per caller', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const file of ['ReplaceKeyDialog.tsx', 'SourceOrderDrawer.tsx']) {
+      expect(readFileSync(join(here, file), 'utf8')).not.toMatch(/!\(?failure\?\.serverNamed/);
+    }
   });
 });
 

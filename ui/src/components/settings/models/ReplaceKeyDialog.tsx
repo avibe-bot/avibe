@@ -31,7 +31,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { apiFailure, modelsApi } from './modelsApi';
 import { Field } from './dialogFields';
-import { REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
+import { mayHaveWritten, REPAIR_LINE_KEY, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { SupplyGapNote } from './SupplyGapNote';
 import type { Source, SupplyGap } from './types';
 
@@ -94,6 +94,14 @@ export const ReplaceKeyDialog: React.FC<{
         setPhase('confirm');
         return;
       }
+      // A refusal the route NAMED wrote nothing — that is what the guard above is,
+      // and what makes it safe to leave the rows alone. A failure it did not name
+      // is the atomic write with its answer lost coming back: the credential may
+      // be replaced and re-discovered already, in which case the row behind this
+      // dialog still shows the old key's state and 更换 would provision a second
+      // replacement. So the error is reported AND the list re-read — the two are
+      // not alternatives, and only the report is about this dialog.
+      if (mayHaveWritten(failure)) onReplaced();
       setPhase('error');
     }
   };

@@ -579,17 +579,24 @@ const DryRunRow: React.FC<{
       const failure = apiFailure(err);
       // `serverNamed` is the error's to state, not this site's to infer from
       // 「is it one of ours?」: a response that would not parse is one of ours and
-      // names nothing, and that is the case the reread below exists for.
+      // names nothing, and that is the case the reread below exists for. The code
+      // rides along for the opposite case — a refusal that named itself and, in
+      // naming itself, disproved the head this button was drawn from.
       const arrival = probeArrival(
-        { kind: 'thrown', serverNamed: failure?.serverNamed ?? false },
+        {
+          kind: 'thrown',
+          serverNamed: failure?.serverNamed ?? false,
+          code: failure?.code ?? null,
+        },
         seq.current === mine,
       );
       // The server's own reason when it named one (`probe_no_candidate` carries a
       // detail key), the generic line when it didn't — the same degradation the
       // rest of the page gives a server-chosen key.
       if (arrival.report) setErrorText(serverText(t, failure?.detail, 'settings.models.dryRun.error'));
-      // A failure the route never named is not one of its checked outcomes: the
-      // probe may have run and written with the answer lost on the way back.
+      // Either because the probe may have run and written with the answer lost on
+      // the way back, or because the refusal that came back contradicts the chain
+      // this row is drawn from — `probeArrival` keeps those two apart.
       if (arrival.reread) reread();
     } finally {
       if (seq.current === mine) setRunning(false);

@@ -354,6 +354,46 @@ export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutc
 export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable;
 
 /**
+ * Whether a caught failure leaves the server's state UNKNOWN to us — the one
+ * question two dialogs and this drawer all had to answer, so it lives once.
+ *
+ * `serverNamed` is the error's own account of where its code came from: the
+ * transport mints `bad_response` for a body that would not parse and `http_<n>`
+ * for one that parsed saying nothing, and a request that reached the route and
+ * lost its answer coming back is exactly as consistent with 「it committed」 as
+ * with 「it never ran」. A failure with no name is not one of the route's
+ * enumerated outcomes, so nothing about it can be checked outcome by outcome.
+ *
+ * `null` — a throw that is not an `ApiCallError` at all — counts as unknown for
+ * the same reason and one more: reaching it means our own code threw AFTER the
+ * await, which puts the server's write strictly in the past.
+ */
+export const mayHaveWritten = (failure: { serverNamed: boolean } | null): boolean =>
+  !(failure?.serverNamed ?? false);
+
+/**
+ * Refusals whose ARRIVAL disproves what the page was already drawing, whether or
+ * not they wrote anything.
+ *
+ * `probe_no_candidate` is the case: it is raised before any write (the chain
+ * payload is computed, no runnable item is found, nothing is saved), so
+ * `mayHaveWritten` is correctly false for it — and yet the 试跑 control the user
+ * pressed was rendered from a loaded chain WITH a head, so the refusal is the
+ * server saying that head is gone. Another turn, or another client, cooled or
+ * blocked it in between. `direct_mode` is the same sentence about the mode: the
+ * drawer only offers a chain for an agent it believes is in hub mode.
+ *
+ * Leaving those two un-reread is the one stale state the user cannot clear by
+ * looking: the chip still names a source and the button still invites a run that
+ * cannot happen. A write is one reason to re-read; being contradicted is another,
+ * and they are independent.
+ */
+const STATE_PRECONDITION_REFUSALS = new Set(['probe_no_candidate', 'direct_mode']);
+
+export const disprovedDrawnHead = (code: string | null): boolean =>
+  code !== null && STATE_PRECONDITION_REFUSALS.has(code);
+
+/**
  * What a probe's arrival still gets to do. Two questions that look like one and
  * are not: whether this answer may be SHOWN, and whether the page behind the
  * sheet has to be RE-READ.
@@ -375,6 +415,12 @@ export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable
  * the response never reaching us. Unknown is not the same as no, and this takes
  * `probeWroteState`'s own trade: one extra read costs a request, while being
  * wrong the other way costs a page that silently disagrees with the server.
+ *
+ * And a re-read is owed for a SECOND reason that has nothing to do with writing:
+ * a refusal can arrive that contradicts the state the page is drawing from
+ * (`disprovedDrawnHead`). The two are independent — `probe_no_candidate` writes
+ * nothing and still disproves the head — so they are asked separately and only
+ * their answers are combined.
  */
 export type ProbeAnswer =
   | { kind: 'result'; probe: ProbeResult }
@@ -383,8 +429,10 @@ export type ProbeAnswer =
    *  outcomes. Not 「is it one of ours?」: the transport mints `bad_response` and
    *  `http_<n>` itself for a response that never said what happened, and those
    *  are the exact answers this exists for — a probe that ran, wrote, and lost
-   *  its reply on the way back throws one of ours with nothing named in it. */
-  | { kind: 'thrown'; serverNamed: boolean };
+   *  its reply on the way back throws one of ours with nothing named in it.
+   *  `code` is that name when there is one, for the refusals whose arrival is
+   *  itself news about the chain. */
+  | { kind: 'thrown'; serverNamed: boolean; code: string | null };
 
 export type ProbeArrival = {
   /** Whether this answer is still the answer to what the row is asking. */
@@ -395,7 +443,10 @@ export type ProbeArrival = {
 
 export const probeArrival = (answer: ProbeAnswer, stillCurrent: boolean): ProbeArrival => ({
   report: stillCurrent,
-  reread: answer.kind === 'result' ? probeWroteState(answer.probe) : !answer.serverNamed,
+  reread:
+    answer.kind === 'result'
+      ? probeWroteState(answer.probe)
+      : mayHaveWritten(answer) || disprovedDrawnHead(answer.code),
 });
 
 /**

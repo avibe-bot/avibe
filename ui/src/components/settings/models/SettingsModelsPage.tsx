@@ -21,6 +21,7 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
 import { createLatestAsyncAuthority } from './asyncLifetime';
+import { feedAfterHeadRead, mergeEventFeed } from './eventFeed';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
@@ -123,12 +124,25 @@ export const SettingsModelsPage: React.FC = () => {
     };
   }, []);
 
+  // 最近切换 is re-read here with the rows, because the writes this refresh exists
+  // for are the writes that FILE events: a failing 试跑 cools its head down through
+  // `_cooldown`, which records the `cooldown` row that explains the state change
+  // the user is about to see. Fetched only at mount, the row changed and the line
+  // explaining it appeared nowhere until the page was reloaded — the explanation
+  // arriving later than the thing it explains.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[]]>(([nextSources, nextAgents]) => {
-      if (!aliveRef.current) return;
-      setSources(nextSources);
-      setAgents(nextAgents);
-    }),
+    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[]]>(
+      ([nextSources, nextAgents, headEvents]) => {
+        if (!aliveRef.current) return;
+        setSources(nextSources);
+        setAgents(nextAgents);
+        // Merged, not replaced: 加载更早 pages tail-ward, and a head re-read must
+        // not silently drop the rows it never asked for. `eventsExhausted` is left
+        // alone on purpose — it is a fact about the TAIL, and this read is of the
+        // head. See `feedAfterHeadRead` for the one case merging is wrong.
+        setEvents((prev) => feedAfterHeadRead(prev, headEvents));
+      },
+    ),
   );
 
   React.useEffect(() => {
@@ -161,7 +175,9 @@ export const SettingsModelsPage: React.FC = () => {
 
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
-      await refreshAuthority.run(() => Promise.all([modelsApi.listSources(), modelsApi.listAgents()]));
+      await refreshAuthority.run(() =>
+        Promise.all([modelsApi.listSources(), modelsApi.listAgents(), modelsApi.listEvents(EVENT_PAGE)]),
+      );
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
       // the user the view might be stale rather than silently swallowing it.
@@ -177,11 +193,10 @@ export const SettingsModelsPage: React.FC = () => {
       const page = await modelsApi.listEvents(EVENT_PAGE, oldest);
       if (!aliveRef.current) return;
       // Merged by id rather than concatenated: the feed grows at the head while
-      // we page from the tail, so an overlapping row is normal, not a bug.
-      setEvents((prev) => {
-        const seen = new Set(prev.map((e) => e.id));
-        return [...prev, ...page.filter((e) => !seen.has(e.id))];
-      });
+      // we page from the tail, so an overlapping row is normal, not a bug. Same
+      // owner as the head re-read, with the argument order stating which end this
+      // page belongs to.
+      setEvents((prev) => mergeEventFeed(prev, page));
       setEventsExhausted(page.length < EVENT_PAGE);
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
