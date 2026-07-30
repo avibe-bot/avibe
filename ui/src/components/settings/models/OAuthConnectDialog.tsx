@@ -143,18 +143,29 @@ export const OAuthConnectDialog: React.FC<{
    * same reason `adopted_by` travels with a creation — no later read of `/agents`
    * reproduces them — and they name who the REAUTH's irreversible half left
    * without a source. That half is what a create does not have, so that is the one
-   * part still asking about the journey. A path with no error carries no pairs, and
-   * passing nothing is how it says so.
+   * part still asking about the journey.
    *
    * Which is why `pairsSpeak` exists beside them rather than being read off the
    * failure: passing no pairs still WRITES an empty list, so 「this arrival has
    * none」 and 「this arrival may not answer that question」 need saying separately.
-   * Every path that IS the arrival of record — a terminal settle, the close path,
-   * a released flow — leaves the default alone; the two `catch` sites hand over
-   * `failureLanded(step.action)`, because an arrival the authority ignored is not
-   * the failure whose sentence these pairs are rendered under.
+   * It defaults to the SILENT answer, because the two answers are not equally
+   * wrong. This component outlives the attempt — both hosts leave it mounted and
+   * toggle `open` (`RepairJourney.tsx`, `SettingsModelsPage.tsx`), so `stranded`
+   * survives a close, and a request left in flight by attempt A can land after
+   * attempt B has already put ITS gap report on screen. A site that forgets to
+   * speak costs nothing: the refetch it came for still runs. A site that forgets
+   * to stay silent erases the one part of B's report no later read reproduces.
+   *
+   * So exactly one arrival opts IN — the terminal settle, which is the account of
+   * record for the view it just settled and has no pairs to show, because
+   * `interrupted_pairs` rides an error envelope and a terminal RESPONSE has none.
+   * The three `catch` sites hand over `failureLanded(step.action)`, since an
+   * arrival the authority ignored is not the failure whose sentence these pairs
+   * are rendered under. Everything reached after the attempt is over — the
+   * resolved-after-close path, the released flow's re-read — says nothing, and
+   * says it by default.
    */
-  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>, pairsSpeak = true) => {
+  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>, pairsSpeak = false) => {
     if (isReauth && pairsSpeak) setStranded(failure?.interrupted ?? []);
     onConnectedRef.current();
   };
@@ -246,7 +257,12 @@ export const OAuthConnectDialog: React.FC<{
       // `failed` hub reauth has already been persisted as 需处理 with its models
       // stripped by the time this reads it — the two branches asked 「did it
       // succeed?」, and that is the one terminal the answer left behind.
-      if (terminalArrivalMovedRows(step.action)) rowsBehindAreStale();
+      // The `true` is the one opt-in to speaking for the pairs, and it is this
+      // arrival's to make: it just settled the view they render under, and it has
+      // none — `interrupted_pairs` rides an error envelope, so a terminal RESPONSE
+      // that says `failed` carries no list. Clearing them here is how a stale
+      // report from an earlier arrival stops outliving the sentence it belonged to.
+      if (terminalArrivalMovedRows(step.action)) rowsBehindAreStale(undefined, true);
       // A paste submit can terminate the flow while a poll timer is still armed;
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
@@ -265,10 +281,13 @@ export const OAuthConnectDialog: React.FC<{
      * `oauth_cancel` itself routes a terminal flow into materialization. This is
      * the last thing that corrects the rows.
      *
-     * It carries no pairs, deliberately: the dialog that would have shown them is
-     * gone, and on an effect RE-RUN (a language switch restarts the flow) the new
-     * attempt has already cleared them — handing it the old journey's would put
-     * one attempt's casualties under another's.
+     * It says nothing about the pairs, and takes the default to say so. Not because
+     * it has none to hand over — it never does — but because the empty list is
+     * itself a claim, and this arrival has no standing to make it: the dialog that
+     * would have shown ITS pairs is gone, while the one on screen may already
+     * belong to a later attempt. Closing a re-login and starting another on a
+     * different source is one click away, and this request can land after that
+     * one has failed.
      */
     const resolvedAfterClose = () => rowsBehindAreStale();
 
@@ -434,6 +453,10 @@ export const OAuthConnectDialog: React.FC<{
       // `cur` — the last POLLED snapshot, which a poll in flight can terminalize
       // between that read and the cancel landing. So nothing branches on it; it
       // supplies the flow id and nothing else.
+      // The re-read speaks for the rows and not for the pairs, by the default: it
+      // is the latest-landing arrival in the file, because it awaits the cancel
+      // first, and by then the attempt it belongs to is not merely settled but
+      // GONE. Whatever gap report is on screen when it returns is somebody else's.
       void releaseFlow(authority, owner, {
         cancel: cur ? () => modelsApi.cancelOAuth(cur.flow_id) : null,
         reusable: isReauth,

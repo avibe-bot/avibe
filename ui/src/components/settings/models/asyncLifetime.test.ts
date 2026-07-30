@@ -452,7 +452,11 @@ describe('terminalArrivalMovedRows — which terminal is also a write', () => {
     // parent's callback is reached from exactly one line.
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
 
-    expect(dialog).toMatch(/if \(terminalArrivalMovedRows\(step\.action\)\) rowsBehindAreStale\(\);/);
+    // The second argument is round 16's: silence became the default, so the arrival
+    // that IS the account of record for the view it just settled says so out loud.
+    expect(dialog).toMatch(
+      /if \(terminalArrivalMovedRows\(step\.action\)\) rowsBehindAreStale\(undefined, true\);/,
+    );
     expect((dialog.match(/onConnectedRef\.current\(\)/g) ?? []).length).toBe(1);
     // And that owner no longer asks which journey it is before re-reading: a
     // create's `oauth_cancel` commits the source it was told to throw away.
@@ -499,6 +503,35 @@ describe('failureLanded — whose account of the rows is the one on screen', () 
     // And the refetch is still owed on the ignored path: the gate is the second
     // argument, never a reason to skip the call.
     expect(dialog).not.toMatch(/if \(failureLanded\(/);
+  });
+
+  it('makes silence the default, and lets exactly one arrival opt out of it', () => {
+    // Round 16's finding, and why it is fixed at the DEFAULT rather than at the two
+    // call sites that had it wrong. This component outlives the attempt: both hosts
+    // leave it mounted and toggle `open`, so `stranded` survives a close, and a
+    // request abandoned by attempt A can land after attempt B has put its own gap
+    // report on screen — one click away, since closing a re-login and starting
+    // another on a different source does exactly that. The two answers are not
+    // equally wrong. Forgetting to speak costs nothing, because the refetch runs
+    // either way; forgetting to stay silent writes an empty list over the one part
+    // of B's report that no later read of `/agents` reproduces.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/pairsSpeak = false/);
+
+    // One opt-in, and it belongs to the arrival that just settled the view these
+    // pairs render under. Any other site passing a bare `true` is this bug again.
+    const speaking = [...dialog.matchAll(/rowsBehindAreStale\([^)]*true[^)]*\)/g)].map((m) => m[0]);
+    expect(speaking).toEqual(['rowsBehindAreStale(undefined, true)']);
+    expect(dialog).toMatch(
+      /terminalArrivalMovedRows\(step\.action\)\) rowsBehindAreStale\(undefined, true\)/,
+    );
+
+    // The two paths reached after the attempt is over take the default rather than
+    // restating it — including the release re-read, which awaits the cancel first
+    // and is therefore the latest-landing arrival in the file.
+    expect(dialog).toMatch(/const resolvedAfterClose = \(\) => rowsBehindAreStale\(\);/);
+    expect(dialog).toMatch(/reread: \(\) => rowsBehindAreStale\(\),/);
   });
 });
 
