@@ -36,6 +36,7 @@ from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
     TurnCorrelationRegistry,
 )
+from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -106,6 +107,7 @@ class ProbeAdapter:
     def __init__(self, outcomes: list[RawCallOutcome]):
         self.outcomes = deque(outcomes)
         self.invocations: list[tuple[str, str, str]] = []
+        self.requests: list[ModelHubRequest] = []
 
     async def sync_sources(self, _bindings) -> None:
         return None
@@ -113,8 +115,9 @@ class ProbeAdapter:
     async def revoke_credential(self, _credential_ref: str) -> None:
         return None
 
-    async def invoke(self, source_id, model_id, _request, _stream, origin):
+    async def invoke(self, source_id, model_id, request, _stream, origin):
         self.invocations.append((source_id, model_id, origin))
+        self.requests.append(request)
         return InvokeHandle(self.outcomes.popleft())
 
     async def status(self) -> EngineStatus:
@@ -1207,6 +1210,81 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     )
     assert anthropic_not_found.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", not_found)
+
+
+@pytest.mark.parametrize(
+    ("backend", "source_protocol", "request_protocol", "request_keys"),
+    [
+        (
+            "claude",
+            source_protocol,
+            "anthropic",
+            {"model", "max_tokens", "messages"},
+        )
+        for source_protocol in (
+            "anthropic",
+            "openai_responses",
+            "openai_chat",
+            "openai_compatible",
+        )
+    ]
+    + [
+        (
+            "codex",
+            source_protocol,
+            "openai_responses",
+            {"model", "max_output_tokens", "input"},
+        )
+        for source_protocol in (
+            "anthropic",
+            "openai_responses",
+            "openai_chat",
+            "openai_compatible",
+        )
+    ]
+    + [
+        (
+            "opencode",
+            source_protocol,
+            source_protocol,
+            (
+                {"model", "max_output_tokens", "input"}
+                if source_protocol == "openai_responses"
+                else {"model", "max_tokens", "messages"}
+            ),
+        )
+        for source_protocol in (
+            "anthropic",
+            "openai_responses",
+            "openai_chat",
+            "openai_compatible",
+        )
+    ],
+)
+def test_probe_request_matches_live_backend_protocol_matrix(
+    tmp_path: Path,
+    backend: str,
+    source_protocol: str,
+    request_protocol: str,
+    request_keys: set[str],
+) -> None:
+    source = _source("src_primary01", "Primary")
+    source.protocol = source_protocol
+    service = _service(
+        tmp_path,
+        sources=[source],
+        outcomes=[_outcome(RawOutcomeKind.SUCCESS)],
+    )
+
+    result = asyncio.run(service.probe_agent(backend, "shared-model"))
+
+    assert result["reachable"] is True
+    assert service.adapter.invocations == [
+        ("src_primary01", "shared-model", backend)
+    ]
+    request = service.adapter.requests[0]
+    assert request.protocol == request_protocol
+    assert set(request) == request_keys
 
 
 def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:

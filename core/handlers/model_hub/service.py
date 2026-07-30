@@ -2143,14 +2143,24 @@ class ModelHubService:
         return self._agent_chain(self.store.load(), backend, model_id)
 
     @staticmethod
-    def _probe_request(source: ModelHubSourceConfig, model_id: str) -> ModelHubRequest:
-        if source.protocol == "anthropic":
+    def _probe_request(
+        source: ModelHubSourceConfig,
+        model_id: str,
+        backend: str,
+    ) -> ModelHubRequest:
+        # A probe enters the same translation seam as a live backend turn, so
+        # its payload must be shaped in the backend's client protocol.
+        request_protocol = {
+            "claude": "anthropic",
+            "codex": "openai_responses",
+        }.get(backend, source.protocol)
+        if request_protocol == "anthropic":
             payload = {
                 "model": model_id,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "ping"}],
             }
-        elif source.protocol == "openai_responses":
+        elif request_protocol == "openai_responses":
             payload = {
                 "model": model_id,
                 "max_output_tokens": 1,
@@ -2162,7 +2172,7 @@ class ModelHubService:
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "ping"}],
             }
-        return ModelHubRequest(payload, protocol=source.protocol)
+        return ModelHubRequest(payload, protocol=request_protocol)
 
     @staticmethod
     def _probe_failure(
@@ -2306,7 +2316,7 @@ class ModelHubService:
             self.adapter.invoke(
                 source.id,
                 resolved_model,
-                self._probe_request(source, resolved_model),
+                self._probe_request(source, resolved_model, backend),
                 False,
                 backend,
             )
@@ -2321,7 +2331,7 @@ class ModelHubService:
                 self.adapter.invoke(
                     source.id,
                     resolved_model,
-                    self._probe_request(source, resolved_model),
+                    self._probe_request(source, resolved_model, backend),
                     False,
                     backend,
                 )
