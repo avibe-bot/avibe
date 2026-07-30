@@ -5212,8 +5212,14 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
     matches the RAW negative value — that is what the CAS asserts, deliberately
     unclamped — and persists attempt exactly 1 with the first declared backoff
     armed. The same rows then follow the ordinary retry schedule to the ordinary
-    dead letter in the normal bounded attempt count, and enough of them sit ahead
-    of a valid due notice to exercise the batch ordering without starving it.
+    dead letter in the normal bounded attempt count.
+
+    MORE negative rows than the drain's batch limit sit ahead of a valid due
+    notice, so the batch BOUNDARY is exercised, not just batch ordering: pass 1
+    claims exactly the first batch and leaves the remainder untouched (unclaimed
+    — no attempt consumed, no backoff armed); pass 2, inside the first batch's
+    backoff, must advance PAST those backed-off rows to the remaining negatives
+    and the valid notice rather than reselecting the first batch forever.
 
     Red on the pre-clamp head: the first claim persisted the negative increment
     (``-2`` from ``"-3q"``; ``INT64_MIN + 1`` from the floor), never attempt 1,
@@ -5235,7 +5241,16 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
     # only the canonical would be claimed per pass and the rest would defer —
     # correct suppression, but it would hide the per-row claim this test exists
     # to prove. Separate definitions make every row its own canonical.
-    negatives: list[Any] = ["-3q", -3, -(2**63), "-1x", -1, -(2**63)]
+    #
+    # THIRTEEN rows — more than the drain's batch limit of 10 — with all three
+    # required shapes (negative-prefix text, negative scalar, i64 floor) present
+    # in the first batch AND in the remainder past the boundary. The listing
+    # orders by ``(created_at, id)``, so indexes 0-9 are the first batch.
+    negatives: list[Any] = [
+        "-3q", -3, -(2**63), "-1x", -1, -1e100, "-7q", -5, -(2**63), " -2x",
+        # Past the batch boundary:
+        "-9z", -4, -(2**63),
+    ]
     for index, counter in enumerate(negatives):
         _task(sqlite, f"task-neg-{index:02d}", deliver_key="slack::channel::C1")
         _pending_failure(
@@ -5298,35 +5313,94 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
         service.validate_platform = lambda platform: None
         service._t = lambda key, **kwargs: key
 
-        # PASS 1: the guarded claim matched the raw negative and persisted exactly
-        # attempt 1, with the FIRST declared interval armed — the clamp starting
-        # the ladder rather than extending it downward.
+        # PASS 1 claims exactly the first batch. Snapshot the boundary between the
+        # passes with cheap reads only — the first backoff is BACKOFF_SECONDS[0]
+        # seconds and pass 2 must run inside it to prove the batch does not get
+        # reselected.
+        first_batch = list(range(10))
+        remainder = list(range(10, len(negatives)))
+        asyncio.run(service._drain_failure_notices())
+        pass_one_at = datetime.now(timezone.utc)
+        remainder_after_pass_one = {
+            index: sqlite.owed_failure_notice(f"run-neg-{index:02d}") for index in remainder
+        }
+        valid_after_pass_one = sqlite.owed_failure_notice("run-neg-behind")["state"]
+
+        # PASS 2, immediately: the first batch is backed off, so the bounded drain
+        # must advance PAST it to the remaining negatives and the valid notice.
         asyncio.run(service._drain_failure_notices())
         now = datetime.now(timezone.utc)
-        for index in range(len(negatives)):
+
+        # The boundary, as pass 1 left it: rows past the limit were simply not
+        # pulled — unclaimed, so no attempt consumed and no backoff armed, and the
+        # CAS expectation still reads their RAW negative. The valid notice, last in
+        # ``(created_at, id)`` order, was outside the first batch too.
+        for index, snapshot in remainder_after_pass_one.items():
+            assert snapshot["state"] == "pending" and snapshot.get("next_attempt_at") is None, (
+                f"pass 1 must leave the row past the batch boundary unclaimed, got {snapshot!r}"
+            )
+            assert notice_write_expectation(snapshot)[1] < 0, (
+                f"an unclaimed remainder row must still hold its raw negative, got {snapshot!r}"
+            )
+        assert valid_after_pass_one == "pending", (
+            "the valid notice sorts after thirteen negatives — pass 1's batch of 10 "
+            "must not have reached it"
+        )
+
+        # PASS 1's claims: the guarded claim matched the raw negative and persisted
+        # exactly attempt 1, with the FIRST declared interval armed — the clamp
+        # starting the ladder rather than extending it downward. Still attempt 1
+        # after pass 2: the backoff excluded the first batch from reselection.
+        for index in first_batch:
             notice = sqlite.owed_failure_notice(f"run-neg-{index:02d}")
             assert notice["attempts"] == 1, (
-                f"the first claim over {negatives[index]!r} must persist attempt exactly 1, "
+                f"the first claim over {negatives[index]!r} must persist attempt exactly 1 "
+                f"and pass 2 must not reselect the backed-off batch, "
+                f"got {notice['attempts']!r} (state={notice['state']!r})"
+            )
+            assert notice["state"] == "pending"
+            armed = datetime.fromisoformat(notice["next_attempt_at"])
+            delta = (armed - pass_one_at).total_seconds()
+            assert -5 <= delta <= BACKOFF_SECONDS[0] + 5, (
+                f"the first backoff must be the first declared interval, got {delta:.1f}s"
+            )
+        # PASS 2's claims: the remainder crossed the boundary on the very next
+        # bounded pass — attempt exactly 1, first interval armed — and the valid
+        # due notice behind every negative row delivered instead of starving.
+        for index in remainder:
+            notice = sqlite.owed_failure_notice(f"run-neg-{index:02d}")
+            assert notice["attempts"] == 1, (
+                f"pass 2 must claim the remainder row {negatives[index]!r} at attempt 1, "
                 f"got {notice['attempts']!r} (state={notice['state']!r})"
             )
             assert notice["state"] == "pending"
             armed = datetime.fromisoformat(notice["next_attempt_at"])
             delta = (armed - now).total_seconds()
             assert -5 <= delta <= BACKOFF_SECONDS[0] + 5, (
-                f"the first backoff must be the first declared interval, got {delta:.1f}s"
+                f"the remainder's first backoff must be the first declared interval, got {delta:.1f}s"
             )
         assert sqlite.owed_failure_notice("run-neg-behind")["state"] == "sent", (
-            "six negative rows ahead of it must not starve the valid due notice"
+            "thirteen negative rows ahead of it must not starve the valid due notice "
+            "past the second pass"
         )
 
-        # PASSES 2..N: rewind the backoff between passes and let the schedule run
+        # PASSES 3..N: rewind the backoff between passes and let the schedule run
         # out. Every negative row must reach the ordinary dead letter at exactly
-        # the declared bound — MAX_ATTEMPTS — never more.
-        for _ in range(MAX_ATTEMPTS + 1):
-            for index in range(len(negatives)):
-                run_id = f"run-neg-{index:02d}"
-                if sqlite.owed_failure_notice(run_id)["state"] == "pending":
-                    sqlite.update_owed_failure_notice(run_id, next_attempt_at=None)
+        # the declared bound — MAX_ATTEMPTS — never more. The bound: 13 rows need
+        # 5 more claims each and a pass claims at most 10, with ``(created_at,
+        # id)`` order letting the first batch monopolize passes until it dead-
+        # letters — 5 passes for the first ten, then 5 for the remainder, so
+        # 2 * (MAX_ATTEMPTS + 1) passes is enough with slack.
+        for _ in range(2 * (MAX_ATTEMPTS + 1)):
+            pending = [
+                index
+                for index in range(len(negatives))
+                if sqlite.owed_failure_notice(f"run-neg-{index:02d}")["state"] == "pending"
+            ]
+            if not pending:
+                break
+            for index in pending:
+                sqlite.update_owed_failure_notice(f"run-neg-{index:02d}", next_attempt_at=None)
             asyncio.run(service._drain_failure_notices())
 
     for index in range(len(negatives)):
