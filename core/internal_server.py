@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import socket
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -114,7 +115,13 @@ def create_app(controller: "Controller") -> FastAPI:
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
 
-    async def _submit_scheduled_turn(session_id: str, context: MessageContext, text: str) -> str:
+    async def _submit_scheduled_turn(
+        session_id: str,
+        context: MessageContext,
+        text: str,
+        *,
+        delivery_intent: str = "queue",
+    ) -> Any:
         """Run a scheduled / watch turn through the SAME unified ``manager.submit``
         the interactive Chat path uses, so a scheduled run can never preempt an
         active Chat turn and gets the full turn lifecycle (in_flight + turn.start /
@@ -143,10 +150,23 @@ def create_app(controller: "Controller") -> FastAPI:
                 ):
                     return "duplicate"
 
+        queue_owner_transferred = False
+        queue_transfer_cancelled = False
+
+        class _QueueTransferCancelled(RuntimeError):
+            pass
+
         def _enqueue() -> bool:
+            nonlocal queue_owner_transferred, queue_transfer_cancelled
+
             from core.message_mirror import _scope_id_for_session
             from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
             from storage import messages_service
+            from storage.background import (
+                agent_run_cancellation_won_in_connection,
+                hold_running_agent_run_for_workbench_in_connection,
+                run_update_event_transaction,
+            )
 
             # Persist the scheduled run's delivery / attribution provenance on the
             # queued row's metadata so flush_queue re-runs it as SOURCE_SCHEDULED with
@@ -154,7 +174,7 @@ def create_app(controller: "Controller") -> FastAPI:
             # attribution instead of degrading to a plain user turn (#84). The key's
             # PRESENCE also marks this row as a scheduled segment for the flush.
             engine = get_cached_sqlite_engine()
-            with engine.begin() as conn:
+            with run_update_event_transaction(engine) as conn:
                 scope_id = _scope_id_for_session(conn, session_id)
                 try:
                     with conn.begin_nested():
@@ -170,8 +190,43 @@ def create_app(controller: "Controller") -> FastAPI:
                             metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
                             native_message_id=native_message_id or None,
                         )
+                        if delivery_intent == "send_now":
+                            execution_id = str(
+                                (context.platform_specific or {}).get(
+                                    "task_execution_id"
+                                )
+                                or ""
+                            ).strip()
+                            if not hold_running_agent_run_for_workbench_in_connection(
+                                conn,
+                                execution_id,
+                                delivery_outcome={
+                                    "intent": "send_now",
+                                    "status": "admitted",
+                                    "target_was_busy": bool(
+                                        manager.in_flight.get(session_id)
+                                    ),
+                                },
+                            ):
+                                if agent_run_cancellation_won_in_connection(
+                                    conn,
+                                    execution_id,
+                                ):
+                                    raise _QueueTransferCancelled
+                                raise RuntimeError(
+                                    "send-now Agent Run queue ownership transfer was refused"
+                                )
+                            queue_owner_transferred = True
+                except _QueueTransferCancelled:
+                    queue_transfer_cancelled = True
+                    return False
                 except IntegrityError:
                     logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
+                    if delivery_intent == "send_now":
+                        # A send-now attempt may not treat somebody else's
+                        # duplicate row as its own admission; that would
+                        # interrupt without transferring this Run.
+                        return False
                     return bool(
                         native_message_id
                         and messages_service.native_message_exists(
@@ -188,10 +243,45 @@ def create_app(controller: "Controller") -> FastAPI:
             text,
             source=SOURCE_SCHEDULED,
             enqueue=_enqueue,
+            delivery_intent=delivery_intent,
         )
         if submission.route == "enqueued" and submission.queue_persisted is not True:
-            raise RuntimeError("scheduled turn queue row was not persisted")
-        return submission.route
+            if queue_transfer_cancelled:
+                submission = replace(submission, delivery_status="canceled")
+            else:
+                raise RuntimeError("scheduled turn queue row was not persisted")
+        if delivery_intent == "send_now":
+            from storage.background import (
+                record_agent_run_delivery_outcome_in_connection,
+                run_update_event_transaction,
+            )
+
+            execution_id = str(
+                (context.platform_specific or {}).get("task_execution_id") or ""
+            ).strip()
+            outcome = {
+                "intent": "send_now",
+                "status": submission.delivery_status or submission.route,
+                "target_was_busy": submission.target_was_busy,
+            }
+            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                if not record_agent_run_delivery_outcome_in_connection(
+                    conn,
+                    execution_id,
+                    outcome,
+                ):
+                    raise RuntimeError(
+                        "send-now Agent Run delivery outcome could not be recorded"
+                    )
+            submission = replace(
+                submission,
+                queue_owner_transferred=queue_owner_transferred,
+            )
+        # Existing scheduled/task/watch callers consume only the route string.
+        # A direct Agent Run with send-now also needs the turn owner's exact
+        # interrupt outcome, so return the structured result only for that
+        # explicit contract and keep every legacy caller byte-compatible.
+        return submission if delivery_intent == "send_now" else submission.route
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
@@ -638,14 +728,23 @@ def create_app(controller: "Controller") -> FastAPI:
         but they can reach this permission-restricted Unix socket and reuse the
         same Controller -> UI-server -> browser SSE path.
         """
-        from core.inbox_events import RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT, bus
+        from core.inbox_events import (
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+            bus,
+        )
 
         payload = await _safe_json(request)
         if not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payload"})
         event_type = str(payload.get("type") or "").strip()
         data = payload.get("data")
-        if event_type not in {RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT}:
+        if event_type not in {
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+        }:
             return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_event_type"})
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_event_data"})
@@ -687,10 +786,13 @@ def create_app(controller: "Controller") -> FastAPI:
     @app.post("/internal/send-now/{session_id}")
     async def _send_now(session_id: str) -> Any:
         """HTTP adapter: delegate "立即发送" (run the send-while-busy queue now) to
-        the turn owner (FSM, Phase 1b); ``stop_failed`` -> 409."""
+        the turn owner (FSM, Phase 1b); typed failures remain HTTP failures."""
         result = await manager.send_now(session_id)
-        if result.get("code") == "stop_failed":
+        code = result.get("code")
+        if code == "stop_failed":
             return JSONResponse(status_code=409, content=result)
+        if code == "flush_failed":
+            return JSONResponse(status_code=503, content=result)
         return result
 
     # Expose the per-session turn gate to in-process callers (the scheduler)

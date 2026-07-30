@@ -35,6 +35,8 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -1117,6 +1119,10 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
+          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
+          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          Inspect queued work with: vibe session queue list <session-id>
+          Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -1141,6 +1147,10 @@ def _agent_run_examples_text() -> str:
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
+          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe session queue list sesk8m4q2p7x
+          vibe session queue remove sesk8m4q2p7x msg_queued123
+          vibe session send-now sesk8m4q2p7x
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -4424,6 +4434,18 @@ def cmd_agent_run(args):
             example_command="vibe agent run --agent default",
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
+        delivery_intent = (
+            AGENT_RUN_DELIVERY_SEND_NOW
+            if bool(getattr(args, "send_now", False))
+            else AGENT_RUN_DELIVERY_QUEUE
+        )
+        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+            raise TaskCliError(
+                "--send-now requires an existing Agent Session",
+                code="send_now_requires_existing_session",
+                hint="Pass --session-id <session-id>, or omit --send-now for a new or forked Session.",
+                help_command="vibe agent run --help",
+            )
         agent_name = (args.agent or "").strip()
         if session_policy in {"create", "none"} and not agent_name:
             raise TaskCliError(
@@ -4495,6 +4517,20 @@ def cmd_agent_run(args):
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
             target = resolve_session_id_target(session_id)
+            if (
+                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
+                and target.session_key.platform != "avibe"
+            ):
+                raise TaskCliError(
+                    "--send-now requires a Web/Workbench Agent Session",
+                    code="send_now_unsupported_target",
+                    hint="Omit --send-now to queue work for an IM-backed Session.",
+                    help_command="vibe agent run --help",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
                 agent_name=agent_name or None,
@@ -4588,6 +4624,7 @@ def cmd_agent_run(args):
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
             callback_active=run_async,
+            delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
@@ -4620,6 +4657,12 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
+        if delivery_intent != AGENT_RUN_DELIVERY_QUEUE:
+            # Keep the long-standing default-queue envelope byte-compatible.
+            # The explicit control intent is surfaced only when the caller opted
+            # into the new behavior.
+            payload["delivery_intent"] = delivery_intent
+            payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
             payload["forked_from_session_id"] = fork_result.fork.source_session_id
         if fork_result:
@@ -5074,6 +5117,228 @@ def cmd_session_get(args):
         session=_session_row(payload, brief=False),
         message=_session_get_hint(session_id),
         **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+    )
+    return 0
+
+
+def cmd_session_send_now(args):
+    """Apply Workbench's Session-level Send now transition without adding work."""
+
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+        target = resolve_session_id_target(session_id)
+        if target.session_key.platform != "avibe":
+            raise TaskCliError(
+                "send-now requires a Web/Workbench Agent Session",
+                code="send_now_unsupported_target",
+                hint="This Session uses an IM scope, whose active turn is not owned by Workbench.",
+                details={
+                    "session_id": session_id,
+                    "platform": target.session_key.platform,
+                },
+            )
+        controller_result = asyncio.run(internal_client.send_now(session_id))
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except internal_client.InternalServerUnavailable as exc:
+        _print_task_error(
+            TaskCliError(
+                "the live Session controller is unavailable",
+                code="internal_unavailable",
+                hint="Keep the queued messages intact and retry after the Avibe service is reachable.",
+                details={"session_id": session_id, "detail": str(exc)},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session send-now --help")
+        return 1
+
+    raw_status_code = controller_result.get("status_code")
+    try:
+        status_code = int(raw_status_code)
+    except (TypeError, ValueError):
+        status_code = 500
+    body = controller_result.get("body")
+    result = dict(body) if isinstance(body, dict) else {}
+    if not 200 <= status_code < 300 or result.get("ok") is False:
+        code = str(result.get("code") or result.get("status") or "send_now_failed")
+        detail = str(result.get("detail") or result.get("message") or code)
+        _print_task_error(
+            TaskCliError(
+                detail,
+                code=code,
+                hint="The active turn and durable queue were left intact; retry or let the turn finish normally.",
+                details={
+                    "session_id": session_id,
+                    "controller_status_code": status_code,
+                    "controller_response": result,
+                },
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+
+    _print_cli_payload(
+        "session_send_now",
+        session_id=session_id,
+        status=str(result.get("status") or "unknown"),
+        result=result,
+    )
+    return 0
+
+
+def _queued_agent_run_id(row: dict) -> str | None:
+    metadata = row.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    provenance = metadata.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    platform_specific = provenance.get("platform_specific")
+    if not isinstance(platform_specific, dict):
+        return None
+    if str(platform_specific.get("task_trigger_kind") or "").strip() != "agent_run":
+        return None
+    run_id = str(platform_specific.get("task_execution_id") or "").strip()
+    return run_id or None
+
+
+def _session_queue_row(row: dict, *, position: int) -> dict:
+    return {
+        "position": position,
+        "id": str(row.get("id") or ""),
+        "text": str(row.get("text") or ""),
+        "created_at": row.get("created_at"),
+        "author": row.get("author"),
+        "source": row.get("source"),
+        "run_id": _queued_agent_run_id(row),
+    }
+
+
+def cmd_session_queue_list(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        page_request = _page_request_from_args(
+            args,
+            help_command="vibe session queue list --help",
+        )
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue inspection requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
+            result = messages_service.list_queued_page(
+                conn,
+                session_id,
+                page_request=page_request,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue list --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue list --help")
+        return 1
+
+    _print_cli_payload(
+        "session_queue",
+        session_id=session_id,
+        queued=[
+            _session_queue_row(
+                row,
+                position=page_request.offset + index,
+            )
+            for index, row in enumerate(result.items, start=1)
+        ],
+        **_paginated_fields(
+            result,
+            command=["vibe", "session", "queue", "list", session_id],
+        ),
+    )
+    return 0
+
+
+def cmd_session_queue_remove(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.background import run_update_event_transaction
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    message_id = str(getattr(args, "message_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with run_update_event_transaction(engine) as conn:
+            sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue removal requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
+            removed = messages_service.remove_queued(
+                conn,
+                session_id,
+                message_id,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue remove --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue remove --help")
+        return 1
+
+    if removed:
+        _post_session_queue_updated_to_live_ui(session_id)
+    _print_cli_payload(
+        "session_queue_remove",
+        session_id=session_id,
+        message_id=message_id,
+        removed=removed,
+        status="removed" if removed else "not_found",
     )
     return 0
 
@@ -10995,6 +11260,26 @@ def _post_session_activity_to_live_ui(
     the DB in a separate process from the in-proc SSE broker, so without this the
     rename only shows after a page refresh. Silently no-ops when the UI isn't running
     or is unreachable — it must never affect the CLI command's own result."""
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {
+            "event": "session_updated",
+            "previous_scope_id": previous_scope_id,
+            "previous_visibility": previous_visibility,
+        },
+    )
+
+
+def _post_session_queue_updated_to_live_ui(session_id: str) -> None:
+    """Best-effort queue refresh for Web surfaces after an out-of-process CLI write."""
+
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {"event": "queue_updated"},
+    )
+
+
+def _post_session_cli_event_to_live_ui(session_id: str, payload: dict) -> None:
     from urllib.parse import quote
 
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
@@ -11008,12 +11293,7 @@ def _post_session_activity_to_live_ui(
     if not status.get("ui_pid") or not port:
         return
     url = f"http://{_ui_show_events_host(config)}:{int(port)}/api/sessions/{quote(session_id, safe='')}/cli-activity"
-    body = json.dumps(
-        {
-            "previous_scope_id": previous_scope_id,
-            "previous_visibility": previous_visibility,
-        }
-    ).encode("utf-8")
+    body = json.dumps(payload).encode("utf-8")
     http_request = urllib.request.Request(
         url,
         data=body,
@@ -12367,6 +12647,11 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument(
+        "--send-now",
+        action="store_true",
+        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+    )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
@@ -12452,17 +12737,21 @@ def build_parser():
 
     session_parser = subparsers.add_parser(
         "session",
-        help="List, inspect, and rename Agent sessions",
+        help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'update' renames a session's title. Archived sessions are soft-deleted "
-            "and never surfaced."
+            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'update' changes title, visibility, or scope. Archived sessions are "
+            "soft-deleted and never surfaced."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session --help",
         error_hint="Run one of the session subcommands below. Start with: vibe session list",
     )
-    session_subparsers = session_parser.add_subparsers(dest="session_command", metavar="{list,get,update}")
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_command",
+        metavar="{list,get,queue,send-now,update}",
+    )
     session_subparsers.required = True
     session_list_parser = session_subparsers.add_parser(
         "list",
@@ -12489,6 +12778,61 @@ def build_parser():
     )
     session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     _add_json_noop(session_get_parser)
+    session_send_now_parser = session_subparsers.add_parser(
+        "send-now",
+        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        description=(
+            "Apply the same Session-level Send now transition as Workbench without "
+            "adding another message. If the Session is busy, Avibe interrupts the "
+            "active turn and starts the durable FIFO queue head as a new turn. If "
+            "the Session is idle, Avibe starts the queue head directly."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session send-now --help",
+    )
+    session_send_now_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_json_noop(session_send_now_parser)
+    session_queue_parser = session_subparsers.add_parser(
+        "queue",
+        help="Inspect or remove queued Session messages",
+        description=(
+            "Inspect a Session's durable FIFO input queue or remove one queued "
+            "message by its stable ID. Queue removal never targets transcript "
+            "messages or reorders the remaining queue."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue --help",
+    )
+    session_queue_subparsers = session_queue_parser.add_subparsers(
+        dest="session_queue_command",
+        metavar="{list,remove}",
+    )
+    session_queue_subparsers.required = True
+    session_queue_list_parser = session_queue_subparsers.add_parser(
+        "list",
+        help="List a Session's queued messages in FIFO order",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue list --help",
+    )
+    session_queue_list_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_pagination_args(
+        session_queue_list_parser,
+        help_command="vibe session queue list --help",
+    )
+    _add_json_noop(session_queue_list_parser)
+    session_queue_remove_parser = session_queue_subparsers.add_parser(
+        "remove",
+        help="Remove one queued message by stable ID",
+        description=(
+            "Remove one message only when it is still queued in the named "
+            "Session. A stale or cross-Session ID returns removed=false."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue remove --help",
+    )
+    session_queue_remove_parser.add_argument("session_id", help="Target Agent Session ID")
+    session_queue_remove_parser.add_argument("message_id", help="Queued message ID")
+    _add_json_noop(session_queue_remove_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
         help="Update a session's title, visibility, or scope",
@@ -13636,6 +13980,14 @@ def main():
             sys.exit(cmd_session_list(args))
         if args.session_command == "get":
             sys.exit(cmd_session_get(args))
+        if args.session_command == "queue":
+            if args.session_queue_command == "list":
+                sys.exit(cmd_session_queue_list(args))
+            if args.session_queue_command == "remove":
+                sys.exit(cmd_session_queue_remove(args))
+            parser.error("session queue command is required")
+        if args.session_command == "send-now":
+            sys.exit(cmd_session_send_now(args))
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")

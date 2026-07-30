@@ -6749,6 +6749,10 @@ def sessions_cli_activity(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    if payload.get("event") == "queue_updated":
+        broker.publish("queue.updated", {"session_id": session_id})
+        return jsonify({"ok": True})
+
     previous_session = None
     if "previous_scope_id" in payload and "previous_visibility" in payload:
         previous_session = {
@@ -8281,10 +8285,11 @@ def sessions_queue_list(session_id: str):
 def sessions_queue_remove(session_id: str, message_id: str):
     """Drop one queued message (the per-item delete in the queue strip)."""
     from storage import messages_service
+    from storage.background import run_update_event_transaction
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
-    with engine.begin() as conn:
+    with run_update_event_transaction(engine) as conn:
         removed = messages_service.remove_queued(conn, session_id, message_id)
     if removed:
         broker.publish("queue.updated", {"session_id": session_id})

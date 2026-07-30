@@ -14,7 +14,11 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import and_, case, func, insert, or_, select, update
 
 from config import paths
-from storage.agent_session_rows import session_openable_in_chat, unchanged_text
+from storage.agent_session_rows import (
+    reserve_write_lock,
+    session_openable_in_chat,
+    unchanged_text,
+)
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
@@ -726,6 +730,45 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
             logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
 
 
+def _publish_queue_updated(session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    try:
+        from core.inbox_events import (
+            QUEUE_UPDATED_EVENT,
+            bus,
+            is_controller_process,
+        )
+    except Exception:
+        logger.debug("failed to import queue event publisher", exc_info=True)
+        return
+    payload = {"session_id": normalized_session_id}
+    try:
+        bus.publish(QUEUE_UPDATED_EVENT, payload)
+        if bus.subscriber_count() == 0 and not is_controller_process():
+            try:
+                from vibe import internal_client
+
+                internal_client.publish_event_sync(
+                    QUEUE_UPDATED_EVENT,
+                    payload,
+                    timeout=1.5,
+                )
+            except Exception:
+                logger.debug(
+                    "failed to bridge queue.updated for %s",
+                    normalized_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.debug(
+            "failed to publish queue.updated for %s",
+            normalized_session_id,
+            exc_info=True,
+        )
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -927,6 +970,160 @@ def claim_queued_runs_for_workbench_in_connection(
             raise RuntimeError(f"failed to claim queued agent run {run_id}")
     _defer_run_ids_updated_from_connection(conn, normalized_run_ids)
     return normalized_run_ids
+
+
+def hold_running_agent_run_for_workbench_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    delivery_outcome: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Transfer a claimed Agent Run to the durable Workbench queue.
+
+    The caller persists the matching queued message in the same write
+    transaction. The queue row therefore cannot become flushable while the
+    scheduler still owns the Run as ``running``.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    metadata = _json_loads(row["metadata_json"], {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["workbench_queue_holds_run"] = True
+    if delivery_outcome is not None:
+        metadata["delivery_outcome"] = dict(delivery_outcome)
+    now = _utc_now_iso()
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.status.in_(_status_query_values("running")))
+        .where(agent_runs.c.cancel_requested == 0)
+        .values(
+            status="queued",
+            started_at=None,
+            updated_at=now,
+            metadata_json=_json_dumps(metadata),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
+
+
+def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
+    """Whether cancellation already owns a refused queue handoff."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs.c.status, agent_runs.c.cancel_requested)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    return bool(row["cancel_requested"]) or normalize_run_status(
+        row["status"]
+    ) == "canceled"
+
+
+def cancel_workbench_queued_agent_run_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+) -> bool:
+    """Cancel a Run only while the named Workbench queue still owns it.
+
+    Queue-row deletion and this transition share the caller's transaction. A
+    concurrent claim/settlement therefore either wins before this guard (and the
+    row is not removed) or loses after both cancellation and deletion commit.
+    Missing Run rows are stale queue input and may be removed.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return True
+    metadata = _json_loads(row["metadata_json"], {})
+    if (
+        normalize_run_status(row["status"]) != "queued"
+        or str(row["session_id"] or "").strip() != normalized_session_id
+        or not isinstance(metadata, dict)
+        or metadata.get("workbench_queue_holds_run") is not True
+    ):
+        return False
+    now = _utc_now_iso()
+    transition = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(agent_runs.c.status.in_(_status_query_values("queued")))
+        .where(agent_runs.c.metadata_json == row["metadata_json"])
+        .values(
+            status="canceled",
+            cancel_requested=1,
+            cancel_requested_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    if not transition.rowcount:
+        return False
+    updated = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().one()
+    _defer_run_rows_updated_from_connection(conn, [updated])
+    return True
+
+
+def record_agent_run_delivery_outcome_in_connection(
+    conn: Any,
+    run_id: str,
+    outcome: dict[str, Any],
+) -> bool:
+    """Merge the observed delivery transition without changing Run ownership."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+        .values(
+            updated_at=_utc_now_iso(),
+            metadata_json=func.json_set(
+                agent_runs.c.metadata_json,
+                "$.delivery_outcome",
+                func.json(_json_dumps(dict(outcome))),
+            ),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
 
 
 def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now: str) -> None:
@@ -1852,11 +2049,21 @@ class SQLiteBackgroundTaskStore:
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
+        queue_session_id = ""
         with self.engine.begin() as conn:
-            row = conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
+            # Cancellation and Workbench queue retirement are one ownership
+            # transition. Reserve the writer before reading so a concurrent
+            # claim cannot move the Run between the decision and its row delete.
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
             if not row:
                 return False
             status = normalize_run_status(row["status"])
+            metadata = _json_loads(row["metadata_json"], {})
             values: dict[str, Any] = {
                 "cancel_requested": 1,
                 "cancel_requested_at": now,
@@ -1874,7 +2081,22 @@ class SQLiteBackgroundTaskStore:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
                 )
+                if (
+                    status == "queued"
+                    and isinstance(metadata, dict)
+                    and metadata.get("workbench_queue_holds_run") is True
+                ):
+                    from storage import messages_service
+
+                    session_id = str(row["session_id"] or "").strip()
+                    if messages_service.delete_queued_agent_run(
+                        conn,
+                        session_id=session_id,
+                        run_id=run_id,
+                    ):
+                        queue_session_id = session_id
         _publish_run_rows_updated([row_to_publish])
+        _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:

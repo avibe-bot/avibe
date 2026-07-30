@@ -28,6 +28,7 @@ from storage.models import (
     scope_settings,
     scopes,
 )
+from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 from vibe.message_types import types_with, types_without
 
@@ -83,6 +84,34 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
+_SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+
+
+def _queued_agent_run_id(row: dict[str, Any]) -> str:
+    native_message_id = str(row.get("native_message_id") or "").strip()
+    if native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX):
+        return native_message_id[len(_AGENT_RUN_NATIVE_PREFIX):]
+    try:
+        metadata = json.loads(row.get("metadata_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    provenance = (
+        metadata.get(_SCHEDULED_PROVENANCE_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    platform_specific = (
+        provenance.get("platform_specific")
+        if isinstance(provenance, dict)
+        else None
+    )
+    if (
+        not isinstance(platform_specific, dict)
+        or str(platform_specific.get("task_trigger_kind") or "").strip()
+        != "agent_run"
+    ):
+        return ""
+    return str(platform_specific.get("task_execution_id") or "").strip()
 
 
 def _attach_agent_run_provenance(
@@ -754,15 +783,39 @@ def enqueue_queued(
     )
 
 
-def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
-    """Pending queued messages for a session, oldest first."""
-    query = (
+def _queued_query(session_id: str):
+    return (
         select(messages)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
+
+
+def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+    """Pending queued messages for a session, oldest first."""
+    query = _queued_query(session_id)
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+
+
+def list_queued_page(
+    conn: Connection,
+    session_id: str,
+    *,
+    page_request: PageRequest,
+) -> PageResult[dict[str, Any]]:
+    """One bounded FIFO page for Agent-facing Session queue inspection."""
+
+    query = (
+        _queued_query(session_id)
+        .limit(page_request.limit + 1)
+        .offset(page_request.offset)
+    )
+    rows = [
+        _row_to_payload(dict(row))
+        for row in conn.execute(query).mappings().all()
+    ]
+    return page_result_from_limit_plus_one(rows, page_request)
 
 
 def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:
@@ -833,6 +886,45 @@ def delete_queued(conn: Connection, ids: list[str]) -> None:
     if not ids:
         return
     conn.execute(delete(messages).where(messages.c.id.in_(ids)))
+
+
+def delete_queued_agent_run(
+    conn: Connection,
+    *,
+    session_id: str,
+    run_id: str,
+) -> int:
+    """Retire the exact queued row owned by a canceled Workbench Agent Run."""
+
+    normalized_session_id = str(session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_session_id or not normalized_run_id:
+        return 0
+    rows = list(
+        conn.execute(
+            select(
+                messages.c.id,
+                messages.c.native_message_id,
+                messages.c.metadata_json,
+            )
+            .where(messages.c.session_id == normalized_session_id)
+            .where(messages.c.type == QUEUED_TYPE)
+        ).mappings()
+    )
+    row_ids = [
+        str(row["id"])
+        for row in rows
+        if _queued_agent_run_id(dict(row)) == normalized_run_id
+    ]
+    if not row_ids:
+        return 0
+    result = conn.execute(
+        delete(messages)
+        .where(messages.c.id.in_(row_ids))
+        .where(messages.c.session_id == normalized_session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+    )
+    return result.rowcount or 0
 
 
 def clear_queued(conn: Connection, session_id: str) -> int:
@@ -911,14 +1003,44 @@ def pending_message_target_type(
 
 
 def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
-    """Delete one queued message, scoped to its session so a stale / cross-session
-    id can't drop another chat's queued row. Returns True if a row was removed."""
+    """Delete one queued message and cancel any Agent Run it durably owns.
+
+    The Session/type predicates keep stale and cross-Session ids inert. An
+    Agent-Run-backed row may be removed only while that Run is still queued and
+    explicitly held by Workbench; its cancellation and the row deletion commit
+    together in the caller's transaction.
+    """
+    row = conn.execute(
+        select(messages.c.native_message_id, messages.c.metadata_json)
+        .where(messages.c.id == message_id)
+        .where(messages.c.session_id == session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    run_id = _queued_agent_run_id(dict(row))
+    if run_id:
+        from storage.background import (
+            cancel_workbench_queued_agent_run_in_connection,
+        )
+
+        if not cancel_workbench_queued_agent_run_in_connection(
+            conn,
+            run_id,
+            session_id=session_id,
+        ):
+            return False
     result = conn.execute(
         delete(messages)
         .where(messages.c.id == message_id)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
     )
+    if run_id and not result.rowcount:
+        raise RuntimeError(
+            "queued Agent Run cancellation succeeded but its message deletion was refused"
+        )
     return bool(result.rowcount)
 
 

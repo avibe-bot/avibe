@@ -192,6 +192,389 @@ def test_get_missing_is_not_found(monkeypatch, tmp_path, capsys):
     assert payload["code"] == "session_not_found"
 
 
+# -------------------------------------------------------------------- send now
+
+
+def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+    called: list[str] = []
+
+    async def _send_now(session_id):
+        called.append(session_id)
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "status": "flushed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 0
+    assert called == ["sesaaa"]
+    assert payload == {
+        "schema_version": 1,
+        "ok": True,
+        "kind": "session_send_now",
+        "session_id": "sesaaa",
+        "status": "flushed",
+        "result": {
+            "ok": True,
+            "session_id": "sesaaa",
+            "status": "flushed",
+        },
+    }
+
+
+def test_send_now_surfaces_a_typed_interrupt_refusal(monkeypatch, tmp_path, capsys):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+
+    async def _send_now(session_id):
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "session_id": session_id,
+                "code": "stop_failed",
+                "detail": "backend refused Stop",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "stop_failed"
+    assert payload["error"] == "backend refused Stop"
+    assert payload["details"]["session_id"] == "sesaaa"
+    assert payload["details"]["controller_status_code"] == 409
+
+
+def test_send_now_surfaces_an_idle_flush_failure(monkeypatch, tmp_path, capsys):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa")
+
+    async def _send_now(session_id):
+        return {
+            "status_code": 503,
+            "body": {
+                "ok": False,
+                "session_id": session_id,
+                "code": "flush_failed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesaaa"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "flush_failed"
+    assert payload["details"]["session_id"] == "sesaaa"
+    assert payload["details"]["controller_status_code"] == 503
+
+
+def test_send_now_rejects_an_archived_session_before_controller_call(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesarch", status="archived")
+
+    async def _send_now(_session_id):
+        raise AssertionError("archived Session must not reach the live controller")
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    code, payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesarch"],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "session_not_found"
+
+
+def test_send_now_requires_an_explicit_target(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["session", "send-now"])
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert payload["help_command"] == "vibe session send-now --help"
+
+
+def test_send_now_and_queue_controls_reject_an_im_backed_session(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesim", platform="slack", native="C123")
+
+    async def _send_now(_session_id):
+        raise AssertionError("IM-backed Session must not reach the Workbench controller")
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    send_code, send_payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesim"],
+        capsys,
+    )
+    list_code, list_payload = _run(
+        cli.cmd_session_queue_list,
+        ["session", "queue", "list", "sesim"],
+        capsys,
+    )
+    remove_code, remove_payload = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesim", "msg_any"],
+        capsys,
+    )
+
+    assert send_code == 1
+    assert send_payload["code"] == "send_now_unsupported_target"
+    assert list_code == 1
+    assert list_payload["code"] == "session_queue_unsupported_target"
+    assert remove_code == 1
+    assert remove_payload["code"] == "session_queue_unsupported_target"
+
+
+# ------------------------------------------------------------------------ queue
+
+
+def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from storage import messages_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    scope_id = _seed(engine, "sesaaa")
+    with engine.begin() as conn:
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="sesaaa",
+            text="first",
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="sesaaa",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="second",
+            metadata={
+                "scheduled_provenance": {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": "run_second",
+                    }
+                }
+            },
+        )
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="sesaaa",
+            text="third",
+        )
+
+    code, page1 = _run(
+        cli.cmd_session_queue_list,
+        ["session", "queue", "list", "sesaaa", "--limit", "2"],
+        capsys,
+    )
+
+    assert code == 0
+    assert [row["text"] for row in page1["queued"]] == ["first", "second"]
+    assert [row["position"] for row in page1["queued"]] == [1, 2]
+    assert page1["queued"][0]["run_id"] is None
+    assert page1["queued"][1]["run_id"] == "run_second"
+    assert page1["pagination"]["next_command"] == (
+        "vibe session queue list sesaaa --page 2 --limit 2"
+    )
+
+    code, page2 = _run(
+        cli.cmd_session_queue_list,
+        ["session", "queue", "list", "sesaaa", "--page", "2", "--limit", "2"],
+        capsys,
+    )
+
+    assert code == 0
+    assert [row["text"] for row in page2["queued"]] == ["third"]
+    assert [row["position"] for row in page2["queued"]] == [3]
+    assert page2["pagination"]["has_more"] is False
+
+
+def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from storage import messages_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    scope_id = _seed(engine, "sesaaa")
+    _seed(engine, "sesbbb", native="proj_b")
+    with engine.begin() as conn:
+        queued = messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="sesaaa",
+            text="obsolete",
+        )
+    notified: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "_post_session_queue_updated_to_live_ui",
+        lambda session_id: notified.append(session_id),
+    )
+
+    code, wrong_session = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesbbb", queued["id"]],
+        capsys,
+    )
+
+    assert code == 0
+    assert wrong_session["removed"] is False
+    assert wrong_session["status"] == "not_found"
+    assert notified == []
+
+    code, removed = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesaaa", queued["id"]],
+        capsys,
+    )
+
+    assert code == 0
+    assert removed["removed"] is True
+    assert removed["status"] == "removed"
+    assert notified == ["sesaaa"]
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, "sesaaa") == []
+
+
+def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage import messages_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    scope_id = _seed(engine, "sesrun")
+    store = TaskExecutionStore()
+    request = store.enqueue_agent_run(
+        session_id="sesrun",
+        message="obsolete delegated work",
+        agent_name="worker",
+    )
+    assert store.claim(request.id) is not None
+    store.requeue(
+        request.id,
+        metadata={"workbench_queue_holds_run": True},
+    )
+    with engine.begin() as conn:
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="sesrun",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text=request.message or "",
+            native_message_id=f"agent_run:{request.id}",
+        )
+    monkeypatch.setattr(
+        cli,
+        "_post_session_queue_updated_to_live_ui",
+        lambda _session_id: None,
+    )
+
+    code, removed = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesrun", queued["id"]],
+        capsys,
+    )
+
+    assert code == 0
+    assert removed["removed"] is True
+    stored = store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["cancel_requested"] is True
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, "sesrun") == []
+
+
+def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesarch", status="archived")
+
+    list_code, list_payload = _run(
+        cli.cmd_session_queue_list,
+        ["session", "queue", "list", "sesarch"],
+        capsys,
+    )
+    remove_code, remove_payload = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesarch", "msg_any"],
+        capsys,
+    )
+
+    assert list_code == 1
+    assert list_payload["code"] == "session_not_found"
+    assert remove_code == 1
+    assert remove_payload["code"] == "session_not_found"
+
+
 # ------------------------------------------------------------------------- update
 
 
@@ -516,6 +899,31 @@ def test_cli_activity_endpoint_publishes_with_token(monkeypatch):
     events = [data for topic, data in published if topic == "session.activity"]
     assert events and events[0]["session_id"] == "seslive"
     assert events[0]["event"] == "updated" and events[0]["title"] == "Renamed"
+
+
+def test_cli_activity_endpoint_publishes_queue_updates_with_token(monkeypatch):
+    import vibe.sse_broker as sse_broker
+    from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+    from vibe.ui_server import app
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        sse_broker.broker,
+        "publish",
+        lambda topic, data: published.append((topic, data)),
+    )
+
+    resp = app.test_client().post(
+        "/api/sessions/sesqueue/cli-activity",
+        json={"event": "queue_updated"},
+        headers={
+            "X-Vibe-Show-Client": "cli",
+            SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert published == [("queue.updated", {"session_id": "sesqueue"})]
 
 
 def test_cli_activity_placement_events_match_patch(monkeypatch):

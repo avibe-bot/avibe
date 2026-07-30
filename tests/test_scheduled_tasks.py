@@ -5567,20 +5567,35 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert handler_calls == []
 
 
-def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(monkeypatch, tmp_path) -> None:
+def test_busy_avibe_agent_run_send_now_records_the_turn_owner_outcome(monkeypatch, tmp_path) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id=session_id,
         message="run behind active workbench turn",
         agent_name="codex",
+        delivery_intent="send_now",
     )
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text):
-        submitted.append((sid, text, ctx.platform_specific.get("task_execution_id")))
-        return "enqueued"
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="queue"):
+        from core.session_turns import TurnSubmissionResult
+
+        submitted.append(
+            (
+                sid,
+                text,
+                ctx.platform_specific.get("task_execution_id"),
+                delivery_intent,
+            )
+        )
+        return TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=True,
+            target_was_busy=True,
+            delivery_status="interrupted",
+        )
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append(message)
@@ -5609,8 +5624,168 @@ def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(m
     assert run.get("started_at") is None
     assert run.get("completed_at") is None
     assert (run.get("metadata") or {}).get("workbench_queue_holds_run") is True
-    assert submitted == [(session_id, "run behind active workbench turn", request.id)]
+    assert run["metadata"]["delivery_intent"] == "send_now"
+    assert run["metadata"]["delivery_outcome"] == {
+        "intent": "send_now",
+        "status": "interrupted",
+        "target_was_busy": True,
+    }
+    assert submitted == [
+        (session_id, "run behind active workbench turn", request.id, "send_now")
+    ]
     assert handler_calls == []
+
+
+def test_idle_send_now_flush_failure_invokes_queue_recovery(monkeypatch, tmp_path) -> None:
+    from core.session_turns import TurnSubmissionResult
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recover the held queue",
+        agent_name="codex",
+        delivery_intent="send_now",
+    )
+    recovered: list[str] = []
+
+    async def _submit_scheduled(_sid, _ctx, _text, *, delivery_intent="queue"):
+        request_store.requeue(
+            request.id,
+            metadata={
+                "workbench_queue_holds_run": True,
+                "delivery_outcome": {
+                    "intent": "send_now",
+                    "status": "flush_failed",
+                    "target_was_busy": False,
+                },
+            },
+        )
+        return TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=True,
+            target_was_busy=False,
+            delivery_status="flush_failed",
+            queue_owner_transferred=True,
+        )
+
+    async def _recover_queue(sid):
+        recovered.append(sid)
+        return []
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        raise AssertionError("send-now must not use direct IM dispatch")
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
+    controller = _avibe_controller_double(
+        gate=gate,
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    controller.session_turns = SimpleNamespace(
+        recover_persisted_agent_run_queue=_recover_queue,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "queued"
+    assert stored["metadata"]["workbench_queue_holds_run"] is True
+    assert stored["metadata"]["delivery_outcome"]["status"] == "flush_failed"
+    assert recovered == [session_id]
+
+
+def test_send_now_runtime_rejects_non_workbench_session(monkeypatch, tmp_path) -> None:
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state(primary_platform="slack")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C_SEND_NOW",
+            now="2026-07-30T00:00:00Z",
+        )
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=str(tmp_path),
+                agent_name=None,
+                agent_backend=None,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json="{}",
+                created_at="2026-07-30T00:00:00Z",
+                updated_at="2026-07-30T00:00:00Z",
+            )
+        )
+        session_id = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_name="worker",
+        )["id"]
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="do not silently downgrade",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    direct_calls: list[str] = []
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        direct_calls.append(message)
+
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": object()},
+        im_clients={"slack": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        session_turn_gate=SimpleNamespace(submit_scheduled=AsyncMock(), in_flight={}),
+        message_handler=SimpleNamespace(
+            handle_scheduled_message=_handle_scheduled_message,
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert "Web/Workbench Agent Session" in stored["error"]
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "send_now",
+        "status": "unsupported_target",
+        "target_was_busy": False,
+    }
+    assert direct_calls == []
+    controller.session_turn_gate.submit_scheduled.assert_not_awaited()
 
 
 def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
