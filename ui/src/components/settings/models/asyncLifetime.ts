@@ -187,6 +187,28 @@ export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthori
 export const isDone = (action: FlowAction): boolean => action !== 'continue';
 
 /**
+ * Whether a FAILED status poll may speak for the journey.
+ *
+ * A poll is a reader; the paste submit is the writer of record. `GET …/status`
+ * failing while a submit is outstanding says nothing about whether that submit
+ * committed — and the submit's own response is the only arrival that carries the
+ * terminal tail (`repaired` / `created`) at all. Latching the reader's error
+ * settles the view, `flowStep` above then correctly ignores the success that
+ * follows, and the dialog says 授权失败 over a credential the server did replace:
+ * no toast, no refetch, no repair verdict, on a journey that worked.
+ *
+ * Dropping it is safe precisely because the other authority is guaranteed to
+ * answer: the submit settles the view itself, with its success or through its own
+ * catch. So the flow is not left hanging on a poll — and the caller keeps reading
+ * meanwhile, which is what preserves the deadline for a submit that never returns.
+ *
+ * With no submit outstanding a poll IS the only authority, and its failure is the
+ * journey's: a status read is also the call that materializes a just-succeeded
+ * flow, so its error can be the one thing that knows the login went nowhere.
+ */
+export const pollFailureSettles = (submitOutstanding: boolean): boolean => !submitOutstanding;
+
+/**
  * Hands back the flow a journey opened, and is the ONLY authorization for a
  * teardown cancel.
  *

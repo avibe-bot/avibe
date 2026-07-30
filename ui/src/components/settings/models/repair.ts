@@ -351,3 +351,46 @@ export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutc
  * propagates out of `_engine_call` above the write block.
  */
 export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable;
+
+/**
+ * What the 试跑 row IS right now — which is not the same question as what the
+ * chain is, because the row outlives the chain it reported on.
+ *
+ * Two rules, and neither is visible from `dryRunPlan` alone:
+ *
+ *  1. A REPORT survives losing its head. 试跑 is what takes the head away:
+ *     probing the chain's last runnable source and failing cools that source
+ *     down (`probeWroteState`), so the re-read that failure demands comes back
+ *     with `current: null` and the plan turns `none`. Dropping the row there
+ *     erases the sentence the click produced — making the failing run, the one
+ *     the user most needs to read, the only one whose answer flashes past. So
+ *     the CONTROL goes (there is nothing runnable to reach, and the page states
+ *     that one level up with the remedy attached) while the LINE stays.
+ *  2. The control waits for the drawer's save. That PUT is optimistic: the list
+ *     — and the chain key the report is filed under — have already moved to the
+ *     order the user dropped while the server still answers for the old one. A
+ *     probe launched in that window reports on the superseded chain under the
+ *     new one's key, and the key cannot clear it because it IS already the new
+ *     key. Every other control in this drawer is disabled for that window; this
+ *     one is not special.
+ */
+export type DryRunRowView = {
+  /** The backend to probe, or `null` when there is nothing runnable to reach. */
+  backend: AgentBackend | null;
+  /** Whether the control may be pressed now. */
+  enabled: boolean;
+  /** Whether the last answer is still worth drawing. */
+  report: boolean;
+};
+
+export const dryRunRowView = (
+  plan: DryRunPlan,
+  row: { line: string | null; saving: boolean; running: boolean },
+): DryRunRowView => {
+  const backend = plan.kind === 'probe' ? plan.backend : null;
+  return {
+    backend,
+    enabled: backend !== null && !row.saving && !row.running,
+    report: row.line !== null,
+  };
+};

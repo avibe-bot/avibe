@@ -48,13 +48,13 @@ import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { apiFailure, modelsApi } from './modelsApi';
-import { dryRunOutcome, dryRunPlan, probeWroteState, type DryRunOutcome } from './repair';
+import { dryRunOutcome, dryRunPlan, dryRunRowView, probeWroteState, type DryRunOutcome } from './repair';
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
 import { isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
-import type { AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
+import type { AgentBackend, AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
 
 // ── Row parts ───────────────────────────────────────────────────────────
 //
@@ -468,6 +468,7 @@ export const SourceOrderDrawer: React.FC<{
             agent={agent}
             sources={sources}
             chainKey={`${policy}|${order.join('>')}`}
+            saving={saving}
             reread={onSaved}
           />
         )}
@@ -522,10 +523,14 @@ const DryRunRow: React.FC<{
   /** The chain as the USER has it — see the reset effect for why the report is
    *  keyed on this and not on the head the server computes from it. */
   chainKey: string;
+  /** The drawer's order PUT is in flight. A probe started now would answer for the
+   *  chain the server still holds, filed under the one the user already sees —
+   *  `dryRunRowView` owns that rule. */
+  saving: boolean;
   /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
    *  write, so the page it sits on is stale until this runs. */
   reread: () => void;
-}> = ({ agent, sources, chainKey, reread }) => {
+}> = ({ agent, sources, chainKey, saving, reread }) => {
   const { t } = useTranslation();
   const plan = dryRunPlan(agent);
   const [running, setRunning] = React.useState(false);
@@ -553,18 +558,13 @@ const DryRunRow: React.FC<{
     setErrorText(null);
   }, [chainKey]);
 
-  // No head, or Direct mode: the route answers `direct_mode` / has nothing
-  // runnable to reach, and the page says why one level up with the remedy
-  // attached. A disabled 试跑 would only repeat it.
-  if (plan.kind === 'none') return null;
-
-  const run = async () => {
+  const run = async (backend: AgentBackend) => {
     const mine = ++seq.current;
     setRunning(true);
     setOutcome(null);
     setErrorText(null);
     try {
-      const probe = await modelsApi.probeAgent(plan.backend);
+      const probe = await modelsApi.probeAgent(backend);
       if (seq.current !== mine) return;
       setOutcome(dryRunOutcome(probe, sources));
       // Store the verdict first, then re-read: `probeWroteState` owns which
@@ -593,20 +593,32 @@ const DryRunRow: React.FC<{
         // sentence rather than a machine code appended to it.
         failedLine(t, outcome.sourceName, serverText(t, outcome.detailKey));
 
+  // What this row IS right now, which the plan alone cannot say: no head means no
+  // control (Direct mode, or waiting/interrupted — the page states that one level
+  // up with the remedy attached, so a disabled 试跑 would only repeat it), and yet
+  // this very row is how a chain LOSES its head, because a failing probe cools its
+  // own head down. The answer therefore outlives the chain it was about; only the
+  // control goes with it. `saving` is in there for the mirror-image reason — see
+  // `dryRunRowView`.
+  const { backend, enabled, report } = dryRunRowView(plan, { line, saving, running });
+  if (backend === null && !report) return null;
+
   return (
     <div className="mt-1 flex flex-col gap-2">
-      <Button
-        variant="outline"
-        className="h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold"
-        onClick={() => void run()}
-        disabled={running}
-      >
-        <span className="flex items-center gap-2">
-          {running ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-          {t(running ? 'settings.models.dryRun.running' : 'settings.models.dryRun.action')}
-        </span>
-      </Button>
-      {line && (
+      {backend !== null && (
+        <Button
+          variant="outline"
+          className="h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold"
+          onClick={() => void run(backend)}
+          disabled={!enabled}
+        >
+          <span className="flex items-center gap-2">
+            {running ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+            {t(running ? 'settings.models.dryRun.running' : 'settings.models.dryRun.action')}
+          </span>
+        </Button>
+      )}
+      {report && (
         <p
           className={cn(
             'flex items-start gap-1.5 px-1 text-[12px] leading-relaxed',

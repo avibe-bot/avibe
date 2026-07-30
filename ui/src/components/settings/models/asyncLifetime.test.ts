@@ -26,6 +26,18 @@
 //      and a replacement opens; the server's pending-flow reuse hands the
 //      replacement THAT SAME flow. The first journey's cleanup then cancels the
 //      login the user is watching in the dialog that replaced it.
+//
+//   5. poll-error-during-submit. The 2s status read fails at the moment the paste
+//      submit it raced commits. Latching the READER's error settles the view, so
+//      the submit's success — the only arrival that carries the terminal tail — is
+//      then correctly ignored, and the dialog reports 授权失败 over a credential the
+//      server did replace.
+//
+//   6. start-rejected-after-close. A reauth's start rejects AFTER the dialog closed
+//      and after `mark_native_irreversible_start` committed. The close path re-read
+//      the rows, but it did so while that request was still in flight, so it can
+//      have read them before the write — and the rejection path returned without a
+//      second read, leaving healthy rows on a page whose source is 需处理.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -37,6 +49,7 @@ import {
   flowStep,
   initialSeedState,
   isDone,
+  pollFailureSettles,
   releaseFlow,
   savedMappingsKey,
   savedMenuKey,
@@ -293,6 +306,44 @@ describe('flow authority', () => {
   });
 });
 
+describe('pollFailureSettles — who speaks for a journey whose submit is outstanding', () => {
+  it('lets a failed poll settle the journey when it is the only authority', () => {
+    // A status read is also the call that materializes a just-succeeded flow, so on
+    // a device-code login its failure can be the one thing that knows the login
+    // produced nothing usable.
+    expect(pollFailureSettles(false)).toBe(true);
+  });
+
+  it('does not let it settle one while the user’s own submit is outstanding', () => {
+    // The submit is the writer of record; a read failing beside it says nothing
+    // about whether that write committed.
+    expect(pollFailureSettles(true)).toBe(false);
+  });
+
+  it('shows what latching one costs: the success right behind it is ignored', () => {
+    // Interleaving 5 as a sequence. `flowStep` is right to ignore the second
+    // arrival — the fix is upstream, at which arrival is allowed to be a verdict.
+    const authority = createFlowAuthority(() => {});
+
+    authority.transition({ kind: 'response', flow: flow('awaiting_action') });
+    authority.transition({ kind: 'error', errorKey: 'settings.models.oauth.error.generic' });
+    const submitSucceeded = authority.transition({ kind: 'response', flow: flow('success') });
+
+    expect(submitSucceeded.action).toBe('ignore');
+    expect(authority.current().errorKey).toBe('settings.models.oauth.error.generic');
+  });
+
+  it('is what the dialog’s poll actually asks, about the submit’s own flag', () => {
+    // A predicate nothing consults is worth nothing, and the value it reads is the
+    // other half of the fix: the flow effect is built once per attempt, so it must
+    // read the submit's in-flight state through a ref or it reads `false` forever.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/pollFailureSettles\(submittingRef\.current\)/);
+    expect(dialog).toMatch(/submittingRef\.current = submitting;/);
+  });
+});
+
 describe('startNeedsStatusRead — a start response that is already terminal', () => {
   it('sends an already-successful start to the status route', () => {
     // `POST …/reauth` reuses a live pending flow rather than opening a second one,
@@ -397,5 +448,26 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     expect(calls.length).toBeGreaterThan(0);
     expect(handedOver.length).toBe(calls.length);
     expect(dialog).not.toMatch(/TERMINAL/);
+  });
+
+  it('hands the rows back on every exit a closed journey can still take', () => {
+    // Interleaving 6, structurally, because the reachable proof needs a DOM this
+    // repo's vitest does not have. THREE requests of one reauth journey can resolve
+    // after the dialog is gone — a start that rejects, a status read that
+    // materialized a just-succeeded flow, a poll that failed — and the close path's
+    // own re-read was issued while all three were still in flight, so it can predate
+    // their write. Each therefore re-reads on its way out, through one named owner.
+    //
+    // Exactly one guard may still return bare: the one at the TOP of `poll`, where
+    // nothing has been requested yet on that tick and so nothing can have written.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const bare = dialog.match(/if \(cancelled\) return;/g) ?? [];
+    const handedBack = dialog.match(/if \(cancelled\) \{\s*resolvedAfterClose\(\);\s*return;\s*\}/g) ?? [];
+
+    expect(bare.length).toBe(1);
+    expect(handedBack.length).toBe(3);
+    // And the fourth exit — a start that SUCCEEDED after the close — reaches the
+    // same owner through the release it also has to make.
+    expect(dialog).toMatch(/reread: resolvedAfterClose,/);
   });
 });

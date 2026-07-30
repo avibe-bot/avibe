@@ -16,6 +16,7 @@ import zh from '../../../i18n/zh.json';
 import {
   dryRunOutcome,
   dryRunPlan,
+  dryRunRowView,
   probeWroteState,
   reauthBodyKey,
   reauthCost,
@@ -449,6 +450,62 @@ describe('probeWroteState — whether 试跑 left a mark the page has to re-read
     // a cooldown on success — so a green 试跑 must NOT refetch, or every check
     // costs the page two extra requests for nothing.
     expect(probeWroteState(probe({ channel, latency_ms: channel === 'hub' ? 412 : null }))).toBe(false);
+  });
+});
+
+describe('dryRunRowView — a report that outlives the chain it was about', () => {
+  const idle = { line: null, saving: false, running: false };
+
+  it('offers a live control while the chain has a head', () => {
+    expect(dryRunRowView(dryRunPlan(agent()), idle)).toEqual({ backend: 'claude', enabled: true, report: false });
+  });
+
+  it('keeps the answer on screen after 试跑 itself took the head away', () => {
+    // The case the row creates: probing the chain's last runnable source and
+    // failing cools that source down, so the re-read `probeWroteState` demands
+    // comes back with `current: null` — and the plan the row is drawn from turns
+    // `none` under the sentence the click just produced. Dropping it there would
+    // make the failing run the only one whose answer flashes past.
+    const headless = dryRunPlan(agent({ current: null, supply_status: 'interrupted' }));
+
+    expect(dryRunRowView(headless, { ...idle, line: 'Key A 没跑通' })).toEqual({
+      backend: null,
+      enabled: false,
+      report: true,
+    });
+  });
+
+  it('draws nothing when there is neither a head nor an answer', () => {
+    // Direct mode, or a chain that was already stopped when the drawer opened. The
+    // page states that one level up with the remedy attached; an empty row here, or
+    // a disabled button, would only repeat it.
+    expect(dryRunRowView(dryRunPlan(agent({ mode: 'direct', sources: null, current: null })), idle)).toEqual({
+      backend: null,
+      enabled: false,
+      report: false,
+    });
+  });
+
+  it('holds the probe while the order PUT is still in flight', () => {
+    // The save is optimistic: the list and the chain key the report is filed under
+    // have already moved to the order the user dropped, while the server still
+    // answers for the old one. A probe in that window reports on the superseded
+    // chain under the new one's key — and the key cannot clear it, because it IS
+    // the new key. The control stays drawn and goes disabled, like every other
+    // control in this drawer.
+    expect(dryRunRowView(dryRunPlan(agent()), { ...idle, saving: true })).toEqual({
+      backend: 'claude',
+      enabled: false,
+      report: false,
+    });
+  });
+
+  it('holds it while a probe is already running', () => {
+    expect(dryRunRowView(dryRunPlan(agent()), { ...idle, running: true })).toEqual({
+      backend: 'claude',
+      enabled: false,
+      report: false,
+    });
   });
 });
 

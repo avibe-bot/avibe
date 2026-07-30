@@ -27,6 +27,7 @@ import {
   createFlowAuthority,
   initialFlowView,
   isDone,
+  pollFailureSettles,
   releaseFlow,
   startNeedsStatusRead,
   type FlowAuthority,
@@ -100,6 +101,10 @@ export const OAuthConnectDialog: React.FC<{
   const flowAuthorityRef = React.useRef<FlowAuthority | null>(null);
   const settleRef = React.useRef<((result: OAuthResult) => void) | null>(null);
   const successTimer = React.useRef<number | null>(null);
+  // Mirrored for the flow effect, which is built once per attempt and would
+  // otherwise read this from the render that built it — i.e. always `false`.
+  const submittingRef = React.useRef(false);
+  submittingRef.current = submitting;
   const onConnectedRef = React.useRef(onConnected);
   onConnectedRef.current = onConnected;
   const onCloseRef = React.useRef(onClose);
@@ -227,17 +232,52 @@ export const OAuthConnectDialog: React.FC<{
     };
     settleRef.current = settle;
 
+    /**
+     * A request of THIS journey that resolved after the dialog was already gone.
+     *
+     * The close path re-read too — but it did so while this request was still in
+     * flight, so that read can predate the request's own write, and every request
+     * here has one: a status poll MATERIALIZES a just-succeeded flow, a start that
+     * rejects can have kept `mark_native_irreversible_start`'s marking, and
+     * `oauth_cancel` itself routes a terminal flow into materialization. This is
+     * the last thing that corrects the rows.
+     *
+     * It carries no pairs, deliberately: the dialog that would have shown them is
+     * gone, and on an effect RE-RUN (a language switch restarts the flow) the new
+     * attempt has already cleared them — handing it the old journey's would put
+     * one attempt's casualties under another's.
+     */
+    const resolvedAfterClose = () => reauthLeftRowsStale();
+
     const poll = async (flowId: string) => {
+      // Nothing has been requested yet on this tick, so there is nothing that
+      // could have written — unlike the two exits below.
       if (cancelled) return;
       const overdue = transition({ kind: 'tick', overdue: Date.now() > deadline });
       if (isDone(overdue.action)) return;
       try {
         const result = await modelsApi.getOAuthStatus(flowId);
-        if (cancelled) return;
+        if (cancelled) {
+          resolvedAfterClose();
+          return;
+        }
         if (settle(result)) return;
         pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
       } catch (err) {
-        if (cancelled) return;
+        if (cancelled) {
+          resolvedAfterClose();
+          return;
+        }
+        // The user's own submit outranks a failed READ, and `pollFailureSettles`
+        // says why: that submit is the writer of record and settles this view
+        // itself, so latching a status error here would terminalize the journey
+        // and `flowStep` would then ignore the success the submit brings back.
+        // Keep reading instead of stopping — the deadline check at the top of each
+        // poll is what bounds a submit that never returns.
+        if (!pollFailureSettles(submittingRef.current)) {
+          pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
+          return;
+        }
         // A poll that lands on a just-succeeded flow is also the call that
         // materializes the outcome, so it can fail for reasons that have nothing
         // to do with the authorization (consent_required / discovery_failed):
@@ -291,8 +331,10 @@ export const OAuthConnectDialog: React.FC<{
             // flight: that read can return the row as it was before
             // `mark_native_irreversible_start` committed, and nothing afterwards
             // would correct it. The abandoned journey is the one case where the
-            // user is no longer looking at a dialog that could tell them.
-            reread: () => reauthLeftRowsStale(),
+            // user is no longer looking at a dialog that could tell them — the
+            // same reason, and the same owner, as every other exit of a request
+            // that outlived its dialog.
+            reread: resolvedAfterClose,
           });
           return;
         }
@@ -307,11 +349,17 @@ export const OAuthConnectDialog: React.FC<{
         if (started.expires_at) deadline = new Date(started.expires_at).getTime() + 60_000;
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
       } catch (err) {
-        if (cancelled) return;
         const failure = apiFailure(err);
         // A reauth that fails to START can still have written the row: the
         // irreversible marking is rolled back only for a login that fails to
-        // spawn, not for the flow-binding failures after it.
+        // spawn, not for the flow-binding failures after it. Which is why this
+        // rejection re-reads on BOTH sides of the guard — the abandoned case
+        // through the one owner for it, since the close path's own read may have
+        // been issued before this write landed.
+        if (cancelled) {
+          resolvedAfterClose();
+          return;
+        }
         reauthLeftRowsStale(failure);
         const code = failure?.code;
         transition({
