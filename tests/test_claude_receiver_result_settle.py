@@ -727,6 +727,44 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 
+    async def test_activity_settlement_clears_ambiguous_interrupt(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-activity-interrupt:/tmp/work"
+        primary_request = SimpleNamespace(context=context, output_activities=[])
+        agent._pending_requests[composite_key] = [primary_request]
+        agent._ambiguous_interrupt_keys().add(composite_key)
+        receiver_task = asyncio.create_task(asyncio.Event().wait())
+        activity = SimpleNamespace(metadata={"summary": "activity complete"})
+        registry = SimpleNamespace(
+            has_active=Mock(return_value=False),
+            has_completed_output=Mock(return_value=True),
+            claim_completed_output_batch=Mock(return_value=[]),
+        )
+        agent._activity_registry = lambda: registry
+        agent._claim_activity_batch_for_turns = Mock(return_value=[activity])
+        agent._attach_request_activities = (
+            lambda request, activities: setattr(request, "output_activities", activities)
+        )
+        agent._emit_activity_result = AsyncMock(return_value=None)
+        agent._ack_request_activities = Mock()
+        agent._remove_result_pending_reaction = AsyncMock(return_value=None)
+
+        retry = await agent._flush_completed_activity_outputs(
+            composite_key,
+            context,
+        )
+
+        self.assertFalse(retry)
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
+        agent._emit_activity_result.assert_awaited_once()
+        self.assertFalse(receiver_task.done())
+
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
     async def test_unmatched_activity_flush_does_not_consume_terminal_barrier(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)

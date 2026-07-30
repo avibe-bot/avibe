@@ -185,6 +185,23 @@ class _SteeringAwareOpenCodeServer:
             for part in (message.get("parts") or [])
         )
 
+    def _completed_assistant_boundary(
+        self,
+        messages: list[Dict[str, Any]],
+    ) -> set[str]:
+        last_completed_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("info", {}).get("role") == "assistant"
+                and messages[index].get("info", {}).get("time", {}).get("completed")
+                and messages[index].get("info", {}).get("id")
+                not in self._state.baseline_message_ids
+            ),
+            -1,
+        )
+        return self._message_ids(messages[: last_completed_index + 1])
+
     def _idle_reconciliation_error_text(self) -> str:
         if self._state.idle_reconciliation_message:
             return self._state.idle_reconciliation_message
@@ -275,18 +292,24 @@ class _SteeringAwareOpenCodeServer:
                     else:
                         self._state.status_reconciliation_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
+                            if reconcile_initial_status and awaiting is None:
+                                self._state.awaiting_after_message_ids = (
+                                    self._completed_assistant_boundary(messages)
+                                )
                             wait_for_insert = True
                         else:
                             self._state.reconcile_initial_status = False
                             if reconcile_insert:
                                 inserted_user_missing = (
-                                    inserted_user_text is not None
-                                    and self._inserted_user_index(
-                                        messages,
-                                        awaiting,
-                                        inserted_user_text,
+                                    inserted_user_text is None
+                                    or (
+                                        self._inserted_user_index(
+                                            messages,
+                                            awaiting,
+                                            inserted_user_text,
+                                        )
+                                        < 0
                                     )
-                                    < 0
                                 )
                                 last_message_id = (
                                     messages[-1].get("info", {}).get("id")
