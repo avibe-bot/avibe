@@ -305,6 +305,10 @@ async def test_codex_maps_native_failures_without_turn_start(error: Exception, e
         receipt = await steer_active_turn(controller, "codex", _steer_request("codex-turn"))
         assert receipt.outcome is expected
         assert [method for method, _params in transport.calls] == ["turn/steer"]
+        if expected is SteerOutcome.UNKNOWN:
+            assert primary.working_path in agent._transport_last_activity
+        else:
+            assert primary.working_path not in getattr(agent, "_transport_last_activity", {})
     finally:
         await _cancel_tasks(gate_task)
 
@@ -395,6 +399,10 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
         assert receipt.outcome is expected
         assert agent._pending_requests["runtime-key"] == [primary]
         assert agent.receiver_tasks["runtime-key"] is receiver_task
+        if expected is SteerOutcome.UNKNOWN:
+            assert agent.session_handler.activity_touches == ["runtime-key"]
+        else:
+            assert agent.session_handler.activity_touches == []
     finally:
         await _cancel_tasks(gate_task, receiver_task)
 

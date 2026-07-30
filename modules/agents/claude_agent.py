@@ -614,6 +614,15 @@ class ClaudeAgent(BaseAgent):
         current_generation = self._steering_generation(composite_key)
         self._steering_generations[composite_key] = current_generation + 1
 
+    def _touch_steering_activity(self, composite_key: str) -> None:
+        touch_session_activity = getattr(
+            self.session_handler,
+            "touch_session_activity",
+            None,
+        )
+        if callable(touch_session_activity):
+            touch_session_activity(composite_key)
+
     async def steer_active_turn(
         self,
         request: SteerRequest,
@@ -661,6 +670,7 @@ class ClaudeAgent(BaseAgent):
                     await client.query(request.text, session_id=composite_key)
                 except (asyncio.TimeoutError, TimeoutError) as exc:
                     self._advance_steering_generation(composite_key)
+                    self._touch_steering_activity(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="acknowledgement_ambiguous",
@@ -684,6 +694,7 @@ class ClaudeAgent(BaseAgent):
                         )
                     ):
                         self._advance_steering_generation(composite_key)
+                        self._touch_steering_activity(composite_key)
                         return steer_result(
                             SteerOutcome.UNKNOWN,
                             reason="acknowledgement_ambiguous",
@@ -706,6 +717,7 @@ class ClaudeAgent(BaseAgent):
                             diagnostic=diagnostic,
                         )
                     self._advance_steering_generation(composite_key)
+                    self._touch_steering_activity(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="unclassified_transport_failure",
@@ -716,9 +728,7 @@ class ClaudeAgent(BaseAgent):
                 writers.discard(composite_key)
 
             self._advance_steering_generation(composite_key)
-            touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
-            if callable(touch_session_activity):
-                touch_session_activity(composite_key)
+            self._touch_steering_activity(composite_key)
             if (
                 self.claude_sessions.get(composite_key) is not client
                 or self.receiver_tasks.get(composite_key) is not receiver_task
@@ -1313,10 +1323,19 @@ class ClaudeAgent(BaseAgent):
                 except Exception as e:
                     logger.error(f"Error processing message from Claude: {e}", exc_info=True)
                     continue
-            await self._flush_completed_activity_outputs(composite_key, context)
+            eof_steering_generation = self._steering_generation(composite_key)
+            await self._flush_completed_activity_outputs(
+                composite_key,
+                context,
+                expected_steering_generation=eof_steering_generation,
+            )
             await self._flush_detached_activity_output(composite_key, context)
             await self._flush_detached_unsolicited_output(composite_key, context)
-            await self._handle_receiver_eof(composite_key, context)
+            await self._handle_receiver_eof(
+                composite_key,
+                context,
+                expected_steering_generation=eof_steering_generation,
+            )
         except asyncio.CancelledError:
             # Receiver task was explicitly cancelled (e.g. /stop, /clear,
             # or a new message replacing the session).  Clean up reactions
@@ -1433,21 +1452,41 @@ class ClaudeAgent(BaseAgent):
                     expected_lock=receiver_steering_lock,
                 )
 
-    async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
+    async def _handle_receiver_eof(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        *,
+        expected_steering_generation: int | None = None,
+    ) -> None:
         """Settle a Claude receiver that ended without a ResultMessage."""
-        pending_request = self._pop_pending_request(composite_key)
-        if pending_request is None:
-            return
+        if expected_steering_generation is None:
+            expected_steering_generation = self._steering_generation(composite_key)
+        async with self._steering_lock(composite_key):
+            if expected_steering_generation != self._steering_generation(composite_key):
+                logger.info(
+                    "Ignoring Claude receiver EOF superseded by steering for %s",
+                    composite_key,
+                )
+                return
+            pending_request = self._pop_pending_request(composite_key)
+            if pending_request is None:
+                return
 
-        pending_token = str(
-            (getattr(getattr(pending_request, "context", None), "platform_specific", None) or {}).get(
-                AGENT_RUNTIME_TURN_TOKEN
+            pending_token = str(
+                (
+                    getattr(
+                        getattr(pending_request, "context", None),
+                        "platform_specific",
+                        None,
+                    )
+                    or {}
+                ).get(AGENT_RUNTIME_TURN_TOKEN)
+                or ""
             )
-            or ""
-        )
-        if not pending_token:
-            self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
-            return
+            if not pending_token:
+                self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
+                return
         self._requeue_request_activity(pending_request)
         logger.warning("Claude receiver ended without a result for session %s", composite_key)
         self._adopt_pending_turn_token(context, pending_request)
@@ -2326,27 +2365,43 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         context: MessageContext,
+        *,
+        expected_steering_generation: int | None = None,
     ) -> bool:
         """Deliver task notifications that ended the receiver without a Result."""
 
         registry = self._activity_registry()
         if registry is None:
             return False
+        if expected_steering_generation is None:
+            expected_steering_generation = self._steering_generation(composite_key)
         while True:
-            pending = self._pending_requests.get(composite_key) or []
-            pending_request = pending[0] if pending else None
-            if pending_request is not None:
-                pending_turn_ids = self._request_activity_turn_ids(pending_request)
-                activities = self._claim_activity_batch_for_turns(
-                    registry,
-                    composite_key,
-                    pending_turn_ids,
-                )
-                if not activities:
-                    return registry.has_completed_output(self.name, composite_key)
+            async with self._steering_lock(composite_key):
+                if expected_steering_generation != self._steering_generation(
+                    composite_key
+                ):
+                    logger.info(
+                        "Ignoring Claude Activity terminal output superseded by steering for %s",
+                        composite_key,
+                    )
+                    return False
+                pending = self._pending_requests.get(composite_key) or []
+                pending_request = pending[0] if pending else None
+                if pending_request is not None:
+                    pending_turn_ids = self._request_activity_turn_ids(pending_request)
+                    activities = self._claim_activity_batch_for_turns(
+                        registry,
+                        composite_key,
+                        pending_turn_ids,
+                    )
+                    if not activities:
+                        return registry.has_completed_output(self.name, composite_key)
 
-                self._attach_request_activities(pending_request, activities)
-                matched_request = self._pop_pending_request(composite_key)
+                    self._attach_request_activities(pending_request, activities)
+                    matched_request = self._pop_pending_request(composite_key)
+                else:
+                    matched_request = None
+            if matched_request is not None:
                 self._adopt_pending_turn_token(context, matched_request)
                 retained = self._request_activities(matched_request)
                 activity = retained[-1]
@@ -2405,16 +2460,24 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         context: MessageContext,
+        *,
+        expected_steering_generation: int | None = None,
     ) -> None:
         existing = self._activity_flush_tasks.get(composite_key)
         if existing is not None and not existing.done():
             return
+        if expected_steering_generation is None:
+            expected_steering_generation = self._steering_generation(composite_key)
 
         async def _flush_after_grace() -> None:
             retry = False
             try:
                 await asyncio.sleep(self.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS)
-                retry = await self._flush_completed_activity_outputs(composite_key, context)
+                retry = await self._flush_completed_activity_outputs(
+                    composite_key,
+                    context,
+                    expected_steering_generation=expected_steering_generation,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2428,7 +2491,11 @@ class ClaudeAgent(BaseAgent):
                 if self._activity_flush_tasks.get(composite_key) is task:
                     self._activity_flush_tasks.pop(composite_key, None)
             if retry:
-                self._schedule_completed_activity_flush(composite_key, context)
+                self._schedule_completed_activity_flush(
+                    composite_key,
+                    context,
+                    expected_steering_generation=expected_steering_generation,
+                )
 
         task = asyncio.create_task(_flush_after_grace())
         self._activity_flush_tasks[composite_key] = task

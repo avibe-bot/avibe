@@ -395,6 +395,7 @@ class CodexAgent(BaseAgent):
                     backend=self.name,
                     diagnostic=diagnostic,
                 )
+            self._touch_transport_activity(cwd)
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="acknowledgement_ambiguous",
@@ -402,6 +403,7 @@ class CodexAgent(BaseAgent):
                 diagnostic=diagnostic,
             )
         except TimeoutError as exc:
+            self._touch_transport_activity(cwd)
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="acknowledgement_ambiguous",

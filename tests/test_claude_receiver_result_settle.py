@@ -18,7 +18,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -250,6 +250,145 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_awaited_once()
         self.assertEqual(agent.emit_result_message.await_args.args[1], "reconciled result")
         self.assertFalse(agent._has_pending_requests(composite_key))
+
+    async def test_successful_steer_supersedes_a_concurrent_activity_flush(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-activity-steer:/tmp/work"
+        primary_request = SimpleNamespace(context=context, output_activities=[])
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+
+        class _SteeringClient:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+        client = _SteeringClient()
+        receiver_task = asyncio.create_task(asyncio.Event().wait())
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        registry = SimpleNamespace(has_completed_output=Mock(return_value=True))
+        agent._activity_registry = lambda: registry
+        agent._claim_activity_batch_for_turns = Mock()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-activity-steer",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="continue after activity",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        agent._schedule_completed_activity_flush(composite_key, context)
+        flush_task = agent._activity_flush_tasks[composite_key]
+        await asyncio.sleep(0)
+        release_query.set()
+
+        receipt = await steer_task
+        await flush_task
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent._claim_activity_batch_for_turns.assert_not_called()
+        agent.emit_result_message.assert_not_awaited()
+
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_successful_steer_supersedes_concurrent_receiver_eof(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-eof-steer:/tmp/work"
+        primary_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={"agent_runtime_turn_token": "runtime-turn"}
+            )
+        )
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        finish_receiver = asyncio.Event()
+        eof_started = asyncio.Event()
+
+        class _SteeringClient:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await finish_receiver.wait()
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        original_eof = agent._handle_receiver_eof
+
+        async def _observed_eof(*args, **kwargs):
+            eof_started.set()
+            return await original_eof(*args, **kwargs)
+
+        agent._handle_receiver_eof = _observed_eof
+        client = _SteeringClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-eof-steer",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-eof-steer",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="continue before eof",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        finish_receiver.set()
+        await eof_started.wait()
+        release_query.set()
+
+        receipt = await steer_task
+        await receiver_task
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_not_awaited()
 
     async def test_successful_steer_supersedes_concurrent_assistant_terminal_failure(self):
         mark_idle_calls: list[str] = []
