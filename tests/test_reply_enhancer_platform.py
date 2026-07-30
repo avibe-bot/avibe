@@ -262,6 +262,49 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
+    def test_silent_parser_preserves_container_fences_byte_for_byte(self):
+        text = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "  ```\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "> ~~~\n\n"
+            "> - ````markdown\n"
+            ">   ```nested```\n"
+            ">   <silent>nested literal</silent>\n"
+            ">   ````\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_stops_unclosed_fence_at_container_boundary(self):
+        text = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "List ended.\n"
+            "<silent>remove after list</silent>\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "Quote ended.\n"
+            "<silent>remove after quote</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "List ended.\n"
+            "\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "Quote ended.\n"
+            "\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
     def test_silent_parser_removes_real_blocks_while_preserving_code_examples(self):
         text = (
             "Start\n"
@@ -294,6 +337,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(protected), protected)
         self.assertEqual(strip_silent_blocks(escaped), r"Before \`\` after")
+
+    def test_silent_parser_handles_many_unmatched_backtick_runs(self):
+        unmatched_runs = " ".join("`" * length for length in range(2, 502))
+        text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
 
     def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
         text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
