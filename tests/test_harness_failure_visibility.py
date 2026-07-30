@@ -5302,8 +5302,24 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
 
     import pytest as _pytest
 
+    import core.failure_notices as failure_notices
+
     with _pytest.MonkeyPatch.context() as patch:
         patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
+        # A DETERMINISTIC pass-2 window: the real first rung is 2 seconds, and on a
+        # preempted worker that could elapse between the passes — pass 2 would then
+        # legitimately reselect the expired first batch and the boundary assertions
+        # would fail against correct production behavior. Widening ONLY the first
+        # rung removes the race without touching production code, keeps the
+        # ladder's length (MAX_ATTEMPTS is unchanged), and makes the rung-1 check
+        # sharper: a [first_interval - 30, first_interval + 5] window cannot be
+        # satisfied by rung 2, where the real 2s rung with clock slop sat within
+        # a few seconds of it. The dead-letter walk below rewinds
+        # ``next_attempt_at`` between passes, so the remaining rungs never gate it.
+        first_interval = 3600.0
+        patch.setattr(
+            failure_notices, "BACKOFF_SECONDS", (first_interval,) + BACKOFF_SECONDS[1:]
+        )
         service = ScheduledTaskService.__new__(ScheduledTaskService)
         service.store = store
         service.request_store = requests
@@ -5314,9 +5330,8 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
         service._t = lambda key, **kwargs: key
 
         # PASS 1 claims exactly the first batch. Snapshot the boundary between the
-        # passes with cheap reads only — the first backoff is BACKOFF_SECONDS[0]
-        # seconds and pass 2 must run inside it to prove the batch does not get
-        # reselected.
+        # passes — pass 2 runs inside the (widened) first backoff to prove the
+        # batch does not get reselected.
         first_batch = list(range(10))
         remainder = list(range(10, len(negatives)))
         asyncio.run(service._drain_failure_notices())
@@ -5361,8 +5376,8 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
             assert notice["state"] == "pending"
             armed = datetime.fromisoformat(notice["next_attempt_at"])
             delta = (armed - pass_one_at).total_seconds()
-            assert -5 <= delta <= BACKOFF_SECONDS[0] + 5, (
-                f"the first backoff must be the first declared interval, got {delta:.1f}s"
+            assert first_interval - 30 <= delta <= first_interval + 5, (
+                f"the first backoff must be the ladder's FIRST rung, got {delta:.1f}s"
             )
         # PASS 2's claims: the remainder crossed the boundary on the very next
         # bounded pass — attempt exactly 1, first interval armed — and the valid
@@ -5376,8 +5391,8 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
             assert notice["state"] == "pending"
             armed = datetime.fromisoformat(notice["next_attempt_at"])
             delta = (armed - now).total_seconds()
-            assert -5 <= delta <= BACKOFF_SECONDS[0] + 5, (
-                f"the remainder's first backoff must be the first declared interval, got {delta:.1f}s"
+            assert first_interval - 30 <= delta <= first_interval + 5, (
+                f"the remainder's first backoff must be the ladder's FIRST rung, got {delta:.1f}s"
             )
         assert sqlite.owed_failure_notice("run-neg-behind")["state"] == "sent", (
             "thirteen negative rows ahead of it must not starve the valid due notice "
