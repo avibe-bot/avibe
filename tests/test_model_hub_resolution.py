@@ -235,6 +235,17 @@ def _assert_no_references_to(service, model_id: str) -> None:
         (_outcome(RawOutcomeKind.SUCCESS, status=200), False, "return", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=422, code="tool_schema_error"), False, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"), False, "surface", None),
+        (
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=403,
+                message="The requested model is not accessible",
+            ),
+            False,
+            "surface",
+            None,
+        ),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), False, "refresh", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "fallback", "credential_expired"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), False, "refresh", None),
@@ -444,6 +455,7 @@ def test_refreshed_fallback_stream_emits_switch_event(tmp_path):
 def test_parameter_error_and_started_stream_never_fallback(tmp_path):
     for outcome in (
         _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"),
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"),
         _outcome(RawOutcomeKind.HTTP_ERROR, status=429, stream_started=True),
     ):
         adapter = FakeAdapter([outcome])
@@ -451,6 +463,7 @@ def test_parameter_error_and_started_stream_never_fallback(tmp_path):
         with pytest.raises(ModelHubError):
             asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}, stream=True))
         assert len(adapter.invocations) == 1
+        assert service.store.load().sources[0].state.status == "standby"
 
 
 def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):

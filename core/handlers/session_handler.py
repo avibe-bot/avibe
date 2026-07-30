@@ -805,13 +805,23 @@ class SessionHandler(BaseHandler):
             if configured_agent_model and configured_agent_model.lower() not in ("inherit", ""):
                 launch_model = configured_agent_model
         launch_model = launch_model or self.config.claude.default_model
+        cached_base = (
+            f"{base_session_id}:{effective_agent}"
+            if effective_agent
+            else None
+        )
+        cached_key = (
+            f"{cached_base}:{working_path}"
+            if cached_base is not None
+            else None
+        )
         from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
         model_hub_launch = await resolve_model_hub_launch(
             self.controller,
             "claude",
             launch_model or "",
-            process_scope=composite_key,
+            process_scope=cached_key or composite_key,
         )
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model
@@ -836,8 +846,7 @@ class SessionHandler(BaseHandler):
                 return client
 
         if effective_agent:
-            cached_base = f"{base_session_id}:{effective_agent}"
-            cached_key = f"{cached_base}:{working_path}"
+            assert cached_base is not None and cached_key is not None
             cached_session_id = self.sessions.get_agent_session_id(
                 session_key,
                 cached_base,

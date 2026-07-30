@@ -28,7 +28,7 @@ Backend process scopes are:
 
 | Backend | Credential scope | Runtime fact |
 | --- | --- | --- |
-| Claude | Claude composite session identity | One SDK client/process lane per session identity |
+| Claude | Claude composite client identity | One SDK client/process lane per main or agent-specific session identity |
 | Codex | `(backend, normalized cwd)` | One app-server transport is reused by every session in that cwd |
 | OpenCode | OpenCode server instance | `OpenCodeServerManager` is a singleton shared across all working directories and tracks multiple active sessions |
 
@@ -52,7 +52,8 @@ gateway wire shape, or runtime fingerprint semantics.
 The launch callers thread only the process identity already available at the
 owned call sites:
 
-- Claude passes its composite session identity;
+- Claude passes the exact composite cache identity of the main or agent-specific
+  SDK client;
 - Codex passes its normalized cwd;
 - OpenCode passes the singleton server scope.
 
@@ -184,7 +185,8 @@ The acceptance suite contains separate fixtures for:
   health), so a failed turn cannot be recorded as served;
 - Direct, ambiguous-known, and unknown provenance route absences;
 - source chain order and model-scoped supply state;
-- probe usable-completion and latency partition;
+- Hub probe usable-completion, native CLI readiness, and their latency
+  partitions;
 - single-grain event emission and source referential integrity.
 
 Healthy ambiguity emits no ResolutionEvent.

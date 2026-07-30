@@ -768,13 +768,15 @@ class ModelHubRuntimeRouter:
         mode: Optional[Literal["direct", "hub"]] = None,
     ) -> None:
         if self.turn_gateway is not None:
-            if mode is not None:
-                self.turn_gateway.correlation.note_turn_mode(turn_id, mode)
-            self.turn_gateway.correlation.settle(
-                turn_id,
-                settled_by=settled_by,
-                ts=ts,
-            )
+            try:
+                if mode is not None:
+                    self.turn_gateway.correlation.note_turn_mode(turn_id, mode)
+            finally:
+                self.turn_gateway.correlation.settle(
+                    turn_id,
+                    settled_by=settled_by,
+                    ts=ts,
+                )
 
     async def resolve(
         self,

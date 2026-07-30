@@ -43,7 +43,11 @@ from core.run_settlement import (
 )
 from core.services.dispatch import TurnDispatchOutcome
 from core.session_turns import SessionTurnManager
-from modules.agents.model_hub import ModelHubLaunch, bind_launch
+from modules.agents.model_hub import (
+    ModelHubLaunch,
+    ModelHubRuntimeRouter,
+    bind_launch,
+)
 
 
 CONTRACTS = Path(__file__).parents[1] / "docs" / "plans" / "model-hub-contracts"
@@ -586,6 +590,34 @@ def test_fsm_settlement_persists_the_turn_time_mode() -> None:
     assert runtime.settle_turn.call_args.kwargs["mode"] == "direct"
 
 
+def test_settlement_retires_correlation_when_mode_persistence_fails(
+    tmp_path: Path,
+) -> None:
+    correlation = Mock()
+    correlation.note_turn_mode.side_effect = OSError("mode store unavailable")
+    router = ModelHubRuntimeRouter(
+        service=_service(
+            tmp_path,
+            sources=[_source("src_primary01", "Primary")],
+        ),
+        turn_gateway=SimpleNamespace(correlation=correlation),
+    )
+
+    with pytest.raises(OSError, match="mode store unavailable"):
+        router.settle_turn(
+            "turn_mode_failure",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+            mode="hub",
+        )
+
+    correlation.settle.assert_called_once_with(
+        "turn_mode_failure",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
     tmp_path: Path,
 ) -> None:
@@ -730,6 +762,23 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert network["latency_ms"] is None
     assert network["error"] == "models.source.cooldown.network"
     _assert_valid("probe-result.schema.json", network)
+
+    timeout_service = _service(
+        tmp_path / "timeout",
+        sources=[_source("src_primary01", "Primary")],
+        outcomes=[_outcome(RawOutcomeKind.TIMEOUT)],
+    )
+    timeout = asyncio.run(
+        timeout_service.probe_agent("claude", "shared-model")
+    )
+    assert timeout["reachable"] is False
+    assert timeout["latency_ms"] is None
+    assert timeout["error"] == "models.source.cooldown.timeout"
+    assert timeout_service.store.load().sources[0].state.detail_key == (
+        "models.source.cooldown.timeout"
+    )
+    assert timeout_service.events.list(limit=10)[0]["reason"] == "network"
+    _assert_valid("probe-result.schema.json", timeout)
 
     rate_service = _service(
         tmp_path / "rate",

@@ -27,6 +27,12 @@ _SURFACE_PATTERNS = re.compile(
     r"tool[_ -]?(?:compat|choice|schema|use)|malformed[_ -]?(?:request|schema))",
     re.IGNORECASE,
 )
+_MODEL_SURFACE_PATTERNS = re.compile(
+    r"(?:model[_ -]?(?:(?:is[_ -]?)?not[_ -]?(?:found|available|accessible)|"
+    r"does[_ -]?not[_ -]?exist)|"
+    r"unknown[_ -]?model|no[_ -]?such[_ -]?model)",
+    re.IGNORECASE,
+)
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",
@@ -85,7 +91,9 @@ def classify_outcome(
             "fallback",
             reason="balance_exhausted",
         )
-    if _SURFACE_PATTERNS.search(error_text):
+    if _SURFACE_PATTERNS.search(error_text) or _MODEL_SURFACE_PATTERNS.search(
+        error_text
+    ):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):

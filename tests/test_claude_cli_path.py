@@ -732,6 +732,13 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
     monkeypatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {"clients": []}
+    from modules.agents import model_hub as model_hub_module
+
+    original_resolve = model_hub_module.resolve_model_hub_launch
+
+    async def capture_model_hub_scope(*args, **kwargs):
+        captured["model_hub_process_scope"] = kwargs.get("process_scope")
+        return await original_resolve(*args, **kwargs)
 
     class _SubagentSessions(_Sessions):
         @staticmethod
@@ -770,6 +777,11 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        model_hub_module,
+        "resolve_model_hub_launch",
+        capture_model_hub_scope,
+    )
 
     controller = _Controller(tmp_path)
     controller.settings_manager = _RoutingSettingsManager()
@@ -784,6 +796,7 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
     client = _run_session(handler, context)
 
     composite_key = f"slack_C123:reviewer:{tmp_path}"
+    assert captured["model_hub_process_scope"] == composite_key
     assert client.options.resume is None
     assert not hasattr(client, "_vibe_native_session_id")
     assert controller.claude_sessions[composite_key] is client

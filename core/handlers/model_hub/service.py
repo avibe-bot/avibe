@@ -2353,6 +2353,7 @@ class ModelHubService:
                     decision,
                     agent=cast(EventAgent, backend),
                     model_id=resolved_model,
+                    detail_key=error_key,
                 )
             elif event_reason is not None:
                 await self._set_source_blocker(
@@ -2792,6 +2793,7 @@ class ModelHubService:
         *,
         agent: EventAgent,
         model_id: str,
+        detail_key: Optional[str] = None,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -2803,7 +2805,7 @@ class ModelHubService:
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
                 retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
-                detail_key=f"models.source.cooldown.{decision.reason}",
+                detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
             self.store.save(config)
             if not already_cooling:

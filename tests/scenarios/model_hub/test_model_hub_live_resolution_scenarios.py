@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -437,6 +438,42 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
             assert body == b"data: partial\n\n"
             assert [call[0] for call in adapter.invocations] == ["src_primary"]
             assert store.load().sources[0].state.status == "standby"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake(
+            [
+                AdapterResult(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="rate_limited",
+                    body=b'{"partial":',
+                    stream_started=True,
+                ),
+            ]
+        )
+        store = MemoryStore(_config(_source("src_primary")))
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            status, body = await _post_turn(
+                await router.resolve("claude", "model-live"),
+            )
+            assert status == 429
+            assert json.loads(body)["error"]["code"] == "stream_interrupted"
         finally:
             await gateway.close()
 

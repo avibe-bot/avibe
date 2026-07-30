@@ -235,11 +235,17 @@ class ModelHubTurnGateway:
             async for chunk in handle.stream:
                 payload.extend(chunk)
             outcome = await handle.outcome()
+            decision = classify_outcome(outcome)
             self.correlation.finish_attempt(
                 turn_id,
                 outcome=outcome,
-                decision=classify_outcome(outcome),
+                decision=decision,
             )
+            if decision.action != "return":
+                return self._outcome_response(
+                    outcome,
+                    error_code=decision.error_code,
+                )
             return web.Response(
                 status=200,
                 body=bytes(payload),
@@ -271,13 +277,17 @@ class ModelHubTurnGateway:
         return response
 
     @staticmethod
-    def _outcome_response(outcome: RawCallOutcome) -> web.Response:
+    def _outcome_response(
+        outcome: RawCallOutcome,
+        *,
+        error_code: Optional[str] = None,
+    ) -> web.Response:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
         status = outcome.http_status if outcome.http_status and 400 <= outcome.http_status <= 599 else 502
         return ModelHubTurnGateway._error_response(
             status=status,
-            code=outcome.error_code or "api_error",
+            code=error_code or outcome.error_code or "api_error",
         )
 
     @staticmethod
