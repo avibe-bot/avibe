@@ -1,16 +1,46 @@
-// 最近切换 — the human-readable resolution-event feed (frame 01r). Shows the
-// three most recent by default; 查看全部 expands to the full fetched set. Text
-// uses the locale-matched human_zh / human_en the adapter already produced.
+// 最近切换 — the human-readable resolution-event feed (design.pen 「产品改造 V6
+// 01」). Shows the three most recent by default; 查看全部 opens the list and walks
+// the endpoint's `before` cursor page by page, so 全部 means the whole feed and not
+// just the rows the page happened to fetch first.
+//
+// AC-18: an event's sentence is rendered VERBATIM from the recorded human_zh /
+// human_en. It is a historical record — the source it names may have been renamed
+// or deleted since, and re-deriving the wording from today's inventory would
+// silently rewrite history (or, worse, blank the row out). What the UI adds is a
+// render-time observation, not a rewrite: when a canonical `src_*` endpoint no
+// longer resolves against the live sources, the row gets a 已删除 marker so the
+// reader knows why looking for that source in the list above will fail. No action
+// is offered — there is nothing left to act on.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { Badge } from '@/components/ui/badge';
 import { Dot } from './chips';
 import type { Accent } from './vendorMeta';
-import type { ResolutionEvent } from './types';
+import type { ResolutionEvent, Source } from './types';
 
 const COLLAPSED = 3;
 
-function eventAccent(e: ResolutionEvent): Accent {
+/**
+ * 需处理 — read off the server's own grading rather than re-derived here.
+ *
+ * `severity` is in the contract precisely as 「Feed and Models-page presentation
+ * metadata」, pinned to `action_required` on the needs_action and supply_interrupted
+ * branches. Ignoring it left those two rows falling through to the same cyan as an
+ * ordinary switch: the one kind of event nobody may scroll past looked like traffic.
+ *
+ * The kind fallback covers only a journal row written before the field existed —
+ * where re-grading an outage as cyan would hide it — and never overrides a severity
+ * the server did send.
+ */
+const isActionRequired = (e: ResolutionEvent): boolean =>
+  e.severity === 'action_required' ||
+  (e.severity == null && (e.kind === 'needs_action' || e.kind === 'supply_interrupted'));
+
+export function eventAccent(e: ResolutionEvent): Accent {
+  // Gold is the page's one attention colour (`needsAttention`'s sub-line, the chain's
+  // dot). An action-required event earns it rather than a treatment of its own.
+  if (isActionRequired(e)) return 'gold';
   if (e.billing_note === 'entered_metered') return 'gold';
   if (e.kind === 'recover' || e.reason === 'recovery') return 'mint';
   if (e.kind === 'cooldown' || e.kind === 'skip') return 'muted';
@@ -35,14 +65,32 @@ function useEventTime() {
   };
 }
 
-export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ events }) => {
+export const RecentSwitchesCard: React.FC<{
+  events: ResolutionEvent[];
+  /** Live inventory — read only to tell a still-present source from a deleted one. */
+  sources: Source[];
+  /** The feed has older pages than the ones held here (`/events` pages by cursor). */
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  /** Fetch the next older page. Required for 查看全部 to mean 全部. */
+  onLoadMore?: () => void;
+}> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
   const zh = i18n.language.startsWith('zh');
+  const liveIds = React.useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
+  const namesDeletedSource = (e: ResolutionEvent) =>
+    [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
   const shown = expanded ? events : events.slice(0, COLLAPSED);
-  const canExpand = events.length > COLLAPSED;
+  // 查看全部 opens the fetched rows AND asks for the next page, so the label is
+  // true the moment it is pressed rather than only for feeds under one page.
+  const canExpand = events.length > COLLAPSED || hasMore;
+  const expand = () => {
+    setExpanded(true);
+    if (hasMore && !loadingMore) onLoadMore?.();
+  };
 
   return (
     <section className="rounded-xl border border-border bg-background">
@@ -51,7 +99,7 @@ export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ ev
         {canExpand && (
           <button
             type="button"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => (expanded ? setExpanded(false) : expand())}
             className="inline-flex min-h-10 items-center text-[13px] font-medium text-mint transition-colors hover:text-mint/80 sm:min-h-0"
           >
             {expanded ? t('settings.models.recent.collapse') : t('settings.models.recent.viewAll')}
@@ -78,9 +126,27 @@ export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ ev
               </span>
               <span className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-foreground sm:order-3 sm:text-[13px]">
                 {zh ? event.human_zh : event.human_en}
+                {namesDeletedSource(event) && (
+                  <Badge
+                    variant="secondary"
+                    className="ml-1.5 translate-y-[-1px] bg-foreground/[0.03] px-2 py-0 text-[10px] font-medium"
+                  >
+                    {t('settings.models.recent.deletedSource')}
+                  </Badge>
+                )}
               </span>
             </div>
           ))}
+          {expanded && hasMore && (
+            <button
+              type="button"
+              onClick={() => onLoadMore?.()}
+              disabled={loadingMore}
+              className="min-h-11 border-t border-border px-4 py-3 text-[12.5px] font-medium text-mint transition-colors hover:text-mint/80 disabled:text-muted sm:px-5 sm:text-[13px]"
+            >
+              {loadingMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.loadMore')}
+            </button>
+          )}
         </div>
       )}
     </section>

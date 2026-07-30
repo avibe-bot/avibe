@@ -38,6 +38,7 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         base_url=BASE_URL,
     ).get_json()["flow"]
     assert started["state"] == "awaiting_action"
+    assert harness.agent_auth.start_calls == [("claude", False)]
     assert started["presentation"] == {
         "auth_url": "https://claude.ai/oauth/authorize?test=true",
         "device_code": None,

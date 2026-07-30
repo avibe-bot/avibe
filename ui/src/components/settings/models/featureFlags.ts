@@ -22,8 +22,9 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
 export const MODELS_API_MODE: 'mock' | 'live' = 'live';
 
 /**
- * Wires the 模型菜单 buttons on the Agent card to L5's mapping / menu drawers.
- * ON now that L5 is merged.
+ * Wires 模型菜单与映射 — the 来源顺序 drawer's hand-off into L5's mapping / menu
+ * drawers, which is the only way in since V6 gave the Agent row's action slot to
+ * 来源顺序. ON now that L5 is merged.
  */
 export const MODEL_MENUS_ENABLED = true;
 

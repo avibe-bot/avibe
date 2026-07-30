@@ -19,8 +19,10 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { modelsApi } from './modelsApi';
+import { AdoptionNote } from './AdoptionNote';
+import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
-import type { Source } from './types';
+import type { AdoptedBy, Source } from './types';
 
 type Phase = 'edit' | 'submitting' | 'done' | 'error';
 
@@ -58,6 +60,7 @@ export const AddApiKeyDialog: React.FC<{
   const [baseUrl, setBaseUrl] = React.useState('');
   const [phase, setPhase] = React.useState<Phase>('edit');
   const [discovered, setDiscovered] = React.useState(0);
+  const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[]>([]);
   const [error, setError] = React.useState<string | null>(null);
   const closeTimer = React.useRef<number | null>(null);
   // Bumped on every open/close so a test-and-add resolving after the dialog was
@@ -73,6 +76,7 @@ export const AddApiKeyDialog: React.FC<{
       setBaseUrl(DEFAULT_VENDOR.base_url ?? '');
       setPhase('edit');
       setDiscovered(0);
+      setAdoptedBy([]);
       setError(null);
     }
     return () => {
@@ -93,7 +97,7 @@ export const AddApiKeyDialog: React.FC<{
     setPhase('submitting');
     setError(null);
     try {
-      const source = await modelsApi.createApiKeySource({
+      const { source, adopted_by } = await modelsApi.createApiKeySource({
         kind: 'api_key',
         vendor,
         base_url: baseUrl.trim() || null,
@@ -101,9 +105,20 @@ export const AddApiKeyDialog: React.FC<{
       });
       if (submitSeq.current !== seq) return; // dialog closed/reopened mid-request
       setDiscovered(source.models.length);
+      setAdoptedBy(adopted_by);
       setPhase('done');
       onAdded(source);
-      closeTimer.current = window.setTimeout(onClose, 1500);
+      // Auto-dismiss only when the note is pure confirmation. 「还没有 Agent
+      // 启用它」 is an instruction, and 1.5s is not long enough to read one — a
+      // dialog that closes itself over that sentence is how the user ends up
+      // believing a working key is in service.
+      //
+      // `covered` and nothing weaker: a non-empty adopter list does not rule out a
+      // `custom` backend that skipped the key, and that sentence is an instruction
+      // too. Today's payload cannot prove `covered`, so this nicety is dormant until
+      // the server sends `skipped_by` — a confirmation that can lie under a mixed
+      // outcome is worth less than the second the user spends closing the dialog.
+      if (adoptionVerdict(adopted_by).kind === 'covered') closeTimer.current = window.setTimeout(onClose, 1500);
     } catch (e: any) {
       if (submitSeq.current !== seq) return;
       const code = e?.code || e?.message || 'discovery_failed';
@@ -169,9 +184,12 @@ export const AddApiKeyDialog: React.FC<{
         </div>
 
         {phase === 'done' && (
-          <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
-            <CheckCircle2 className="size-4 shrink-0" />
-            <span>{t('settings.models.addKey.discovered', { count: discovered })}</span>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <CheckCircle2 className="size-4 shrink-0" />
+              <span>{t('settings.models.addKey.discovered', { count: discovered })}</span>
+            </div>
+            <AdoptionNote adoptedBy={adoptedBy} />
           </div>
         )}
         {phase === 'error' && (
@@ -183,8 +201,11 @@ export const AddApiKeyDialog: React.FC<{
 
         <DialogFooter>
           <div className="flex items-center gap-2">
+            {/* 关闭, not 取消, once the source exists: after a successful add this
+                is the way out of a dialog that no longer auto-dismisses, and
+                「取消」 on a committed credential reads as an undo. */}
             <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={phase === 'submitting'}>
-              {t('common.cancel')}
+              {t(phase === 'done' ? 'common.close' : 'common.cancel')}
             </Button>
             <Button
               variant="brand"

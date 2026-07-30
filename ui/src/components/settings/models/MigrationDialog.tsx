@@ -21,6 +21,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
+import { serverText } from './serverCopy';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
 import type { AgentBackend, MigrationItem, MigrationAction } from './types';
 
@@ -54,6 +55,7 @@ const ActionBadge: React.FC<{ action: MigrationAction }> = ({ action }) => {
 const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item, onToggle }) => {
   const { t } = useTranslation();
   const { Icon, accent } = migrationVisual(item);
+  const note = serverText(t, item.notes_key);
   // reauth needs the interactive browser flow, so it can't be bulk-applied here.
   const selectable = item.proposed_action !== 'reauth';
   return (
@@ -75,7 +77,9 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-semibold text-foreground">{item.masked_detail}</span>
-          {item.notes_key && <span className="truncate text-[12px] text-muted">{t(item.notes_key)}</span>}
+          {/* `notes_key` is runtime-declared and optional, so an entry this
+              bundle doesn't carry drops the line instead of printing the key. */}
+          {note && <span className="truncate text-[12px] text-muted">{note}</span>}
         </div>
       </div>
       <div className="shrink-0 pl-[46px] sm:pl-0">

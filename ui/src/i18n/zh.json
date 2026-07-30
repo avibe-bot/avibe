@@ -612,16 +612,22 @@
     "openSetup": "打开设置向导",
     "models": {
       "title": "模型",
-      "subtitle": "连一次来源，所有 Agent 统一供给；顺序即优先级，用完自动切换、恢复自动切回。",
+      "subtitle": "来源连一次，全局共用；每个 Agent 自己决定用哪些、先用谁，失败自动切换、恢复自动切回。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
       "statusPill": {
-        "ok": "一切正常 · {{count}} 个 Agent 已接入",
-        "degraded": "部分来源需留意 · {{count}} 个 Agent 已接入"
+        "ok": "一切正常 · {{count}} 个 Agent 已接入中枢",
+        "none": "还没有 Agent 接入中枢",
+        "engineDown": "供给引擎未就绪 · 中枢暂时无法供给",
+        "interrupted": "{{count}} 个 Agent 供给中断 · 需要处理",
+        "waiting": "{{count}} 个 Agent 正在等待来源恢复",
+        "needsAction": "{{source}} {{detail}}",
+        "cooldown": "{{source}} {{detail}} · 已自动切换，恢复后切回",
+        "andMore": "另有 {{count}} 个来源"
       },
       "sources": {
         "title": "来源",
-        "subtitle": "全局一份；拖动调整顺序 —— 顺序就是花钱顺序",
+        "subtitle": "全局一份的账号库；谁先谁后，在下方各 Agent 里调",
         "empty": "还没有来源，点“添加来源”连接订阅或 API Key。"
       },
       "source": {
@@ -631,10 +637,37 @@
         "customEndpoint": "自定义地址",
         "retryIn": "{{minutes}} 分后重试",
         "reorder": "拖动排序",
-        "oauthSignedOut": "CLI 订阅未登录",
-        "cooldown": {
-          "timeout": "连续超时"
-        }
+        "oauthSignedOut": "CLI 订阅未登录"
+      },
+      "current": "当前",
+      "order": {
+        "title": "来源顺序 · {{backend}}",
+        "subtitle": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。这里的顺序只影响 {{backend}}。",
+        "subtitleShort": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。只影响 {{backend}}。",
+        "groupEnabled": "启用 · {{count}} 个来源",
+        "groupDisabled": "未启用 · {{count}}",
+        "groupIneligible": "不适用 · {{count}}",
+        "following": "跟随推荐中",
+        "followingLong": "跟随推荐中 · 新来源自动加入",
+        "restore": "恢复推荐顺序",
+        "enable": "启用",
+        "enableAria": "启用 {{name}}",
+        "disable": "取消启用",
+        "openMenu": "模型菜单与映射",
+        "supplies": "供 {{family}} 全系",
+        "viaMapping": "经模型菜单改写后可供 {{backend}} 使用",
+        "viaMappingShort": "经映射后可供 {{backend}}",
+        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会因为供给中断而失败——中枢不会替它回退到直连。从下面的「未启用」里加一个进来。",
+        "ineligibleUnknown": "不能供 {{backend}} 使用",
+        "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用",
+        "family": {
+          "anthropic": "Claude",
+          "openai": "GPT",
+          "zhipuai": "GLM",
+          "kimi": "Kimi",
+          "xai": "Grok"
+        },
+        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。"
       },
       "billing": {
         "monthly": "包月",
@@ -645,6 +678,7 @@
         "active": "使用中",
         "standby": "备用",
         "cooldown": "暂不可用",
+        "needs_action": "需要处理",
         "error": "不可用"
       },
       "usage": {
@@ -663,24 +697,37 @@
       "experimental": "实验",
       "agents": {
         "title": "Agent",
-        "subtitle": "每个 Agent 用什么模型、由谁供给",
+        "subtitle": "各自选用来源、各自排序；失败自动切到下一个",
         "backendSettings": "后端设置",
-        "modelMenu": "模型菜单",
         "connectHub": "接入中枢",
-        "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
         "modelCount": "{{count}} 个模型",
-        "multiSource": "多来源",
-        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义",
-        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）",
-        "directNote": "仍在用 CLI 原生配置供给，未接入中枢"
+        "hubNoSupply": "已接入中枢 · 没有启用任何来源，下一个回合会失败",
+        "directNote": "仍在用 CLI 原生配置供给，未接入中枢",
+        "sourceOrder": "来源顺序",
+        "menuKind": {
+          "fixed": "菜单固定",
+          "open": "菜单开放"
+        },
+        "policy": {
+          "follow": "跟随推荐",
+          "custom": "自定义"
+        },
+        "attribution": {
+          "interrupted": "{{names}} 供给中断",
+          "waiting": "{{names}} 正在等待来源恢复",
+          "unassigned": "{{models}} 暂无来源可供给"
+        }
       },
       "recent": {
         "title": "最近切换",
         "viewAll": "查看全部",
         "collapse": "收起",
+        "loadMore": "加载更早的记录",
+        "loadingMore": "加载中…",
         "today": "今天",
         "yesterday": "昨天",
-        "empty": "暂无切换记录"
+        "empty": "暂无切换记录",
+        "deletedSource": "已删除"
       },
       "advanced": {
         "title": "高级",
@@ -756,8 +803,7 @@
           "awaitingPaste": "等待授权 · {{time}} 后超时",
           "awaitingDevice": "等待完成 · 自动检测，无需回填",
           "verifying": "验证中…",
-          "success": "连接成功",
-          "finalizing": "正在创建来源…"
+          "success": "连接成功"
         },
         "error": {
           "start": "无法开始授权，请重试",
@@ -787,8 +833,20 @@
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
         "connectFailed": "接入失败，请重试",
-        "refreshFailed": "刷新失败，请重试",
-        "connectedNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连"
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "supply": {
+        "degraded": "已接入中枢 · 有来源不可用，已自动切到下一个",
+        "waiting": "已接入中枢 · 来源都在冷却中，恢复前的回合会失败",
+        "interrupted": "已接入中枢 · 供给中断，下一个回合会失败",
+        "noSources": "已接入中枢 · 还没有启用任何来源，下一个回合会失败",
+        "nothingRunnable": "已接入中枢 · 已启用的来源当前都无法供给，下一个回合会失败"
+      },
+      "adoption": {
+        "enabled": "已自动加入 {{list}} 的来源顺序",
+        "entry": "{{name}}（第 {{position}} 位）",
+        "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
+        "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用"
       },
       "menus": {
         "done": "完成",
@@ -799,8 +857,8 @@
           "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",
           "builtinCol": "内置 MODEL ID",
           "supplyCol": "实际供给",
-          "followNative": "跟随原生 · 按优先级供给",
-          "candidates": "来源按优先级 · {{sources}}",
+          "followNative": "跟随原生 · 按来源顺序供给",
+          "candidates": "来源顺序 · {{sources}}",
           "candidatesUnavailable": "暂无来源可供给此模型",
           "warning": "改写后思维链、缓存与工具语义与原生不完全等价",
           "resetRow": "恢复默认",
@@ -855,7 +913,7 @@
           "title": "中枢模式 · Hub",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、优先级、映射都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
+          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、来源顺序、映射都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
         },
         "direct": {
           "title": "直连模式 · Direct",
@@ -863,12 +921,11 @@
           "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
           "import": "导入中枢…"
         },
-        "switchedHubNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连",
-        "hubNoSupply": "已选中枢，但还没有可供给本后端的来源，当前仍走直连。去「模型」页添加或启用来源后即生效。"
+        "fixHint": "去「模型」页添加或启用来源即可恢复。"
       },
       "migration": {
         "title": "接入模型中枢",
-        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢，三个 Agent 共用一份来源和优先级。",
+        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢；导入后每个 Agent 各自选用来源、各自排序。",
         "empty": "没有检测到可迁移的原生配置。",
         "scanFailed": "扫描原生配置失败，请重试",
         "applyFailed": "导入失败，请重试",
@@ -914,20 +971,13 @@
         "deleteForceConfirm": "强制删除",
         "deleted": "已删除来源",
         "deleteFailed": "删除失败，请重试",
-        "priorityLabel": "优先级 {{position}}",
         "renameHint": "只改显示名，不动凭证",
         "rediscoverHint": "重新拉取这个来源能供给的模型",
-        "moveUp": "上移一位",
-        "moveUpHint": "更早被使用",
-        "moveUpHintAtTop": "已在第 1 位，不能再上移",
-        "moveDown": "下移一位",
-        "moveDownHint": "更晚被使用",
-        "moveDownHintAtBottom": "已在最后一位，不能再下移",
         "deleteHint": "删除前会再确认一次"
       },
       "migrationBanner": {
         "title": "发现可导入中枢的原生配置",
-        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢，三个 Agent 共用一份来源和优先级。",
+        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢；导入后每个 Agent 各自选用来源、各自排序。",
         "import": "导入中枢",
         "dismiss": "忽略"
       }
@@ -978,6 +1028,31 @@
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
     "optimizeStarted": "第二条 Connector 正在评估更优线路"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
+      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
+      "consent_required": "需要先同意实验性中枢供给"
+    },
+    "source": {
+      "cooldown": {
+        "network": "网络不通",
+        "timeout": "连续超时",
+        "rate_limited": "触发限流",
+        "quota_exhausted": "本周期额度用完",
+        "server_error": "上游服务异常"
+      },
+      "needs_action": {
+        "oauth_expired": "登录已过期，需要重新授权",
+        "balance_exhausted": "余额不足，需要充值",
+        "credential_revoked": "凭据已失效，需要重新填写",
+        "account_banned": "账号被限制使用"
+      },
+      "error": {
+        "unclassified": "未知错误，暂时不可用"
+      }
+    }
   },
   "accessBlocked": {
     "title": "无法在此地址打开控制台",
