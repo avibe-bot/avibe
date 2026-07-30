@@ -2947,6 +2947,33 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
 
+    def run_callback_state(self, run_id: str) -> Optional[str]:
+        """This run's callback delivery status, or ``None`` when it has no callback.
+
+        Read FRESH, at decision time, rather than trusted from the drain's listing:
+        the owed-notice batch is listed once per pass and each row is then decided
+        one at a time, so by the time a row is reached ``_drain_callbacks`` may
+        already have moved its callback from ``pending`` to ``sent`` — and the
+        notice decision keyed on the stale copy would defer a row whose blocker is
+        already resolved, or worse, deliver beside a callback that just landed.
+        Two narrow columns by primary key; the drain pays one indexed point read.
+
+        ``None`` means "no callback exists for this run" (no target session), which
+        is different from a callback whose status column is empty — a target with
+        no recorded status has never been armed, and the caller treats both as
+        no-shield.
+        """
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs.c.callback_session_id, agent_runs.c.callback_status)
+                .where(agent_runs.c.id == str(run_id))
+                .limit(1)
+            ).first()
+        if row is None or not str(row[0] or "").strip():
+            return None
+        return str(row[1] or "").strip() or None
+
     def update_callback_status(
         self,
         run_id: str,

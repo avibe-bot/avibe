@@ -407,6 +407,7 @@ def decide(
     notice: Optional[dict[str, Any]],
     streak_facts: Optional[dict[str, Any]],
     earlier_unsettled: Optional[dict[str, Any]],
+    callback_status: Optional[str] = None,
 ) -> NoticeDecision:
     """What to do with one pending owed notice.
 
@@ -414,7 +415,9 @@ def decide(
     — ``in_streak``, ``has_sent_elsewhere``, ``earliest_pending_id`` — or ``None`` when
     no streak was read (the bypass lanes below return before it is consulted).
     ``earlier_unsettled`` is an earlier-created execution of the same definition that
-    has not settled.
+    has not settled. ``callback_status`` is the run's callback delivery status read
+    FRESH at decision time (``run_callback_state``), or ``None`` when the run has no
+    callback.
 
     Facts, not rows. This function used to receive the streak itself and rederive
     "anyone sent?" and "who is canonical?" from it in Python, which is what made the
@@ -423,6 +426,27 @@ def decide(
     are answered where the rows are. The outcomes are unchanged, reason strings
     included.
     """
+
+    # A PENDING CALLBACK IS ALREADY A DELIVERY for the same transition (plan
+    # correction, 2026-07-29): a failed run carrying ``callback_session_id`` gets a
+    # user-visible result turn from ``_drain_callbacks``, so the notice lane firing
+    # too would give one failure two independently keyed messages. The stamp stayed
+    # unconditional for durability — the callback can still die — so the DRAIN
+    # resolves the race here, on the callback's own outcome: still ``pending`` →
+    # step aside without consuming an attempt; ``sent`` → this notice is a
+    # duplicate, acknowledged as delivered-by-callback; ``failed``/``skipped`` →
+    # the primary path is dead and the retry protocol below proceeds.
+    #
+    # Checked before every other lane — including the interruption lane, whose
+    # unconditional DELIVER is about suppression scope, not about a second
+    # messenger — with one exemption: a binding-change notice reports a different
+    # fact (the pinned session was replaced), which the callback's result turn
+    # never carries, so shielding it would silence the news entirely.
+    if callback_status and not is_binding_change(notice):
+        if callback_status == "pending":
+            return NoticeDecision(ACTION_DEFER, "callback_pending")
+        if callback_status == "sent":
+            return NoticeDecision(ACTION_SKIP, "delivered_by_callback")
 
     if is_interruption(notice):
         # Per-run, always, with no suppression scope and no deferral: the streak is

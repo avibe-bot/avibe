@@ -1657,6 +1657,80 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
     assert "ci waiter" in body, f"the watch's own name must survive the lookup: {body}"
 
 
+def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
+    """The task-side twin of the retired-watch copy fix — FINISHED IS NOT PAUSED.
+
+    A failed ``at`` task is disabled by ``mark_task_result(disable_one_shot=True)``
+    before its notice renders, so the generic disabled branch told the user the task
+    was PAUSED and offered ``vibe task resume`` — while the canonical lifecycle
+    projection (``definition_lifecycle_expression``) classifies a past one-shot as
+    FINISHED and the CLI reads the same combination as a failed one-shot. One
+    surface's copy contradicted every other surface and named a lifecycle action
+    that re-arms nothing.
+
+    The distinction is read through the projection's own question —
+    ``compute_next_run_at`` returns ``None`` exactly when the named instant is
+    behind us — so the copy and the badge cannot disagree. The explicit re-run
+    affordance is retained: ``vibe task run`` is real and is the honest next step
+    for a failed one-shot.
+
+    The control is a paused CRON task: a cron task cannot retire itself, so its
+    disabled copy must keep naming resume.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    # The instant is named and behind us; ``mark_task_result`` left the switch off.
+    _task(
+        sqlite,
+        "task-once",
+        name="one shot",
+        schedule_type="at",
+        cron=None,
+        run_at="2026-07-20T00:00:00+00:00",
+        enabled=False,
+    )
+    _task(sqlite, "task-paused", name="paused cron", enabled=False)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    # No ``config`` on the controller, so the real ``_t`` renders English out of
+    # the shipped catalog: the defect is in the command strings a user reads.
+    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        {"id": "run-once", "task_id": "task-once", "error": "boom"},
+        {"failure_id": "failure:run-once", "interrupt_reason": None},
+    )
+    assert i18n_t("harness.notice.taskFinished", "en") in body, (
+        f"a finished one-shot's copy has to say it finished: {body!r}"
+    )
+    assert "vibe task resume" not in body, (
+        "and must NOT offer resume for a definition the lifecycle projection reads "
+        f"as FINISHED: {body!r}"
+    )
+    assert "vibe task run task-once" in body, (
+        f"the explicit re-run affordance is retained for a failed one-shot: {body!r}"
+    )
+
+    control = service._failure_notice_body(
+        {"id": "run-paused", "task_id": "task-paused", "error": "boom"},
+        {"failure_id": "failure:run-paused", "interrupt_reason": None},
+    )
+    assert "vibe task resume task-paused" in control, (
+        f"a genuinely paused cron task keeps the resume copy: {control!r}"
+    )
+
+
 # --- group 2d: crash/exception ordering in the delivery protocol -----------
 #
 # All three of these are ordering bugs, not happy-path gaps: the delivery
@@ -5438,6 +5512,170 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
             "the dead letter must arrive at the declared bound, not before or after: "
             f"{notice['attempts']!r} != {MAX_ATTEMPTS} for {negatives[index]!r}"
         )
+
+
+def _callback_run(sqlite_store, run_id: str, definition_id: str, *, status: str) -> None:
+    """A settled failure owing a notice, whose run also carries a callback."""
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    _pending_failure(
+        sqlite_store,
+        run_id,
+        definition_id,
+        created_at="2026-07-27T00:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": run_id,
+        },
+    )
+    with sqlite_store.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(callback_session_id="ses-callback-target", callback_status=status)
+        )
+
+
+def _notice_drain_service(tmp_path: Path, sqlite_store, requests) -> tuple[Any, list[str]]:
+    """A detached drain service whose emitter records and acks every delivery."""
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite_store
+    store.load()
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service._drain_dirty = False
+    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service._owns_service_instance = lambda: True
+    service.validate_platform = lambda platform: None
+    service._t = lambda key, **kwargs: key
+    delivered: list[str] = []
+
+    async def _spy_emit(controller, context, backend, diagnostic, **kwargs):
+        delivered.append(str(kwargs.get("failure_id")))
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    service._spy_emit = _spy_emit  # kept referenced for the caller's MonkeyPatch
+    return service, delivered
+
+
+def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -> None:
+    """Owed by the plan (corrected 2026-07-29): a pending callback IS the delivery.
+
+    A failed run carrying ``callback_session_id`` gets a user-visible result turn
+    from ``_drain_callbacks`` — the path the plan treats as sufficient notification
+    — while terminalization stamps ``owed_failure_notice`` unconditionally for
+    durability. Without coordination the two drains both fire and one failure
+    produces two independently keyed messages.
+
+    The notice drain must resolve on the callback's outcome: defer while it is
+    ``pending`` (no attempt consumed — the row has not been tried), and acknowledge
+    the notice as delivered-by-callback (``skipped``) once it is ``sent``. The
+    fallback is proven live by the companion test
+    ``test_owed_notice_takes_over_when_the_callback_dead_letters``.
+    """
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.failure_notices import DEFERRAL_RECHECK_SECONDS
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb", deliver_key="slack::channel::C1")
+    _callback_run(sqlite, "run-cb", "task-cb", status="pending")
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+
+        # PASS 1: the callback is still pending, so the notice steps aside — no
+        # message, no attempt consumed, and the deferral is durable (a real backoff
+        # instant, so the row does not occupy the batch on every tick).
+        asyncio.run(service._drain_failure_notices())
+        assert delivered == [], "the notice lane must not fire beside a pending callback"
+        notice = sqlite.owed_failure_notice("run-cb")
+        assert notice["state"] == "pending"
+        assert not notice.get("attempts"), (
+            f"a deferral consumes no attempt, got {notice.get('attempts')!r}"
+        )
+        assert notice.get("defer_reason") == "callback_pending", f"got {notice!r}"
+        from datetime import datetime
+
+        armed = datetime.fromisoformat(notice["next_attempt_at"])
+        assert armed is not None  # a durable step-aside, not a Python-side continue
+        assert DEFERRAL_RECHECK_SECONDS > 0
+
+        # The callback lands. The notice is now a duplicate of a message the user
+        # already has, and must say so terminally rather than staying eligible.
+        sqlite.update_callback_status("run-cb", status="sent", callback_run_id="cbrun-1")
+        sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
+        asyncio.run(service._drain_failure_notices())
+        notice = sqlite.owed_failure_notice("run-cb")
+        assert notice["state"] == "skipped", f"got {notice!r}"
+        assert notice.get("skip_reason") == "delivered_by_callback", f"got {notice!r}"
+        assert delivered == [], (
+            "exactly one message for the transition — the callback's; the notice "
+            f"lane emitted {delivered!r}"
+        )
+
+        # And the skip is terminal: a later pass does not resurrect it.
+        asyncio.run(service._drain_failure_notices())
+        assert delivered == []
+        assert sqlite.owed_failure_notice("run-cb")["state"] == "skipped"
+
+
+def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -> None:
+    """Owed by the plan (corrected 2026-07-29): the fallback exists the moment the
+    primary path dies.
+
+    Same transition as the companion test, but the callback delivery FAILED — the
+    reason the ``owed_failure_notice`` stamp stayed unconditional. The notice must
+    become deliverable and walk the ordinary retry protocol, not stay shielded
+    behind a callback that will never land.
+
+    The control is a binding-change notice riding a run whose callback is still
+    ``pending``: it reports a fact (the pinned session was replaced) the callback's
+    result turn never carries, so the shield must not silence it.
+    """
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-dead", deliver_key="slack::channel::C1")
+    _callback_run(sqlite, "run-cb-dead", "task-cb-dead", status="failed")
+
+    _task(sqlite, "task-cb-binding", deliver_key="slack::channel::C2")
+    _callback_run(sqlite, "run-cb-binding", "task-cb-binding", status="pending")
+    sqlite.update_owed_failure_notice("run-cb-binding", kind="binding_change")
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert sorted(delivered) == ["run-cb-binding", "run-cb-dead"], (
+        "a dead-lettered callback hands the transition back to the notice lane, and "
+        "a binding-change notice is never shielded by an unrelated callback; got "
+        f"{delivered!r}"
+    )
+    assert sqlite.owed_failure_notice("run-cb-dead")["state"] == "sent"
+    assert sqlite.owed_failure_notice("run-cb-binding")["state"] == "sent"
 
 
 def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(

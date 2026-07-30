@@ -3275,12 +3275,19 @@ class ScheduledTaskService:
                 # notice from the earlier outage then skips a live one.
                 streak_facts = store.failure_streak_decision(definition_id, run_id)
 
+        # The callback's status is read FRESH, not taken from the listed row: the
+        # batch predates this decision by up to a whole pass, and ``_drain_callbacks``
+        # runs on the same ticks — a stale ``pending`` here would defer a notice whose
+        # callback already landed, and a stale absence would deliver beside it. A
+        # read failure propagates to the drain loop's per-row handler and the row is
+        # retried later, which errs toward one message rather than two.
         decision = failure_notices.decide(
             run_id=run_id,
             definition_id=definition_id,
             notice=notice,
             streak_facts=streak_facts,
             earlier_unsettled=earlier_unsettled,
+            callback_status=store.run_callback_state(run_id),
         )
         if decision.action == failure_notices.ACTION_DEFER:
             # No attempt consumed — this row has not been tried. But the deferral is
@@ -4295,7 +4302,28 @@ class ScheduledTaskService:
                 lines.append(self._t("harness.notice.watchShow", id=definition_id))
             else:
                 if task is not None and not task.enabled:
-                    lines.append(self._t("harness.notice.paused", id=definition_id))
+                    # FINISHED IS NOT PAUSED, the task-side twin of the watch branch
+                    # above. A failed one-shot is disabled by ``mark_task_result``
+                    # (``disable_one_shot``), so ``enabled = 0`` here carries two
+                    # meanings — and the paused copy offers ``vibe task resume`` for
+                    # a definition the canonical lifecycle projection reads as
+                    # FINISHED, an action that re-arms nothing. The distinction is
+                    # the projection's own ``ended`` fact, asked through the same
+                    # question it uses (``compute_next_run_at`` returns ``None``
+                    # exactly when the named instant is behind us) — with
+                    # ``enabled=True`` so the switch cannot mask the clock. The
+                    # explicit re-run affordance below stays either way: unlike a
+                    # watch, ``vibe task run`` is real and is the honest next step.
+                    if task.schedule_type == "at" and not compute_next_run_at(
+                        enabled=True,
+                        schedule_type=task.schedule_type,
+                        cron=task.cron,
+                        run_at=task.run_at,
+                        timezone_name=task.timezone,
+                    ):
+                        lines.append(self._t("harness.notice.taskFinished"))
+                    else:
+                        lines.append(self._t("harness.notice.paused", id=definition_id))
                 elif task is not None:
                     next_run = compute_next_run_at(
                         enabled=task.enabled,

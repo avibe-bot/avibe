@@ -60,6 +60,7 @@
       "unknownError": "未记录错误信息",
       "definition": "任务 ID:{id}",
       "paused": "该任务当前已暂停,恢复前不会再次触发:vibe task resume {id}",
+      "taskFinished": "这个一次性任务已经结束,不会再次触发。",
       "nextRun": "下次运行时间:{when}",
       "rerun": "立即重跑:vibe task run {id};查看详情:vibe task show {id}",
       "watchPaused": "该监视当前已暂停,恢复前不会再次监视:vibe watch resume {id}",
