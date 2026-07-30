@@ -8981,6 +8981,11 @@ def test_an_agent_run_pinned_to_the_reserved_session_dispatches_no_turn(
         "NO turn may be dispatched into the runtime's own row: its transcript has to be "
         f"byte-identical to the notices it held before the run: {_session_transcript(reserved)}"
     )
+    assert requests.list_pending() == [], (
+        "and the refused run leaves NOTHING queued — not a requeue, not a retry. A "
+        "settled-failed row that is still pending would fire again on the next drain, "
+        f"which is the same hole one tick later: {requests.list_pending()}"
+    )
 
 
 def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(

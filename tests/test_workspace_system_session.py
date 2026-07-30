@@ -582,11 +582,38 @@ def test_the_shared_target_resolver_refuses_the_reserved_row(monkeypatch, tmp_pa
         resolve_session_id_target(WORKSPACE_NOTICE_SESSION_ID, db_path=db_path)
     assert drifted.value.reason == "reserved"
 
-    # An ordinary session is untouched — the resolver's whole job still works.
+    # ORDINARY SESSIONS ARE UNCHANGED, in BOTH of the two caller-assignable
+    # visibilities — the control cyhhao asked for by name (comment 5124692513). The
+    # guard's whole risk is over-reach: ``session_is_runtime_owned`` ORs an identity
+    # test with a projection test, and a projection widened by one value would refuse
+    # every ``background`` session, i.e. every ``create_once`` / ``create_per_run``
+    # definition and every ``vibe agent run --create-session`` on the install. So both
+    # are resolved here and their whole target is compared, not just the fact that no
+    # exception was raised: ``suppress_delivery`` is DERIVED from ``visibility``
+    # (``background`` suppresses), which is exactly the field a mis-widened predicate
+    # would take out with it.
     ordinary, _scope_id = _ordinary_session(db_path, channel="C704")
     resolved = resolve_session_id_target(ordinary, db_path=db_path)
     assert resolved.session_id == ordinary
     assert resolved.session_key.to_key() == "slack::channel::C704"
+    assert resolved.visibility == "foreground"
+    assert resolved.suppress_delivery is False
+
+    with engine.begin() as conn:
+        assert wss.update_session(conn, ordinary, visibility="background")["visibility"] == "background"
+    backgrounded = resolve_session_id_target(ordinary, db_path=db_path)
+    assert backgrounded.session_id == ordinary, (
+        "a BACKGROUND session is the ordinary shape of every reserved harness session — "
+        "refusing it here would break every ``create_once`` definition on the install"
+    )
+    assert backgrounded.session_key.to_key() == "slack::channel::C704"
+    assert backgrounded.visibility == "background"
+    assert backgrounded.suppress_delivery is True, (
+        "and its delivery suppression still derives from the same visibility the guard "
+        "reads, so the two readings of that column cannot drift apart"
+    )
+    with engine.begin() as conn:
+        wss.update_session(conn, ordinary, visibility="foreground")
 
     # The PROJECTION half: a hypothetical second runtime-owned row inherits the refusal
     # by visibility alone, with no second line here. Written by raw SQL because
