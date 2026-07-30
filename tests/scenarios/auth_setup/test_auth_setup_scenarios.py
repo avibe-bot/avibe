@@ -15,6 +15,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.service import ModelHubError
+from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
@@ -49,7 +50,88 @@ class _FakeCodexNextTurnRuntime:
         return "turn-ok"
 
 
+class _CodexProviderBindingSessions:
+    def get_agent_session_id(self, *_args, **_kwargs):
+        return "thread-existing"
+
+    def ensure_agent_session_id(self, *_args, **_kwargs):
+        return "ses-provider"
+
+    def bind_agent_session(self, *_args, **_kwargs):
+        return "ses-provider"
+
+
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
+        """Scenario: AUTH-SETUP-903"""
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=True)
+        )
+        agent.codex_config = SimpleNamespace(
+            default_model=None,
+            auth_mode="api_key",
+            base_url="https://relay.example/v1",
+        )
+        agent.sessions = _CodexProviderBindingSessions()
+        agent._session_mgr = SimpleNamespace(set_thread_id=lambda *_args: None)
+        agent._build_thread_developer_instructions = lambda _request: None
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={},
+                user_id="U1",
+                channel_id="C1",
+                thread_id=None,
+            ),
+            base_session_id="base-provider",
+            session_key="avibe::project::provider",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_id=None,
+            vibe_agent_name=None,
+        )
+        provider_config = {
+            "name": "OpenAI",
+            "base_url": "https://relay.example/v1",
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": False,
+        }
+
+        calls = []
+
+        async def send_request(method, params):
+            calls.append((method, params))
+            if method == "config/read":
+                return {
+                    "config": {
+                        "model_provider": "openai-managed",
+                        "model_providers": {"openai-managed": provider_config},
+                    }
+                }
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "id": "thread-existing",
+                        "modelProvider": "openai-managed",
+                    }
+                }
+            if method == "thread/resume":
+                return {"thread": {"id": "thread-existing"}}
+            raise AssertionError(f"Unexpected Codex request: {method}")
+
+        thread_id = await agent._start_or_resume_thread(
+            SimpleNamespace(send_request=send_request),
+            request,
+        )
+
+        self.assertEqual(thread_id, "thread-existing")
+        resume = next(params for method, params in calls if method == "thread/resume")
+        self.assertEqual(resume["modelProvider"], "openai-managed")
+
     async def test_native_model_hub_reauth_confirms_before_honest_failure(self):
         """Scenario: AUTH-SETUP-106"""
         state_dir = tempfile.TemporaryDirectory()

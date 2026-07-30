@@ -43,6 +43,9 @@ if TYPE_CHECKING:
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
 _CODEX_DEFAULT_PROVIDER_ID = "openai"
+_CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
+    (_CODEX_MODEL_HUB_PROVIDER_ID,)
+)
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 
 
@@ -1213,7 +1216,12 @@ class CodexAgent(BaseAgent):
                     resume_params,
                     request,
                 )
-                model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
+                model_provider = await self._resolve_resume_model_provider_override(
+                    transport,
+                    request,
+                    persisted,
+                    rebind_same_provider=True,
+                )
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
                 resp = await transport.send_request(
@@ -1279,15 +1287,17 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         request: AgentRequest,
         thread_id: str,
+        *,
+        rebind_same_provider: bool = False,
     ) -> Optional[str]:
         """Return a provider override only when a persisted thread is stale.
 
         Codex preserves a thread's latest model / reasoning effort on resume
         unless the client sends a model/provider override. Vibe Remote only
-        needs to override the provider after the user changes Codex auth mode
-        between Vibe Remote-managed OAuth/API-key providers, so inspect the
-        stored thread first and leave normal resumes on Codex's persisted
-        fallback path.
+        overrides transitions between managed providers. A persisted thread's
+        first resume in a fresh app-server also rebinds Avibe-managed same-id
+        providers, because OAuth and API-key/custom-base-URL configurations
+        deliberately reuse ``openai-managed``.
         """
         current_provider = await self._read_effective_model_provider(transport, request)
         if not current_provider:
@@ -1314,6 +1324,8 @@ class CodexAgent(BaseAgent):
 
         stored_provider = stored_provider.strip()
         if stored_provider == current_provider:
+            if rebind_same_provider and current_provider in _CODEX_REBINDABLE_SAME_ID_PROVIDERS:
+                return current_provider
             return None
         if not self._is_managed_provider_transition(stored_provider, current_provider):
             return None

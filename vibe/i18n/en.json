@@ -395,6 +395,7 @@
       "claudeMethodFallback": "Choose a Claude sign-in source with `/setup claude claudeai` or `/setup claude console`.",
       "resetPrompt": "{backend} looks logged out. Use the button below to restart OAuth setup.",
       "resetPromptPlain": "{backend} looks logged out. Run `/setup {backend}` to restart OAuth setup.",
+      "apiKeyRecoveryPrompt": "{backend} rejected the configured API key. Check the API key and Base URL in Settings, save them, and retry.",
       "manualFallback": "If inline buttons are unavailable, run `/setup {backend}`.",
       "codexInstructions": "Codex setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when login finishes.",
       "claudeInstructions": "Claude setup started.\n\nOpen this URL in your browser and finish the login flow:\n{url}\n\nWhen the browser callback page shows the final `authorizationCode#state` value, send it back directly in this chat.",
