@@ -21,6 +21,7 @@ import {
   cleanupVoiceTranscript,
   voiceInsertionSnapshot,
   voiceInsertionText,
+  type VoiceCleanupResult,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
@@ -116,6 +117,8 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
   insertion: VoiceInsertionSnapshot;
+  cleanupOutcome?: VoiceCleanupResult['outcome'];
+  cleanupElapsedMs?: number;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -134,12 +137,14 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
     session.finalizedFailedSegmentCount = session.segments.filter(
       (segment) => segment.error,
     ).length;
-    const transcript = await cleanupVoiceTranscript(rawTranscript, session.insertion, {
+    const cleanup = await cleanupVoiceTranscript(rawTranscript, session.insertion, {
       signal: session.abortController.signal,
     });
     if (session.abortController.signal.aborted) return;
-    if (!transcript.trim()) throw new VoiceTranscriptionError('empty');
-    session.transcript = transcript;
+    session.cleanupOutcome = cleanup.outcome;
+    session.cleanupElapsedMs = cleanup.elapsedMs;
+    if (!cleanup.text.trim()) throw new VoiceTranscriptionError('empty');
+    session.transcript = cleanup.text;
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
@@ -232,6 +237,7 @@ const reportVoiceFinalization = (
       session.finalizedFailedSegmentCount
       ?? session.segments.filter((segment) => segment.error).length
     ),
+    elapsedMs: session.cleanupElapsedMs,
     backlogAtStop: session.backlogAtStop,
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
@@ -631,7 +637,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       && voiceSessionsById.get(session.sessionId) === session
     );
     if (session.status === 'ready' && session.transcript) {
-      reportVoiceFinalization(session, 'success');
+      reportVoiceFinalization(session, session.cleanupOutcome ?? 'success');
     } else if (session.status === 'failed') {
       reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
     }
@@ -736,17 +742,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [presentVoiceSession, sessionId]);
 
-  const startRecording = async () => {
+  const startRecording = async (capturedInsertion?: VoiceInsertionSnapshot) => {
     if (
       !sessionId
       || recordingStartRef.current
       || voiceSessionsById.has(sessionId)
     ) {
-      pendingVoiceInsertionRef.current = null;
       return;
     }
-    const insertion = pendingVoiceInsertionRef.current ?? captureVoiceInsertion();
-    pendingVoiceInsertionRef.current = null;
+    const insertion = capturedInsertion ?? captureVoiceInsertion();
     recordingStartRef.current = true;
     let stream: MediaStream | null = null;
     let startingPipeline: VoiceRecordingPipeline | null = null;
@@ -874,9 +878,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     recordingSessionRef.current?.abortController.abort();
     recorderRef.current?.abort();
   }, []);
-  const toggleRecording = () => {
+  const toggleRecording = (pointerActivation: boolean) => {
+    const pointerInsertion = pointerActivation ? pendingVoiceInsertionRef.current : null;
+    pendingVoiceInsertionRef.current = null;
     if (recording) stopRecording();
-    else void startRecording();
+    else void startRecording(pointerInsertion ?? captureVoiceInsertion());
   };
 
   // ESC aborts an in-progress recording (discard, no transcribe).
@@ -1052,7 +1058,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   onPointerDown={() => {
                     if (!recording) pendingVoiceInsertionRef.current = captureVoiceInsertion();
                   }}
-                  onClick={toggleRecording}
+                  onPointerCancel={() => {
+                    pendingVoiceInsertionRef.current = null;
+                  }}
+                  onContextMenu={() => {
+                    pendingVoiceInsertionRef.current = null;
+                  }}
+                  onClick={(event) => toggleRecording(event.detail > 0)}
                   disabled={isVoiceControlDisabled(
                     disabled,
                     recording,

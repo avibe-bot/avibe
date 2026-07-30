@@ -23,6 +23,12 @@ type VoiceCleanupDependencies = {
   signal?: AbortSignal;
 };
 
+export type VoiceCleanupResult = {
+  text: string;
+  outcome: 'success' | 'fallback';
+  elapsedMs: number;
+};
+
 const boundedSelection = (text: string, start: number, end: number): [number, number] => {
   const safeStart = Math.max(0, Math.min(text.length, Math.floor(start)));
   const safeEnd = Math.max(safeStart, Math.min(text.length, Math.floor(end)));
@@ -110,7 +116,13 @@ export const cleanupVoiceTranscript = async (
   transcript: string,
   snapshot: VoiceInsertionSnapshot,
   dependencies: VoiceCleanupDependencies = {},
-): Promise<string> => {
+): Promise<VoiceCleanupResult> => {
+  const startedAt = Date.now();
+  const result = (text: string, outcome: VoiceCleanupResult['outcome']): VoiceCleanupResult => ({
+    text,
+    outcome,
+    elapsedMs: Date.now() - startedAt,
+  });
   const request = timeoutSignal(
     dependencies.timeoutMs ?? VOICE_CLEANUP_TIMEOUT_MS,
     dependencies.signal,
@@ -129,11 +141,13 @@ export const cleanupVoiceTranscript = async (
         signal: request.signal,
       },
     );
-    if (!response.ok) return transcript;
+    if (!response.ok) return result(transcript, 'fallback');
     const payload = await response.json().catch(() => null) as { text?: unknown } | null;
-    return typeof payload?.text === 'string' ? payload.text : transcript;
+    if (typeof payload?.text !== 'string') return result(transcript, 'fallback');
+    if (payload.text !== '' && !payload.text.trim()) return result(transcript, 'fallback');
+    return result(payload.text, 'success');
   } catch {
-    return transcript;
+    return result(transcript, 'fallback');
   } finally {
     request.cancel();
   }

@@ -227,13 +227,26 @@ function serializedPointAtOffset(target: number): SerializedPoint | null {
     if (!$isElementNode(node)) return null;
     const children = node.getChildren();
     let offset = base;
-    if (target === offset) return { key: node.getKey(), offset: 0, type: 'element' };
+    if (target === offset) {
+      if (!rootLevel) return { key: node.getKey(), offset: 0, type: 'element' };
+      const first = children[0];
+      if (!first) return null;
+      return $isElementNode(first)
+        ? { key: first.getKey(), offset: 0, type: 'element' }
+        : visit(first, offset);
+    }
     for (let index = 0; index < children.length; index += 1) {
       const childEnd = offset + serializedNodeLength(children[index]);
       if (target > offset && target < childEnd) {
         return visit(children[index], offset);
       }
       if (target === childEnd) {
+        if (rootLevel) {
+          const child = children[index];
+          return $isElementNode(child)
+            ? { key: child.getKey(), offset: child.getChildrenSize(), type: 'element' }
+            : visit(child, offset);
+        }
         return { key: node.getKey(), offset: index + 1, type: 'element' };
       }
       offset = childEnd;

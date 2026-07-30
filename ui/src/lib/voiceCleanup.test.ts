@@ -45,7 +45,10 @@ describe('voice cleanup', () => {
     );
     const snapshot = voiceInsertionSnapshot('计划：。', 3, 3);
 
-    await expect(cleanupVoiceTranscript('呃后天发布', snapshot, { cloudFetch })).resolves.toBe('后天发布。');
+    await expect(cleanupVoiceTranscript('呃后天发布', snapshot, { cloudFetch })).resolves.toMatchObject({
+      text: '后天发布。',
+      outcome: 'success',
+    });
     const [, init] = cloudFetch.mock.calls[0];
     expect(JSON.parse(String(init?.body))).toEqual({
       transcript: '呃后天发布',
@@ -58,8 +61,36 @@ describe('voice cleanup', () => {
     const snapshot = voiceInsertionSnapshot('', 0, 0);
     const unavailable = vi.fn().mockResolvedValue(new Response('{}', { status: 404 }));
     const malformed = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const networkError = vi.fn().mockRejectedValue(new TypeError('network unavailable'));
 
-    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: unavailable })).resolves.toBe('raw');
-    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: malformed })).resolves.toBe('raw');
+    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: unavailable })).resolves.toMatchObject({
+      text: 'raw',
+      outcome: 'fallback',
+    });
+    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: malformed })).resolves.toMatchObject({
+      text: 'raw',
+      outcome: 'fallback',
+    });
+    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: networkError })).resolves.toMatchObject({
+      text: 'raw',
+      outcome: 'fallback',
+    });
+  });
+
+  it('preserves intentional empty output but falls back from whitespace-only output', async () => {
+    const snapshot = voiceInsertionSnapshot('', 0, 0);
+    const empty = vi.fn().mockResolvedValue(new Response(JSON.stringify({ text: '' }), { status: 200 }));
+    const whitespace = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ text: '   ' }), { status: 200 }),
+    );
+
+    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: empty })).resolves.toMatchObject({
+      text: '',
+      outcome: 'success',
+    });
+    await expect(cleanupVoiceTranscript('raw', snapshot, { cloudFetch: whitespace })).resolves.toMatchObject({
+      text: 'raw',
+      outcome: 'fallback',
+    });
   });
 });
