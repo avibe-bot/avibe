@@ -991,7 +991,7 @@
         "retest": "Retry",
         "reauthTitle": "Sign in to “{{name}}” again?",
         "reauthBody": {
-          "immediate": "The old sign-in stops working as soon as you start, and sources using it are unavailable until you finish.",
+          "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
           "onFailure": "If this sign-in doesn’t go through, the source needs attention until you sign in again."
         },
         "reauthConfirm": "Start sign-in",

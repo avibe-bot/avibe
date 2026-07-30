@@ -317,14 +317,26 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
   it('lets a failed poll settle the journey when it is the only authority', () => {
     // A status read is also the call that materializes a just-succeeded flow, so on
     // a device-code login its failure can be the one thing that knows the login
-    // produced nothing usable.
-    expect(pollFailureSettles(false)).toBe(true);
+    // produced nothing usable — when the route is what said so.
+    expect(pollFailureSettles(false, true)).toBe(true);
   });
 
   it('does not let it settle one while the user’s own submit is outstanding', () => {
     // The submit is the writer of record; a read failing beside it says nothing
     // about whether that write committed.
-    expect(pollFailureSettles(true)).toBe(false);
+    expect(pollFailureSettles(true, true)).toBe(false);
+  });
+
+  it('does not let a failure the route never named settle one either', () => {
+    // The other half of 「only authority」: being the only one who could speak is not
+    // the same as having spoken. The call that materializes a just-succeeded create
+    // is this very read, so a dropped connection or an unparseable body means the
+    // source may exist while the dialog declares a terminal nobody reported — and
+    // an ordinary connect retried from that sentence mints a second source. Same
+    // `serverNamed` bit `mayHaveWritten` reads for the refetch, asked about speech.
+    expect(pollFailureSettles(false, false)).toBe(false);
+    // …and the submit's precedence does not depend on it.
+    expect(pollFailureSettles(true, false)).toBe(false);
   });
 
   it('shows what latching one costs: the success right behind it is ignored', () => {
@@ -346,8 +358,15 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
     // read the submit's in-flight state through a ref or it reads `false` forever.
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
 
-    expect(dialog).toMatch(/pollFailureSettles\(submittingRef\.current\)/);
+    expect(dialog).toMatch(
+      /pollFailureSettles\(submittingRef\.current, failure\?\.serverNamed \?\? false\)/,
+    );
     expect(dialog).toMatch(/submittingRef\.current = submitting;/);
+    // The second argument only exists if the failure is read BEFORE the question is
+    // asked — reading it after the settle branch is how this reverts silently.
+    expect(dialog.indexOf('const failure = apiFailure(err);')).toBeLessThan(
+      dialog.indexOf('if (!pollFailureSettles('),
+    );
   });
 });
 

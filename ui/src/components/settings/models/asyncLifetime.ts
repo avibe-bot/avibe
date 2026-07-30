@@ -262,11 +262,22 @@ export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
  * catch. So the flow is not left hanging on a poll — and the caller keeps reading
  * meanwhile, which is what preserves the deadline for a submit that never returns.
  *
- * With no submit outstanding a poll IS the only authority, and its failure is the
- * journey's: a status read is also the call that materializes a just-succeeded
- * flow, so its error can be the one thing that knows the login went nowhere.
+ * With no submit outstanding a poll IS the only authority — but only when the ROUTE
+ * answered. That same materializing call is the reason: a status read that commits
+ * the create or the repair and then loses its response (a dropped connection, a
+ * proxy's HTML 502, a body that will not parse) throws a failure `call()` minted,
+ * not one the server named. Settling on it declares a terminal nobody reported, over
+ * an operation that may have committed — the dialog says 授权失败 on a source the
+ * server did create, and an ordinary connect retried from there mints a second one.
+ * `serverNamed` is the same discriminator `mayHaveWritten` reads for the refetch,
+ * asked here about speech instead of writes: a refusal that named itself knows the
+ * login went nowhere; a transport failure knows nothing at all.
+ *
+ * Dropping it is bounded either way — the caller keeps polling, and the deadline at
+ * the top of each tick is the dialog's own verdict when nothing ever answers.
  */
-export const pollFailureSettles = (submitOutstanding: boolean): boolean => !submitOutstanding;
+export const pollFailureSettles = (submitOutstanding: boolean, serverNamed: boolean): boolean =>
+  !submitOutstanding && serverNamed;
 
 /**
  * Whether the failure that just arrived is the one now ON SCREEN.

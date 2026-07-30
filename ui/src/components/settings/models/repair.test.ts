@@ -308,6 +308,20 @@ describe('the copy each remedy names', () => {
     for (const s of [source({ ...subscription, ...native }), source(subscription)])
       for (const bundle of [en, zh]) expect(typeof translated(bundle, reauthBodyKey(s))).toBe('string');
   });
+
+  it('says the native cost is not paid back in full', () => {
+    // Round 19. The start strips EVERY native source of that backend, and only the
+    // one that finishes comes back: `_materialize_completed_oauth` re-discovers
+    // onto the selected source and its siblings keep the empty inventory and the
+    // 需处理 (test_native_reauth_invalidates_sibling_sources_for_shared_cli). The
+    // sentence said they were unavailable 「until you finish」, which reads as a
+    // wait — so the user could confirm an irreversible action without learning
+    // that finishing leaves the rest needing their own sign-in.
+    const key = reauthBodyKey(source({ ...subscription, ...native }));
+    expect(translated(en, key)).toMatch(/only this one/i);
+    expect(translated(zh, key)).toMatch(/只恢复这一个/);
+    for (const bundle of [en, zh]) expect(translated(bundle, key)).not.toMatch(/until you finish|完成前/);
+  });
 });
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
@@ -481,17 +495,16 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
     expect(key({ ...oc, menu: { view: 'full', checked: ['openai/gpt-6'] } })).not.toBe(key(oc));
   });
 
-  it('does not move for the order the two lists were written in', () => {
-    // `mappings` and `menu.checked` are sets the user edits by toggling; the API
-    // makes no ordering promise about either, and a re-read that returns the same
-    // configuration in another order would otherwise clear the report.
+  it('does not move for the order the mappings were written in', () => {
+    // `mappings` is a set the user edits by toggling; the API makes no ordering
+    // promise about it, and a re-read that returns the same overrides in another
+    // order would otherwise clear the report.
     expect(
       key({
         mappings: [
           { builtin_id: 'b', target_model_id: 'y', enabled: true },
           { builtin_id: 'a', target_model_id: 'x', enabled: true },
         ],
-        menu: { view: 'featured', checked: ['b', 'a'] },
       }),
     ).toBe(
       key({
@@ -499,8 +512,31 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
           { builtin_id: 'a', target_model_id: 'x', enabled: true },
           { builtin_id: 'b', target_model_id: 'y', enabled: true },
         ],
-        menu: { view: 'featured', checked: ['a', 'b'] },
       }),
+    );
+  });
+
+  it('moves for the order menu.checked was written in, because there order IS the pick', () => {
+    // Round 19, and this test used to assert the opposite — `checked` was
+    // canonicalized beside `mappings` as though both were sets. On opencode with
+    // no explicit request the resolver walks `checked` and takes the FIRST
+    // identifier whose source is runnable (`resolver.py:171-182`), so [A, B] and
+    // [B, A] are different turns — different model, possibly different source —
+    // with identical membership. `selected_model_id` is excluded there, so this
+    // list is the only thing in the key that can carry the difference. Nothing on
+    // this page writes `checked`, so a re-order arrives the way an inventory
+    // change does: from another client. `savedMenuKey` reads it in order too.
+    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const };
+    expect(key({ ...oc, menu: { view: 'full', checked: ['a', 'b'] } })).not.toBe(
+      key({ ...oc, menu: { view: 'full', checked: ['b', 'a'] } }),
+    );
+    // The fixed-menu backends resolve through `selected_model_id`, so the order
+    // decides nothing for them — this member stays sensitive anyway rather than
+    // branching per backend. The whole cost is a still-true report cleared by an
+    // edit that did not matter, and the user answers that by re-running; the other
+    // direction is a sentence about a chain that moved. Only one is a wrong answer.
+    expect(key({ menu: { view: 'featured', checked: ['a', 'b'] } })).not.toBe(
+      key({ menu: { view: 'featured', checked: ['b', 'a'] } }),
     );
   });
 

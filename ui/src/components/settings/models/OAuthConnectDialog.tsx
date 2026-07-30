@@ -324,16 +324,6 @@ export const OAuthConnectDialog: React.FC<{
           resolvedAfterAttempt();
           return;
         }
-        // The user's own submit outranks a failed READ, and `pollFailureSettles`
-        // says why: that submit is the writer of record and settles this view
-        // itself, so latching a status error here would terminalize the journey
-        // and `flowStep` would then ignore the success the submit brings back.
-        // Keep reading instead of stopping — the deadline check at the top of each
-        // poll is what bounds a submit that never returns.
-        if (!pollFailureSettles(submittingRef.current)) {
-          pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
-          return;
-        }
         // A poll that lands on a just-succeeded flow is also the call that
         // materializes the outcome, so it can fail for reasons that have nothing
         // to do with the authorization (consent_required / discovery_failed):
@@ -346,6 +336,16 @@ export const OAuthConnectDialog: React.FC<{
         // and the codes that only exist after it are the only ones that may
         // claim completion. `engine_down` is not one of them.
         const failure = apiFailure(err);
+        // Two reasons a failed READ may not speak for the journey, and
+        // `pollFailureSettles` holds both: the user's own submit is the writer of
+        // record beside it, and a failure the ROUTE never named is not an answer
+        // about the flow at all — that same read is what materializes a
+        // just-succeeded one. Keep reading instead of stopping; the deadline check
+        // at the top of each poll bounds either.
+        if (!pollFailureSettles(submittingRef.current, failure?.serverNamed ?? false)) {
+          pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
+          return;
+        }
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.

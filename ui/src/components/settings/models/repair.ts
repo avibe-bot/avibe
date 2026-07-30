@@ -142,6 +142,13 @@ export const REPAIR_LABEL_KEY: Record<RepairKind, string> = {
  * stripped; it is rolled back only when the login fails to SPAWN. The price is
  * paid on 「开始」, whatever happens next.
  *
+ * And it is not paid back in full: the sentence has to say so, because success
+ * restores only the source the dialog is about. `_materialize_completed_oauth`
+ * re-discovers onto THAT one; its siblings on the shared CLI keep the empty
+ * inventory and the 需处理 the start wrote, each needing its own sign-in
+ * (`tests/test_model_hub_api.py::test_native_reauth_invalidates_sibling_sources_for_shared_cli`).
+ * 「until you finish」 alone reads as a wait, which is the one thing this is not.
+ *
  * `on_failure`: a hub re-login writes nothing at start — the held credential goes
  * on working while the user signs in. The cost arrives only if the flow comes
  * back `failed`, where `_fail_closed_hub_reauth` marks the source 需要处理 because
@@ -324,7 +331,18 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  *   and no cooldown. An inventory change is a real chain change; a cooldown cannot
  *   fake one.
  * - `menu.checked` — same pruning via `_available_opencode_identifiers`, and for
- *   opencode this IS the selection surface.
+ *   opencode this IS the selection surface. It goes in IN ORDER, unsorted, because
+ *   on opencode the order is the selection: with no explicit request the resolver
+ *   walks `checked` and takes the first identifier whose source is runnable
+ *   (`resolver.py:171-182`), so `[A, B]` and `[B, A]` are different turns — a
+ *   different model and possibly a different source — with the same membership.
+ *   Nothing on this page writes `checked`, so a re-order arrives the way the
+ *   inventory does, from another client; canonicalizing it here would hide exactly
+ *   the change the member exists to catch. On the fixed-menu backends the order
+ *   carries nothing, and the sensitivity costs at most a still-true report cleared
+ *   by an edit that did not matter, which the user answers by re-running 一次试跑
+ *   — the same asymmetry the inventory paragraph below settles the same way.
+ *   `savedMenuKey` already reads this list in order for the drawer's own baseline.
  * - `selected_model_id` for every backend EXCEPT opencode. On the fixed-menu
  *   backends the hub path echoes `requested_model` back verbatim in every return
  *   (only `target_model` takes the mapping), so it is the configured request. On
@@ -390,7 +408,7 @@ export const dryRunChainKey = (
       .map((m) => `${m.builtin_id}>${m.target_model_id}:${m.enabled ? 'on' : 'off'}`)
       .sort()
       .join(','),
-    [...(agent.menu?.checked ?? [])].sort().join(','),
+    (agent.menu?.checked ?? []).join(','),
     sources
       .map((s) => `${s.id}:${s.models.map((m) => m.id).sort().join('+')}`)
       .sort()
