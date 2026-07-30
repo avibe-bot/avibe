@@ -47,6 +47,16 @@ const request = (
   expires_at: null,
 });
 
+const orderedMessage = (
+  idSuffix: string,
+  orderAt: string,
+  createdAt: string,
+  author = 'agent',
+): WorkbenchMessage => {
+  const microseconds = Math.floor(Date.parse(orderAt) * 1_000);
+  return message(`msg_${microseconds.toString(16).padStart(15, '0')}${idSuffix}`, createdAt, author);
+};
+
 describe('vaultRequestType', () => {
   it('keeps provision separate from access and sign approvals', () => {
     expect(vaultRequestType(request('p', 'provision', '2026-07-30T10:00:00Z'))).toBe('provision');
@@ -81,6 +91,34 @@ describe('placeVaultProvisionRequests', () => {
 
     expect(placed.byMessageId.get('agent-owner')?.map((item) => item.id)).toEqual(['p']);
     expect(placed.byMessageId.has('agent-later')).toBe(false);
+  });
+
+  it('uses the message id clock when the reply shares the request second', () => {
+    const sameSecondMessages = [
+      orderedMessage('11111111', '2026-07-30T10:00:00.100Z', '2026-07-30T10:00:00Z', 'user'),
+      orderedMessage('22222222', '2026-07-30T10:00:00.800Z', '2026-07-30T10:00:00Z'),
+    ];
+    const placed = placeVaultProvisionRequests(sameSecondMessages, [
+      request('p', 'provision', '2026-07-30T10:00:00.500Z'),
+    ]);
+
+    expect(placed.byMessageId.get(sameSecondMessages[1].id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
+  it('does not cross a later user or harness input-turn boundary', () => {
+    for (const boundaryKind of ['user', 'harness'] as const) {
+      const origin = orderedMessage('11111111', '2026-07-30T10:00:00.100Z', '2026-07-30T10:00:00Z', 'user');
+      const boundary = orderedMessage('22222222', '2026-07-30T10:00:00.700Z', '2026-07-30T10:00:00Z', boundaryKind);
+      if (boundaryKind === 'harness') boundary.type = 'harness';
+      const unrelated = orderedMessage('33333333', '2026-07-30T10:00:00.900Z', '2026-07-30T10:00:00Z');
+      const placed = placeVaultProvisionRequests([origin, boundary, unrelated], [
+        request(`p-${boundaryKind}`, 'provision', '2026-07-30T10:00:00.500Z'),
+      ]);
+
+      expect([...placed.byMessageId]).toEqual([]);
+      expect(placed.unanchored.map((item) => item.id)).toEqual([`p-${boundaryKind}`]);
+    }
   });
 
   it('uses an available turn identity before the timestamp fallback', () => {

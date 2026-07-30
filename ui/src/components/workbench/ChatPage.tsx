@@ -3434,7 +3434,10 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
         onChoose={(choice) => onQuickReply(message.id, choice)}
       />
     ) : null;
-  const vaultRequestsNode = vaultRequests?.length && onVaultRequestResolved ? (
+  // Unlike a `$<NAME>` marker in the reply text, attached requests are live
+  // pending state, not authored transcript content. Archive expires that state,
+  // so a stale tab must withdraw the card instead of preserving a false action.
+  const vaultRequestsNode = !readOnly && vaultRequests?.length && onVaultRequestResolved ? (
     <div className="flex w-full flex-col gap-2 pt-1">
       {vaultRequests.map((request) => (
         <VaultRequestCard key={request.id} request={request} onResolved={onVaultRequestResolved} />

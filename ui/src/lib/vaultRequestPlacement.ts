@@ -1,5 +1,7 @@
 import type { VaultRequest, WorkbenchMessage } from '@/context/ApiContext';
 import { chatRowKind } from '@/lib/chatRowKind';
+import { specFor } from '@/lib/messageTypes';
+import { messageOrderTimeMs } from '@/lib/transcriptOrder';
 
 export type VaultRequestType = 'access' | 'sign' | 'provision' | 'other';
 
@@ -21,6 +23,10 @@ export type VaultProvisionPlacement = {
 
 function isAgentReply(message: WorkbenchMessage): boolean {
   return chatRowKind(message).kind === 'agent';
+}
+
+function isInputTurn(message: WorkbenchMessage): boolean {
+  return specFor(message.type).inputAuthors.includes(message.author);
 }
 
 function appendRequest(map: Map<string, VaultRequest[]>, messageId: string, request: VaultRequest): void {
@@ -45,6 +51,21 @@ function sameRequestTurn(request: VaultRequest, message: WorkbenchMessage): bool
   return false;
 }
 
+function inferReplyWithinTurn(
+  messages: WorkbenchMessage[],
+  requestTime: number,
+): WorkbenchMessage | undefined {
+  for (const message of messages) {
+    const messageTime = messageOrderTimeMs(message);
+    if (Number.isNaN(messageTime) || messageTime < requestTime) continue;
+    // An anchorless request belongs only to the turn that created it. Once a
+    // later user/harness input starts another turn, no later Agent row can own it.
+    if (isInputTurn(message)) return undefined;
+    if (isAgentReply(message)) return message;
+  }
+  return undefined;
+}
+
 /** Attach provision requests to the Agent reply that announced them.
  *
  * Newer producers can set `message_id` explicitly. Historical CLI-created rows
@@ -60,7 +81,7 @@ export function placeVaultProvisionRequests(
   const unanchored: VaultRequest[] = [];
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const agentMessages = messages.filter(isAgentReply);
-  const firstLoadedTime = messages.length > 0 ? Date.parse(messages[0].created_at) : Number.NaN;
+  const firstLoadedTime = messages.length > 0 ? messageOrderTimeMs(messages[0]) : Number.NaN;
 
   for (const request of requests) {
     if (vaultRequestType(request) !== 'provision') continue;
@@ -79,10 +100,7 @@ export function placeVaultProvisionRequests(
     const windowCoversRequest = Number.isNaN(firstLoadedTime) || firstLoadedTime <= requestTime;
     const inferred = sameTurn ?? (Number.isNaN(requestTime) || !windowCoversRequest
       ? undefined
-      : agentMessages.find((message) => {
-          const messageTime = Date.parse(message.created_at);
-          return !Number.isNaN(messageTime) && messageTime >= requestTime;
-        }));
+      : inferReplyWithinTurn(messages, requestTime));
     if (inferred) appendRequest(byMessageId, inferred.id, request);
     else unanchored.push(request);
   }

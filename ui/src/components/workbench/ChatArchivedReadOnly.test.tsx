@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { VaultRequest, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ToastProvider } from '../../context/ToastContext';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow } from './ChatPage';
@@ -436,6 +436,35 @@ describe('archived conflicts converge whatever the verb', () => {
 // request, not the write. Locked (not hidden) for the same reason the quick-reply
 // group is: the card is the transcript record of what was asked.
 describe('read-only transcript locks the secret-request cards', () => {
+  it('withdraws a stale pending provision card attached to an Agent reply', () => {
+    const pending = {
+      id: 'vrq_stale',
+      request_type: 'provision',
+      secret_name: 'STALE_API_KEY',
+      requester: { session_id: 'ses_01J8XK5M8T' },
+      delivery: {},
+      status: 'pending',
+      message_id: null,
+      created_at: '2026-07-27T04:04:00.500Z',
+      decided_at: null,
+      expires_at: null,
+    } satisfies VaultRequest;
+
+    const archived = render(
+      <MessageRow
+        message={agentWithQuickReplies()}
+        session={session({ status: 'archived' })}
+        messageFontSize={13}
+        onQuickReply={() => undefined}
+        vaultRequests={[pending]}
+        onVaultRequestResolved={() => undefined}
+        readOnly
+      />,
+    );
+
+    expect(archived).not.toContain('STALE_API_KEY');
+  });
+
   it('renders the recorded ask, disabled, with the reason', () => {
     const locked = render(<SecretRequestCard name="OPENAI_API_KEY" readOnly />);
     // Still legible as a transcript entry...

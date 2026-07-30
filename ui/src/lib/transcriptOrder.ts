@@ -1,5 +1,23 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 
+const TIME_SORTABLE_MESSAGE_ID_RE = /^msg_([0-9a-f]{15})/i;
+
+/** Best available wall-clock position for a durable transcript row.
+ *
+ * Persisted message timestamps are second-resolution. Canonical `msg_` ids add
+ * a microsecond clock prefix specifically to preserve ordering inside that
+ * second, so prefer it whenever present and retain `created_at` for imported or
+ * historical ids.
+ */
+export const messageOrderTimeMs = (message: Pick<WorkbenchMessage, 'id' | 'created_at'>): number => {
+  const idTime = TIME_SORTABLE_MESSAGE_ID_RE.exec(message.id)?.[1];
+  if (idTime) {
+    const microseconds = Number.parseInt(idTime, 16);
+    if (Number.isSafeInteger(microseconds)) return microseconds / 1_000;
+  }
+  return Date.parse(message.created_at);
+};
+
 // Pure ordering/merge helpers for the chat transcript, kept transport-agnostic
 // (they only read ``created_at`` / ``id``) so the ordering contract can be unit
 // tested independently of the ChatPage component. The chat keeps its ``messages``
