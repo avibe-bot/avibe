@@ -474,7 +474,7 @@ export const SourceOrderDrawer: React.FC<{
           <DryRunRow
             agent={agent}
             sources={sources}
-            chainKey={dryRunChainKey(agent, policy, order)}
+            chainKey={dryRunChainKey(agent, policy, order, sources)}
             saving={saving}
             reread={onSaved}
           />

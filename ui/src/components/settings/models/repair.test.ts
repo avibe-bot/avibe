@@ -361,8 +361,12 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
     mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: true }],
     menu: { view: 'featured', checked: ['zhipuai/glm-5.2'] },
   });
-  const key = (over: Partial<AgentSupply> = {}, policy: SourcePolicy = 'follow', order = ['src_a']) =>
-    dryRunChainKey({ ...base, ...over }, policy, order);
+  const key = (
+    over: Partial<AgentSupply> = {},
+    policy: SourcePolicy = 'follow',
+    order = ['src_a'],
+    sources: Source[] = [source({ id: 'src_a', models: [{ id: 'glm-5.2', provenance: 'discovered' }] })],
+  ) => dryRunChainKey({ ...base, ...over }, policy, order, sources);
 
   it('moves for every surface the user selects the probed turn with', () => {
     // The chain is not only its order: the probe takes no model, so the server
@@ -390,6 +394,79 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
     expect(key({ current: { model_id: 'glm-5.2', source_id: 'src_b', channel: 'hub' } })).toBe(same);
     expect(key({ current: null, supply_status: 'interrupted' })).toBe(same);
     expect(key({ supply_status: 'degraded' })).toBe(same);
+  });
+
+  it('moves for an inventory the user never touched from this page', () => {
+    // Round 18. Everything else in this key is a surface of THIS drawer, so the
+    // key was blind to the one chain change that arrives from outside it: a
+    // discovery, a key replacement or a re-auth in another client changes what a
+    // source supplies, eligibility runs over that inventory, and membership moves
+    // with every surface here identical. The two lists above only notice it by
+    // being pruned — and an agent with neither has nothing inventory-derived left.
+    const withGlm = [source({ id: 'src_a', models: [{ id: 'glm-5.2', provenance: 'discovered' }] })];
+    const same = key({}, 'follow', ['src_a'], withGlm);
+    expect(key({}, 'follow', ['src_a'], withGlm)).toBe(same);
+    // Discovered a second model: same policy, order, model, mappings and menu.
+    expect(
+      key({}, 'follow', ['src_a'], [
+        source({
+          id: 'src_a',
+          models: [
+            { id: 'glm-5.2', provenance: 'discovered' },
+            { id: 'glm-5.3', provenance: 'discovered' },
+          ],
+        }),
+      ]),
+    ).not.toBe(same);
+    // Stripped back to nothing — what a fail-closed re-auth leaves behind.
+    expect(key({}, 'follow', ['src_a'], [source({ id: 'src_a', models: [] })])).not.toBe(same);
+    // A source that `order` does not name still counts, because under `follow`
+    // order is a recommendation and eligibility is what puts a source in the chain.
+    expect(
+      key({}, 'follow', ['src_a'], [...withGlm, source({ id: 'src_b', models: [{ id: 'gpt-6', provenance: 'discovered' }] })]),
+    ).not.toBe(same);
+  });
+
+  it('holds still for a source whose health moved but whose inventory did not', () => {
+    // The reason the member above is safe to key on, and it is the same argument
+    // as the opencode exclusion read the other way: an inventory is not health.
+    // `_cooldown` and `_set_source_blocker` — the only two writers a failing 试跑
+    // reaches — assign `source.state` and nothing else. If this ever moved, the
+    // probe would erase its own answer.
+    const models = [{ id: 'glm-5.2', provenance: 'discovered' as const }];
+    const same = key({}, 'follow', ['src_a'], [source({ id: 'src_a', models })]);
+    expect(
+      key({}, 'follow', ['src_a'], [
+        source({ id: 'src_a', models, state: { status: 'cooldown', retry_at: '2026-07-30T13:00:00Z' } }),
+      ]),
+    ).toBe(same);
+    expect(
+      key({}, 'follow', ['src_a'], [
+        source({ id: 'src_a', models, state: { status: 'needs_action', detail_key: 'models.source.oauth_expired' } }),
+      ]),
+    ).toBe(same);
+    // Nor for the order the inventory happens to come back in.
+    expect(
+      key({}, 'follow', ['src_a'], [
+        source({
+          id: 'src_a',
+          models: [
+            { id: 'b', provenance: 'discovered' },
+            { id: 'a', provenance: 'discovered' },
+          ],
+        }),
+      ]),
+    ).toBe(
+      key({}, 'follow', ['src_a'], [
+        source({
+          id: 'src_a',
+          models: [
+            { id: 'a', provenance: 'discovered' },
+            { id: 'b', provenance: 'discovered' },
+          ],
+        }),
+      ]),
+    );
   });
 
   it('reads opencode by its own selection surface, not by the pick', () => {
@@ -835,7 +912,9 @@ describe('the class: no component decides a repair for itself', () => {
   it('leaves the chain key to its owner', () => {
     const offenders = files.filter((f) => INLINE_CHAIN_KEY.test(read(f)));
     expect(offenders).toEqual([]);
-    expect(read('SourceOrderDrawer.tsx')).toMatch(/chainKey=\{dryRunChainKey\(agent, policy, order\)\}/);
+    expect(read('SourceOrderDrawer.tsx')).toMatch(
+      /chainKey=\{dryRunChainKey\(agent, policy, order, sources\)\}/,
+    );
   });
 
   /**

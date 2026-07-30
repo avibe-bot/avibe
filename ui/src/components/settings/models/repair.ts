@@ -346,6 +346,33 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  * a server-side discriminator — explicitness beside `selected_model_id` — and this
  * stays as it is until there is one.
  *
+ * - the sources' model INVENTORIES, and this one is not the user's edit at all.
+ *   Everything above is a surface the user changes from this page, and the
+ *   paragraph on `mappings` claims 「an inventory change is a real chain change」
+ *   while relying on the pruning of two lists to notice one. It does not always
+ *   notice: an agent with no mappings and an empty `checked` has nothing
+ *   inventory-derived in the key, and under the `follow` policy `order` is a
+ *   recommendation rather than the membership — eligibility runs over the
+ *   inventory (`source_eligible_for_backend`), so a discovery, a key replacement
+ *   or a re-auth elsewhere can move a source in or out of the chain with every
+ *   surface on this page untouched. Another client is enough; so is the same user
+ *   in a second tab.
+ *
+ *   Keying on it is safe for the reason the `selected_model_id` paragraph above is
+ *   about, read the other way: an inventory is not health. The two writers a
+ *   failing 试跑 reaches — `_cooldown` and `_set_source_blocker` — assign
+ *   `source.state` and nothing else, so the probe cannot move this member and the
+ *   self-erasing report that killed both remedies for the OpenCode gap cannot
+ *   happen here. It is `models[].id` only: no `state`, no `usage`, no
+ *   `retry_at`, no `provenance` (which changes without changing eligibility).
+ *
+ *   Scope is every source, not the ones `order` names, precisely because of the
+ *   `follow` case above — under that policy a source can join the chain without
+ *   appearing in `order` first. The cost of being that broad is an unrelated
+ *   source's discovery clearing a report that was still true, and the user re-runs
+ *   一次试跑; the cost of being narrow is a sentence that answers for a supplier
+ *   chain that no longer exists. Only one of those two is a wrong answer.
+ *
  * Excluded on purpose: `agent.current` and everything else about head health. The
  * head moving is what a failing report is FOR.
  */
@@ -353,6 +380,7 @@ export const dryRunChainKey = (
   agent: AgentSupply,
   policy: SourcePolicy,
   order: string[],
+  sources: Source[],
 ): string =>
   [
     policy,
@@ -363,6 +391,10 @@ export const dryRunChainKey = (
       .sort()
       .join(','),
     [...(agent.menu?.checked ?? [])].sort().join(','),
+    sources
+      .map((s) => `${s.id}:${s.models.map((m) => m.id).sort().join('+')}`)
+      .sort()
+      .join(';'),
   ].join('|');
 
 /**
