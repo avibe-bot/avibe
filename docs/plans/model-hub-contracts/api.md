@@ -193,12 +193,14 @@ Eligibility is server-authoritative. An ineligible row carries exactly one close
 ### Mapping and menu enrollment
 
 A mapping or open-menu target is accepted only when its selected source is enrolled
-in the backend's post-mutation effective order. Selecting a target from an eligible
-but non-enrolled source auto-appends that source to the order in the same accepted
-mutation. This is an order edit: `follow` forks to `custom`, an existing `custom`
-order remains `custom`, and the confirm step must surface the appended source before
-acceptance. An ineligible source is never auto-enrolled and the request fails with
-`mapping_target_unavailable`. Evidence at master `05f72ae5`:
+in the backend's post-mutation effective order. Under `follow`, the effective order
+is `ModelHubConfig.effective_source_order`'s recommendation and is exhaustive over
+eligible sources, so an eligible-but-non-enrolled target is representable only under
+`custom`. Acceptance auto-appends that source to the custom order, and the confirm
+step must surface the append. Acceptance never converts policy: a selection that
+does not change the order is not an order edit. An ineligible source is never
+auto-enrolled and the request fails with `mapping_target_unavailable`. Evidence at
+master `05f72ae5`:
 `service.py:1955-1985` validates targets against eligible inventory but does not
 yet require or edit effective-order enrollment; the follow-up consumer lane owns
 that acceptance change.

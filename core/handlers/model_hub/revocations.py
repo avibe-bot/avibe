@@ -8,12 +8,24 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+
+RevocationOperation = Literal[
+    "revoke_credential",
+    "cleanup_orphaned_oauth_material",
+]
+_REVOCATION_OPERATIONS = {
+    "revoke_credential",
+    "cleanup_orphaned_oauth_material",
+}
 
 
 @dataclass(frozen=True)
 class PendingCredentialRevocation:
     source_id: str
     credential_ref: str
+    operation: RevocationOperation = "revoke_credential"
 
 
 class CredentialRevocationJournal:
@@ -36,17 +48,24 @@ class CredentialRevocationJournal:
             PendingCredentialRevocation(
                 source_id=item["source_id"],
                 credential_ref=item["credential_ref"],
+                operation=item.get("operation", "revoke_credential"),
             )
             for item in payload
             if isinstance(item, dict)
             and isinstance(item.get("source_id"), str)
             and isinstance(item.get("credential_ref"), str)
+            and item.get("operation", "revoke_credential")
+            in _REVOCATION_OPERATIONS
         ]
 
     def _write(self, entries: list[PendingCredentialRevocation]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = [
-            {"source_id": entry.source_id, "credential_ref": entry.credential_ref}
+            {
+                "source_id": entry.source_id,
+                "credential_ref": entry.credential_ref,
+                "operation": entry.operation,
+            }
             for entry in entries
         ]
         content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -58,10 +77,20 @@ class CredentialRevocationJournal:
         os.chmod(temp_name, 0o600)
         os.replace(temp_name, self.path)
 
-    def add(self, source_id: str, credential_ref: str) -> None:
+    def add(
+        self,
+        source_id: str,
+        credential_ref: str,
+        *,
+        operation: RevocationOperation = "revoke_credential",
+    ) -> None:
         with self._lock:
             entries = self._read()
-            entry = PendingCredentialRevocation(source_id, credential_ref)
+            entry = PendingCredentialRevocation(
+                source_id,
+                credential_ref,
+                operation,
+            )
             if entry not in entries:
                 entries.append(entry)
                 self._write(entries)

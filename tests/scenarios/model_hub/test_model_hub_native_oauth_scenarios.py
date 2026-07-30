@@ -156,6 +156,7 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
         "flow",
         "source",
         "adopted_by",
+        "skipped_by",
     }
     completed = completion["flow"]
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
@@ -171,6 +172,9 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
     assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
     assert source["credential_ref"] is None
     assert completion["adopted_by"] == []
+    assert completion["skipped_by"] == [
+        {"backend": "codex", "reason": "custom_order"}
+    ]
     assert codex["sources"]["policy"] == "custom"
     assert codex["sources"]["order"] == []
     assert codex["sources"]["eligibility"] == [
@@ -178,6 +182,8 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
             "source_id": source["id"],
             "eligible": True,
             "reason_key": None,
+            "in_current_model_chain": None,
+            "process_availability_reason": None,
         }
     ]
 

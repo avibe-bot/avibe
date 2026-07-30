@@ -41,6 +41,7 @@ from .adapter import (
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
+    RetainedMaterialDisposition,
     SourceBinding,
 )
 from .classification import ResolutionDecision, classify_outcome
@@ -581,11 +582,25 @@ class ModelHubService:
                     except OSError:
                         pass
                     continue
-                try:
-                    await self.adapter.revoke_credential(pending.credential_ref)
-                except Exception as error:
-                    if not self._credential_was_already_revoked(error):
+                if pending.operation == "cleanup_orphaned_oauth_material":
+                    try:
+                        cleaned = (
+                            await self.adapter.cleanup_orphaned_oauth_material(
+                                pending.credential_ref
+                            )
+                        )
+                    except Exception:
                         continue
+                    if not cleaned:
+                        continue
+                else:
+                    try:
+                        await self.adapter.revoke_credential(
+                            pending.credential_ref
+                        )
+                    except Exception as error:
+                        if not self._credential_was_already_revoked(error):
+                            continue
                 try:
                     self.revocations.remove(
                         pending.source_id,
@@ -692,6 +707,38 @@ class ModelHubService:
         if replacement_ref != old_credential_ref:
             await self._rollback_credential(source_id, replacement_ref)
 
+    async def _cleanup_orphaned_hub_material(
+        self,
+        source_id: str,
+        credential_ref: str,
+    ) -> None:
+        journaled = False
+        try:
+            self.revocations.add(
+                source_id,
+                credential_ref,
+                operation="cleanup_orphaned_oauth_material",
+            )
+        except OSError:
+            pass
+        else:
+            journaled = True
+        try:
+            cleaned = await self.adapter.cleanup_orphaned_oauth_material(
+                credential_ref
+            )
+        except Exception:
+            cleaned = False
+        if not cleaned:
+            if not journaled:
+                raise ModelHubError("engine_down", status=503)
+            return
+        if journaled:
+            try:
+                self.revocations.remove(source_id, credential_ref)
+            except OSError:
+                pass
+
     def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
         # The engine may replace OAuth material behind the same opaque ref.
         # Without an old snapshot, fail closed instead of restoring stale supply.
@@ -776,10 +823,25 @@ class ModelHubService:
             if config.agents[backend].sources.policy == "follow" and source_id in config.effective_source_order(backend)
         ]
 
+    def _skipped_by(self, source_id: str) -> list[dict]:
+        config = self.store.load()
+        source = self._source(config, source_id)
+        return [
+            {
+                "backend": backend,
+                "reason": "custom_order",
+            }
+            for backend in MODEL_HUB_BACKENDS
+            if self._eligible_for_agent(source, backend)
+            and config.agents[backend].sources.policy == "custom"
+            and source_id not in config.effective_source_order(backend)
+        ]
+
     def _source_creation_result(self, source: dict) -> dict:
         return {
             "source": source,
             "adopted_by": self._adopted_by(source["id"]),
+            "skipped_by": self._skipped_by(source["id"]),
         }
 
     async def _create_oauth_source(
@@ -942,7 +1004,22 @@ class ModelHubService:
                 else None
             ),
             expires_at_iso=None,
-            credential_ref=source.credential_ref,
+            credential_ref=(
+                source.credential_ref
+                if binding.channel == "hub"
+                else None
+            ),
+            channel=binding.channel,
+            retained_material_disposition=(
+                RetainedMaterialDisposition.FLOW_SOURCE_REF
+                if binding.channel == "hub"
+                else RetainedMaterialDisposition.NONE
+            ),
+            retained_credential_ref=(
+                source.credential_ref
+                if binding.channel == "hub"
+                else None
+            ),
         )
 
     def _completed_reauth_result(
@@ -1202,6 +1279,40 @@ class ModelHubService:
         self.store.save(config)
         return config
 
+    async def _materialize_failed_hub_reauth(
+        self,
+        binding: OAuthFlowBinding,
+        flow: OAuthFlowState,
+        *,
+        config: ModelHubConfig | None = None,
+    ) -> ModelHubConfig | None:
+        disposition = flow.retained_material_disposition
+        if disposition in {
+            RetainedMaterialDisposition.NONE,
+            RetainedMaterialDisposition.FOREIGN_SOURCE_REF,
+        }:
+            return config
+        if disposition in {
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            RetainedMaterialDisposition.UNKNOWN,
+        }:
+            return self._fail_closed_hub_reauth(
+                binding,
+                config=config,
+            )
+        if disposition == RetainedMaterialDisposition.ORPHAN_REF:
+            if (
+                binding.source_id is None
+                or flow.retained_credential_ref is None
+            ):
+                raise ModelHubError("engine_down", status=503)
+            await self._cleanup_orphaned_hub_material(
+                binding.source_id,
+                flow.retained_credential_ref,
+            )
+            return config
+        raise ModelHubError("engine_down", status=503)
+
     async def _materialize_completed_oauth(
         self,
         flow_id: str,
@@ -1216,9 +1327,10 @@ class ModelHubService:
                 and binding.source_id is not None
             ):
                 async with self._mutation_lock:
-                    # error_key is presentation-only until the owner-ruled
-                    # retained-material discriminator lands.
-                    self._fail_closed_hub_reauth(binding)
+                    await self._materialize_failed_hub_reauth(
+                        binding,
+                        flow,
+                    )
             return flow, None
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
@@ -1814,6 +1926,57 @@ class ModelHubService:
             for model in source.models
         }
 
+    def _mapping_target_sources(
+        self,
+        config: ModelHubConfig,
+        backend: str,
+        model_id: str,
+    ) -> list[str]:
+        by_id = {source.id: source for source in config.sources}
+        return [
+            source_id
+            for source_id in config.recommended_source_order(backend)
+            if any(
+                model.id == model_id
+                for model in by_id[source_id].models
+            )
+        ]
+
+    def _opencode_target_sources(
+        self,
+        config: ModelHubConfig,
+        identifier: str,
+    ) -> list[str]:
+        by_id = {source.id: source for source in config.sources}
+        return [
+            source_id
+            for source_id in config.recommended_source_order("opencode")
+            if any(
+                opencode_model_id(by_id[source_id].vendor, model.id)
+                == identifier
+                for model in by_id[source_id].models
+            )
+        ]
+
+    @staticmethod
+    def _enroll_target_sources(
+        config: ModelHubConfig,
+        agent: ModelHubAgentSupplyConfig,
+        target_source_ids: list[str],
+    ) -> None:
+        effective_order = config.effective_source_order(agent.backend)
+        enrolled = set(effective_order)
+        appended = []
+        for source_id in target_source_ids:
+            if source_id in enrolled:
+                continue
+            enrolled.add(source_id)
+            appended.append(source_id)
+        if not appended:
+            return
+        agent.sources.policy = "custom"
+        agent.sources.order = [*effective_order, *appended]
+
     def _available_opencode_identifiers(self, config: ModelHubConfig) -> set[str]:
         return {
             opencode_model_id(source.vendor, model.id)
@@ -1880,12 +2043,36 @@ class ModelHubService:
             }
             for model_id in menu_model_ids
         ]
+        selected_model_id = (
+            (resolution.requested_model or None)
+            if agent.mode == "hub"
+            else None
+        )
+        current_chain_source_ids = {
+            source.id
+            for source in resolution.matching_sources
+        }
         sources = (
             {
                 "policy": agent.sources.policy,
                 "order": config.effective_source_order(agent.backend),
                 "eligibility": [
-                    self._source_eligibility(source, agent.backend)
+                    {
+                        **self._source_eligibility(
+                            source,
+                            agent.backend,
+                        ),
+                        "in_current_model_chain": (
+                            source.id in current_chain_source_ids
+                            if selected_model_id is not None
+                            else None
+                        ),
+                        "process_availability_reason": (
+                            "native_cli_unavailable"
+                            if source.id in unavailable_source_ids
+                            else None
+                        ),
+                    }
                     for source in sorted(config.sources, key=lambda item: item.id)
                 ],
             }
@@ -1924,7 +2111,7 @@ class ModelHubService:
         return {
             **agent.to_payload(),
             "selected_by_agent": selected_by_agent,
-            "selected_model_id": (resolution.requested_model or None) if agent.mode == "hub" else None,
+            "selected_model_id": selected_model_id,
             "current": current,
             "sources": sources,
             "supply_status": (
@@ -1962,9 +2149,26 @@ class ModelHubService:
                 parsed = [ModelHubMappingConfig.from_payload(mapping) for mapping in mappings]
             except ValueError as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            available = self._available_model_ids(config, backend)
-            if any(mapping.target_model_id not in available for mapping in parsed):
+            target_sources = {
+                mapping.target_model_id: self._mapping_target_sources(
+                    config,
+                    backend,
+                    mapping.target_model_id,
+                )
+                for mapping in parsed
+            }
+            if any(not source_ids for source_ids in target_sources.values()):
                 raise ModelHubError("mapping_target_unavailable")
+            self._enroll_target_sources(
+                config,
+                agent,
+                [
+                    source_id
+                    for mapping in parsed
+                    if mapping.enabled
+                    for source_id in target_sources[mapping.target_model_id]
+                ],
+            )
             agent.mappings = parsed
             self.store.save(config)
             return self._agent_payload(config, agent)
@@ -1977,9 +2181,24 @@ class ModelHubService:
                 parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            available = self._available_opencode_identifiers(config)
-            if any(identifier not in available for identifier in parsed.checked):
+            target_sources = {
+                identifier: self._opencode_target_sources(
+                    config,
+                    identifier,
+                )
+                for identifier in parsed.checked
+            }
+            if any(not source_ids for source_ids in target_sources.values()):
                 raise ModelHubError("mapping_target_unavailable")
+            self._enroll_target_sources(
+                config,
+                agent,
+                [
+                    source_id
+                    for identifier in parsed.checked
+                    for source_id in target_sources[identifier]
+                ],
+            )
             agent.menu = parsed
             self.store.save(config)
             return self._agent_payload(config, agent)
@@ -2531,9 +2750,13 @@ class ModelHubService:
                         pending_flow.state == "failed"
                         and pending_binding.channel == "hub"
                     ):
-                        config = self._fail_closed_hub_reauth(
-                            pending_binding,
-                            config=config,
+                        config = (
+                            await self._materialize_failed_hub_reauth(
+                                pending_binding,
+                                pending_flow,
+                                config=config,
+                            )
+                            or config
                         )
                         source = self._source(config, source_id)
                     try:
