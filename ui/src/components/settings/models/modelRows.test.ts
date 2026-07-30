@@ -8,7 +8,7 @@ import {
   modelChainRequests,
   modelHasOffOrderSupplier,
   modelIssueCount,
-  modelNeedsAction,
+  modelNeedsAttention,
   modelSupplierCounts,
   orderedRouteSources,
   routableMappings,
@@ -169,7 +169,7 @@ describe('model row projection', () => {
   });
 
   it('attributes runtime failure only to a model whose current head uses the managed channel', () => {
-    expect(modelNeedsAction(agent(), 'builtin-model', read(), runtime('down'))).toBe(true);
+    expect(modelNeedsAttention(agent(), 'builtin-model', read(), runtime('down'))).toBe(true);
     const native = read({ chain: [{
       source_id: 'src_native',
       channel: 'native_cli',
@@ -180,14 +180,18 @@ describe('model row projection', () => {
       reason: null,
       retry_at: null,
     }] });
-    expect(modelNeedsAction(agent(), 'builtin-model', native, runtime('down'))).toBe(false);
+    expect(modelNeedsAttention(agent(), 'builtin-model', native, runtime('down'))).toBe(false);
   });
 
-  it('does not turn an automatic cooldown into manual work', () => {
-    expect(modelNeedsAction(agent(), 'builtin-model', read({ supply_state: 'waiting' }))).toBe(false);
+  it('keeps an automatic cooldown in the non-healthy rollup', () => {
+    const waiting = read({ supply_state: 'waiting' });
+    expect(modelNeedsAttention(agent(), 'builtin-model', waiting)).toBe(true);
+    expect(modelIssueCount([agent({ builtin_models: ['builtin-model'], model_supply: [] })], {
+      [modelChainKey('claude', 'builtin-model')]: waiting,
+    })).toBe(1);
   });
 
   it('does not claim health when the live chain could not be read', () => {
-    expect(modelNeedsAction(agent(), 'builtin-model', { kind: 'error' })).toBe(true);
+    expect(modelNeedsAttention(agent(), 'builtin-model', { kind: 'error' })).toBe(true);
   });
 });

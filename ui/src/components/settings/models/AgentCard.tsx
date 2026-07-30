@@ -34,7 +34,7 @@ import {
   listedModelIds,
   modelChainKey,
   modelHasOffOrderSupplier,
-  modelNeedsAction,
+  modelNeedsAttention,
   type ModelChainIndex,
   type ModelChainRead,
 } from './modelRows';
@@ -292,7 +292,9 @@ const ModelRow: React.FC<{
   const head = runnableHead(read);
   const headIndex = read?.kind === 'ready' && head ? read.chain.chain.indexOf(head) : -1;
   const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
-  const needsAction = modelNeedsAction(agent, modelId, read, runtime);
+  const needsAttention = modelNeedsAttention(agent, modelId, read, runtime);
+  const recoversAutomatically = read?.kind === 'ready' && read.chain.supply_state === 'waiting';
+  const needsAction = needsAttention && !recoversAutomatically;
   const nativeProcessBlock = read?.kind === 'ready' && read.chain.supply_state === 'interrupted'
     ? read.chain.chain.find((link) => link.reason === 'native_cli_unavailable') ?? null
     : null;
@@ -402,7 +404,7 @@ const ModelRow: React.FC<{
   ) : null;
 
   return (
-    <div className={cn('border-b border-border last:border-b-0', current && 'bg-mint-soft/35')} data-model-issue={needsAction || undefined}>
+    <div className={cn('border-b border-border last:border-b-0', current && 'bg-mint-soft/35')} data-model-issue={needsAttention || undefined}>
       <div className="group grid min-w-0 grid-cols-[minmax(0,1fr)] items-center gap-3 px-4 py-3 sm:grid-cols-[minmax(180px,0.9fr)_minmax(260px,1.4fr)_auto] sm:px-5">
         <button
           type="button"
@@ -531,7 +533,7 @@ const AgentModelCard: React.FC<{
   const { Icon, accent } = backendVisual(agent.backend);
   const allModels = listedModelIds(agent);
   const models = issuesOnly
-    ? allModels.filter((modelId) => modelNeedsAction(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime))
+    ? allModels.filter((modelId) => modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime))
     : allModels;
   const emptySelection = agentNeedsModelSelection(agent);
   if (issuesOnly && !emptySelection && models.length === 0) return null;
@@ -688,7 +690,7 @@ export const AgentCard: React.FC<{
       {props.issuesOnly && !agents.some((agent) => {
         if (agentNeedsModelSelection(agent)) return true;
         return listedModelIds(agent).some((modelId) =>
-          modelNeedsAction(agent, modelId, props.chains[modelChainKey(agent.backend, modelId)], props.runtime),
+          modelNeedsAttention(agent, modelId, props.chains[modelChainKey(agent.backend, modelId)], props.runtime),
         );
       }) && (
         <div className="rounded-xl border border-border bg-background px-4 py-10 text-center text-[12.5px] text-muted">

@@ -270,6 +270,27 @@ describe('AgentCard model list', () => {
     expect(html).not.toContain('claude-sonnet-4-6');
   });
 
+  it('keeps a cooling model in the affected view without offering manual repair', () => {
+    const waiting = chain('claude-opus-4-6', {
+      supply_state: 'waiting',
+      chain: [{
+        source_id: 'src_a',
+        channel: 'hub',
+        via_mapping: false,
+        resolved_model_id: null,
+        health: 'cooldown',
+        runnable: false,
+        reason: null,
+        retry_at: '2026-07-31T04:00:00Z',
+      }],
+    });
+    const html = render([agent({ builtin_models: ['claude-opus-4-6'] })], chains(waiting), true);
+    expect(html).toContain('claude-opus-4-6');
+    expect(html).toContain(zh.settings.models.modelStatus.cooldown);
+    expect(html).toContain('data-model-issue="true"');
+    expect(html).not.toContain(zh.settings.models.routes.manual);
+  });
+
   it('gives a chain read failure a retry door', () => {
     const html = render([agent()], {
       [modelChainKey('claude', 'claude-opus-4-6')]: { kind: 'error' },

@@ -93,7 +93,8 @@ export function modelChainRequests(agents: AgentSupply[]): ModelChainRequest[] {
   return [...requests.values()];
 }
 
-export function modelNeedsAction(
+/** Whether a row belongs in the non-healthy rollup, including automatic cooldowns. */
+export function modelNeedsAttention(
   agent: AgentSupply,
   modelId: string,
   read: ModelChainRead | undefined,
@@ -104,7 +105,7 @@ export function modelNeedsAction(
   if (read?.kind === 'ready') {
     const head = read.chain.chain.find((link) => link.runnable);
     if (head?.channel === 'hub' && runtime && runtime.status.health !== 'ok') return true;
-    return read.chain.supply_state === 'interrupted';
+    return read.chain.supply_state !== 'ok';
   }
   return agent.model_supply?.find((model) => model.model_id === modelId)?.chain_length === 0;
 }
@@ -120,7 +121,7 @@ export function modelIssueCount(
 ): number {
   return agents.reduce((count, agent) => {
     const modelIssues = listedModelIds(agent).filter((modelId) =>
-      modelNeedsAction(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime),
+      modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime),
     ).length;
     return count + modelIssues + (agentNeedsModelSelection(agent) ? 1 : 0);
   }, 0);
