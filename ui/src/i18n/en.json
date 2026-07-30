@@ -2972,6 +2972,7 @@
       "voiceEmpty": "No speech was detected in this recording.",
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
+      "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
       "removeAttachment": "Remove",
       "dropOverlay": "Drop files to attach"
     },

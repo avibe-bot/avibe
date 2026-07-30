@@ -15,6 +15,7 @@ import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import {
   $createParagraphNode,
+  $createRangeSelection,
   $createTextNode,
   $getRoot,
   $getSelection,
@@ -22,11 +23,13 @@ import {
   $isLineBreakNode,
   $isRangeSelection,
   $isTextNode,
+  $setSelection,
   COMMAND_PRIORITY_HIGH,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
   type EditorState,
   type LexicalNode,
+  type PointType,
 } from 'lexical';
 import {
   BeautifulMentionsPlugin,
@@ -42,6 +45,11 @@ import { filesFromClipboard } from '../../lib/clipboardFiles';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn } from '../../lib/utils';
 import { dedupeReferences, type MentionReference } from '../../lib/mentions';
+import {
+  voiceInsertionSnapshot,
+  voiceInsertionText,
+  type VoiceInsertionSnapshot,
+} from '../../lib/voiceCleanup';
 
 export type AgentSearchResult = {
   name: string;
@@ -56,6 +64,12 @@ export interface MentionEditorHandle {
   clear: () => void;
   /** Append free text at the end (voice transcript) without disturbing chips. */
   append: (text: string) => void;
+  /** Capture the serialized draft and logical selection before a toolbar click
+   *  moves DOM focus away from the editor. */
+  captureSelection: () => VoiceInsertionSnapshot;
+  /** Replace a captured logical range while preserving untouched mention chips.
+   *  Returns false if the draft changed or the range can no longer be mapped. */
+  replaceSelection: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
   /** Replace the whole editor with plain text (restore on a failed send). */
   setText: (text: string) => void;
   /** Insert a mention chip at the current cursor — same node a picker-selected
@@ -138,13 +152,104 @@ function nodeToMarkerText(node: LexicalNode, refs: MentionReference[]): string {
 }
 
 function serializeEditorState(state: EditorState): { text: string; references: MentionReference[] } {
-  return state.read(() => {
-    const refs: MentionReference[] = [];
-    const blocks = $getRoot()
-      .getChildren()
-      .map((block) => nodeToMarkerText(block, refs));
-    return { text: blocks.join('\n'), references: dedupeReferences(refs) };
-  });
+  return state.read(serializeCurrentEditor);
+}
+
+function serializeCurrentEditor(): { text: string; references: MentionReference[] } {
+  const refs: MentionReference[] = [];
+  const blocks = $getRoot()
+    .getChildren()
+    .map((block) => nodeToMarkerText(block, refs));
+  return { text: blocks.join('\n'), references: dedupeReferences(refs) };
+}
+
+const serializedNodeLength = (node: LexicalNode): number => nodeToMarkerText(node, []).length;
+
+type SerializedPoint = {
+  key: string;
+  offset: number;
+  type: 'text' | 'element';
+};
+
+function serializedOffsetForPoint(point: PointType): number | null {
+  const root = $getRoot();
+  const visit = (node: LexicalNode, base: number, rootLevel = false): number | null => {
+    if (node.getKey() === point.key) {
+      if (point.type === 'text' && $isTextNode(node)) {
+        const serialized = nodeToMarkerText(node, []);
+        if ($isBeautifulMentionNode(node)) {
+          return base + (point.offset === 0 ? 0 : serialized.length);
+        }
+        return base + Math.min(point.offset, serialized.length);
+      }
+      if (point.type === 'element' && $isElementNode(node)) {
+        const children = node.getChildren();
+        let offset = base;
+        const childCount = Math.min(point.offset, children.length);
+        for (let index = 0; index < childCount; index += 1) {
+          offset += serializedNodeLength(children[index]);
+          if (rootLevel && index < children.length - 1) offset += 1;
+        }
+        return offset;
+      }
+    }
+    if (!$isElementNode(node)) return null;
+    const children = node.getChildren();
+    let offset = base;
+    for (let index = 0; index < children.length; index += 1) {
+      const found = visit(children[index], offset);
+      if (found !== null) return found;
+      offset += serializedNodeLength(children[index]);
+      if (rootLevel && index < children.length - 1) offset += 1;
+    }
+    return null;
+  };
+  return visit(root, 0, true);
+}
+
+function serializedPointAtOffset(target: number): SerializedPoint | null {
+  const visit = (node: LexicalNode, base: number, rootLevel = false): SerializedPoint | null => {
+    if ($isTextNode(node)) {
+      const serialized = nodeToMarkerText(node, []);
+      const textLength = node.getTextContentSize();
+      if ($isBeautifulMentionNode(node)) {
+        if (target === base) return { key: node.getKey(), offset: 0, type: 'text' };
+        if (target === base + serialized.length) {
+          return { key: node.getKey(), offset: textLength, type: 'text' };
+        }
+        return null;
+      }
+      if (target >= base && target <= base + serialized.length) {
+        return { key: node.getKey(), offset: target - base, type: 'text' };
+      }
+      return null;
+    }
+    if (!$isElementNode(node)) return null;
+    const children = node.getChildren();
+    let offset = base;
+    if (target === offset) return { key: node.getKey(), offset: 0, type: 'element' };
+    for (let index = 0; index < children.length; index += 1) {
+      const childEnd = offset + serializedNodeLength(children[index]);
+      if (target > offset && target < childEnd) {
+        return visit(children[index], offset);
+      }
+      if (target === childEnd) {
+        return { key: node.getKey(), offset: index + 1, type: 'element' };
+      }
+      offset = childEnd;
+      if (rootLevel && index < children.length - 1) {
+        offset += 1;
+        if (target === offset) {
+          const next = children[index + 1];
+          return $isElementNode(next)
+            ? { key: next.getKey(), offset: 0, type: 'element' }
+            : visit(next, offset);
+        }
+      }
+    }
+    return null;
+  };
+  return visit($getRoot(), 0, true);
 }
 
 // Enter submits — except Shift+Enter (newline), mid-IME composition (CJK), while
@@ -254,6 +359,37 @@ function BootstrapPlugin({
           const prefix = root.getTextContent().length > 0 ? ' ' : '';
           selection.insertText(`${prefix}${text}`);
         }),
+      captureSelection: () => editor.getEditorState().read(() => {
+        const { text } = serializeCurrentEditor();
+        const selection = $getSelection();
+        if (!$isRangeSelection(selection)) {
+          return voiceInsertionSnapshot(text, text.length, text.length);
+        }
+        const anchor = serializedOffsetForPoint(selection.anchor);
+        const focus = serializedOffsetForPoint(selection.focus);
+        if (anchor === null || focus === null) {
+          return voiceInsertionSnapshot(text, text.length, text.length);
+        }
+        return voiceInsertionSnapshot(text, Math.min(anchor, focus), Math.max(anchor, focus));
+      }),
+      replaceSelection: (snapshot, text) => {
+        let replaced = false;
+        editor.update(() => {
+          const current = serializeCurrentEditor().text;
+          const insertion = voiceInsertionText(current, snapshot, text);
+          if (insertion === null) return;
+          const start = serializedPointAtOffset(snapshot.start);
+          const end = serializedPointAtOffset(snapshot.end);
+          if (!start || !end) return;
+          const selection = $createRangeSelection();
+          selection.anchor.set(start.key, start.offset, start.type);
+          selection.focus.set(end.key, end.offset, end.type);
+          $setSelection(selection);
+          selection.insertText(insertion);
+          replaced = true;
+        });
+        return replaced;
+      },
       setText: (text: string) =>
         editor.update(() => {
           const root = $getRoot();
