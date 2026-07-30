@@ -168,6 +168,93 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.emit_result_message.await_args.args[1], "steered result")
         self.assertFalse(agent._has_pending_requests(composite_key))
 
+    async def test_successful_steer_supersedes_a_buffered_primary_result(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-buffered-result:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        consume_buffered_result = asyncio.Event()
+        buffered_result_processed = asyncio.Event()
+        final_result_ready = asyncio.Event()
+
+        class _BufferedClient:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await consume_buffered_result.wait()
+                    buffered = _ResultMessage()
+                    buffered.result = "buffered primary result"
+                    yield buffered
+                    await final_result_ready.wait()
+                    final = _ResultMessage()
+                    final.result = "steered result"
+                    yield final
+
+                return _iterate()
+
+        client = _BufferedClient()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-buffered-result",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        terminal_claim_superseded = agent._terminal_claim_superseded
+
+        def _observe_terminal_claim(*args):
+            superseded = terminal_claim_superseded(*args)
+            if asyncio.current_task() is receiver_task:
+                buffered_result_processed.set()
+            return superseded
+
+        agent._terminal_claim_superseded = _observe_terminal_claim
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-buffered-result",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="continue after buffered result",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        release_query.set()
+        receipt = await steer_task
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+
+        consume_buffered_result.set()
+        await buffered_result_processed.wait()
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        agent.emit_result_message.assert_not_awaited()
+
+        final_result_ready.set()
+        await receiver_task
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "steered result")
+        self.assertFalse(agent._has_pending_requests(composite_key))
+
     async def test_ambiguous_steer_retains_owner_past_a_concurrent_primary_result(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
@@ -639,7 +726,9 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
         agent._detect_message_type = lambda _message: "system"
-        agent.claude_client.format_message = lambda *args, **kwargs: "invalid bearer token"
+        agent.claude_client.format_message = (
+            lambda *args, **kwargs: "Failed to authenticate. API Error: 401 Invalid bearer token"
+        )
         agent._handle_auth_failure_result = AsyncMock(return_value=True)
         query_started = asyncio.Event()
         release_query = asyncio.Event()

@@ -77,6 +77,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
+        self._steering_terminal_barriers: dict[str, int] = {}
         self._steering_closing: set[str] = set()
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
@@ -609,12 +610,39 @@ class ClaudeAgent(BaseAgent):
         generations = getattr(self, "_steering_generations", None)
         if generations is not None:
             generations.pop(composite_key, None)
+        barriers = getattr(self, "_steering_terminal_barriers", None)
+        if barriers is not None:
+            barriers.pop(composite_key, None)
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
     def _advance_steering_generation(self, composite_key: str) -> None:
         current_generation = self._steering_generation(composite_key)
         self._steering_generations[composite_key] = current_generation + 1
+        barriers = getattr(self, "_steering_terminal_barriers", None)
+        if barriers is None:
+            barriers = {}
+            self._steering_terminal_barriers = barriers
+        barriers[composite_key] = barriers.get(composite_key, 0) + 1
+
+    def _terminal_claim_superseded(
+        self,
+        composite_key: str,
+        expected_steering_generation: int,
+    ) -> bool:
+        """Consume one pre-steer terminal frame, including SDK-buffered frames."""
+        generation_changed = expected_steering_generation != self._steering_generation(
+            composite_key
+        )
+        barriers = getattr(self, "_steering_terminal_barriers", None)
+        buffered_terminal = bool(barriers and barriers.get(composite_key, 0) > 0)
+        if buffered_terminal:
+            remaining = barriers[composite_key] - 1
+            if remaining:
+                barriers[composite_key] = remaining
+            else:
+                barriers.pop(composite_key, None)
+        return generation_changed or buffered_terminal
 
     def _touch_steering_activity(self, composite_key: str) -> None:
         touch_session_activity = getattr(
@@ -1022,9 +1050,9 @@ class ClaudeAgent(BaseAgent):
                             diagnostic = self._terminal_backend_failure(message, assistant_text)
                             if (
                                 diagnostic is not None
-                                and (
-                                    terminal_steering_generation
-                                    != self._steering_generation(composite_key)
+                                and self._terminal_claim_superseded(
+                                    composite_key,
+                                    terminal_steering_generation,
                                 )
                             ):
                                 self._suppressed_synthetic_results.add(composite_key)
@@ -1128,11 +1156,20 @@ class ClaudeAgent(BaseAgent):
                             get_relative_path=lambda path: self.get_relative_path(path, context),
                             formatter=formatter,
                         )
+                        system_is_auth_failure = self._is_auth_failure_result(
+                            getattr(message, "subtype", "") or "",
+                            formatted_message,
+                        )
                         async with self._steering_lock(composite_key):
                             if (
                                 composite_key in self._steering_closing_keys()
-                                or terminal_steering_generation
-                                != self._steering_generation(composite_key)
+                                or (
+                                    system_is_auth_failure
+                                    and self._terminal_claim_superseded(
+                                        composite_key,
+                                        terminal_steering_generation,
+                                    )
+                                )
                             ):
                                 logger.info(
                                     "Ignoring Claude system terminal superseded by steering or teardown for %s",
@@ -1229,8 +1266,10 @@ class ClaudeAgent(BaseAgent):
                         async with self._steering_lock(composite_key):
                             if (
                                 composite_key in self._steering_closing_keys()
-                                or terminal_steering_generation
-                                != self._steering_generation(composite_key)
+                                or self._terminal_claim_superseded(
+                                    composite_key,
+                                    terminal_steering_generation,
+                                )
                             ):
                                 logger.info(
                                     "Ignoring Claude terminal result superseded by steering or teardown for %s",
@@ -2427,8 +2466,10 @@ class ClaudeAgent(BaseAgent):
             async with self._steering_lock(composite_key):
                 if (
                     (composite_key in self._steering_closing_keys() and not allow_closing)
-                    or expected_steering_generation
-                    != self._steering_generation(composite_key)
+                    or self._terminal_claim_superseded(
+                        composite_key,
+                        expected_steering_generation,
+                    )
                 ):
                     logger.info(
                         "Ignoring Claude Activity terminal output superseded by steering for %s",
@@ -2951,14 +2992,7 @@ class ClaudeAgent(BaseAgent):
         subtype: str,
         text: Optional[str],
     ) -> bool:
-        if not text or not text.strip():
-            return False
-
-        normalized_subtype = (subtype or "").strip().lower()
-        if normalized_subtype not in {"error", "failed"}:
-            return False
-
-        if not classify_auth_error("claude", text):
+        if not self._is_auth_failure_result(subtype, text):
             return False
 
         # The reused receiver still carries an EARLIER turn's ``turn_token``; adopt
@@ -2985,6 +3019,15 @@ class ClaudeAgent(BaseAgent):
                 preserve_pending_request_state=True,
             )
         return handled
+
+    @staticmethod
+    def _is_auth_failure_result(subtype: str, text: Optional[str]) -> bool:
+        return bool(
+            text
+            and text.strip()
+            and (subtype or "").strip().lower() in {"error", "failed"}
+            and classify_auth_error("claude", text)
+        )
 
     @staticmethod
     def _error_value_text(value) -> str:

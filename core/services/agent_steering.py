@@ -63,14 +63,16 @@ def result(
 
 def _context_session_ids(context: Any) -> set[str]:
     payload = getattr(context, "platform_specific", None) or {}
-    values: set[str] = set()
     target = payload.get("agent_session_target") if isinstance(payload, dict) else None
     if isinstance(target, dict):
-        values.add(str(target.get("id") or "").strip())
+        target_id = str(target.get("id") or "").strip()
+        if target_id:
+            return {target_id}
     if isinstance(payload, dict):
-        values.add(str(payload.get("agent_session_id") or "").strip())
-    values.discard("")
-    return values
+        legacy_id = str(payload.get("agent_session_id") or "").strip()
+        if legacy_id:
+            return {legacy_id}
+    return set()
 
 
 def _active_targets(controller: Any, backend: str, session_id: str) -> list[ActiveSteerTarget]:

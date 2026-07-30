@@ -887,6 +887,39 @@ async def test_opencode_poll_keeps_owner_until_failed_status_probe_recovers() ->
 
 
 @pytest.mark.anyio
+async def test_opencode_status_reconciliation_failures_are_bounded() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status_error=ConnectionError("status unavailable"),
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        with pytest.raises(ConnectionError, match="status unavailable"):
+            await asyncio.wait_for(
+                poll_server.list_messages("opencode-session", primary.working_path),
+                timeout=1,
+            )
+        assert server.list_calls == 3
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -1092,6 +1125,31 @@ async def test_shared_guard_disambiguates_concurrent_gates_by_expected_turn_iden
         assert [method for method, _params in second_transport.calls] == ["turn/steer"]
     finally:
         await _cancel_tasks(first_task, second_task)
+
+
+@pytest.mark.anyio
+async def test_shared_service_prefers_explicit_session_target_over_legacy_id() -> None:
+    primary = _primary_request(session_id="current-session", backend="codex")
+    primary.context.platform_specific["agent_session_id"] = "stale-session"
+    gate_task = await _held_task()
+    transport = _CodexTransport()
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+    agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "codex-thread",
+        primary.working_path,
+    )
+    agent._transports = {primary.working_path: transport}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        assert active_steer_identity(controller, "codex", "stale-session") is None
+        assert active_steer_identity(controller, "codex", "current-session") == (
+            "logical-turn",
+            "codex-turn",
+        )
+    finally:
+        await _cancel_tasks(gate_task)
 
 
 @pytest.mark.anyio

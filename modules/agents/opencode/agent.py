@@ -50,6 +50,7 @@ from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
+_STATUS_RECONCILIATION_FAILURE_LIMIT = 3
 
 
 def _task_is_stopping(task: asyncio.Task) -> bool:
@@ -125,6 +126,7 @@ class _SteeringAwareOpenCodeServer:
         )
 
     async def list_messages(self, session_id: str, directory: str) -> list[Dict[str, Any]]:
+        status_failures = 0
         while True:
             wait_for_insert = False
             async with self._state.lock:
@@ -141,8 +143,12 @@ class _SteeringAwareOpenCodeServer:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
                     except Exception:
+                        status_failures += 1
+                        if status_failures >= _STATUS_RECONCILIATION_FAILURE_LIMIT:
+                            raise
                         wait_for_insert = True
                     else:
+                        status_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
                             wait_for_insert = True
                         else:
