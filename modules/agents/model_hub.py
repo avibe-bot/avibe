@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,7 @@ from core.handlers.model_hub.resolver import (
     source_eligible_for_backend,
 )
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from vibe.i18n import t as i18n_t
 
@@ -241,7 +243,7 @@ def _localized_launch_error(
     requested_model: str,
     error: ModelHubError,
 ) -> ModelHubError:
-    failure = getattr(error, "launch_failure", None)
+    failure = error.data
     if not isinstance(failure, dict):
         return error
     language = str(
@@ -287,6 +289,7 @@ def _localized_launch_error(
             blockers=blockers,
         ),
         supply_state=error.supply_state,
+        data=error.data,
     )
 
 
@@ -398,6 +401,14 @@ class ModelHubRuntimeRouter:
         *,
         verified_oauth: bool = False,
     ) -> bool:
+        runtime_config = getattr(load_config_or_default().agents, backend)
+        cli_path = str(getattr(runtime_config, "cli_path", "") or "").strip()
+        if (
+            not bool(getattr(runtime_config, "enabled", False))
+            or not cli_path
+            or shutil.which(os.path.expanduser(cli_path)) is None
+        ):
+            return False
         if backend == "claude":
             from vibe.claude_config import read_claude_settings_env
 
@@ -531,6 +542,7 @@ class ModelHubRuntimeRouter:
         turn_id: Optional[str],
         requested_model_id: Optional[str] = None,
         resolved_model_id: Optional[str] = None,
+        source_id: Optional[str] = None,
         via_mapping: bool = False,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
@@ -540,6 +552,7 @@ class ModelHubRuntimeRouter:
                 turn_id=turn_id,
                 requested_model_id=requested_model_id,
                 resolved_model_id=resolved_model_id,
+                source_id=source_id,
                 via_mapping=via_mapping,
             )
         await self.service._ensure_engine_synced()
@@ -787,13 +800,15 @@ class ModelHubRuntimeRouter:
                     now=self.service.now(),
                 )
                 self._last_supply_state[supply_key] = current_state
-        error = ModelHubError(
+        return ModelHubError(
             "mapping_target_unavailable",
             status=409,
             supply_state=supply_state,
+            data=self._launch_failure(
+                config,
+                resolution,
+            ),
         )
-        error.launch_failure = self._launch_failure(config, resolution)
-        return error
 
     def settle_turn(
         self,
@@ -818,11 +833,14 @@ class ModelHubRuntimeRouter:
         self,
         backend: BackendName,
         process_scope: str,
+        *,
+        terminal_turn_id: Optional[str] = None,
     ) -> None:
         if self.turn_gateway is not None:
             self.turn_gateway.correlation.retire_scope(
                 backend,
                 process_scope,
+                terminal_turn_id=terminal_turn_id,
             )
 
     def turn_mode(self, backend: BackendName) -> TurnMode:
@@ -901,6 +919,7 @@ class ModelHubRuntimeRouter:
                 turn_id=turn_id,
                 requested_model_id=requested_model,
                 resolved_model_id=target_model,
+                source_id=source.id,
                 via_mapping=resolution.mapping_applied,
             )
             runtime_model = target_model

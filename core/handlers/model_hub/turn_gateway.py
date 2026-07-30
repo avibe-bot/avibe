@@ -72,18 +72,20 @@ class ModelHubTurnGateway:
         turn_id: Optional[str] = None,
         requested_model_id: Optional[str] = None,
         resolved_model_id: Optional[str] = None,
+        source_id: Optional[str] = None,
         via_mapping: bool = False,
     ) -> tuple[str, str]:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(backend, scope, turn_id)
-        if requested_model_id and resolved_model_id:
+        if requested_model_id and resolved_model_id and source_id:
             self.correlation.prepare_gateway_turn(
                 backend=backend,
                 token=token,
                 requested_model_id=requested_model_id,
                 resolved_model_id=resolved_model_id,
+                source_id=source_id,
                 via_mapping=via_mapping,
             )
         await self._ensure_started()
@@ -141,16 +143,36 @@ class ModelHubTurnGateway:
             return self._error_response(status=401, code="authentication_error")
         endpoint = request.match_info["endpoint"].strip("/")
         if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+            self.correlation.fail_gateway_validation(
+                backend=backend,
+                token=token,
+                reason="protocol_error",
+            )
             return self._error_response(status=404, code="not_found_error")
         try:
             payload = await request.json(loads=json.loads)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            self.correlation.fail_gateway_validation(
+                backend=backend,
+                token=token,
+                reason="invalid_parameter",
+            )
             return self._error_response(status=400, code="invalid_request_error")
         if not isinstance(payload, dict):
+            self.correlation.fail_gateway_validation(
+                backend=backend,
+                token=token,
+                reason="invalid_parameter",
+            )
             return self._error_response(status=400, code="invalid_request_error")
         model_id = payload.get("model")
         stream = payload.get("stream", False)
         if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
+            self.correlation.fail_gateway_validation(
+                backend=backend,
+                token=token,
+                reason="invalid_parameter",
+            )
             return self._error_response(status=400, code="invalid_request_error")
 
         turn_id = self.correlation.begin_gateway_request(

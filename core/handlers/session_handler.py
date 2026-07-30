@@ -1152,7 +1152,26 @@ class SessionHandler(BaseHandler):
                 label="claude",
             )
         except Exception as exc:
-            self._retire_model_hub_process_scope(composite_key)
+            router = getattr(self.controller, "model_hub_runtime", None)
+            record_failure = getattr(router, "record_native_failure", None)
+            if callable(record_failure):
+                try:
+                    await record_failure(context, str(exc))
+                except Exception:
+                    logger.warning(
+                        "Failed to record Model Hub Claude startup failure",
+                        exc_info=True,
+                    )
+            terminal_turn_id = str(
+                (getattr(context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            self._retire_model_hub_process_scope(
+                composite_key,
+                terminal_turn_id=terminal_turn_id or None,
+            )
             stderr_text = "\n".join(claude_stderr_lines)
             match = CLAUDE_NO_CONVERSATION_RE.search(stderr_text) or CLAUDE_NO_CONVERSATION_RE.search(str(exc))
             if match:
@@ -1436,11 +1455,23 @@ class SessionHandler(BaseHandler):
             return False
         return bool(agent and getattr(agent, "backend", None) == backend)
 
-    def _retire_model_hub_process_scope(self, composite_key: str) -> None:
+    def _retire_model_hub_process_scope(
+        self,
+        composite_key: str,
+        *,
+        terminal_turn_id: Optional[str] = None,
+    ) -> None:
         router = getattr(self.controller, "model_hub_runtime", None)
         retire = getattr(router, "retire_process_scope", None)
         if callable(retire):
-            retire("claude", composite_key)
+            if terminal_turn_id is None:
+                retire("claude", composite_key)
+            else:
+                retire(
+                    "claude",
+                    composite_key,
+                    terminal_turn_id=terminal_turn_id,
+                )
 
     async def cleanup_session(
         self,

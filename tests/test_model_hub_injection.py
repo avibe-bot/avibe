@@ -561,6 +561,7 @@ def test_prelaunch_supply_failure_copy_is_shared_across_backends(
     assert str(exc_info.value) == (
         "模型 missing-model 没有已启用的来源。请前往 Models 配置。"
     )
+    assert exc_info.value.data["copy_key"] == "no_enabled_source"
 
 
 def test_prelaunch_blocker_details_are_localized(
@@ -1128,11 +1129,31 @@ def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(tmp_path: Path,
     config_path = codex_home / "config.toml"
     auth_path.write_text(json.dumps({"tokens": {"access_token": "fixture-token"}}))
     config_path.write_text("")
+    codex_executable = tmp_path / "codex"
+    codex_executable.write_text("#!/bin/sh\nexit 0\n")
+    codex_executable.chmod(0o755)
+    codex_runtime = SimpleNamespace(
+        enabled=True,
+        cli_path=str(codex_executable),
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(codex=codex_runtime),
+        ),
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         monkeypatch.delenv(key, raising=False)
 
     assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is True
+
+    codex_runtime.enabled = False
+    assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
+    codex_runtime.enabled = True
+    codex_runtime.cli_path = str(tmp_path / "missing-codex")
+    assert ModelHubRuntimeRouter._default_native_cli_ready("codex") is False
+    codex_runtime.cli_path = str(codex_executable)
 
     config_path.write_text(
         'model_provider = "relay"\n\n[model_providers.relay]\nbase_url = "https://relay.invalid/v1"\n'
@@ -1161,6 +1182,39 @@ def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(tmp_path: Path,
     )
 
 
+def test_mh_chan_001_claude_native_runtime_requires_enabled_executable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    claude_executable = tmp_path / "claude"
+    claude_executable.write_text("#!/bin/sh\nexit 0\n")
+    claude_executable.chmod(0o755)
+    claude_runtime = SimpleNamespace(
+        enabled=True,
+        cli_path=str(claude_executable),
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(claude=claude_runtime),
+        ),
+    )
+    monkeypatch.setattr(
+        "vibe.claude_config.read_claude_settings_env",
+        lambda: {},
+    )
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is True
+
+    claude_runtime.enabled = False
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is False
+    claude_runtime.enabled = True
+    claude_runtime.cli_path = str(tmp_path / "missing-claude")
+    assert ModelHubRuntimeRouter._default_native_cli_ready("claude") is False
+
+
 def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     tmp_path: Path,
     monkeypatch,
@@ -1170,6 +1224,20 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     codex_home.mkdir()
     (codex_home / "auth.json").write_text("{}")
     (codex_home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\n')
+    codex_executable = tmp_path / "codex"
+    codex_executable.write_text("#!/bin/sh\nexit 0\n")
+    codex_executable.chmod(0o755)
+    monkeypatch.setattr(
+        "modules.agents.model_hub.load_config_or_default",
+        lambda: SimpleNamespace(
+            agents=SimpleNamespace(
+                codex=SimpleNamespace(
+                    enabled=True,
+                    cli_path=str(codex_executable),
+                )
+            ),
+        ),
+    )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         monkeypatch.delenv(key, raising=False)
@@ -1809,6 +1877,66 @@ def test_mh_inj_codex_runtime_change_waits_for_shared_active_turn(tmp_path: Path
 
         old_transport.stop.assert_awaited_once()
         new_transport.start.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_mh_inj_codex_hub_to_direct_retires_gateway_scope(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        agent = object.__new__(CodexAgent)
+        old_transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="hub:http://127.0.0.1:18443:token-hash",
+            stop=AsyncMock(),
+        )
+        new_transport = SimpleNamespace(
+            start=AsyncMock(),
+            on_notification=Mock(),
+            on_server_request=Mock(),
+            pid=12345,
+        )
+        retire_scope = Mock()
+        agent._transport_locks = {}
+        agent._transports = {str(tmp_path): old_transport}
+        agent._transport_last_activity = {}
+        agent._transport_cwd_inodes = {}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=Mock(return_value=set()),
+            invalidate_thread=Mock(),
+        )
+        agent._turn_registry = SimpleNamespace(clear_session=Mock())
+        agent._clear_thread_developer_instructions = Mock()
+        agent._on_notification = Mock()
+        agent._on_server_request = AsyncMock()
+        agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
+        agent.controller = SimpleNamespace(
+            resource_governor=None,
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            ),
+        )
+        launch = ModelHubLaunch(
+            "codex",
+            "direct",
+            "gpt-5",
+            "gpt-5",
+            "gpt-5",
+        )
+
+        with (
+            patch("modules.agents.codex.agent.CodexTransport", return_value=new_transport),
+            patch(
+                "modules.agents.codex.agent.governor_from_controller",
+                return_value=SimpleNamespace(apply_to_pid=Mock()),
+            ),
+        ):
+            assert await agent._get_or_create_transport(str(tmp_path), launch) is new_transport
+
+        old_transport.stop.assert_awaited_once()
+        new_transport.start.assert_awaited_once()
+        retire_scope.assert_called_once_with("codex", str(tmp_path))
 
     asyncio.run(exercise())
 

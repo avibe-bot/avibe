@@ -57,6 +57,7 @@ class TurnTrace:
     terminal_error: Optional[dict] = None
     pending_attempt: Optional[AttemptIdentity] = None
     model_supply_state: Optional[SupplyState] = None
+    gateway_source_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     gateway_via_mapping: bool = False
     ambiguous: bool = False
@@ -248,10 +249,17 @@ class TurnCorrelationRegistry:
                 authorized = authorized or (matches and key[0] == backend)
             return authorized
 
-    def retire_scope(self, backend: str, process_scope: str) -> None:
+    def retire_scope(
+        self,
+        backend: str,
+        process_scope: str,
+        *,
+        terminal_turn_id: Optional[str] = None,
+    ) -> None:
         """Invalidate a process credential when its owning runtime is evicted."""
 
         key = self._scope_key(backend, process_scope)
+        normalized_terminal_turn_id = str(terminal_turn_id or "").strip()
         with self._lock:
             scope = self._scopes.pop(key, None)
             if scope is None:
@@ -259,7 +267,20 @@ class TurnCorrelationRegistry:
             self._token_scopes.pop(scope.token, None)
             for turn_id in scope.active_turns:
                 trace = self._traces.get(turn_id)
-                if trace is not None:
+                terminal_is_exact = (
+                    turn_id == normalized_terminal_turn_id
+                    and trace is not None
+                    and not trace.ambiguous
+                    and not scope.untracked_use
+                    and scope.active_turns == {turn_id}
+                    and turn_id not in scope.ambiguous_turns
+                    and bool(trace.failed_attempts or trace.terminal_error)
+                )
+                if terminal_is_exact:
+                    turn_scopes = self._turn_scopes.get(turn_id)
+                    if turn_scopes is not None:
+                        turn_scopes.discard(key)
+                elif trace is not None:
                     trace.ambiguous = True
 
     def _exact_turn(self, backend: str, token: str) -> tuple[str, ScopeKey] | None:
@@ -318,6 +339,7 @@ class TurnCorrelationRegistry:
         token: str,
         requested_model_id: str,
         resolved_model_id: str,
+        source_id: str,
         via_mapping: bool,
     ) -> None:
         """Retain the caller-facing model before the CLI rewrites its request."""
@@ -339,6 +361,10 @@ class TurnCorrelationRegistry:
             if (
                 trace.requested_model_id != requested_model_id
                 or (
+                    trace.gateway_source_id is not None
+                    and trace.gateway_source_id != source_id
+                )
+                or (
                     trace.gateway_model_id is not None
                     and trace.gateway_model_id != resolved_model_id
                 )
@@ -346,8 +372,41 @@ class TurnCorrelationRegistry:
                 trace.ambiguous = True
                 self._scopes[key].ambiguous_turns.add(turn_id)
                 return
+            trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
             trace.gateway_via_mapping = via_mapping
+
+    def fail_gateway_validation(
+        self,
+        *,
+        backend: str,
+        token: str,
+        reason: Literal["invalid_parameter", "protocol_error"],
+    ) -> None:
+        """Record an exact authenticated request rejected before resolution."""
+
+        with self._lock:
+            exact = self._exact_turn(backend, token)
+            if exact is None:
+                return
+            turn_id, _ = exact
+            trace = self._traces.get(turn_id)
+            if (
+                trace is None
+                or trace.gateway_source_id is None
+                or trace.gateway_model_id is None
+            ):
+                return
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = {
+                "source_id": trace.gateway_source_id,
+                "resolved_model_id": trace.gateway_model_id,
+                "channel": "hub",
+                "via_mapping": trace.gateway_via_mapping,
+                "reason": reason,
+                "stream_started": False,
+            }
 
     def begin_native_attempt(
         self,

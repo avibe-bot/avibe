@@ -762,6 +762,9 @@ class CodexAgent(BaseAgent):
             async with self._transport_locks[cwd]:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
+                desired_fingerprint = launch.fingerprint if launch is not None else "direct"
+                existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
+                runtime_changed = existing_fingerprint != desired_fingerprint
                 if existing and existing.is_initialized:
                     # Reuse only while the directory the app-server was spawned in
                     # is still the SAME directory (#561): after a delete (+ possible
@@ -769,8 +772,6 @@ class CodexAgent(BaseAgent):
                     # thread/start fails. Untracked legacy entries reuse as before.
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                    desired_fingerprint = launch.fingerprint if launch is not None else "direct"
-                    runtime_changed = getattr(existing, "runtime_fingerprint", "direct") != desired_fingerprint
                     if not stale_cwd and not runtime_changed:
                         self._touch_transport_activity(cwd)
                         return existing
@@ -791,6 +792,12 @@ class CodexAgent(BaseAgent):
                     # Stop stale transport if any
                     if existing:
                         await existing.stop()
+                        if (
+                            runtime_changed
+                            and desired_fingerprint == "direct"
+                            and existing_fingerprint.startswith("hub:")
+                        ):
+                            self._retire_model_hub_process_scope(cwd)
                         # The new app-server process won't know about threads/turns
                         # from the old process. Invalidate only sessions bound to
                         # this cwd so healthy sessions on other cwds are unaffected.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -317,6 +319,148 @@ def test_retired_process_scope_revokes_token_and_fails_closed(
     assert registry._token_scopes == {}
 
 
+def test_terminal_failure_survives_exact_scope_retirement(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "terminal-retirement.json")
+    registry = TurnCorrelationRegistry(store)
+    registry.begin_native_attempt(
+        backend="claude",
+        process_scope="session:/repo",
+        turn_id="turn_startup_failure",
+        requested_model_id="claude-opus",
+        source_id="src_native01",
+        resolved_model_id="claude-opus",
+        via_mapping=False,
+    )
+    registry.fail_native_attempt(
+        "turn_startup_failure",
+        reason="unclassified_error",
+    )
+
+    registry.retire_scope(
+        "claude",
+        "session:/repo",
+        terminal_turn_id="turn_startup_failure",
+    )
+    registry.settle(
+        "turn_startup_failure",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get("turn_startup_failure")
+    assert record is not None
+    assert record["outcome"] == "exhausted"
+    assert record["failed_attempts"][0]["reason"] == "unclassified_error"
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_terminal_retirement_does_not_restore_ambiguous_scope(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "ambiguous-retirement.json")
+    registry = TurnCorrelationRegistry(store)
+    registry.begin_native_attempt(
+        backend="claude",
+        process_scope="session:/repo",
+        turn_id="turn_first",
+        requested_model_id="claude-opus",
+        source_id="src_native01",
+        resolved_model_id="claude-opus",
+        via_mapping=False,
+    )
+    registry.begin_native_attempt(
+        backend="claude",
+        process_scope="session:/repo",
+        turn_id="turn_second",
+        requested_model_id="claude-opus",
+        source_id="src_native01",
+        resolved_model_id="claude-opus",
+        via_mapping=False,
+    )
+    registry.fail_native_attempt("turn_first", reason="unclassified_error")
+
+    registry.retire_scope(
+        "claude",
+        "session:/repo",
+        terminal_turn_id="turn_first",
+    )
+    registry.settle(
+        "turn_first",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    assert store.get("turn_first") is None
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "status", "reason"),
+    [
+        ("responses", "{", 400, "invalid_parameter"),
+        ("responses", "[]", 400, "invalid_parameter"),
+        ("responses", '{"stream":false}', 400, "invalid_parameter"),
+        ("unsupported", '{"model":"shared-model"}', 404, "protocol_error"),
+    ],
+)
+def test_authenticated_gateway_validation_failure_is_correlated(
+    tmp_path: Path,
+    path: str,
+    body: str,
+    status: int,
+    reason: str,
+) -> None:
+    async def exercise() -> None:
+        service = _service(
+            tmp_path,
+            sources=[_source("src_primary01", "Primary")],
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_invalid_gateway_request",
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/{path}",
+                    data=body,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                assert response.status == status
+                await response.read()
+        finally:
+            await gateway.close()
+
+        gateway.correlation.settle(
+            "turn_invalid_gateway_request",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_invalid_gateway_request")
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"] == {
+            "source_id": "src_primary01",
+            "resolved_model_id": "shared-model",
+            "channel": "hub",
+            "via_mapping": False,
+            "reason": reason,
+            "stream_started": False,
+        }
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
 def test_gateway_provenance_retains_pre_mapping_model_identity(
     tmp_path: Path,
 ) -> None:
@@ -328,6 +472,7 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
         token=token,
         requested_model_id="gpt-5",
         resolved_model_id="custom-gpt-5",
+        source_id="src_primary01",
         via_mapping=True,
     )
 
@@ -378,6 +523,7 @@ def test_gateway_model_outside_prepared_turn_fails_closed(
         token=token,
         requested_model_id="gpt-5",
         resolved_model_id="custom-gpt-5",
+        source_id="src_primary01",
         via_mapping=True,
     )
 

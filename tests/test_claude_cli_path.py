@@ -1232,6 +1232,78 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
     assert captured["options"].resume == stale_session_id
 
 
+def test_claude_startup_failure_is_recorded_before_scope_retirement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    events: list[tuple] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+
+        async def connect(self) -> None:
+            raise RuntimeError("startup failed")
+
+    class _Runtime:
+        async def resolve(self, backend, requested_model, **kwargs):
+            return ModelHubLaunch(
+                backend=backend,
+                channel="native_cli",
+                requested_model=requested_model,
+                target_model="claude-opus",
+                runtime_model="claude-opus",
+                source_id="src_native01",
+            )
+
+        async def record_native_failure(self, context, diagnostic):
+            events.append(("record", diagnostic))
+            return False
+
+        def retire_process_scope(
+            self,
+            backend,
+            process_scope,
+            *,
+            terminal_turn_id=None,
+        ):
+            events.append(
+                (
+                    "retire",
+                    backend,
+                    process_scope,
+                    terminal_turn_id,
+                )
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = _Runtime()
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"turn_token": "turn_startup_failure"},
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        _run_session(handler, context)
+
+    assert events == [
+        ("record", "startup failed"),
+        (
+            "retire",
+            "claude",
+            f"slack_C123:{tmp_path}",
+            "turn_startup_failure",
+        ),
+    ]
+
+
 def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
