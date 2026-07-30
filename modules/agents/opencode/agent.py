@@ -12,7 +12,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 import aiohttp
 
@@ -48,6 +49,90 @@ from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
+
+
+def _task_is_stopping(task: asyncio.Task) -> bool:
+    cancelling = getattr(task, "cancelling", None)
+    return task.done() or bool(cancelling and cancelling())
+
+
+@dataclass
+class _OpenCodeSteerState:
+    task: asyncio.Task
+    native_session_id: str
+    directory: str
+    agent: Optional[str]
+    model: Optional[Dict[str, str]]
+    reasoning_effort: Optional[str]
+    system: Optional[str]
+    baseline_message_ids: set[str]
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    closing: bool = False
+    awaiting_after_message_ids: set[str] | None = None
+
+    @property
+    def native_turn_id(self) -> str:
+        return f"opencode:{self.native_session_id}:{id(self.task)}"
+
+
+class _SteeringAwareOpenCodeServer:
+    """Keep the primary poll owner alive across an accepted async prompt."""
+
+    def __init__(
+        self,
+        server: OpenCodeServerManager,
+        state: _OpenCodeSteerState,
+    ) -> None:
+        self._server = server
+        self._state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._server, name)
+
+    @staticmethod
+    def _message_ids(messages: list[Dict[str, Any]]) -> set[str]:
+        return {
+            str(message.get("info", {}).get("id"))
+            for message in messages
+            if message.get("info", {}).get("id")
+        }
+
+    def _is_final_assistant_snapshot(self, messages: list[Dict[str, Any]]) -> bool:
+        if not messages:
+            return False
+        info = messages[-1].get("info", {})
+        return bool(
+            info.get("id") not in self._state.baseline_message_ids
+            and info.get("role") == "assistant"
+            and info.get("time", {}).get("completed")
+            and info.get("finish") != "tool-calls"
+            and not info.get("error")
+        )
+
+    async def list_messages(self, session_id: str, directory: str) -> list[Dict[str, Any]]:
+        while True:
+            wait_for_insert = False
+            async with self._state.lock:
+                messages = await self._server.list_messages(session_id, directory)
+                awaiting = self._state.awaiting_after_message_ids
+                if awaiting is not None and self._message_ids(messages).issubset(awaiting):
+                    wait_for_insert = True
+                else:
+                    self._state.awaiting_after_message_ids = None
+                    if self._is_final_assistant_snapshot(messages):
+                        try:
+                            status = await self._server.get_session_status(session_id, directory)
+                        except Exception:
+                            return messages
+                        if status is not None and status.get("type") in {"busy", "retry"}:
+                            wait_for_insert = True
+                        else:
+                            self._state.closing = True
+                            return messages
+                    else:
+                        return messages
+            if wait_for_insert:
+                await asyncio.sleep(0.1)
 
 
 def resolve_opencode_model_dict(model_str: str | None, default_provider: str | None) -> dict[str, str] | None:
@@ -86,6 +171,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._poll_loop = OpenCodePollLoop(self)
 
         self._active_requests: Dict[str, asyncio.Task] = {}
+        self._steering_states: Dict[str, _OpenCodeSteerState] = {}
 
     async def _get_server(self) -> OpenCodeServerManager:
         return await self._client_manager.get_server()
@@ -207,6 +293,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
+        steer_state: _OpenCodeSteerState | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
         model_hub_launch: ModelHubLaunch | None = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
@@ -423,6 +510,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             get_started_at = getattr(server, "get_last_prompt_started_at", None)
             prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("OpenCode runner task is unavailable")
+            steer_state = _OpenCodeSteerState(
+                task=current_task,
+                native_session_id=session_id,
+                directory=request.working_path,
+                agent=agent_to_use,
+                model=model_dict,
+                reasoning_effort=reasoning_effort,
+                system=system_prompt_injection,
+                baseline_message_ids=set(baseline_message_ids),
+                awaiting_after_message_ids=set(baseline_message_ids),
+            )
+            self._steering_states[request.base_session_id] = steer_state
             self.mark_runtime_turn_started(request.context)
 
             logger.info(
@@ -462,9 +564,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_key=request.session_key,
             )
 
+            poll_server = _SteeringAwareOpenCodeServer(
+                server,
+                steer_state,
+            )
             final_text, should_emit = await self._poll_loop.run_prompt_poll(
                 request,
-                server,
+                poll_server,
                 session_id,
                 agent_to_use=agent_to_use,
                 model_dict=model_dict,
@@ -530,6 +636,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request=request,
             )
         finally:
+            if steer_state is not None:
+                async with steer_state.lock:
+                    steer_state.closing = True
+                if self._steering_states.get(request.base_session_id) is steer_state:
+                    self._steering_states.pop(request.base_session_id, None)
             if run_registered:
                 await server.mark_run_inactive(session_id)
 
@@ -539,10 +650,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             return None
         base_session_id = active_request.base_session_id
         task = self._active_requests.get(base_session_id)
-        request_session = self._session_manager.get_request_session(base_session_id)
-        if task is None or task.done() or request_session is None:
+        state = self._steering_states.get(base_session_id)
+        if (
+            task is None
+            or _task_is_stopping(task)
+            or state is None
+            or state.task is not task
+            or state.closing
+        ):
             return None
-        return f"opencode:{request_session[0]}:{id(task)}"
+        return state.native_turn_id
 
     async def steer_active_turn(
         self,
@@ -556,11 +673,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         base_session_id = active_request.base_session_id
         task = self._active_requests.get(base_session_id)
         request_session = self._session_manager.get_request_session(base_session_id)
-        if task is None or task.done() or request_session is None:
+        state = self._steering_states.get(base_session_id)
+        if task is None or _task_is_stopping(task) or request_session is None or state is None:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="no_active_native_run", backend=self.name)
 
         native_session_id, directory, _session_key = request_session
-        native_turn_id = f"opencode:{native_session_id}:{id(task)}"
+        native_turn_id = state.native_turn_id
         if native_turn_id != request.expected_native_turn_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
 
@@ -569,11 +687,59 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
 
         try:
-            await server.prompt_async(
-                session_id=native_session_id,
-                directory=directory,
-                text=request.text,
-            )
+            async with state.lock:
+                if (
+                    state.closing
+                    or state.task is not task
+                    or self._active_requests.get(base_session_id) is not task
+                    or _task_is_stopping(task)
+                    or self._session_manager.get_request_session(base_session_id) != request_session
+                ):
+                    return steer_result(
+                        SteerOutcome.NOT_ACTIVE,
+                        reason="no_active_native_run",
+                        backend=self.name,
+                    )
+                try:
+                    messages = await server.list_messages(native_session_id, directory)
+                    status = await server.get_session_status(native_session_id, directory)
+                except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError) as exc:
+                    return steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="preflight_unavailable",
+                        backend=self.name,
+                        diagnostic=str(exc),
+                    )
+                except Exception as exc:  # noqa: BLE001 - no input write was attempted
+                    return steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="preflight_failed",
+                        backend=self.name,
+                        diagnostic=str(exc),
+                    )
+
+                if status is None or status.get("type") not in {"busy", "retry"}:
+                    return steer_result(
+                        SteerOutcome.NOT_ACTIVE,
+                        reason="native_session_idle",
+                        backend=self.name,
+                    )
+                before_insert = _SteeringAwareOpenCodeServer._message_ids(messages)
+                try:
+                    await server.prompt_async(
+                        session_id=native_session_id,
+                        directory=directory,
+                        text=request.text,
+                        agent=state.agent,
+                        model=state.model,
+                        reasoning_effort=state.reasoning_effort,
+                        system=state.system,
+                        tools={"question": False},
+                    )
+                except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError):
+                    state.awaiting_after_message_ids = before_insert
+                    raise
+                state.awaiting_after_message_ids = before_insert
         except OpenCodePromptRejectedError as exc:
             outcome = SteerOutcome.NOT_ACTIVE if exc.status == 404 else SteerOutcome.REFUSED
             reason = "native_session_missing" if exc.status == 404 else "backend_refused"
@@ -606,11 +772,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 diagnostic=str(exc),
             )
 
-        if (
-            self._active_requests.get(base_session_id) is not task
-            or task.done()
-            or self._session_manager.get_request_session(base_session_id) != request_session
-        ):
+        if self._active_requests.get(base_session_id) is not task or _task_is_stopping(task):
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="runner_generation_changed",

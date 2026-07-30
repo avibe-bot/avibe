@@ -1556,6 +1556,26 @@ class OpenCodeServerManager:
                     raise RuntimeError(f"Failed to list messages: {resp.status} {error_text}")
                 return await resp.json()
 
+    async def get_session_status(
+        self,
+        session_id: str,
+        directory: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the installed OpenCode runtime status for one native session."""
+
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.get(
+                f"{self.base_url}/session/status",
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"Failed to get session status: {resp.status} {error_text}")
+                statuses = await resp.json()
+                status = statuses.get(session_id) if isinstance(statuses, dict) else None
+                return status if isinstance(status, dict) else None
+
     async def get_message(self, session_id: str, message_id: str, directory: str) -> Dict[str, Any]:
         async with self._request_scope():
             session = await self._get_http_session()

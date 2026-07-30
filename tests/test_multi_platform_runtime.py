@@ -786,6 +786,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
@@ -1138,6 +1139,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
@@ -1320,6 +1322,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = _remove_ack

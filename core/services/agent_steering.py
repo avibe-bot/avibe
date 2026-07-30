@@ -73,11 +73,11 @@ def _context_session_ids(context: Any) -> set[str]:
     return values
 
 
-def _active_target(controller: Any, backend: str, session_id: str) -> ActiveSteerTarget | None:
+def _active_targets(controller: Any, backend: str, session_id: str) -> list[ActiveSteerTarget]:
     service = getattr(controller, "agent_service", None)
     gates = getattr(service, "_turn_gates", None)
     if not isinstance(gates, dict):
-        return None
+        return []
 
     matches: list[ActiveSteerTarget] = []
     for runtime_key, gate in list(gates.items()):
@@ -86,9 +86,6 @@ def _active_target(controller: Any, backend: str, session_id: str) -> ActiveStee
         if not str(getattr(gate, "token", "") or "") or not bool(
             getattr(gate, "runtime_started", False)
         ):
-            continue
-        task = getattr(gate, "task", None)
-        if task is None or task.done():
             continue
         agent_request = getattr(gate, "request", None)
         context = getattr(gate, "context", None) or getattr(agent_request, "context", None)
@@ -114,15 +111,24 @@ def _active_target(controller: Any, backend: str, session_id: str) -> ActiveStee
             )
         )
 
-    return matches[0] if len(matches) == 1 else None
+    return matches
 
 
-def active_steer_identity(controller: Any, backend: str, session_id: str) -> tuple[str, str] | None:
+def active_steer_identity(
+    controller: Any,
+    backend: str,
+    session_id: str,
+    *,
+    expected_logical_turn_id: str | None = None,
+) -> tuple[str, str] | None:
     """Return the current logical/native identity pair for a steerable Turn."""
 
-    target = _active_target(controller, backend, session_id)
-    if target is None:
+    targets = _active_targets(controller, backend, session_id)
+    if expected_logical_turn_id is not None:
+        targets = [target for target in targets if target.logical_turn_id == expected_logical_turn_id]
+    if len(targets) != 1:
         return None
+    target = targets[0]
     native_identity = getattr(target.agent, "steering_native_turn_id", None)
     if not callable(native_identity):
         return None
@@ -139,8 +145,8 @@ async def steer_active_turn(
 ) -> SteerResult:
     """Insert text through a registered backend without entering normal dispatch."""
 
-    target = _active_target(controller, backend, request.target_session_id)
-    if target is None:
+    targets = _active_targets(controller, backend, request.target_session_id)
+    if not targets:
         service = getattr(controller, "agent_service", None)
         if getattr(service, "agents", {}).get(backend) is None:
             return result(
@@ -149,8 +155,25 @@ async def steer_active_turn(
                 backend=backend,
             )
         return result(SteerOutcome.NOT_ACTIVE, reason="no_matching_active_turn", backend=backend)
-    if target.logical_turn_id != request.expected_logical_turn_id:
+    logical_matches = [
+        target for target in targets if target.logical_turn_id == request.expected_logical_turn_id
+    ]
+    if not logical_matches:
         return result(SteerOutcome.NOT_ACTIVE, reason="stale_logical_turn", backend=backend)
+
+    native_matches: list[ActiveSteerTarget] = []
+    for target in logical_matches:
+        native_identity = getattr(target.agent, "steering_native_turn_id", None)
+        if callable(native_identity) and str(native_identity(target) or "").strip() == request.expected_native_turn_id:
+            native_matches.append(target)
+    if len(native_matches) == 1:
+        target = native_matches[0]
+    elif not native_matches and len(logical_matches) == 1:
+        # Let the sole backend generation distinguish a stale native identity
+        # from a runtime that disappeared after the shared gate was observed.
+        target = logical_matches[0]
+    else:
+        return result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=backend)
 
     steer = getattr(target.agent, "steer_active_turn", None)
     if not callable(steer):

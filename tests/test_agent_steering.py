@@ -15,7 +15,11 @@ from core.services.agent_steering import (
 from modules.agents.base import AgentRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.codex.agent import CodexAgent
-from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.agent import (
+    OpenCodeAgent,
+    _OpenCodeSteerState,
+    _SteeringAwareOpenCodeServer,
+)
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 
@@ -94,8 +98,21 @@ class _OpenCodeSessionManager:
 
 
 class _OpenCodeServer:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        list_error: Exception | None = None,
+        messages: list[dict] | None = None,
+        status: dict | None = None,
+    ) -> None:
         self.error = error
+        self.list_error = list_error
+        self.messages = messages or [
+            {"info": {"id": "primary-user", "role": "user"}, "parts": []},
+        ]
+        self.status = status or {"type": "busy"}
+        self.list_calls = 0
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple] = []
 
@@ -103,6 +120,21 @@ class _OpenCodeServer:
         self.prompt_calls.append(kwargs)
         if self.error is not None:
             raise self.error
+        self.messages.append(
+            {
+                "info": {"id": f"steer-user-{len(self.prompt_calls)}", "role": "user"},
+                "parts": [{"type": "text", "text": kwargs["text"]}],
+            }
+        )
+
+    async def list_messages(self, session_id: str, directory: str) -> list[dict]:
+        self.list_calls += 1
+        if self.list_error is not None:
+            raise self.list_error
+        return list(self.messages)
+
+    async def get_session_status(self, session_id: str, directory: str) -> dict | None:
+        return self.status
 
     async def abort_session(self, *args) -> bool:
         self.abort_calls.append(args)
@@ -200,6 +232,26 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_shared_gate_remains_steerable_after_dispatch_task_returns() -> None:
+    primary = _primary_request(backend="codex")
+    completed_dispatch = asyncio.create_task(asyncio.sleep(0))
+    await completed_dispatch
+    transport = _CodexTransport()
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+    agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
+    agent._transports = {primary.working_path: transport}
+    controller = _controller_with_active_gate(agent, primary, completed_dispatch)
+
+    identity = active_steer_identity(controller, "codex", "avibe-session")
+    receipt = await steer_active_turn(controller, "codex", _steer_request("codex-turn"))
+
+    assert identity == ("logical-turn", "codex-turn")
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    assert [method for method, _params in transport.calls] == ["turn/steer"]
 
 
 @pytest.mark.anyio
@@ -352,6 +404,18 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
         primary.working_path,
     )
     agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._steering_states = {
+        primary.base_session_id: _OpenCodeSteerState(
+            task=task,
+            native_session_id="opencode-session",
+            directory=primary.working_path,
+            agent="build",
+            model={"providerID": "openai", "modelID": "gpt-5"},
+            reasoning_effort="high",
+            system="primary system prompt",
+            baseline_message_ids=set(),
+        )
+    }
     return agent
 
 
@@ -374,11 +438,92 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
                 "session_id": "opencode-session",
                 "directory": primary.working_path,
                 "text": STEER_TEXT,
+                "agent": "build",
+                "model": {"providerID": "openai", "modelID": "gpt-5"},
+                "reasoning_effort": "high",
+                "system": "primary system prompt",
+                "tools": {"question": False},
             }
         ]
         assert server.abort_calls == []
         assert len(agent._active_requests) == 1
         assert not gate_task.done()
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "first response"}],
+            }
+        ]
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        while server.list_calls == 0:
+            await asyncio.sleep(0)
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+
+        messages = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert messages[-1]["info"]["id"] == "steer-user-1"
+        assert state.closing is False
+        assert agent._active_requests == {primary.base_session_id: gate_task}
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_refuses_after_poll_owner_claims_terminal_result() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status={"type": "idle"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    native_turn_id = state.native_turn_id
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        await poll_server.list_messages("opencode-session", primary.working_path)
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(native_turn_id))
+
+        assert state.closing is True
+        assert receipt.outcome is SteerOutcome.NOT_ACTIVE
+        assert server.prompt_calls == []
     finally:
         await _cancel_tasks(gate_task)
 
@@ -517,6 +662,78 @@ async def test_shared_service_uses_the_active_runtime_generation_after_registry_
         assert [method for method, _params in active_transport.calls] == ["turn/steer"]
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_shared_guard_disambiguates_concurrent_gates_by_expected_turn_identity() -> None:
+    first = _primary_request(backend="codex")
+    second = _primary_request(backend="codex")
+    second.context.platform_specific["turn_token"] = "logical-turn-2"
+    second.context.platform_specific["agent_runtime_turn_token"] = "runtime-token-2"
+    first_task = await _held_task()
+    second_task = await _held_task()
+
+    first_transport = _CodexTransport(response={"turnId": "codex-turn-1"})
+    first_agent = object.__new__(CodexAgent)
+    first_agent._turn_registry = _CodexTurnRegistry(first.base_session_id, "codex-turn-1")
+    first_agent._session_mgr = _CodexSessionManager(first.base_session_id, "codex-thread-1", first.working_path)
+    first_agent._transports = {first.working_path: first_transport}
+
+    second_transport = _CodexTransport(response={"turnId": "codex-turn-2"})
+    second_agent = object.__new__(CodexAgent)
+    second_agent._turn_registry = _CodexTurnRegistry(second.base_session_id, "codex-turn-2")
+    second_agent._session_mgr = _CodexSessionManager(
+        second.base_session_id,
+        "codex-thread-2",
+        second.working_path,
+    )
+    second_agent._transports = {second.working_path: second_transport}
+
+    gates = {
+        "main": SimpleNamespace(
+            backend="codex",
+            token="runtime-token",
+            runtime_started=True,
+            task=first_task,
+            request=first,
+            context=first.context,
+            agent=first_agent,
+        ),
+        "named-subagent": SimpleNamespace(
+            backend="codex",
+            token="runtime-token-2",
+            runtime_started=True,
+            task=second_task,
+            request=second,
+            context=second.context,
+            agent=second_agent,
+        ),
+    }
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(agents={"codex": first_agent}, _turn_gates=gates)
+    )
+    first_agent.controller = controller
+    second_agent.controller = controller
+    try:
+        assert active_steer_identity(controller, "codex", "avibe-session") is None
+        identity = active_steer_identity(
+            controller,
+            "codex",
+            "avibe-session",
+            expected_logical_turn_id="logical-turn-2",
+        )
+        receipt = await steer_active_turn(
+            controller,
+            "codex",
+            _steer_request("codex-turn-2", logical_turn_id="logical-turn-2"),
+        )
+
+        assert identity == ("logical-turn-2", "codex-turn-2")
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert first_transport.calls == []
+        assert [method for method, _params in second_transport.calls] == ["turn/steer"]
+    finally:
+        await _cancel_tasks(first_task, second_task)
 
 
 @pytest.mark.anyio
