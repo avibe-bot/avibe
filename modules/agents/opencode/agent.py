@@ -24,6 +24,7 @@ from modules.agents.model_hub import (
     ModelHubLaunch,
     OpenCodeOverlay,
     bind_launch,
+    bind_turn_mode,
     opencode_model_for_overlay,
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
@@ -206,6 +207,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         session_id = None
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
+            turn_mode = getattr(model_hub_runtime, "turn_mode", None)
+            if callable(turn_mode):
+                bind_turn_mode(
+                    request.context,
+                    turn_mode("opencode"),
+                )
             prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
             if callable(prepare_overlay):
                 model_hub_overlay = await prepare_overlay()

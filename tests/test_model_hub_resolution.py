@@ -29,6 +29,7 @@ from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.client import _SAFE_ERROR_CODES
 from vibe.model_hub_runtime.state import EngineStateError
 
 
@@ -235,12 +236,38 @@ def _assert_no_references_to(service, model_id: str) -> None:
         (_outcome(RawOutcomeKind.SUCCESS, status=200), False, "return", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=422, code="tool_schema_error"), False, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"), False, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=413, code="request_too_large"), False, "surface", None),
+        (
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=403,
+                message="The requested model is not accessible",
+            ),
+            False,
+            "surface",
+            None,
+        ),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), False, "refresh", None),
-        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "fallback", "credential_expired"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), False, "refresh", None),
-        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), True, "surface", None),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"),
+            True,
+            "fallback",
+            "credential_expired",
+        ),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=402), False, "fallback", "balance_exhausted"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=429), False, "fallback", "rate_limited"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=403, code="quota_exhausted"), False, "fallback", "quota_exhausted"),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=403), False, "fallback", "credential_revoked"),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403, code="account_suspended"),
+            False,
+            "fallback",
+            "account_banned",
+        ),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=418), False, "fallback", "unclassified_error"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=503), False, "fallback", "server_error"),
         (_outcome(RawOutcomeKind.NETWORK_ERROR), False, "fallback", "network"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=429, stream_started=True), False, "surface", None),
@@ -250,6 +277,154 @@ def test_error_classification_table(outcome, refresh_attempted, action, reason):
     decision = classify_outcome(outcome, refresh_attempted=refresh_attempted)
     assert decision.action == action
     assert decision.reason == reason
+
+
+def test_safe_error_code_family_is_exhaustively_classified_without_overclaim():
+    dispositions = {
+        "api_error": (500, False, "fallback", "server_error", None),
+        "account_banned": (403, False, "fallback", "account_banned", None),
+        "account_disabled": (403, False, "fallback", "account_banned", None),
+        "account_suspended": (403, False, "fallback", "account_banned", None),
+        "authentication_error": (401, False, "refresh", None, None),
+        "billing_error": (402, False, "fallback", "balance_exhausted", None),
+        "context_length_exceeded": (
+            400,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "insufficient_quota": (
+            429,
+            False,
+            "fallback",
+            "quota_exhausted",
+            None,
+        ),
+        "invalid_api_key": (401, False, "refresh", None, None),
+        "invalid_request_error": (
+            400,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "model_not_found": (
+            404,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "not_found_error": (
+            404,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "overloaded_error": (529, False, "fallback", "server_error", None),
+        "permission_error": (
+            403,
+            False,
+            "fallback",
+            "permission_denied",
+            None,
+        ),
+        "quota_exceeded": (
+            429,
+            False,
+            "fallback",
+            "quota_exhausted",
+            None,
+        ),
+        "rate_limit_error": (429, False, "fallback", "rate_limited", None),
+        "rate_limit_exceeded": (429, False, "fallback", "rate_limited", None),
+        "request_too_large": (
+            413,
+            False,
+            "surface",
+            None,
+            "upstream_request_invalid",
+        ),
+        "server_error": (500, False, "fallback", "server_error", None),
+    }
+
+    assert set(dispositions) == set(_SAFE_ERROR_CODES)
+    for code, (
+        status,
+        refresh_attempted,
+        action,
+        reason,
+        error_code,
+    ) in dispositions.items():
+        decision = classify_outcome(
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=status, code=code),
+            refresh_attempted=refresh_attempted,
+        )
+        assert (
+            decision.action,
+            decision.reason,
+            decision.error_code,
+        ) == (action, reason, error_code), code
+
+
+def test_permission_denial_falls_back_without_mutating_source_health(tmp_path):
+    adapter = FakeAdapter(
+        [
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=403,
+                code="permission_error",
+            ),
+            _outcome(RawOutcomeKind.SUCCESS, status=200),
+        ]
+    )
+    service = _service(tmp_path, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == "src_backup001"
+    assert [source.state.status for source in service.store.load().sources] == [
+        "standby",
+        "standby",
+    ]
+    events = service.list_events(limit=10)
+    assert len(events) == 1
+    assert events[0]["kind"] == "switch"
+    assert events[0]["reason"] == "permission_denied"
+    assert events[0]["from_source"] == "src_primary01"
+    assert events[0]["to_source"] == "src_backup001"
+
+
+def test_permission_denial_probe_does_not_block_the_source(tmp_path):
+    service = _service(
+        tmp_path,
+        FakeAdapter(
+            [
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=403,
+                    code="permission_error",
+                )
+            ]
+        ),
+    )
+
+    result = asyncio.run(
+        service.probe_agent("claude", "claude-opus-4-6")
+    )
+
+    assert result["reachable"] is False
+    assert result["error"] == "models.source.error.unclassified"
+    assert service.store.load().sources[0].state.status == "standby"
+    assert service.list_events(limit=10) == []
 
 
 def test_quota_failure_cools_source_switches_and_emits_redacted_events(tmp_path):
@@ -339,6 +514,65 @@ def test_401_refreshes_exactly_once_before_returning(tmp_path):
     assert len(adapter.invocations) == 2
 
 
+@pytest.mark.parametrize(
+    ("outcomes", "reason", "detail_key"),
+    [
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=401),
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=401),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "credential_expired",
+            "models.source.needs_action.oauth_expired",
+        ),
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=402),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "balance_exhausted",
+            "models.source.needs_action.balance_exhausted",
+        ),
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=418),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "unclassified_error",
+            "models.source.error.unclassified",
+        ),
+    ],
+)
+def test_non_self_healing_failure_blocks_source_then_falls_back(
+    tmp_path,
+    outcomes,
+    reason,
+    detail_key,
+):
+    service = _service(tmp_path, FakeAdapter(outcomes))
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    primary = service.store.load().sources[0]
+    assert primary.state.status == (
+        "error" if reason == "unclassified_error" else "needs_action"
+    )
+    assert primary.state.detail_key == detail_key
+    events = service.list_events(limit=10)
+    assert [event["kind"] for event in events] == ["switch", "needs_action"]
+    assert events[0]["reason"] == events[1]["reason"] == reason
+    assert events[0]["severity"] == "info"
+    assert events[1]["severity"] == "action_required"
+
+
 def test_refreshed_fallback_stream_emits_switch_event(tmp_path):
     async def stream_bytes():
         yield b"ok"
@@ -371,6 +605,8 @@ def test_refreshed_fallback_stream_emits_switch_event(tmp_path):
 def test_parameter_error_and_started_stream_never_fallback(tmp_path):
     for outcome in (
         _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"),
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="model_not_found"),
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=413, code="request_too_large"),
         _outcome(RawOutcomeKind.HTTP_ERROR, status=429, stream_started=True),
     ):
         adapter = FakeAdapter([outcome])
@@ -378,6 +614,7 @@ def test_parameter_error_and_started_stream_never_fallback(tmp_path):
         with pytest.raises(ModelHubError):
             asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}, stream=True))
         assert len(adapter.invocations) == 1
+        assert service.store.load().sources[0].state.status == "standby"
 
 
 def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):
@@ -1095,6 +1332,7 @@ def test_resolution_event_copy_comes_from_backend_i18n(tmp_path):
         kind="cooldown",
         model_id="test-model",
         reason="network",
+        from_source="src_primary01",
         from_label="Primary",
     )
 
@@ -1519,6 +1757,35 @@ def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
     assert service.store.load().sources[0].state.detail_key == (
         "models.source.error.unclassified"
     )
+    source_test_event = service.list_events(limit=10)[0]
+    assert source_test_event["agent"] == "system"
+    assert source_test_event["model_id"] is None
+
+    turn_service = _service(
+        tmp_path / "turn",
+        FakeAdapter(
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=418),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ]
+        ),
+    )
+    asyncio.run(
+        turn_service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+    turn_event = next(
+        event
+        for event in turn_service.list_events(limit=10)
+        if event["kind"] == "needs_action"
+    )
+    fields = ("kind", "reason", "from_source", "severity")
+    assert tuple(source_test_event[field] for field in fields) == tuple(
+        turn_event[field] for field in fields
+    )
 
 
 def test_existing_source_test_rejects_empty_discovery_before_recovery(tmp_path):
@@ -1558,6 +1825,7 @@ def test_existing_source_test_preserves_health_on_engine_outage(tmp_path):
 
     assert exc_info.value.code == "engine_down"
     assert _serialized_config(service) == before
+    assert service.list_events(limit=10) == []
 
 
 def test_mapping_write_rejects_disabled_unavailable_target(tmp_path):

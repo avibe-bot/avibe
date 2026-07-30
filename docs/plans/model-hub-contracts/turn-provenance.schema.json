@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/turn-provenance.schema.json",
   "title": "TurnProvenance",
-  "description": "v3 debug record for one exactly attributed Hub turn. A record is written only when the turn FSM can attribute every included attempt to this turn; ambiguous attempts produce no provenance record. turn_id therefore remains required and no attribution-grain marker exists. The attempt sequence is failed_attempts followed by exactly one terminating slot when a source attempt terminated the turn: served, terminal_error, or canceled_attempt.",
+  "description": "v4 debug record for one exactly attributed Hub turn. A record is written only when the turn FSM can attribute every included attempt to this turn; ambiguous attempts produce no provenance record. turn_id therefore remains required and no attribution-grain marker exists. The attempt sequence is failed_attempts followed by exactly one terminating slot when a source attempt terminated the turn: served, terminal_error, or canceled_attempt.",
   "type": "object",
   "required": [
     "contract_version",
@@ -19,7 +19,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 3 },
+    "contract_version": { "const": 4 },
     "turn_id": {
       "type": "string",
       "description": "Opaque id in the existing turn/session id space."
@@ -78,9 +78,11 @@
               "credential_revoked",
               "balance_exhausted",
               "account_banned",
+              "permission_denied",
               "unclassified_error"
             ],
-            "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
+            "description": "The attempt-failure partition of ResolutionEvent.reason. permission_denied records a request-scoped denial and does not imply source-global state. The mirror registry enforces totality.",
+            "$comment": "Targeted v4c, review finding 3680338859: core/handlers/model_hub/classification.py:98-125 distinguishes the runtime-preserved permission_error code from source-global credential_revoked. The failed attempt remains useful turn evidence even though no Source state is mutated."
           }
         }
       }
@@ -272,7 +274,7 @@
   ],
   "examples": [
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -298,7 +300,7 @@
       "model_supply_state": null
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -319,7 +321,7 @@
       "model_supply_state": null
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -332,7 +334,7 @@
       "model_supply_state": "waiting"
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -352,7 +354,7 @@
       "model_supply_state": null
     },
     {
-      "contract_version": 3,
+      "contract_version": 4,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",
@@ -367,6 +369,32 @@
         "channel": "native_cli",
         "via_mapping": false
       },
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 4,
+      "turn_id": "turn_01k9x6db",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "served",
+      "failed_attempts": [
+        {
+          "source_id": "src_primary01",
+          "resolved_model_id": "claude-opus-4-6",
+          "channel": "hub",
+          "via_mapping": false,
+          "reason": "permission_denied"
+        }
+      ],
+      "served": {
+        "source_id": "src_backup001",
+        "resolved_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "via_mapping": false
+      },
+      "terminal_error": null,
+      "canceled_attempt": null,
       "model_supply_state": null
     }
   ]

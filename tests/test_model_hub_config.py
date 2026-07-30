@@ -189,11 +189,11 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
-def test_v3_mirror_registry_is_executable_and_complete():
+def test_v4_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 3
+    assert registry["contract_version"] == 4
     assert [entry["id"] for entry in registry["entries"]] == [
         "M1",
         "M2",
@@ -202,13 +202,14 @@ def test_v3_mirror_registry_is_executable_and_complete():
         "M5",
         "M6",
         "M7",
+        "M8",
         "N1",
     ]
     for entry in registry["entries"]:
         _validate_mirror_entry(entry, schemas)
 
 
-def test_v3_mirror_registry_mutation_probes_detect_every_comparable_drift():
+def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
@@ -233,7 +234,53 @@ def test_v3_mirror_registry_mutation_probes_detect_every_comparable_drift():
             _validate_mirror_entry(entry, mutated)
 
 
-def test_v3_shape_amendments_reject_the_false_states_they_replace():
+def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
+    event_schema = _schema("resolution-event.schema.json")
+    event_validator = Draft7Validator(event_schema)
+    permission_event = next(
+        example
+        for example in event_schema["examples"]
+        if example["reason"] == "permission_denied"
+    )
+    event_validator.validate(permission_event)
+
+    invalid_cooldown = {
+        **permission_event,
+        "kind": "cooldown",
+        "to_source": None,
+    }
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_cooldown)
+
+    provenance_schema = _schema("turn-provenance.schema.json")
+    assert provenance_schema["properties"]["contract_version"]["const"] == 4
+    permission_record = next(
+        example
+        for example in provenance_schema["examples"]
+        if any(
+            attempt["reason"] == "permission_denied"
+            for attempt in example["failed_attempts"]
+        )
+    )
+    Draft7Validator(provenance_schema).validate(permission_record)
+
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    schemas = _mirror_schemas(registry)
+    failed_reasons = _json_pointer(
+        schemas["turn-provenance.schema.json"],
+        "/properties/failed_attempts/items/properties/reason",
+    )["enum"]
+    failed_reasons.remove("permission_denied")
+    with pytest.raises(AssertionError):
+        _validate_mirror_entry(
+            next(entry for entry in registry["entries"] if entry["id"] == "M3"),
+            schemas,
+        )
+
+
+def test_v4_shape_amendments_reject_the_false_states_they_replace():
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
     base_supply = {
@@ -289,12 +336,61 @@ def test_v3_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
 
-    canceled = _schema("turn-provenance.schema.json")["examples"][-1]
+    canceled = next(
+        example
+        for example in _schema("turn-provenance.schema.json")["examples"]
+        if example["outcome"] == "canceled"
+    )
     Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
     invented_failure = copy.deepcopy(canceled)
     invented_failure["canceled_attempt"]["reason"] = "server_error"
     with pytest.raises(ValidationError):
         Draft7Validator(_schema("turn-provenance.schema.json")).validate(invented_failure)
+
+    chain_schema = _schema("agent-chain.schema.json")
+    chain_validator = Draft7Validator(chain_schema)
+    native_unavailable = copy.deepcopy(chain_schema["examples"][-1])
+    chain_validator.validate(native_unavailable)
+
+    unavailable_needs_action = copy.deepcopy(native_unavailable)
+    unavailable_needs_action["chain"][0]["health"] = "needs_action"
+    unavailable_needs_action["chain"][0]["retry_at"] = None
+    chain_validator.validate(unavailable_needs_action)
+
+    unmarked_healthy_unavailable = copy.deepcopy(chain_schema["examples"][-2])
+    unmarked_healthy_unavailable["chain"][0]["reason"] = None
+    with pytest.raises(ValidationError):
+        chain_validator.validate(unmarked_healthy_unavailable)
+
+    mislabeled_waiting = copy.deepcopy(native_unavailable)
+    mislabeled_waiting["supply_state"] = "waiting"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(mislabeled_waiting)
+
+    unavailable_hub = copy.deepcopy(native_unavailable)
+    unavailable_hub["chain"][0]["channel"] = "hub"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(unavailable_hub)
+
+    probe_schema = _schema("probe-result.schema.json")
+    probe_validator = Draft7Validator(probe_schema)
+    native_ready = copy.deepcopy(probe_schema["examples"][-2])
+    probe_validator.validate(native_ready)
+    native_ready["latency_ms"] = 12
+    with pytest.raises(ValidationError):
+        probe_validator.validate(native_ready)
+
+    native_not_ready = copy.deepcopy(probe_schema["examples"][-1])
+    probe_validator.validate(native_not_ready)
+    native_not_ready_without_reason = copy.deepcopy(native_not_ready)
+    native_not_ready_without_reason["error"] = None
+    with pytest.raises(ValidationError):
+        probe_validator.validate(native_not_ready_without_reason)
+
+    timed_native_not_ready = copy.deepcopy(native_not_ready)
+    timed_native_not_ready["latency_ms"] = 12
+    with pytest.raises(ValidationError):
+        probe_validator.validate(timed_native_not_ready)
 
 
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):

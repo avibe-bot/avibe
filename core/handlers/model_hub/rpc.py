@@ -55,6 +55,15 @@ async def dispatch_model_hub_rpc(
         return await service.delete_custom_model(payload.get("source_id"), payload.get("model_id"))
     if operation == "list_events":
         return service.list_events(limit=payload.get("limit", 20), before=payload.get("before"))
+    if operation == "get_agent_chain":
+        return service.agent_chain(payload.get("backend"), payload.get("model_id"))
+    if operation == "probe_agent":
+        return await service.probe_agent(
+            payload.get("backend"),
+            payload.get("model_id"),
+        )
+    if operation == "get_turn_provenance":
+        return service.get_turn_provenance(payload.get("turn_id"))
     if operation == "oauth_start":
         return await service.oauth_start(payload.get("oauth"))
     if operation == "oauth_status":

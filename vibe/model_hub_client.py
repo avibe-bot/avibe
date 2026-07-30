@@ -140,6 +140,25 @@ class ModelHubRemoteService:
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         return _rpc_sync("list_events", {"limit": limit, "before": before})
 
+    def agent_chain(self, backend: str, model_id: str) -> dict:
+        return _rpc_sync(
+            "get_agent_chain",
+            {"backend": backend, "model_id": model_id},
+        )
+
+    async def probe_agent(
+        self,
+        backend: str,
+        model_id: Optional[str] = None,
+    ) -> dict:
+        return await _rpc(
+            "probe_agent",
+            {"backend": backend, "model_id": model_id},
+        )
+
+    def get_turn_provenance(self, turn_id: str) -> dict:
+        return _rpc_sync("get_turn_provenance", {"turn_id": turn_id})
+
     async def oauth_start(self, payload: dict) -> dict:
         return await _rpc("oauth_start", {"oauth": payload})
 
