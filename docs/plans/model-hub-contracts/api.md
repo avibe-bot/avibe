@@ -1,12 +1,16 @@
 # Model Hub — REST API contract
 
-Status: **FROZEN v3**. All endpoints live under `/api/models/`.
+Status: **FROZEN v4 (targeted)**. All endpoints live under `/api/models/`.
 
 Success envelope: `{ok: true, contract_version: 3, ...}`.
 Failure envelope:
 `{ok: false, contract_version: 3, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Authentication and CSRF rules are the existing UI-server rules.
+
+The shared envelope remains v3. The targeted v4 amendment changes only the nested
+`AgentChain` and `ProbeResult` objects, whose own `contract_version` is 4; untouched
+schema objects and every unrelated route remain at version 3.
 
 ## Route table
 
@@ -327,9 +331,44 @@ Status and submit return the same terminal shape:
 ## Chain and probe
 
 In Hub mode, `AgentChain.chain` is the effective source order filtered by backend
-eligibility and model support, with mapping applied. Cooling and other blocked members
-stay in the chain; `runnable` is the retry-readiness filter used by the resolver.
-An empty Hub chain is a valid `interrupted` chain.
+eligibility and model support, with mapping applied. Cooling, source-blocked and
+process-unavailable native CLI members stay in the chain at their original positions.
+Each item carries `channel`, source-global `health`, process-aware `runnable`, and
+nullable `reason`. The complete axiom is:
+
+`runnable = health-permits AND process-available`.
+
+Process availability is definitionally true for `channel: "hub"` in v2; there is no
+configuration knob for it. For `native_cli`, `reason: "native_cli_unavailable"` is an
+orthogonal process fact legal at every health and always forces `runnable: false`. The
+item stays visible and dimmed, and makes a fully blocked chain `interrupted`, even when
+its health is `cooldown`; `reason: null` means process-available. An empty Hub chain
+remains a valid `interrupted` chain.
+
+```json
+{
+  "ok": true,
+  "contract_version": 3,
+  "chain": {
+    "contract_version": 4,
+    "backend": "codex",
+    "model_id": "gpt-5.6",
+    "chain": [
+      {
+        "source_id": "src_chatgptplus",
+        "channel": "native_cli",
+        "via_mapping": false,
+        "resolved_model_id": null,
+        "health": "healthy",
+        "runnable": false,
+        "reason": "native_cli_unavailable",
+        "retry_at": null
+      }
+    ],
+    "supply_state": "interrupted"
+  }
+}
+```
 
 In Direct mode both chain and probe refuse with:
 
@@ -352,8 +391,9 @@ A successful probe nests its result:
   "ok": true,
   "contract_version": 3,
   "probe": {
-    "contract_version": 3,
+    "contract_version": 4,
     "backend": "claude",
+    "channel": "hub",
     "reachable": false,
     "source_id": "src_relay9c1x",
     "model_id": "glm-5.2",
@@ -361,6 +401,43 @@ A successful probe nests its result:
     "via_mapping": true,
     "error": "models.source.needs_action.balance_exhausted"
   }
+}
+```
+
+The probe walks the same §4.3 chain order and selects the first runnable item;
+items already marked unavailable are never probed. For `channel: "hub"`, that
+candidate keeps v3's total request-result truth table verbatim. For
+`channel: "native_cli"`, the probe re-verifies process readiness after selection;
+the fact may have gone stale, so an available candidate can honestly return
+not-ready. `reachable` is READINESS, not completion evidence: no upstream call is
+timed, so `latency_ms` is null in both directions. Ready carries `error: null`;
+not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
+
+```json
+{
+  "contract_version": 4,
+  "backend": "codex",
+  "channel": "native_cli",
+  "reachable": true,
+  "source_id": "src_chatgptplus",
+  "model_id": "gpt-5.6",
+  "latency_ms": null,
+  "via_mapping": false,
+  "error": null
+}
+```
+
+```json
+{
+  "contract_version": 4,
+  "backend": "codex",
+  "channel": "native_cli",
+  "reachable": false,
+  "source_id": "src_chatgptplus",
+  "model_id": "gpt-5.6",
+  "latency_ms": null,
+  "via_mapping": false,
+  "error": "models.probe.native_cli_unavailable"
 }
 ```
 
@@ -437,11 +514,11 @@ contract harness and API-boundary tests enforce:
 | Guard | Boundary |
 | --- | --- |
 | every example validates and JSON round-trips | contract harness |
-| mirror registry equality/projection/partition/bijection, including mutation probes | `mirror-registry.json` harness |
+| mirror registry equality/projection/partition/bijection/mapping, including mutation probes | `mirror-registry.json` harness |
 | every non-null `then` constraint has matching `required`, except a declared fail-safe legacy-example exception | contract harness |
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
-| `AgentChain.chain` source ids are unique and preserve effective order | chain assembler |
+| `AgentChain.chain` source ids are unique and preserve effective order, including process-unavailable native CLI items | chain assembler |
 | `model_supply` has one row per menu model with unique ids | AgentSupply assembler |
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |

@@ -3356,6 +3356,52 @@ def model_hub_events_get():
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/chain", methods=["GET"])
+def model_hub_agent_chain_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        if not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        chain = _model_hub_service().agent_chain(backend, model_id)
+        return _model_hub_success(chain=chain)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/probe", methods=["POST"])
+async def model_hub_agent_probe_post(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {"model"}:
+            raise ModelHubError("mapping_target_unavailable")
+        model_id = payload.get("model")
+        if model_id is not None and (
+            not isinstance(model_id, str) or not model_id.strip()
+        ):
+            raise ModelHubError("mapping_target_unavailable")
+        probe = await _model_hub_service().probe_agent(backend, model_id)
+        return _model_hub_success(probe=probe)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/turns/<turn_id>/provenance", methods=["GET"])
+def model_hub_turn_provenance_get(turn_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        provenance = _model_hub_service().get_turn_provenance(turn_id)
+        return _model_hub_success(provenance=provenance)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/oauth/start", methods=["POST"])
 async def model_hub_oauth_start():
     from core.handlers.model_hub import ModelHubError
@@ -6749,6 +6795,10 @@ def sessions_cli_activity(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    if payload.get("event") == "queue_updated":
+        broker.publish("queue.updated", {"session_id": session_id})
+        return jsonify({"ok": True})
+
     previous_session = None
     if "previous_scope_id" in payload and "previous_visibility" in payload:
         previous_session = {
@@ -8281,10 +8331,11 @@ def sessions_queue_list(session_id: str):
 def sessions_queue_remove(session_id: str, message_id: str):
     """Drop one queued message (the per-item delete in the queue strip)."""
     from storage import messages_service
+    from storage.background import run_update_event_transaction
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
-    with engine.begin() as conn:
+    with run_update_event_transaction(engine) as conn:
         removed = messages_service.remove_queued(conn, session_id, message_id)
     if removed:
         broker.publish("queue.updated", {"session_id": session_id})

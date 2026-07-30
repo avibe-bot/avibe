@@ -55,6 +55,12 @@ scenarios:
     kind: regression
     layer: contract
     test: tests/test_scheduled_tasks.py::test_base_agent_terminal_markdown_example_persists_complete_run_and_callback
+  - id: MESSAGE-DELIVERY-008
+    name: Run callbacks use only terminal output while directed child Runs remain independent
+    status: partial
+    kind: concurrency
+    layer: contract
+    test: tests/test_scheduled_tasks.py::test_directed_run_and_callback_remain_distinct_while_target_busy
 next_priority:
   - MESSAGE-DELIVERY-101
   - MESSAGE-DELIVERY-102

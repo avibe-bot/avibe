@@ -98,6 +98,102 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
     assert heads[0] == HEAD_REVISION
 
 
+def test_upgrade_keeps_historical_conflated_callback_rows_sent(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-30T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        def insert_run(
+            run_id: str,
+            *,
+            source_kind: str,
+            parent_run_id: str | None = None,
+            session_id: str | None = None,
+            callback_session_id: str | None = None,
+            callback_status: str | None = None,
+            callback_run_id: str | None = None,
+        ) -> None:
+            conn.execute(
+                """
+                insert into agent_runs (
+                    id, run_type, status, source_kind, parent_run_id, session_id,
+                    callback_session_id, callback_status, callback_error,
+                    callback_run_id, callback_completed_at, cancel_requested,
+                    created_at, completed_at, updated_at, metadata_json
+                ) values (
+                    ?, 'agent_run', 'succeeded', ?, ?, ?, ?, ?, 'legacy error',
+                    ?, ?, 0, ?, ?, ?, '{}'
+                )
+                """,
+                (
+                    run_id,
+                    source_kind,
+                    parent_run_id,
+                    session_id,
+                    callback_session_id,
+                    callback_status,
+                    callback_run_id,
+                    now if callback_status else None,
+                    now,
+                    now if callback_status else None,
+                    now,
+                ),
+            )
+
+        insert_run(
+            "historical_parent",
+            source_kind="agent",
+            callback_session_id="ses_caller",
+            callback_status="sent",
+            callback_run_id="directed_child",
+        )
+        insert_run(
+            "directed_child",
+            source_kind="agent",
+            parent_run_id="historical_parent",
+            session_id="ses_caller",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        parent = conn.execute(
+            """
+            select callback_status, callback_error, callback_run_id,
+                   callback_completed_at
+            from agent_runs
+            where id = 'historical_parent'
+            """
+        ).fetchone()
+        child = conn.execute(
+            """
+            select source_kind, parent_run_id, session_id
+            from agent_runs
+            where id = 'directed_child'
+            """
+        ).fetchone()
+        callback_count = conn.execute(
+            "select count(*) from agent_runs where source_kind = 'callback'"
+        ).fetchone()
+        version = conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone()
+
+    assert parent == (
+        "sent",
+        "legacy error",
+        "directed_child",
+        now,
+    )
+    assert child == ("agent", "historical_parent", "ses_caller")
+    assert callback_count == (0,)
+    assert version == (HEAD_REVISION,)
+
+
 def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 

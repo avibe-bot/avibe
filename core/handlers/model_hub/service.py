@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
 from urllib.parse import parse_qsl, urlsplit
+
+from sqlalchemy import func, select
 
 from config import paths
 from config.v2_config import (
@@ -25,6 +28,8 @@ from config.v2_config import (
     V2Config,
 )
 from core.services.settings import default_config
+from storage.db import get_cached_sqlite_engine
+from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
 from .adapter import (
@@ -35,6 +40,7 @@ from .adapter import (
     OAuthFlowState,
     OriginNotAllowedError,
     RawCallOutcome,
+    RawOutcomeKind,
     SourceBinding,
 )
 from .classification import ResolutionDecision, classify_outcome
@@ -66,6 +72,8 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .provenance import BoundedProvenanceStore
+from .request import ModelHubRequest
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -74,10 +82,13 @@ from .resolver import (
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
+    source_runnable,
 )
 from .revocations import CredentialRevocationJournal
 
 CONTRACT_VERSION = 3
+AGENT_CHAIN_CONTRACT_VERSION = 4
+PROBE_RESULT_CONTRACT_VERSION = 4
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -106,6 +117,7 @@ class ModelHubError(Exception):
         *,
         status: int = 400,
         detail: Optional[str] = None,
+        supply_state: Optional[Literal["waiting", "interrupted"]] = None,
         data: Optional[Mapping[str, Any]] = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
@@ -113,6 +125,7 @@ class ModelHubError(Exception):
         self.code = code
         self.status = status
         self.detail = detail_key
+        self.supply_state = supply_state
         self.data = dict(data or {})
 
 
@@ -223,6 +236,19 @@ class ResolvedInvocation:
     handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
+
+
+AttemptObserver = Callable[
+    [
+        str,
+        str,
+        Literal["native_cli", "hub"],
+        bool,
+        Optional[RawCallOutcome],
+        Optional[ResolutionDecision],
+    ],
+    None,
+]
 
 
 def _utc_now() -> datetime:
@@ -379,6 +405,7 @@ class ModelHubService:
         store: ModelHubConfigStore,
         adapter: EngineAdapter,
         events: BoundedEventLog,
+        provenance: Optional[BoundedProvenanceStore] = None,
         native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
@@ -393,6 +420,9 @@ class ModelHubService:
         self.store = store
         self.adapter = adapter
         self.events = events
+        self.provenance = provenance or BoundedProvenanceStore(
+            paths.get_state_dir() / "model_hub_turn_provenance.json"
+        )
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json")
         self.revocations = revocations or CredentialRevocationJournal(
@@ -611,6 +641,16 @@ class ModelHubService:
 
     def _record_event(self, **event_fields: Any) -> None:
         try:
+            source_ids = {
+                source.id
+                for source in self.store.load().sources
+            }
+            for field in ("from_source", "to_source"):
+                source_id = event_fields.get(field)
+                if source_id is not None and source_id not in source_ids:
+                    raise ValueError(
+                        f"Resolution event names unknown {field}"
+                    )
             self.events.append(build_resolution_event(**event_fields))
         except Exception:
             # Resolution telemetry is best effort and must never affect routing.
@@ -1653,6 +1693,15 @@ class ModelHubService:
                     detail_key="models.source.error.unclassified",
                 )
                 self.store.save(config)
+                self._record_event(
+                    agent="system",
+                    kind="needs_action",
+                    model_id=None,
+                    reason="unclassified_error",
+                    from_source=source.id,
+                    from_label=source.display_name,
+                    now=self.now(),
+                )
                 raise
             source.state = ModelHubSourceStateConfig(status="standby")
             await self._commit_synced(previous, config)
@@ -1992,7 +2041,440 @@ class ModelHubService:
             return source.to_payload()
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
-        return self.events.list(limit=limit, before=before)
+        events = self.events.list(limit=limit, before=before)
+        for event in events:
+            if event.get("severity") is None:
+                event["severity"] = (
+                    "action_required"
+                    if event.get("kind") in {"needs_action", "supply_interrupted"}
+                    else "info"
+                )
+        return events
+
+    @staticmethod
+    def _direct_mode_error() -> ModelHubError:
+        return ModelHubError(
+            "direct_mode",
+            status=409,
+            detail="models.hub.direct_mode",
+        )
+
+    @staticmethod
+    def _chain_supply_state(chain: list[dict]) -> Literal["ok", "waiting", "interrupted"]:
+        if any(item["runnable"] for item in chain):
+            return "ok"
+        if chain and all(
+            item["health"] == "cooldown" and item["reason"] is None
+            for item in chain
+        ):
+            return "waiting"
+        return "interrupted"
+
+    def _agent_chain(
+        self,
+        config: ModelHubConfig,
+        backend: str,
+        model_id: str,
+    ) -> dict:
+        agent = self._agent(config, backend)
+        if agent.mode == "direct":
+            raise self._direct_mode_error()
+        now = self.now()
+        unavailable = self._unavailable_native_sources(
+            config,
+            cast(BackendName, backend),
+        )
+        resolution = resolve_model_hub_turn(
+            config,
+            cast(BackendName, backend),
+            model_id,
+            now=now,
+            unavailable_source_ids=unavailable,
+        )
+        chain: list[dict] = []
+        for source in resolution.matching_sources:
+            status = source.state.status
+            health = (
+                "healthy"
+                if status in {"active", "standby"}
+                else status
+            )
+            runnable = source_runnable(
+                source,
+                now=now,
+                unavailable_source_ids=unavailable,
+            )
+            resolved_model = (
+                resolution.target_model
+                if resolution.mapping_applied or backend == "opencode"
+                else None
+            )
+            chain.append(
+                {
+                    "source_id": source.id,
+                    "channel": source.supply_channel,
+                    "via_mapping": resolution.mapping_applied,
+                    "resolved_model_id": resolved_model,
+                    "health": health,
+                    "runnable": runnable,
+                    "reason": (
+                        "native_cli_unavailable"
+                        if source.id in unavailable
+                        else None
+                    ),
+                    "retry_at": (
+                        source.state.retry_at
+                        if health == "cooldown"
+                        else None
+                    ),
+                }
+            )
+        return {
+            "contract_version": AGENT_CHAIN_CONTRACT_VERSION,
+            "backend": backend,
+            "model_id": resolution.requested_model or model_id,
+            "chain": chain,
+            "supply_state": self._chain_supply_state(chain),
+        }
+
+    def agent_chain(self, backend: str, model_id: object) -> dict:
+        if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        return self._agent_chain(self.store.load(), backend, model_id)
+
+    @staticmethod
+    def _probe_request(
+        source: ModelHubSourceConfig,
+        model_id: str,
+        backend: str,
+    ) -> ModelHubRequest:
+        # A probe enters the same translation seam as a live backend turn, so
+        # its payload must be shaped in the backend's client protocol.
+        request_protocol = {
+            "claude": "anthropic",
+            "codex": "openai_responses",
+        }.get(backend, source.protocol)
+        if request_protocol == "anthropic":
+            payload = {
+                "model": model_id,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        elif request_protocol == "openai_responses":
+            payload = {
+                "model": model_id,
+                "max_output_tokens": 1,
+                "input": "ping",
+            }
+        else:
+            payload = {
+                "model": model_id,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            }
+        return ModelHubRequest(payload, protocol=request_protocol)
+
+    @staticmethod
+    def _probe_failure(
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> tuple[str, Optional[EventReason]]:
+        if decision.action == "surface":
+            return "models.source.error.unclassified", None
+        if decision.reason == "permission_denied":
+            return "models.source.error.unclassified", None
+        if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
+            return "models.source.cooldown.network", "network"
+        if outcome.kind == RawOutcomeKind.TIMEOUT:
+            return "models.source.cooldown.timeout", "network"
+        text = " ".join(
+            value
+            for value in (outcome.error_code, outcome.redacted_message)
+            if isinstance(value, str)
+        ).lower()
+        if outcome.http_status == 401:
+            return "models.source.needs_action.oauth_expired", "credential_expired"
+        if outcome.http_status == 402 or "balance" in text:
+            return "models.source.needs_action.balance_exhausted", "balance_exhausted"
+        if outcome.http_status == 403 and any(
+            marker in text for marker in ("ban", "suspend", "disabled account")
+        ):
+            return "models.source.needs_action.account_banned", "account_banned"
+        if outcome.http_status == 403:
+            return "models.source.needs_action.credential_revoked", "credential_revoked"
+        if decision.reason == "unclassified_error":
+            return "models.source.error.unclassified", "unclassified_error"
+        if decision.action == "fallback" and decision.reason is not None:
+            return f"models.source.cooldown.{decision.reason}", cast(
+                EventReason,
+                decision.reason,
+            )
+        return "models.source.error.unclassified", "unclassified_error"
+
+    async def _set_source_blocker(
+        self,
+        source_id: str,
+        *,
+        backend: BackendName,
+        model_id: str,
+        detail_key: str,
+        reason: EventReason,
+    ) -> None:
+        async with self._mutation_lock:
+            config = self.store.load()
+            source = self._source(config, source_id)
+            status: Literal["error", "needs_action"] = (
+                "error"
+                if reason == "unclassified_error"
+                else "needs_action"
+            )
+            unchanged = (
+                source.state.status == status
+                and source.state.detail_key == detail_key
+            )
+            source.state = ModelHubSourceStateConfig(
+                status=status,
+                detail_key=detail_key,
+            )
+            self.store.save(config)
+            if not unchanged:
+                self._record_event(
+                    agent=cast(EventAgent, backend),
+                    kind="needs_action",
+                    model_id=model_id,
+                    reason=reason,
+                    from_source=source.id,
+                    from_label=source.display_name,
+                    now=self.now(),
+                )
+
+    async def probe_agent(self, backend: str, model_id: object = None) -> dict:
+        if backend not in MODEL_HUB_BACKENDS:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        config = self.store.load()
+        agent = self._agent(config, backend)
+        if agent.mode == "direct":
+            raise self._direct_mode_error()
+        requested_model = (
+            str(model_id).strip()
+            if isinstance(model_id, str) and model_id.strip()
+            else self._requested_model(agent)
+        )
+        chain_payload = self._agent_chain(config, backend, requested_model)
+        candidate_payload = next(
+            (item for item in chain_payload["chain"] if item["runnable"]),
+            None,
+        )
+        if candidate_payload is None:
+            supply_state = chain_payload["supply_state"]
+            retry_at = min(
+                (
+                    item["retry_at"]
+                    for item in chain_payload["chain"]
+                    if item["retry_at"]
+                ),
+                default=None,
+            )
+            raise ModelHubError(
+                "probe_no_candidate",
+                status=409,
+                detail=f"models.probe.no_candidate.{supply_state}",
+                data={
+                    "supply": {
+                        "supply_state": supply_state,
+                        "retry_at": retry_at,
+                    }
+                },
+            )
+        source = self._source(config, candidate_payload["source_id"])
+        resolved_model = (
+            candidate_payload["resolved_model_id"]
+            or chain_payload["model_id"]
+        )
+        if source.supply_channel == "native_cli":
+            ready = self.native_source_ready(
+                cast(BackendName, backend),
+                source_after_cooldown_recovery(source, self.now()),
+            )
+            return {
+                "contract_version": PROBE_RESULT_CONTRACT_VERSION,
+                "backend": backend,
+                "channel": "native_cli",
+                "reachable": ready,
+                "source_id": source.id,
+                "model_id": resolved_model,
+                "latency_ms": None,
+                "via_mapping": bool(candidate_payload["via_mapping"]),
+                "error": (
+                    None
+                    if ready
+                    else "models.probe.native_cli_unavailable"
+                ),
+            }
+
+        await self._ensure_engine_synced()
+        started_at = time.monotonic()
+        handle = await self._engine_call(
+            self.adapter.invoke(
+                source.id,
+                resolved_model,
+                self._probe_request(source, resolved_model, backend),
+                False,
+                backend,
+            )
+        )
+        if handle.stream is not None:
+            async for _chunk in handle.stream:
+                pass
+        outcome = await self._engine_call(handle.outcome())
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            handle = await self._engine_call(
+                self.adapter.invoke(
+                    source.id,
+                    resolved_model,
+                    self._probe_request(source, resolved_model, backend),
+                    False,
+                    backend,
+                )
+            )
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            outcome = await self._engine_call(handle.outcome())
+            decision = classify_outcome(outcome, refresh_attempted=True)
+        elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
+        reachable = decision.action == "return"
+        error_key: Optional[str] = None
+        latency_ms: Optional[int] = elapsed_ms
+        if not reachable:
+            error_key, event_reason = self._probe_failure(outcome, decision)
+            if error_key in {
+                "models.source.cooldown.network",
+                "models.source.cooldown.timeout",
+            }:
+                latency_ms = None
+            if event_reason in {
+                "quota_exhausted",
+                "rate_limited",
+                "server_error",
+                "network",
+            }:
+                await self._cooldown(
+                    source,
+                    decision,
+                    agent=cast(EventAgent, backend),
+                    model_id=resolved_model,
+                    detail_key=error_key,
+                )
+            elif event_reason is not None:
+                await self._set_source_blocker(
+                    source.id,
+                    backend=cast(BackendName, backend),
+                    model_id=resolved_model,
+                    detail_key=error_key,
+                    reason=event_reason,
+                )
+        return {
+            "contract_version": PROBE_RESULT_CONTRACT_VERSION,
+            "backend": backend,
+            "channel": "hub",
+            "reachable": reachable,
+            "source_id": source.id,
+            "model_id": resolved_model,
+            "latency_ms": latency_ms,
+            "via_mapping": bool(candidate_payload["via_mapping"]),
+            "error": error_key,
+        }
+
+    @staticmethod
+    def note_turn_mode(
+        turn_id: str,
+        mode: Literal["direct", "hub"],
+    ) -> None:
+        """Store the mode on the message row whose lifetime defines the turn."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(
+                messages.update()
+                .where(
+                    func.json_extract(
+                        messages.c.metadata_json,
+                        "$.turn_id",
+                    )
+                    == normalized
+                )
+                .values(
+                    metadata_json=func.json_set(
+                        messages.c.metadata_json,
+                        "$.model_hub_mode",
+                        mode,
+                    )
+                )
+            )
+
+    @staticmethod
+    def _known_turn(
+        turn_id: str,
+    ) -> tuple[Optional[str], Optional[Literal["direct", "hub"]]]:
+        try:
+            with get_cached_sqlite_engine().connect() as conn:
+                row = conn.execute(
+                    select(
+                        agent_sessions.c.agent_backend.label("backend"),
+                        func.json_extract(
+                            messages.c.metadata_json,
+                            "$.model_hub_mode",
+                        ).label("mode"),
+                    )
+                    .select_from(
+                        messages.join(
+                            agent_sessions,
+                            messages.c.session_id == agent_sessions.c.id,
+                        )
+                    )
+                    .where(
+                        func.json_extract(
+                            messages.c.metadata_json,
+                            "$.turn_id",
+                        )
+                        == turn_id
+                    )
+                    .limit(1)
+                ).mappings().first()
+        except Exception:
+            return None, None
+        if row is None:
+            return None, None
+        mode = row["mode"]
+        return (
+            str(row["backend"]),
+            mode if mode in {"direct", "hub"} else None,
+        )
+
+    def get_turn_provenance(self, turn_id: object) -> dict:
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            raise ModelHubError("turn_not_found", status=404)
+        record = self.provenance.get(normalized)
+        if record is not None:
+            return record
+        backend, mode = self._known_turn(normalized)
+        if backend is None:
+            raise ModelHubError("turn_not_found", status=404)
+        detail = (
+            "models.provenance.direct_mode"
+            if mode == "direct"
+            else "models.provenance.attribution_ambiguous"
+        )
+        raise ModelHubError(
+            "provenance_unavailable",
+            status=409,
+            detail=detail,
+        )
 
     async def reauth_source(self, source_id: str, payload: object) -> dict:
         if (
@@ -2366,6 +2848,7 @@ class ModelHubService:
         *,
         agent: EventAgent,
         model_id: str,
+        detail_key: Optional[str] = None,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -2373,21 +2856,23 @@ class ModelHubService:
                 current = self._source(config, source.id)
             except ModelHubError:
                 return
+            already_cooling = current.state.status == "cooldown"
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
                 retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
-                detail_key=f"models.source.cooldown.{decision.reason}",
+                detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
             self.store.save(config)
-            self._record_event(
-                agent=agent,
-                kind="cooldown",
-                model_id=model_id,
-                reason=cast(EventReason, decision.reason),
-                from_source=current.id,
-                from_label=current.display_name,
-                now=self.now(),
-            )
+            if not already_cooling:
+                self._record_event(
+                    agent=agent,
+                    kind="cooldown",
+                    model_id=model_id,
+                    reason=cast(EventReason, decision.reason),
+                    from_source=current.id,
+                    from_label=current.display_name,
+                    now=self.now(),
+                )
 
     def _emit_switch(
         self,
@@ -2440,6 +2925,7 @@ class ModelHubService:
         request: Mapping[str, Any],
         stream: bool = False,
         supply_channel: Literal["hub"] | None = None,
+        attempt_observer: Optional[AttemptObserver] = None,
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -2495,7 +2981,16 @@ class ModelHubService:
             )
         candidates = list(resolution.candidates)
         if not candidates:
-            raise ModelHubError("mapping_target_unavailable", status=409)
+            supply_state = (
+                "waiting"
+                if resolution.supply_status == "waiting"
+                else "interrupted"
+            )
+            raise ModelHubError(
+                "mapping_target_unavailable",
+                status=409,
+                supply_state=supply_state,
+            )
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
@@ -2517,6 +3012,15 @@ class ModelHubService:
                 )
             if not engine_prepared:
                 await self._ensure_engine_synced()
+            if attempt_observer is not None:
+                attempt_observer(
+                    source.id,
+                    target_model,
+                    "hub",
+                    resolution.mapping_applied,
+                    None,
+                    None,
+                )
             handle, outcome = await self._invoke(
                 source=source,
                 model_id=target_model,
@@ -2554,6 +3058,15 @@ class ModelHubService:
                     )
                     return ResolvedInvocation(source.id, target_model, handle, None)
                 decision = classify_outcome(outcome, refresh_attempted=True)
+            if attempt_observer is not None:
+                attempt_observer(
+                    source.id,
+                    target_model,
+                    "hub",
+                    resolution.mapping_applied,
+                    outcome,
+                    decision,
+                )
             if decision.action == "return":
                 self._emit_switch(
                     agent=event_agent,
@@ -2573,9 +3086,36 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback":
-                await self._cooldown(source, decision, agent=event_agent, model_id=target_model)
+                event_reason = cast(EventReason, decision.reason)
+                if event_reason in {
+                    "quota_exhausted",
+                    "rate_limited",
+                    "server_error",
+                    "network",
+                }:
+                    await self._cooldown(
+                        source,
+                        decision,
+                        agent=event_agent,
+                        model_id=target_model,
+                    )
+                elif event_reason != "permission_denied":
+                    detail_key = {
+                        "credential_expired": "models.source.needs_action.oauth_expired",
+                        "credential_revoked": "models.source.needs_action.credential_revoked",
+                        "balance_exhausted": "models.source.needs_action.balance_exhausted",
+                        "account_banned": "models.source.needs_action.account_banned",
+                        "unclassified_error": "models.source.error.unclassified",
+                    }[event_reason]
+                    await self._set_source_blocker(
+                        source.id,
+                        backend=cast(BackendName, backend),
+                        model_id=target_model,
+                        detail_key=detail_key,
+                        reason=event_reason,
+                    )
                 failed_source = source
-                failed_reason = cast(EventReason, decision.reason)
+                failed_reason = event_reason
                 continue
             raise ModelHubError(decision.error_code or "engine_down", status=502)
         raise ModelHubError("engine_down", status=503)

@@ -280,6 +280,9 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Continue a pointed Session | `vibe agent run --session-id ...` |
+| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |
+| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |
+| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |
 | Branch from current Session context | `vibe agent run --fork-self ...` |
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
@@ -293,6 +296,10 @@ Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates
 Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
 
 When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
+
+That existing-Session send queues behind an active turn by default. When coordinating another Workbench Session, decide whether its current work should finish or be preempted based on the dependency, urgency, and cost of discarding in-flight work; an explicit user request is one signal, not a prerequisite. Use `vibe agent run --session-id <id> --send-now --message ...` to persist a new Run and then dispatch the Session's FIFO queue head. If older work is already queued, that older head runs first and the new message does not leapfrog it. Use `vibe session send-now <id>` to dispatch an already-queued head without adding another message. Both forms require a Web/Workbench Session, interrupt through the shared Stop path, and start the queue head as a new turn; they do not steer the same native turn. If interruption is refused, the active turn and durable queue remain intact.
+
+Coordinating Agents can inspect the same durable Workbench queue the user sees with `vibe session queue list <id>`. If one queued instruction has become obsolete, contradictory, or duplicated, remove that exact row with `vibe session queue remove <id> <message-id>`. Always list first and use the returned stable message id; never guess an id or delete a different row to simulate reordering.
 
 Use `vibe session update --visible|--hidden` (`--visibility foreground|background`) to promote or hide a persisted Session independently of its scope. Use `--scope-id <scopes.id>` to move it to another scope or `--scope-id none` to make it standalone; moving scope never changes its stored workdir.
 
@@ -313,7 +320,7 @@ Rules:
 - `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
 - `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
-- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the user intends to continue that same existing Session. Async callbacks return to this conversation by default.
+- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session. Async callbacks return to this conversation by default.
 - With `--fork-self` or `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides, and only when the requested Agent backend matches the source Session backend.
 - `--sync` changes waiting behavior, not session identity: default async runs in the background and return through callbacks; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.

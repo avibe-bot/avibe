@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 import socket
-from typing import Final
+from typing import Final, Optional
 
 from aiohttp import web
 
+from config import paths
+
 from .adapter import RawCallOutcome, RawOutcomeKind
+from .classification import classify_outcome
+from .provenance import (
+    BoundedProvenanceStore,
+    GatewayTurnTerminalizer,
+    TurnCorrelationRegistry,
+)
 from .request import ModelHubRequest
 from .service import ModelHubError, ModelHubService, ResolvedInvocation
 
@@ -40,23 +47,54 @@ _PROTOCOL_HEADERS: Final = frozenset(
 class ModelHubTurnGateway:
     """Expose the controller-owned resolver to backend CLI HTTP clients."""
 
-    def __init__(self, service: ModelHubService) -> None:
+    def __init__(
+        self,
+        service: ModelHubService,
+        *,
+        correlation: Optional[TurnCorrelationRegistry] = None,
+    ) -> None:
         self.service = service
-        self._tokens = {
-            backend: secrets.token_urlsafe(32)
-            for backend in ("claude", "codex", "opencode")
-        }
+        self.correlation = correlation or TurnCorrelationRegistry(
+            getattr(
+                service,
+                "provenance",
+                BoundedProvenanceStore(
+                    paths.get_state_dir() / "model_hub_turn_provenance.json"
+                ),
+            )
+        )
         self._start_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
         self._base_url: str | None = None
 
-    async def endpoint(self, backend: str) -> tuple[str, str]:
+    async def endpoint(
+        self,
+        backend: str,
+        *,
+        process_scope: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        requested_model_id: Optional[str] = None,
+        resolved_model_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        via_mapping: bool = False,
+    ) -> tuple[str, str]:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable", status=409)
+        scope = str(process_scope or "").strip() or f"{backend}:untracked"
+        token = self.correlation.credentials(backend, scope, turn_id)
+        if requested_model_id and resolved_model_id and source_id:
+            self.correlation.prepare_gateway_turn(
+                backend=backend,
+                token=token,
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                source_id=source_id,
+                via_mapping=via_mapping,
+            )
         await self._ensure_started()
         assert self._base_url is not None
-        return f"{self._base_url}/{backend}", self._tokens[backend]
+        return f"{self._base_url}/{backend}", token
 
     async def close(self) -> None:
         runner = self._runner
@@ -93,53 +131,92 @@ class ModelHubTurnGateway:
             self._site = site
             self._base_url = f"http://127.0.0.1:{port}"
 
-    def _authorized(self, request: web.Request, backend: str) -> bool:
-        expected = self._tokens.get(backend)
-        if expected is None:
-            return False
+    def _authorized_token(self, request: web.Request, backend: str) -> Optional[str]:
         authorization = request.headers.get("Authorization", "")
         bearer = authorization[7:] if authorization.lower().startswith("bearer ") else ""
         api_key = request.headers.get("x-api-key", "")
-        return secrets.compare_digest(bearer, expected) or secrets.compare_digest(api_key, expected)
+        for candidate in (bearer, api_key):
+            if candidate and self.correlation.authenticates(backend, candidate):
+                return candidate
+        return None
 
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         backend = request.match_info["backend"]
-        if not self._authorized(request, backend):
+        token = self._authorized_token(request, backend)
+        if token is None:
             return self._error_response(status=401, code="authentication_error")
-        endpoint = request.match_info["endpoint"].strip("/")
-        if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
-            return self._error_response(status=404, code="not_found_error")
-        try:
-            payload = await request.json(loads=json.loads)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return self._error_response(status=400, code="invalid_request_error")
-        if not isinstance(payload, dict):
-            return self._error_response(status=400, code="invalid_request_error")
-        model_id = payload.get("model")
-        stream = payload.get("stream", False)
-        if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
-            return self._error_response(status=400, code="invalid_request_error")
+        with self.correlation.gateway_terminalizer(
+            backend=backend,
+            token=token,
+        ) as terminalizer:
+            endpoint = request.match_info["endpoint"].strip("/")
+            if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+                terminalizer.fail("protocol_error")
+                return self._error_response(status=404, code="not_found_error")
+            try:
+                payload = await request.json(loads=json.loads)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            if not isinstance(payload, dict):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            model_id = payload.get("model")
+            stream = payload.get("stream", False)
+            if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
+                terminalizer.fail("invalid_parameter")
+                return self._error_response(status=400, code="invalid_request_error")
+            terminalizer.bind_request_model(model_id)
 
-        try:
-            protocol_headers = {
-                name.lower(): value
-                for name, value in request.headers.items()
-                if name.lower() in _PROTOCOL_HEADERS
-            }
-            resolved = await self.service.resolve(
-                backend=backend,
-                model_id=model_id,
-                request=ModelHubRequest(
-                    payload,
-                    protocol=_REQUEST_PROTOCOLS[endpoint],
-                    headers=protocol_headers,
-                ),
+            def observe_attempt(
+                source_id: str,
+                resolved_model_id: str,
+                channel: str,
+                via_mapping: bool,
+                outcome: Optional[RawCallOutcome],
+                decision,
+            ) -> None:
+                if outcome is None or decision is None:
+                    terminalizer.begin_attempt(
+                        source_id=source_id,
+                        resolved_model_id=resolved_model_id,
+                        channel=channel,
+                        via_mapping=via_mapping,
+                    )
+                    return
+                terminalizer.finish_attempt(
+                    outcome=outcome,
+                    decision=decision,
+                )
+
+            try:
+                protocol_headers = {
+                    name.lower(): value
+                    for name, value in request.headers.items()
+                    if name.lower() in _PROTOCOL_HEADERS
+                }
+                resolved = await self.service.resolve(
+                    backend=backend,
+                    model_id=model_id,
+                    request=ModelHubRequest(
+                        payload,
+                        protocol=_REQUEST_PROTOCOLS[endpoint],
+                        headers=protocol_headers,
+                    ),
+                    stream=stream,
+                    supply_channel="hub",
+                    attempt_observer=observe_attempt,
+                )
+            except ModelHubError as exc:
+                if exc.supply_state is not None:
+                    terminalizer.mark_no_candidate(exc.supply_state)
+                return self._error_response(status=exc.status, code=exc.code)
+            return await self._resolved_response(
+                request,
+                resolved,
                 stream=stream,
-                supply_channel="hub",
+                terminalizer=terminalizer,
             )
-        except ModelHubError as exc:
-            return self._error_response(status=exc.status, code=exc.code)
-        return await self._resolved_response(request, resolved, stream=stream)
 
     async def _resolved_response(
         self,
@@ -147,6 +224,7 @@ class ModelHubTurnGateway:
         resolved: ResolvedInvocation,
         *,
         stream: bool,
+        terminalizer: GatewayTurnTerminalizer,
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
@@ -160,7 +238,17 @@ class ModelHubTurnGateway:
             payload = bytearray()
             async for chunk in handle.stream:
                 payload.extend(chunk)
-            await handle.outcome()
+            outcome = await handle.outcome()
+            decision = classify_outcome(outcome)
+            terminalizer.finish_attempt(
+                outcome=outcome,
+                decision=decision,
+            )
+            if decision.action != "return":
+                return self._outcome_response(
+                    outcome,
+                    error_code=decision.error_code,
+                )
             return web.Response(
                 status=200,
                 body=bytes(payload),
@@ -180,20 +268,29 @@ class ModelHubTurnGateway:
         await response.prepare(request)
         try:
             async for chunk in handle.stream:
+                terminalizer.mark_stream_started()
                 await response.write(chunk)
         finally:
-            await handle.outcome()
+            outcome = await handle.outcome()
+            terminalizer.finish_attempt(
+                outcome=outcome,
+                decision=classify_outcome(outcome),
+            )
         await response.write_eof()
         return response
 
     @staticmethod
-    def _outcome_response(outcome: RawCallOutcome) -> web.Response:
+    def _outcome_response(
+        outcome: RawCallOutcome,
+        *,
+        error_code: Optional[str] = None,
+    ) -> web.Response:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
         status = outcome.http_status if outcome.http_status and 400 <= outcome.http_status <= 599 else 502
         return ModelHubTurnGateway._error_response(
             status=status,
-            code=outcome.error_code or "api_error",
+            code=error_code or outcome.error_code or "api_error",
         )
 
     @staticmethod

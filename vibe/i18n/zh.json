@@ -535,7 +535,11 @@
       "switch": "{from_source}：{reason} -> 已切到 {to_source}",
       "cooldown": "{from_source}：{reason}，暂时冷却",
       "recover": "{to_source}：已恢复可用",
-      "status": "{from_source}：{reason}",
+      "skip": "{from_source}：{reason}，已跳过",
+      "mapping_applied": "{from_source} -> {model}：已应用模型映射",
+      "channel_switch": "{from_source}：供给通道已切换",
+      "needs_action": "{from_source}：{reason}，需要处理",
+      "supply_interrupted": "{model}：{reason}，模型供给已中断",
       "reason": {
         "quota_exhausted": "额度用完",
         "rate_limited": "请求受限",
@@ -543,8 +547,26 @@
         "network": "网络暂不可用",
         "recovery": "已恢复",
         "manual": "手动调整",
-        "mapping": "已应用模型映射"
+        "mapping": "已应用模型映射",
+        "credential_expired": "凭证已过期",
+        "credential_revoked": "凭证已撤销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账户不可用",
+        "permission_denied": "请求权限被拒绝",
+        "unclassified_error": "来源发生未分类错误",
+        "no_enabled_source": "没有已启用的来源",
+        "no_eligible_source": "没有适用的来源",
+        "model_unsupported": "没有来源支持此模型"
       }
+    },
+    "launch": {
+      "retry": "下一回合已自动换线，直接重试即可",
+      "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
+      "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
+      "native_cli_unavailable": "当前进程无法使用 CLI 登录",
+      "no_enabled_source": "模型 {model} 没有已启用的来源。请前往 Models 配置。",
+      "no_eligible_source": "模型 {model} 没有适用于 {backend} 的来源。请前往 Models 配置。",
+      "model_unsupported": "没有来源支持模型 {model}。请前往 Models 配置。"
     }
   },
   "remote_access": {

@@ -971,6 +971,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("### Choosing the right Harness shape", prompt)
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
+        self.assertIn(
+            "| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |",
+            prompt,
+        )
+        self.assertIn(
+            "| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |",
+            prompt,
+        )
+        self.assertIn(
+            "| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |",
+            prompt,
+        )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
         self.assertIn("Tasks created from an Avibe Agent shell continue this conversation by default", prompt)
         self.assertIn("`vibe task add` creates a time-triggered saved Agent message", prompt)
@@ -991,6 +1003,46 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(delegate_guidance, prompt)
         self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
+        self.assertIn(
+            "That existing-Session send queues behind an active turn by default",
+            prompt,
+        )
+        self.assertIn(
+            "an explicit user request is one signal, not a prerequisite",
+            prompt,
+        )
+        self.assertIn(
+            "Both forms require a Web/Workbench Session",
+            prompt,
+        )
+        self.assertIn(
+            "vibe agent run --session-id <id> --send-now --message ...",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session send-now <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue list <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue remove <id> <message-id>",
+            prompt,
+        )
+        self.assertIn(
+            "Always list first and use the returned stable message id",
+            prompt,
+        )
+        self.assertIn(
+            "the new message does not leapfrog it",
+            prompt,
+        )
+        self.assertIn(
+            "If interruption is refused, the active turn and durable queue remain intact",
+            prompt,
+        )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)

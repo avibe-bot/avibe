@@ -11,7 +11,7 @@ observations:
     required_updates:
       - retain intermediate outputs only in the Run output ledger and originating Session
       - keep result_text terminal-only and enqueue one terminal callback
-      - treat an explicit child delivery to the callback Session as satisfying the automatic callback
+      - keep explicit child delivery independent from the parent's automatic callback
       - persist harness-originated prompts with a non-user author and message type
   - id: OBS-MESSAGE-DELIVERY-002
     source: live_local_diagnosis
@@ -24,3 +24,14 @@ observations:
       - recognize silent directives only outside Markdown inline and fenced code
       - preserve code examples byte-for-byte while retaining real silent-block semantics
       - prove the BaseAgent terminal path, message persistence, Run output ledger, and callback payload together
+  - id: OBS-MESSAGE-DELIVERY-003
+    source: live_local_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-008
+    summary: Queued directed child Runs were recorded as completed parent callbacks even though they had not started.
+    previous_assumption: Any explicit child Run targeting the callback Session could satisfy the parent callback.
+    observed_behavior: Parent callback ledgers inherited the child Run id while the child stayed queued, and direct cross-Session database inspection consumed an intermediate preamble instead.
+    required_updates:
+      - derive callback payloads only from the parent Run terminal result
+      - keep directed child Runs as separate durable queue objects with their own callback policy
+      - preserve intermediate assistant and tool activity in the target Session only
