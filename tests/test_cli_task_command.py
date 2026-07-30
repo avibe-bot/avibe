@@ -3454,12 +3454,22 @@ def test_task_add_refuses_the_reserved_session_with_no_side_effects(
     )
     payload = json.loads(stderr_text)
     assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the refusal must be TYPED, not swallowed by the broad handler's generic "
+        "``task_command_failed``. ``reserved_session`` is the same token the Web surface "
+        "already answers with, so one client vocabulary covers both: "
+        f"{payload}"
+    )
     assert "reserved for the runtime" in payload["error"], (
         f"the refusal has to say WHY, in the diagnostic the resolver owns: {payload}"
     )
     assert "ses-workspace-notices" in payload["error"], (
         f"and it has to name the session that was refused: {payload}"
     )
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
 
     # --- zero side effects --------------------------------------------------
     assert cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json").list_tasks() == [], (
@@ -3546,10 +3556,20 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
     )
     payload = json.loads(stderr_text)
     assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the gate's remaining ask (comment 5124964406): direct Agent admission fell "
+        "through ``cmd_agent_run``'s broad ``except Exception`` and reported "
+        "``task_command_failed``, so a caller had only prose to branch on. The refusal "
+        f"must stay typed and coded at the consuming CLI surface: {payload}"
+    )
     assert "reserved for the runtime" in payload["error"], (
         f"the resolver's own diagnostic has to reach the caller: {payload}"
     )
     assert "ses-workspace-notices" in payload["error"]
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
 
     # --- zero side effects --------------------------------------------------
     assert request_store.list_pending() == [], (

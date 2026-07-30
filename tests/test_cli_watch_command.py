@@ -1824,12 +1824,20 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
     )
     payload = json.loads(stderr_text)
     assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the refusal must be TYPED here too, with the same token the Web surface and the "
+        f"other two admission doors use — one contract, every surface: {payload}"
+    )
     assert "reserved for the runtime" in payload["error"], (
         f"the refusal has to say WHY, in the resolver's own diagnostic: {payload}"
     )
     assert "ses-workspace-notices" in payload["error"], (
         f"and it has to name the session that was refused: {payload}"
     )
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
 
     # --- zero side effects --------------------------------------------------
     assert ManagedWatchStore(tmp_path / "watches.json").list_watches() == [], (

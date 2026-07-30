@@ -40,6 +40,7 @@ from core.scheduled_tasks import (
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
+    UnresolvableSessionTarget,
     parse_scope_id,
     parse_session_key,
     resolve_session_id_target,
@@ -185,7 +186,71 @@ class _LocalShowEventsTarget(NamedTuple):
     verify_ui_pid: int | None = None
 
 
+#: The reserved workspace-notifications session, refused at a CLI admission door.
+#:
+#: ONE CODE ACROSS TWO SURFACES. ``reserved_session`` is not new vocabulary invented for
+#: the CLI: ``storage.workbench_sessions_service`` already raises it as
+#: ``ReservedSessionError.code``, ``vibe/ui_server.py`` answers ``403 reserved_session``
+#: for the DELETE, the PATCH and the messages POST, and ``ui/src/i18n`` renders one
+#: ``errors.reserved_session`` entry for it. A coding agent driving ``vibe`` and a browser
+#: driving the API now branch on the SAME token, which is the whole point of coding it:
+#: the round-16 hole was reachable from the CLI precisely because the two surfaces did not
+#: share a contract.
+#:
+#: ONLY ``reserved`` IS TYPED HERE, and the other three ``UnresolvableSessionTarget``
+#: reasons deliberately stay on the generic path. The breadth was checked against the
+#: vocabulary that actually exists rather than assumed:
+#:
+#: * ``session_archived`` does not exist in this CLI at all — it lives only on the Show
+#:   and HTTP surfaces (``core/show_pages.py``, ``vibe/api.py``, ``vibe/ui_server.py``).
+#:   Adding it here would be new vocabulary, not mirroring.
+#: * ``session_not_found`` DOES exist here (``vibe session get`` / ``vibe session
+#:   update``) but means something narrower: a ``LookupError`` from
+#:   ``sessions_service.get_active_session``, which by its own comment folds ARCHIVED into
+#:   not-found. Reusing it for ``reason == "missing"`` would give one token two
+#:   incompatible meanings depending on which command emitted it — worse than a generic
+#:   code, because a client cannot tell which one it got.
+#: * this exception class already HAS a typed CLI code, ``invalid_session_id``, on the
+#:   paths that route through ``_validate_session_id_target`` /
+#:   ``_validate_callback_session_id``. Re-coding ``missing`` / ``archived`` / ``unusable``
+#:   here would make a THIRD vocabulary for one class. Unifying those three is a real
+#:   cleanup with its own blast radius; it is not this finding, and doing it silently
+#:   inside a review round would be the larger change.
+RESERVED_SESSION_CLI_CODE = "reserved_session"
+
+
+def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliError:
+    """Re-type the resolver's refusal as a coded CLI error, keeping its diagnostic.
+
+    ``str(exc)`` is preserved verbatim as the ``error`` because it names the refused
+    session id, which is what a caller greps for. The added ``hint`` mirrors the Web
+    surface's ``harness.notice.workspaceSessionReadOnly`` sentence in the CLI's own plain
+    English (CLI payloads are not routed through ``vibe/i18n``; every other
+    ``TaskCliError`` message here is untranslated too).
+    """
+    return TaskCliError(
+        str(exc),
+        code=RESERVED_SESSION_CLI_CODE,
+        hint=(
+            "This Session only receives Avibe's workspace failure notifications — it "
+            "does not accept turns. Target an ordinary Session, or omit --session-id to "
+            "create one."
+        ),
+        details={"session_id": exc.session_id, "reason": exc.reason},
+    )
+
+
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
+    # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
+    # own ``except``, because this is the one printer every CLI admission door funnels its
+    # broad handler through. ``cmd_agent_run``, ``cmd_task_add`` and ``cmd_watch_add`` all
+    # reached ``resolve_session_id_target`` via ``_resolve_agent_for_target``, which does
+    # not wrap — so all three reported ``task_command_failed`` and a client had nothing but
+    # a prose string to branch on. Fixing it at the printer means a command added later
+    # inherits the code instead of having to remember it, and adds no third copy of the
+    # payload builder below.
+    if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
+        exc = _reserved_session_cli_error(exc)
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,

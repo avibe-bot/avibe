@@ -5905,10 +5905,20 @@ def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
     """
 
     import json
+    from datetime import datetime, timedelta, timezone
 
     from storage.background import SQLiteBackgroundTaskStore
     from storage.pagination import PageRequest
     from vibe import cli
+
+    # Seeded RELATIVE to the wall clock, for the same reason HFR-062's sibling was
+    # (``c57ce4b8``): the CLI path computes health from ``datetime.now``, so a fixed
+    # calendar date here was a time bomb that started aging the run out of the 72 h
+    # window three days after it was written. This one was missed by that commit and
+    # went red on 2026-07-30 — the health it asserts is ``failing`` read ``healthy``
+    # once the seeded failure fell outside the window.
+    def _instant(hours_ago: float) -> str:
+        return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 
     store = SQLiteBackgroundTaskStore()
     try:
@@ -5920,8 +5930,8 @@ def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
                 "status": "failed",
                 "definition_id": "watch-health",
                 "error": "hook blew up",
-                "created_at": "2026-07-27T01:00:00+00:00",
-                "completed_at": "2026-07-27T01:01:00+00:00",
+                "created_at": _instant(2),
+                "completed_at": _instant(1.98),
             }
         )
         assert cli.cmd_watch_list(page_request=PageRequest(limit=20)) == 0
