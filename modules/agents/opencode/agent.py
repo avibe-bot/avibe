@@ -114,11 +114,24 @@ class _SteeringAwareOpenCodeServer:
             and not info.get("error")
         )
 
+    def _has_pending_question_tool(self, messages: list[Dict[str, Any]]) -> bool:
+        return any(
+            message.get("info", {}).get("id") not in self._state.baseline_message_ids
+            and part.get("type") == "tool"
+            and part.get("tool") == "question"
+            and (part.get("state") or {}).get("status") != "completed"
+            for message in messages
+            for part in (message.get("parts") or [])
+        )
+
     async def list_messages(self, session_id: str, directory: str) -> list[Dict[str, Any]]:
         while True:
             wait_for_insert = False
             async with self._state.lock:
                 messages = await self._server.list_messages(session_id, directory)
+                if self._has_pending_question_tool(messages):
+                    self._state.closing = True
+                    return messages
                 awaiting = self._state.awaiting_after_message_ids
                 unchanged_since_insert = (
                     awaiting is not None and self._message_ids(messages).issubset(awaiting)
@@ -142,6 +155,11 @@ class _SteeringAwareOpenCodeServer:
                     return messages
             if wait_for_insert:
                 await asyncio.sleep(0.1)
+
+    async def abort_session(self, *args, **kwargs) -> bool:
+        async with self._state.lock:
+            self._state.closing = True
+            return await self._server.abort_session(*args, **kwargs)
 
 
 def resolve_opencode_model_dict(model_str: str | None, default_provider: str | None) -> dict[str, str] | None:
@@ -1006,7 +1024,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             baseline_message_ids = set(poll_info.baseline_message_ids)
             has_post_assistant_user = any(
-                index > last_completed_assistant_index
+                last_completed_assistant_index >= 0
+                and index > last_completed_assistant_index
                 and message.get("info", {}).get("role") == "user"
                 and message.get("info", {}).get("id") not in baseline_message_ids
                 for index, message in enumerate(messages)

@@ -239,6 +239,18 @@ def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> Non
     assert removed == []
 
 
+def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []}
+    ]
+    agent._test_server.status = {"type": "idle"}
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert removed == ["oc-1"]
+
+
 def test_restored_avibe_poll_marks_session_running():
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     agent, status_writes, _, _ = _build_agent({"oc-1": poll})

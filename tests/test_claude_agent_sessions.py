@@ -8,6 +8,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock
@@ -439,6 +440,79 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
+    async def test_handle_stop_waits_for_in_flight_steering_write(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        interrupt_called = asyncio.Event()
+
+        class _Client:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            async def interrupt(self):
+                interrupt_called.set()
+
+            async def disconnect(self):
+                return None
+
+        async def _receiver():
+            await asyncio.Future()
+
+        agent = ClaudeAgent(controller)
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.active_sessions = {runtime_key}
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        client = _Client()
+        receiver_task = asyncio.create_task(_receiver())
+        controller.claude_sessions[runtime_key] = client
+        controller.receiver_tasks[runtime_key] = receiver_task
+        target = ActiveSteerTarget(
+            runtime_key=runtime_key,
+            logical_turn_id="logical-turn",
+            context=pending_request.context,
+            agent_request=pending_request,
+            agent=agent,
+        )
+        steer_request = SteerRequest(
+            target_session_id="wechat_o9",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{runtime_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="steer while active",
+        )
+        stop_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            composite_session_id=runtime_key,
+            stop_failure_reason=None,
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(steer_request, target))
+        await query_started.wait()
+        stop_task = asyncio.create_task(agent.handle_stop(stop_request))
+        await asyncio.sleep(0)
+        self.assertFalse(interrupt_called.is_set())
+
+        release_query.set()
+        receipt = await steer_task
+        stopped = await stop_task
+
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertTrue(stopped)
+        self.assertTrue(interrupt_called.is_set())
+        self.assertNotIn(runtime_key, agent._steering_locks)
+        self.assertNotIn(runtime_key, agent._steering_generations)
+        self.assertNotIn(runtime_key, agent._steering_closing)
+
     async def test_handle_stop_cleans_up_when_silent_result_emit_fails(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"
@@ -869,6 +943,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 raise
 
         controller.receiver_tasks[session_key] = asyncio.create_task(_receiver())
+        agent._steering_lock(session_key)
+        agent._steering_generations[session_key] = 1
         await asyncio.sleep(0)
 
         cleared = await agent.clear_sessions("wechat-user")
@@ -878,6 +954,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task_cancelled.is_set())
         self.assertNotIn(session_key, controller.receiver_tasks)
         self.assertNotIn(session_key, controller.claude_sessions)
+        self.assertNotIn(session_key, agent._steering_locks)
+        self.assertNotIn(session_key, agent._steering_generations)
         self.assertEqual(controller.session_manager.cleared, ["wechat-user"])
 
     async def test_clear_sessions_cancels_subagent_runtime_keys_for_cleared_session(self):

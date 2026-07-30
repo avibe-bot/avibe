@@ -526,6 +526,46 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
 
 
 @pytest.mark.anyio
+async def test_opencode_question_abort_claims_terminal_owner_before_steering() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "assistant-tool", "role": "assistant"},
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {"status": "pending"},
+                    }
+                ],
+            }
+        ]
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await poll_server.list_messages("opencode-session", primary.working_path)
+        receipt = await steer_active_turn(
+            controller,
+            "opencode",
+            _steer_request(state.native_turn_id),
+        )
+        await poll_server.abort_session("opencode-session", primary.working_path)
+
+        assert messages[-1]["info"]["id"] == "assistant-tool"
+        assert state.closing is True
+        assert receipt.outcome is SteerOutcome.NOT_ACTIVE
+        assert server.prompt_calls == []
+        assert server.abort_calls == [("opencode-session", primary.working_path)]
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()

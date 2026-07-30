@@ -77,6 +77,8 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
+        self._steering_closing: set[str] = set()
+        self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
         self._detached_assistant_text: dict[str, str] = {}
         self._detached_unsolicited_outputs: set[str] = set()
@@ -435,6 +437,24 @@ class ClaudeAgent(BaseAgent):
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
+        await self._prepare_steering_cleanup(composite_key)
+        try:
+            await self._cleanup_runtime_session_state(
+                composite_key,
+                current_receiver_task=current_receiver_task,
+                preserve_pending_request_state=preserve_pending_request_state,
+            )
+        finally:
+            self._retire_steering_state(composite_key)
+
+    async def _cleanup_runtime_session_state(
+        self,
+        composite_key: str,
+        *,
+        current_receiver_task: asyncio.Task | None = None,
+        preserve_pending_request_state: bool = False,
+    ) -> None:
+
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
         self._foreground_tool_use_ids.pop(composite_key, None)
@@ -529,6 +549,7 @@ class ClaudeAgent(BaseAgent):
             or receiver_task is None
             or receiver_task.done()
             or composite_key not in active_sessions
+            or composite_key in self._steering_closing_keys()
         ):
             return None
         return f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
@@ -546,6 +567,48 @@ class ClaudeAgent(BaseAgent):
             generations = {}
             self._steering_generations = generations
         return generations.get(composite_key, 0)
+
+    def _steering_closing_keys(self) -> set[str]:
+        closing = getattr(self, "_steering_closing", None)
+        if closing is None:
+            closing = set()
+            self._steering_closing = closing
+        return closing
+
+    def _steering_writer_keys(self) -> set[str]:
+        writers = getattr(self, "_steering_writers", None)
+        if writers is None:
+            writers = set()
+            self._steering_writers = writers
+        return writers
+
+    async def _prepare_steering_cleanup(self, composite_key: str) -> None:
+        self._steering_closing_keys().add(composite_key)
+        locks = getattr(self, "_steering_locks", None) or {}
+        lock = locks.get(composite_key)
+        if lock is not None and composite_key in self._steering_writer_keys():
+            async with lock:
+                pass
+
+    def _retire_steering_state(
+        self,
+        composite_key: str,
+        *,
+        expected_lock: asyncio.Lock | None = None,
+    ) -> None:
+        locks = getattr(self, "_steering_locks", None)
+        lock = locks.get(composite_key) if locks is not None else None
+        if expected_lock is not None and lock is not expected_lock:
+            return
+        if lock is not None and lock.locked():
+            return
+        if locks is not None:
+            locks.pop(composite_key, None)
+        generations = getattr(self, "_steering_generations", None)
+        if generations is not None:
+            generations.pop(composite_key, None)
+        self._steering_closing_keys().discard(composite_key)
+        self._steering_writer_keys().discard(composite_key)
 
     def _advance_steering_generation(self, composite_key: str) -> None:
         current_generation = self._steering_generation(composite_key)
@@ -566,6 +629,7 @@ class ClaudeAgent(BaseAgent):
                 or receiver_task is None
                 or receiver_task.done()
                 or composite_key not in active_sessions
+                or composite_key in self._steering_closing_keys()
             ):
                 return steer_result(
                     SteerOutcome.REFUSED,
@@ -590,61 +654,66 @@ class ClaudeAgent(BaseAgent):
                 )
             primary_request_count = len(primary_requests)
 
+            writers = self._steering_writer_keys()
+            writers.add(composite_key)
             try:
-                await client.query(request.text, session_id=composite_key)
-            except (asyncio.TimeoutError, TimeoutError) as exc:
-                self._advance_steering_generation(composite_key)
-                return steer_result(
-                    SteerOutcome.UNKNOWN,
-                    reason="acknowledgement_ambiguous",
-                    backend=self.name,
-                    diagnostic=str(exc),
-                )
-            except Exception as exc:  # noqa: BLE001 - SDK transports expose several concrete types
-                diagnostic = str(exc)
-                lowered = diagnostic.lower()
-                if any(
-                    marker in lowered
-                    for marker in (
-                        "failed to write",
-                        "broken pipe",
-                        "connection reset",
-                        "timed out",
-                        "timeout",
-                        "disconnected",
-                        "connection lost",
-                        "unexpected eof",
-                    )
-                ):
+                try:
+                    await client.query(request.text, session_id=composite_key)
+                except (asyncio.TimeoutError, TimeoutError) as exc:
                     self._advance_steering_generation(composite_key)
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="acknowledgement_ambiguous",
                         backend=self.name,
-                        diagnostic=diagnostic,
+                        diagnostic=str(exc),
                     )
-                if any(
-                    marker in lowered
-                    for marker in (
-                        "not connected",
-                        "not ready for writing",
-                        "terminated process",
-                        "process that exited with error",
-                    )
-                ):
+                except Exception as exc:  # noqa: BLE001 - SDK transports expose several concrete types
+                    diagnostic = str(exc)
+                    lowered = diagnostic.lower()
+                    if any(
+                        marker in lowered
+                        for marker in (
+                            "failed to write",
+                            "broken pipe",
+                            "connection reset",
+                            "timed out",
+                            "timeout",
+                            "disconnected",
+                            "connection lost",
+                            "unexpected eof",
+                        )
+                    ):
+                        self._advance_steering_generation(composite_key)
+                        return steer_result(
+                            SteerOutcome.UNKNOWN,
+                            reason="acknowledgement_ambiguous",
+                            backend=self.name,
+                            diagnostic=diagnostic,
+                        )
+                    if any(
+                        marker in lowered
+                        for marker in (
+                            "not connected",
+                            "not ready for writing",
+                            "terminated process",
+                            "process that exited with error",
+                        )
+                    ):
+                        return steer_result(
+                            SteerOutcome.REFUSED,
+                            reason="runtime_unavailable",
+                            backend=self.name,
+                            diagnostic=diagnostic,
+                        )
+                    self._advance_steering_generation(composite_key)
                     return steer_result(
-                        SteerOutcome.REFUSED,
-                        reason="runtime_unavailable",
+                        SteerOutcome.UNKNOWN,
+                        reason="unclassified_transport_failure",
                         backend=self.name,
                         diagnostic=diagnostic,
                     )
-                self._advance_steering_generation(composite_key)
-                return steer_result(
-                    SteerOutcome.UNKNOWN,
-                    reason="unclassified_transport_failure",
-                    backend=self.name,
-                    diagnostic=diagnostic,
-                )
+            finally:
+                writers.discard(composite_key)
 
             self._advance_steering_generation(composite_key)
             touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
@@ -686,7 +755,19 @@ class ClaudeAgent(BaseAgent):
             return False
 
         try:
-            await client.interrupt()
+            async with self._steering_lock(composite_key):
+                if (
+                    self.claude_sessions.get(composite_key) is not client
+                    or composite_key in self._steering_closing_keys()
+                ):
+                    request.stop_failure_reason = "not_active"
+                    return False
+                self._steering_closing_keys().add(composite_key)
+                try:
+                    await client.interrupt()
+                except Exception:
+                    self._steering_closing_keys().discard(composite_key)
+                    raise
         except Exception as err:
             request.stop_failure_reason = "interrupt_failed"
             logger.error(f"Failed to interrupt Claude session {composite_key}: {err}")
@@ -750,9 +831,11 @@ class ClaudeAgent(BaseAgent):
         composite_key: str | None = None,
     ):
         """Receive messages from Claude SDK client."""
+        receiver_steering_lock = None
         try:
             session_key = self.controller._get_session_key(context)
             composite_key = composite_key or f"{base_session_id}:{working_path}"
+            receiver_steering_lock = self._steering_lock(composite_key)
             self._set_activity_connection(composite_key, context, "connected")
 
             # Build a request object for question handler
@@ -1344,6 +1427,11 @@ class ClaudeAgent(BaseAgent):
             self._detached_unsolicited_outputs.discard(composite_key)
             self._detached_unsolicited_text.pop(composite_key, None)
             self._end_activity_runtime(composite_key)
+            if composite_key is not None:
+                self._retire_steering_state(
+                    composite_key,
+                    expected_lock=receiver_steering_lock,
+                )
 
     async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
         """Settle a Claude receiver that ended without a ResultMessage."""
