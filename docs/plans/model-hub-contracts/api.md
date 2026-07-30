@@ -71,6 +71,7 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
   "mode": "hub",
   "selected_by_agent": "pm",
   "selected_model_id": "claude-opus-4-6",
+  "selected_model_explicit": true,
   "current": {
     "model_id": "claude-opus-4-6",
     "source_id": "src_anthkey01",
@@ -128,6 +129,10 @@ default. `supply_status` is derived independently for that effective model. The
 list name and object shape are intentionally distinct from `SupplyGap.agents`,
 which is a list of bare names inside a mutation result.
 
+`selected_model_explicit` is TRUE iff `selected_model_id` originates from the
+user's explicit configuration request. FALSE means no explicit model selection,
+including a resolver-picked value or no selected model.
+
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
 
@@ -156,6 +161,7 @@ backend configuration pins a model:
   "mode": "hub",
   "selected_by_agent": null,
   "selected_model_id": null,
+  "selected_model_explicit": false,
   "current": null,
   "supply_status": null
 }
@@ -620,7 +626,7 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `sources`, `supply_status`, `model_supply`, and `named_agents`; source creation returns both `adopted_by` and `skipped_by` | API payload test |
+| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; source creation returns both `adopted_by` and `skipped_by` | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

@@ -23,6 +23,7 @@
       "description": "v2 (07-29, review round 3): THE SELECTED MODEL of the route named by `selected_by_agent`, as the caller-facing MENU identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. NOT a backend-wide fact (grain corrected 07-29, review round 4): it is the routed Vibe Agent's `model`, falling back to the backend default when that Agent pins none, and a different enabled Agent on the same backend can request a different model on its very next turn. Every projection below that depends on a model — `current`, `supply_status`, and the probe's default — therefore inherits that scope and answers for this route alone. Hoisted out of `current` in round 3, where round 2 had put it as `menu_model_id`. The bug was not merely that the selection was nested: `current` is null whenever nothing is runnable (`waiting` / `interrupted`), so the selection vanished from the payload in exactly the two states where the UI needs it most — 「当前无可用来源」 has to name the model it is talking about, the chain drill-in has to query one, and the probe has to default to one. A client would have had to remember the last non-null `current` and hope, or issue a second call. The two fields answer different questions and have different lifetimes: this one is a persisted user CHOICE that survives every supply state, while `current` is a momentary fact about the next turn. Nesting a choice inside a fact made the choice inherit the fact's nullability. null only when mode=direct (no hub selection exists). OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional). Absent from this file's `examples` on purpose — they round-trip byte-faithfully through the shipped v1 serializer, which has no such field; the worked v2 payload including the `current: null` case lives in api.md.",
       "examples": ["claude-opus-4-6", "zhipuai/glm-5.2"]
     },
+    "selected_model_explicit": { "type": "boolean", "description": "TRUE iff `selected_model_id` originates from the user's explicit configuration request; FALSE means no explicit model selection, including a resolver-picked value or no selected model." },
     "current": {
       "type": ["object", "null"],
       "description": "What the next turn of THIS ROUTE would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for `selected_model_id`, which is the model of the Agent named by `selected_by_agent`. Inherits that grain: a different enabled Vibe Agent on the same backend requesting a different model has a different chain, and this field does not describe it (round 4). NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded. Carries only facts about that candidate — the selection itself is `selected_model_id`, one level up, because it outlives every one of these three nulls.",
@@ -273,6 +274,19 @@
           "selected_by_agent": { "type": "null" },
           "current": { "type": "null" },
           "supply_status": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "selected_model_explicit": { "const": true } },
+        "required": ["selected_model_explicit"]
+      },
+      "then": {
+        "required": ["mode", "selected_model_id"],
+        "properties": {
+          "mode": { "const": "hub" },
+          "selected_model_id": { "type": "string" }
         }
       }
     },

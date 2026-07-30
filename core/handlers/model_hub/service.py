@@ -2106,6 +2106,7 @@ class ModelHubService:
             if agent.mode == "hub"
             else None
         )
+        selected_model_explicit = agent.mode == "hub" and bool(requested_model)
         current_chain_source_ids = {
             source.id
             for source in resolution.matching_sources
@@ -2170,6 +2171,7 @@ class ModelHubService:
             **agent.to_payload(),
             "selected_by_agent": selected_by_agent,
             "selected_model_id": selected_model_id,
+            "selected_model_explicit": selected_model_explicit,
             "current": current,
             "sources": sources,
             "supply_status": (
