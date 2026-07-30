@@ -15,13 +15,15 @@
 // `process_availability_reason` on `sources.eligibility` (whether the local machine
 // can launch a source at all, at per-(source, backend) grain). Each is now read by
 // the function that was already shaped to take it: `adoptionVerdict` takes the
-// complement, `orderSufficiency` asks one predicate per source.
+// complement, `orderSufficiency` asks its predicates per source — of the sources
+// the selected model's route can actually reach, which `in_current_model_chain`,
+// arriving alongside, is what let it narrow to.
 //
 // The rule outlives them, because the arrival is what proves it was right: neither
 // function grew a branch to accommodate the field, and a payload that still omits
 // one keeps returning the same weaker verdict it always did. Silence stays
 // `indeterminate` or the weaker claim, never a false alarm and never a guess.
-import { processAvailabilityOf } from './eligibility';
+import { offCurrentModelChain, processAvailabilityOf } from './eligibility';
 import { isUnhealthy } from './supply';
 import type { AdoptedBy, AgentBackend, AgentSupply, SkippedBy, Source } from './types';
 
@@ -92,6 +94,24 @@ export function adoptionVerdict(
  * on `sources.eligibility` at exactly this grain, per (source, backend). `covered`
  * now means 「a source can be reached AND launched」; an agent whose payload omits
  * the field falls back to the old, weaker claim rather than to a false alarm.
+ *
+ * But being able to serve SOMETHING is not being able to serve the next turn, and
+ * a rollup over every enabled source quietly asked the first question. A healthy
+ * key that does not stock the selected model answered 「fine」 for a turn it was
+ * never going to be asked — so with the model's only supplier a native CLI this
+ * process cannot launch, the drawer stayed silent about a turn that fails. Sources
+ * the server puts outside the current model's route are therefore dropped from the
+ * rollup: they cannot serve THIS turn, whatever else is true of them.
+ *
+ * `in_current_model_chain` is only ever consulted about ids the server's answer was
+ * ABOUT. The route is built by walking `config.effective_source_order(backend)`
+ * (`resolver.py:252`), the very list the payload reports as `sources.order`, so a
+ * source the user has just enabled in the drawer and not yet saved is outside that
+ * walk and reads `false` for a reason that is about the ORDER and not about the
+ * model. Applied to it, the gate would announce 「下一个回合会失败」 at the exact
+ * moment the user enabled the source that fixes it — telling them to do the thing
+ * they just did. So an id not in the answered-about order keeps its old, ungated
+ * treatment, which is also what a `null` or absent membership gets.
  */
 export function orderSufficiency(
   orderIds: readonly string[] | null | undefined,
@@ -104,10 +124,16 @@ export function orderSufficiency(
 
   const byId = new Map(sources.map((s) => [s.id, s]));
   const resolved = orderIds.map((id) => byId.get(id)).filter((s): s is Source => s !== undefined);
+  const answeredAbout = new Set(agent.sources?.order ?? []);
+  const onRoute = resolved.filter((s) => !(answeredAbout.has(s.id) && offCurrentModelChain(agent, s.id)));
   const servable = (s: Source) => !isUnhealthy(s.state) && processAvailabilityOf(agent, s.id).runnable;
-  if (resolved.some(servable)) return { kind: 'covered' };
-  // Every id we could resolve is down. If some could not be resolved, the two reads
-  // disagree and an unknown source is not a broken one.
+  if (onRoute.some(servable)) return { kind: 'covered' };
+  // Nothing on the route can serve — either everything left is down, or the route
+  // is empty because nothing enabled stocks the model. Both fail the next turn, and
+  // the warning offers both remedies (「修好下面的某一个，或者再启用一个」).
+  //
+  // If some id could not be resolved, the two reads disagree and an unknown source
+  // is not a broken one.
   return resolved.length === orderIds.length ? { kind: 'nothing_runnable' } : { kind: 'indeterminate' };
 }
 
@@ -149,6 +175,10 @@ export function connectOutcome(agent: AgentSupply, sources: readonly Source[] | 
 
   // `supply_status: null` means the server had no model to resolve, not that the order
   // is fine. It is silence, so the order's own runnability is the only fact left.
+  //
+  // Which is also the one state where the verdict's route gate has nothing to say:
+  // no model selected means no route, and the server sends `in_current_model_chain:
+  // null` for every source. The narrowing above cannot reach this caller.
   if (verdict.kind === 'nothing_runnable') return 'nothingRunnable';
   return verdict.kind === 'covered' ? 'connected' : 'indeterminate';
 }

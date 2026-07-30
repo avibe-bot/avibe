@@ -144,7 +144,8 @@ export const MappingDrawer: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onClose: () => void;
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed — see `agentsWithEcho`. */
+  onSaved: (echoed: AgentSupply) => void;
 }> = ({ open, backend, agent, sources, onClose, onSaved }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -212,7 +213,7 @@ export const MappingDrawer: React.FC<{
         draft.filter((m) => m.enabled && targetIds.has(m.target_model_id)),
       );
       announceEnrollment(agent, echoed);
-      onSaved();
+      onSaved(echoed);
       onClose();
     } catch {
       showToast(t('settings.models.menus.saveFailed') as string, 'error');

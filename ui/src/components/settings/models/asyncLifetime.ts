@@ -1,7 +1,7 @@
 // Async ownership rules extracted from the Models components so interleavings can
-// be exercised directly: which request may land, how long a write counts as
-// outstanding, when a drawer re-seeds, and whether a connect-flow transition may
-// change an already terminal view.
+// be exercised directly: which request may land, what speaks for a row when no
+// read does, how long a write counts as outstanding, when a drawer re-seeds, and
+// whether a connect-flow transition may change an already terminal view.
 import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
@@ -27,6 +27,38 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
     },
   };
 };
+
+// ── What speaks for a row when no read does ────────────────────────────────
+/**
+ * Takes a write's echoed Agent row into the page's list.
+ *
+ * A mutation here is followed by a re-read, and for a while the re-read was the
+ * only thing that updated the row it moved. That is a read landing in the middle
+ * of the two things it must not be confused with: it can FAIL (the page toasts
+ * 「视图可能不是最新的」 and carries on), and it can be superseded — the authority
+ * above lands only the latest request and reports the rest `stale`. Either way the
+ * mutation returns normally over a row that still shows the pre-write state, which
+ * for 来源顺序 means the enrollment baseline 模型菜单与映射 diffs against is one
+ * write behind, and the menu's own save reports an append the ORDER write made.
+ *
+ * So the write's own answer is taken directly. Every one of these routes replies
+ * with the same `_agent_payload` projection the list read returns
+ * (`service.py:1972` returns it straight out of `set_agent_sources`), computed
+ * under the mutation lock after the commit — it is not a client-side prediction of
+ * what the write did, it is the server's own statement of what the row now is, and
+ * it cannot fail separately from the write that produced it.
+ *
+ * It does not make the re-read redundant: the echo is one Agent, and an order
+ * change also moves the source rows, the other Agents' ● 当前 and the event feed.
+ * It makes the re-read's LANDING stop being the only way the row can catch up.
+ *
+ * A backend the page has no row for is left alone rather than appended. A write
+ * echo is an update to a row; which rows exist is the list read's to say.
+ */
+export const agentsWithEcho = (
+  agents: readonly AgentSupply[],
+  echoed: AgentSupply,
+): AgentSupply[] => agents.map((agent) => (agent.backend === echoed.backend ? echoed : agent));
 
 // ── A write that outlives the drawer that issued it ────────────────────────
 /**

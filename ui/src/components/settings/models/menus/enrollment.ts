@@ -31,11 +31,13 @@ import { useCompactSourceLabel } from './sourceLabel';
  * the page's own Agent list, so a `sources.order` PUT that lands in the window
  * between the page reading it and this write returning would show up in the diff
  * and be reported as this write's doing. The one path that could reach that window
- * is closed where it opens rather than compensated for here: 来源顺序's hand-off to
- * these drawers is shut until its own write has been read back. The fact that one
- * is outstanding is held by the PAGE (`createPendingWrites`, asyncLifetime.ts) and
- * not by the drawer issuing it — the user can close that drawer, which unmounts it,
- * and reopen it mid-write — so the baseline handed over is never mid-write.
+ * is closed where it opens rather than compensated for here, in two parts that meet:
+ * 来源顺序's hand-off to these drawers is shut while its write is in flight — the
+ * outstanding-write fact held by the PAGE, not by the drawer issuing it, since the
+ * user can close that drawer, which unmounts it, and reopen it mid-write
+ * (`createPendingWrites`) — and the order it wrote reaches this list as the WRITE'S
+ * OWN ECHO (`agentsWithEcho`), so the baseline is caught up even when the re-read
+ * that would otherwise have carried it fails or is superseded.
  * The general case — any order write from outside this page's read cycle — is not
  * client-answerable, and its fix is the mutation response naming its own appends
  * (`enrolled_source_ids`), server-side and escalated rather than approximated here.

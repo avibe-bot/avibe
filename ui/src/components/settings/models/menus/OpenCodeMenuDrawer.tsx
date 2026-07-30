@@ -74,7 +74,8 @@ export const OpenCodeMenuDrawer: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onClose: () => void;
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed — see `agentsWithEcho`. */
+  onSaved: (echoed: AgentSupply) => void;
   /** Re-fetch sources after a custom model is added/edited. */
   onRefresh: () => void;
 }> = ({ open, agent, sources, onClose, onSaved, onRefresh }) => {
@@ -158,7 +159,7 @@ export const OpenCodeMenuDrawer: React.FC<{
       // here would strip a just-added custom model before onRefresh lands.
       const echoed = await modelsApi.putMenu({ view, checked: [...checked] });
       announceEnrollment(agent, echoed);
-      onSaved();
+      onSaved(echoed);
       onClose();
     } catch {
       showToast(t('settings.models.menus.saveFailed') as string, 'error');

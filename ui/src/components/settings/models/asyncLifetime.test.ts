@@ -49,12 +49,20 @@
 //      unmounts it, so the reopen re-creates the mark reading 「idle」 over a write
 //      still outstanding. The user then walks into the menu on a stale baseline and
 //      the menu's own save reports the ORDER write's append as its own.
+//
+//   8. write-lands-read-does-not. Interleaving 7 once more, and the last place it
+//      can hide: the mark now spans the re-read, but a re-read is not an outcome.
+//      `refreshSourcesAgents` swallows a failure into a toast and the authority
+//      drops a superseded run, so the await finishes either way and clears the mark
+//      over rows that never moved — the same stale baseline, reached by waiting for
+//      exactly the right thing and being told nothing about how it went.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  agentsWithEcho,
   createFlowAuthority,
   createLatestAsyncAuthority,
   createPendingWrites,
@@ -116,6 +124,73 @@ describe('latest async authority', () => {
     await olderRun;
 
     expect(landed).toEqual(['server order: b,a']);
+  });
+
+  // Interleaving 8, at its source. These are the two ways a re-read finishes with
+  // the rows exactly where they were, and the mutation awaiting it cannot tell
+  // either one from success — which is what makes 「the re-read finished」 a
+  // different fact from 「the row is current」.
+  it('reports a superseded run rather than landing it, and hands a failed one back', async () => {
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthority<string>((value) => landed.push(value));
+    const older = deferred<string>();
+
+    const olderRun = authority.run(() => older.promise);
+    await authority.run(() => Promise.resolve('newest'));
+    older.resolve('older');
+
+    expect(await olderRun).toBe('stale');
+    await expect(authority.run(() => Promise.reject(new Error('read failed')))).rejects.toThrow('read failed');
+    expect(landed).toEqual(['newest']);
+  });
+});
+
+describe('agentsWithEcho — what speaks for a row when no read does', () => {
+  const claude = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a'] } });
+  const codex = agent({ backend: 'codex', sources: { policy: 'follow', order: ['src_b'] } });
+
+  it('takes the write’s echo into the row it is about', () => {
+    const echoed = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a', 'src_c'] } });
+
+    expect(agentsWithEcho([claude, codex], echoed)).toEqual([echoed, codex]);
+  });
+
+  it('leaves every other Agent to the read that owns it', () => {
+    // An order write is per backend; it says nothing about the others, so it may
+    // not answer for them either.
+    const echoed = agent({ backend: 'codex', sources: { policy: 'custom', order: ['src_b', 'src_c'] } });
+
+    expect(agentsWithEcho([claude, codex], echoed)[0]).toBe(claude);
+  });
+
+  it('does not invent a row the page has not read', () => {
+    // Which Agents exist is the list read's to say. A write echo is an update.
+    const echoed = agent({ backend: 'opencode' });
+
+    expect(agentsWithEcho([claude], echoed)).toEqual([claude]);
+  });
+
+  it('does not mutate the list it was handed', () => {
+    const before = [claude, codex];
+    agentsWithEcho(before, agent({ backend: 'claude', sources: { policy: 'follow', order: [] } }));
+
+    expect(before).toEqual([claude, codex]);
+  });
+
+  // Interleaving 8. TypeScript already forces every drawer to hand its echo over —
+  // `onSaved` takes one — so what is left to guard is the page: that it TAKES the
+  // echo rather than dropping it beside a re-read, and that no Agent write reports
+  // itself any other way.
+  it('is how every Agent write on the page reports itself', () => {
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(page).toMatch(/setAgents\(\(prev\) => agentsWithEcho\(prev, echoed\)\)/);
+    // The mode PATCH echoes the same row the drawers' writes do.
+    expect(page).toMatch(/await agentSaved\(echoed\)/);
+
+    const handlers = [...page.matchAll(/onSaved=\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(handlers.length).toBeGreaterThanOrEqual(3);
+    expect(handlers.filter((h) => !h.includes('agentSaved'))).toEqual([]);
   });
 });
 
@@ -228,7 +303,7 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     // And the mark spans the whole of `persist`, read-back included, because
     // `track` is what opens and closes it.
     expect(drawer).toMatch(/orderWrite\.track\(async \(\) => \{/);
-    expect(drawer).toMatch(/await Promise\.resolve\(onSaved\(\)\)\.catch\(\(\) => \{\}\);/);
+    expect(drawer).toMatch(/await Promise\.resolve\(onSaved\(echoed\)\)\.catch\(\(\) => \{\}\);/);
 
     expect(page).toMatch(/createPendingWrites\(setOrderWrites\)/);
     expect(page).toMatch(/pending: orderWrites\.has\(orderAgent\.backend\)/);

@@ -123,9 +123,15 @@ export const SourceOrderDrawer: React.FC<{
   agents: AgentSupply[];
   sources: Source[];
   onClose: () => void;
-  /** Re-read sources + agents: an order change moves ● 当前 on the page too.
-   *  Returning the read's promise lets the pending mark span it — see `persist`. */
-  onSaved: () => void | Promise<void>;
+  /** Hands the page the Agent row this write echoed, and re-reads what else the
+   *  order moved (● 当前 elsewhere, the source rows, the feed). Returning that
+   *  read's promise lets the pending mark span it — see `persist`. */
+  onSaved: (echoed: AgentSupply) => void | Promise<void>;
+  /** Re-reads the rows behind the drawer, claiming nothing about them. Separate
+   *  from `onSaved` because only a write can hand over an echo: 试跑 is a probe
+   *  that moves source state (a cooldown, a 需处理) and echoes no Agent, so a read
+   *  is genuinely all there is to do about it. */
+  onReread: () => void;
   /** This backend's slot in the page's pending-write registry. Held by the page
    *  because every close path stays live during a write and closing unmounts this
    *  drawer — see `createPendingWrites` in asyncLifetime.ts. */
@@ -133,7 +139,7 @@ export const SourceOrderDrawer: React.FC<{
   /** Desktop footer 模型菜单与映射 — hand off to this backend's menu drawer.
    *  Omitted while the menus are flagged off. */
   onOpenMenu?: () => void;
-}> = ({ open, agent, agents, sources, onClose, onSaved, orderWrite, onOpenMenu }) => {
+}> = ({ open, agent, agents, sources, onClose, onSaved, onReread, orderWrite, onOpenMenu }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(agent.backend);
@@ -313,12 +319,13 @@ export const SourceOrderDrawer: React.FC<{
    * and reopened. The page holds it instead — see `createPendingWrites`.
    */
   const persist = (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) =>
-    // Marked pending until the page has RE-READ the order this write moved, not
-    // merely until the PUT returns. The mark gates the hand-off to 模型菜单与映射,
-    // and the drawer it hands off to reads its enrollment baseline out of the
-    // page's Agent list — so a hand-off in the gap between 「the server has the new
-    // order」 and 「the page knows it」 would let the menu's own save echo an append
-    // THIS write made and report it as the menu's own.
+    // Marked pending for the whole hand-back and not merely until the PUT returns,
+    // because the mark is what keeps 模型菜单与映射 shut while this runs, and the
+    // drawer it hands off to reads its enrollment baseline out of the page's Agent
+    // list. What the mark cannot do is make that baseline right: `onSaved` finishes
+    // whether the page's re-read landed, failed or was superseded. So the baseline
+    // travels with the hand-back — the echo below IS the server's post-write row —
+    // and the mark only has to cover the window in which the write is in flight.
     orderWrite.track(async () => {
       const previous = saved.current;
       setPolicy(next.policy);
@@ -334,8 +341,9 @@ export const SourceOrderDrawer: React.FC<{
         setPolicy(adopted.policy);
         setOrder(adopted.order);
         // A failed re-read belongs to the page that made it and is not this write's
-        // to roll back: the server accepted the order either way.
-        await Promise.resolve(onSaved()).catch(() => {});
+        // to roll back: the server accepted the order either way. Which is why the
+        // echo goes over with it rather than being left for that read to rediscover.
+        await Promise.resolve(onSaved(echoed)).catch(() => {});
       } catch {
         saved.current = previous;
         setPolicy(previous.policy);
@@ -523,7 +531,7 @@ export const SourceOrderDrawer: React.FC<{
             sources={sources}
             chainKey={dryRunChainKey(agent, policy, order, sources)}
             saving={saving}
-            reread={onSaved}
+            reread={onReread}
           />
         )}
 
@@ -583,10 +591,11 @@ const DryRunRow: React.FC<{
    *  chain the server still holds, filed under the one the user already sees —
    *  `dryRunRowView` owns that rule. */
   saving: boolean;
-  /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
+  /** Re-read sources + agents, the drawer's own `onReread`: a failing 试跑 is a
    *  write, so the page it sits on is stale until this runs — and `probeArrival`
    *  owns the part that is easy to get wrong, that this is owed even for an answer
-   *  the row will not draw. */
+   *  the row will not draw. A read and not an echo: the probe writes SOURCE state
+   *  and hands back no Agent row to take. */
   reread: () => void;
 }> = ({ agent, sources, chainKey, saving, reread }) => {
   const { t } = useTranslation();
