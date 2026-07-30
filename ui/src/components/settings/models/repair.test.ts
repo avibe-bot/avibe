@@ -678,9 +678,32 @@ describe('mayHaveWritten — the same unknown, wherever it is caught', () => {
 
   it('is one owner, not a predicate re-derived per caller', () => {
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const file of ['ReplaceKeyDialog.tsx', 'SourceOrderDrawer.tsx']) {
+    for (const file of ['ReplaceKeyDialog.tsx', 'SourceOrderDrawer.tsx', 'SourceRowMenu.tsx']) {
       expect(readFileSync(join(here, file), 'utf8')).not.toMatch(/!\(?failure\?\.serverNamed/);
     }
+  });
+
+  it('is not the question 删除 asks, so 删除 does not ask it', () => {
+    // Round 17's finding, and why it is answered without a gate rather than with
+    // this one. 更换 API Key asks 「did MY write land?」, because the cost of getting
+    // it wrong is provisioning a second replacement — `mayHaveWritten` is that
+    // question. A failed DELETE asks 「are the rows I am drawing still right?」, and
+    // the two come apart on both sides: a commit whose answer was lost is unknown
+    // AND stale, while `source_not_found` is server-NAMED, wrote nothing, and is
+    // news precisely because the row is already gone — the same shape
+    // `disprovedDrawnHead` above exists for. Gating on 「may it have written」 would
+    // leave that phantom row on screen until something else happened to refetch.
+    //
+    // So it re-reads either way, for the reason `releaseFlow` gives: a redundant
+    // re-read is inert, a missing one is the bug. The guarded refusal still leaves
+    // through the branch above this one, having provably written nothing.
+    const menu = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'SourceRowMenu.tsx'), 'utf8');
+
+    expect(menu).not.toMatch(/mayHaveWritten/);
+    expect(menu).toMatch(/onChanged\(\);\n\s*showToast\(t\('settings\.models\.sourceActions\.deleteFailed'/);
+    // Both delete outcomes now reach the page: the refusal escalates to a second
+    // confirm, everything else closes and re-reads.
+    expect(menu).toMatch(/failure\?\.code === 'source_last_supplier' && !forceMode/);
   });
 });
 

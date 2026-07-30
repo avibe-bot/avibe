@@ -205,6 +205,18 @@ export const SourceRowMenu: React.FC<{
       }
       if (aliveRef.current) {
         setDeleteOpen(false);
+        // Same rule as `rediscover` above, for the same reason: a failed DELETE is
+        // not read-only either. The supply guard is the one refusal that provably
+        // wrote nothing — `delete_source` raises it off a CLONED config, before
+        // `_commit_synced` — and it left through the branch above. Everything that
+        // reaches here got past that commit or died inside it: a response lost on
+        // the way back arrives as `bad_response`, invented by this client about a
+        // delete that may well have happened, and `source_not_found` means the row
+        // is already gone. Deliberately not gated on `serverNamed`: that says
+        // whether the ROUTE named the failure, never whether the server wrote —
+        // `oauth_cancel` is the standing proof those are different questions. The
+        // toast reports the attempt, the row reports the state.
+        onChanged();
         showToast(t('settings.models.sourceActions.deleteFailed') as string, 'error');
       }
     }

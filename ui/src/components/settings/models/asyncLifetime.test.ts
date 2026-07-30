@@ -530,7 +530,7 @@ describe('failureLanded — whose account of the rows is the one on screen', () 
     // The two paths reached after the attempt is over take the default rather than
     // restating it — including the release re-read, which awaits the cancel first
     // and is therefore the latest-landing arrival in the file.
-    expect(dialog).toMatch(/const resolvedAfterClose = \(\) => rowsBehindAreStale\(\);/);
+    expect(dialog).toMatch(/const resolvedAfterAttempt = \(\) => rowsBehindAreStale\(\);/);
     expect(dialog).toMatch(/reread: \(\) => rowsBehindAreStale\(\),/);
   });
 });
@@ -737,12 +737,53 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     // nothing has been requested yet on that tick and so nothing can have written.
     const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
     const bare = dialog.match(/if \(cancelled\) return;/g) ?? [];
-    const handedBack = dialog.match(/if \(cancelled\) \{\s*resolvedAfterClose\(\);\s*return;\s*\}/g) ?? [];
+    const handedBack = dialog.match(/if \(cancelled\) \{\s*resolvedAfterAttempt\(\);\s*return;\s*\}/g) ?? [];
 
     expect(bare.length).toBe(1);
     expect(handedBack.length).toBe(3);
     // And the fourth exit — a start that SUCCEEDED after the close — reaches the
     // same owner through the release it also has to make.
-    expect(dialog).toMatch(/reread: resolvedAfterClose,/);
+    expect(dialog).toMatch(/reread: resolvedAfterAttempt,/);
+  });
+
+  it('counts the paste submit among those exits, on both of its outcomes', () => {
+    // Round 17's, and the reason the owner is no longer scoped to the effect: the
+    // submit could not reach it. Its two exits ask a different question — `cancelled`
+    // is 「the effect tore down」, `isCurrent()` is 「this attempt is still the one on
+    // screen」, which a mid-open restart also answers no — but they are the same fact
+    // about the rows, and both of them write before they can be dropped. The success
+    // went through `_materialize_completed_oauth` to be a success at all; the
+    // rejection can be `discovery_failed` raised one line after
+    // `_materialize_reauth` saved the source as 需处理 with its models stripped.
+    // Returning bare there left the close path's re-read — issued while the submit
+    // was in flight — as the last word on rows the submit changed afterwards.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+    const superseded =
+      dialog.match(/if \(!isCurrent\(\)\) \{\s*resolvedAfterAttempt\(\);\s*return;\s*\}/g) ?? [];
+
+    expect(superseded.length).toBe(2);
+    expect(dialog).not.toMatch(/if \(!isCurrent\(\)\) return;/);
+    // Component scope, not effect scope, or the two above cannot see it.
+    expect(dialog).toMatch(/^ {2}const resolvedAfterAttempt = /m);
+  });
+
+  it('cancels the flow the request opened, not the one the view landed', () => {
+    // Round 17's other one. A start can come back ALREADY terminal, and that flow is
+    // deliberately never landed in the view — `startNeedsStatusRead` routes it
+    // through `poll` so that `settle` is what terminalizes it. Cleanup took its
+    // cancel id out of the view, so for exactly that start it found nothing and
+    // passed `cancel: null` — which `releaseFlow` is entitled to read as 「this
+    // journey never got a flow id」 when what had happened is that nobody told the
+    // view. Close during the status read and the flow stayed un-materialized;
+    // un-materialized is `not completed`, the only thing `pending_reauth` filters
+    // on, so `POST …/reauth` hands the next attempt on that source the login the
+    // close was abandoning — and reading its status is what commits it.
+    const dialog = readFileSync(join(__dirname, 'OAuthConnectDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/let openedFlowId: string \| null = null;/);
+    expect(dialog).toMatch(/openedFlowId = started\.flow_id;/);
+    expect(dialog).toMatch(/cancel: opened \? \(\) => modelsApi\.cancelOAuth\(opened\) : null,/);
+    // The view is not asked, because it was never the thing that knew.
+    expect(dialog).not.toMatch(/authority\.current\(\)\.flow;/);
   });
 });

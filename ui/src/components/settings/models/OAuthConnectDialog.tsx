@@ -170,6 +170,33 @@ export const OAuthConnectDialog: React.FC<{
     onConnectedRef.current();
   };
 
+  /**
+   * A request of one attempt that resolved after that attempt stopped being the one
+   * on screen — because the dialog closed, or because a later attempt replaced it.
+   * Those are one fact here: whatever this arrival wrote, it wrote it to rows
+   * somebody else is now reading.
+   *
+   * The close path re-read too — but it did so while this request was still in
+   * flight, so that read can predate the request's own write, and every request
+   * here has one: a status poll MATERIALIZES a just-succeeded flow, a paste submit
+   * does the same and can write BEFORE it rejects (`_materialize_reauth` saves the
+   * source as 需处理 with its models stripped and only then raises
+   * `discovery_failed`), a start that rejects can have kept
+   * `mark_native_irreversible_start`'s marking, and `oauth_cancel` itself routes a
+   * terminal flow into materialization. This is the last thing that corrects the
+   * rows, which is why it lives out here where every one of those exits can reach
+   * it — a request that outlived its attempt is one rule, not one per call site.
+   *
+   * It says nothing about the pairs, and takes the default to say so. Not because
+   * it has none to hand over — it never does — but because the empty list is
+   * itself a claim, and this arrival has no standing to make it: the dialog that
+   * would have shown ITS pairs is gone, while the one on screen may already
+   * belong to a later attempt. Closing a re-login and starting another on a
+   * different source is one click away, and this request can land after that
+   * one has failed.
+   */
+  const resolvedAfterAttempt = () => rowsBehindAreStale();
+
   const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -193,6 +220,13 @@ export const OAuthConnectDialog: React.FC<{
     let cancelled = false;
     let pollTimer: number | null = null;
     let deadline = Date.now() + DEADLINE_MS;
+    // The flow id this journey opened, kept beside the view instead of read back out
+    // of it. Cleanup needs an id to cancel with, and the VIEW is exactly what
+    // `startNeedsStatusRead` keeps a terminal start out of — on purpose. Taking the
+    // id from there let 「what may be SHOWN」 decide 「what may be CANCELLED」, and the
+    // one arrival whose cancel IS the materialization was the one it left with
+    // neither.
+    let openedFlowId: string | null = null;
 
     const stop = () => {
       if (pollTimer !== null) window.clearTimeout(pollTimer);
@@ -271,26 +305,6 @@ export const OAuthConnectDialog: React.FC<{
     };
     settleRef.current = settle;
 
-    /**
-     * A request of THIS journey that resolved after the dialog was already gone.
-     *
-     * The close path re-read too — but it did so while this request was still in
-     * flight, so that read can predate the request's own write, and every request
-     * here has one: a status poll MATERIALIZES a just-succeeded flow, a start that
-     * rejects can have kept `mark_native_irreversible_start`'s marking, and
-     * `oauth_cancel` itself routes a terminal flow into materialization. This is
-     * the last thing that corrects the rows.
-     *
-     * It says nothing about the pairs, and takes the default to say so. Not because
-     * it has none to hand over — it never does — but because the empty list is
-     * itself a claim, and this arrival has no standing to make it: the dialog that
-     * would have shown ITS pairs is gone, while the one on screen may already
-     * belong to a later attempt. Closing a re-login and starting another on a
-     * different source is one click away, and this request can land after that
-     * one has failed.
-     */
-    const resolvedAfterClose = () => rowsBehindAreStale();
-
     const poll = async (flowId: string) => {
       // Nothing has been requested yet on this tick, so there is nothing that
       // could have written — unlike the two exits below.
@@ -300,14 +314,14 @@ export const OAuthConnectDialog: React.FC<{
       try {
         const result = await modelsApi.getOAuthStatus(flowId);
         if (cancelled) {
-          resolvedAfterClose();
+          resolvedAfterAttempt();
           return;
         }
         if (settle(result)) return;
         pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
       } catch (err) {
         if (cancelled) {
-          resolvedAfterClose();
+          resolvedAfterAttempt();
           return;
         }
         // The user's own submit outranks a failed READ, and `pollFailureSettles`
@@ -387,7 +401,7 @@ export const OAuthConnectDialog: React.FC<{
             // user is no longer looking at a dialog that could tell them — the
             // same reason, and the same owner, as every other exit of a request
             // that outlived its dialog.
-            reread: resolvedAfterClose,
+            reread: resolvedAfterAttempt,
           });
           return;
         }
@@ -396,6 +410,11 @@ export const OAuthConnectDialog: React.FC<{
         // so the terminal lands through `settle`: `oauth_start` does not
         // materialize, and the status route is where a success grows its repair
         // tail and an unsuccessful hub reauth gets failed closed.
+        // Cleanup can only cancel a flow it can NAME, and from this line it can: a
+        // close landing during the status read below now finds an id where it used
+        // to find a null. Earlier than this the abandoned-start branch above is the
+        // owner, because cleanup has already run and already answered.
+        openedFlowId = started.flow_id;
         if (startNeedsStatusRead(started)) {
           await poll(started.flow_id);
           return;
@@ -412,7 +431,7 @@ export const OAuthConnectDialog: React.FC<{
         // through the one owner for it, since the close path's own read may have
         // been issued before this write landed.
         if (cancelled) {
-          resolvedAfterClose();
+          resolvedAfterAttempt();
           return;
         }
         const code = failure?.code;
@@ -438,7 +457,6 @@ export const OAuthConnectDialog: React.FC<{
       stop();
       settleRef.current = null;
       if (successTimer.current !== null) window.clearTimeout(successTimer.current);
-      const cur = authority.current().flow;
       transition({ kind: 'reset' });
       // Read ownership BEFORE releasing it. React runs this cleanup ahead of the
       // next effect body, so at this instant the ref is still ours whenever it is
@@ -449,16 +467,23 @@ export const OAuthConnectDialog: React.FC<{
       if (owner === authority) flowAuthorityRef.current = null;
       // A cleanup cannot await, but the refetch inside `releaseFlow` still has to
       // wait for the cancel: this call can BE the write (`oauth_cancel` on a
-      // terminal flow materializes it), and the only state to branch on here is
-      // `cur` — the last POLLED snapshot, which a poll in flight can terminalize
-      // between that read and the cancel landing. So nothing branches on it; it
-      // supplies the flow id and nothing else.
+      // terminal flow materializes it). Which is also why the id comes from the
+      // REQUEST and not from the landed view. The view was the wrong place twice
+      // over: a poll in flight can terminalize it between the read and the cancel
+      // landing, so nothing may branch on it — and a start that came back already
+      // terminal is never landed there at all, by design, so for that one the view
+      // had no id to give. `cancel: null` then read as 「there is nothing to
+      // cancel」 when it meant 「the view was not told」, and the flow the user
+      // closed stayed un-materialized: still `not completed`, which is the only
+      // thing `pending_reauth` filters on, so the next reauth of that same source
+      // is handed the login the close was abandoning and commits it.
       // The re-read speaks for the rows and not for the pairs, by the default: it
       // is the latest-landing arrival in the file, because it awaits the cancel
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
+      const opened = openedFlowId;
       void releaseFlow(authority, owner, {
-        cancel: cur ? () => modelsApi.cancelOAuth(cur.flow_id) : null,
+        cancel: opened ? () => modelsApi.cancelOAuth(opened) : null,
         reusable: isReauth,
         reread: () => rowsBehindAreStale(),
       });
@@ -489,14 +514,31 @@ export const OAuthConnectDialog: React.FC<{
     setSubmitting(true);
     try {
       const result = await modelsApi.submitOAuth(cur.flow_id, code.trim());
-      // Drop the response if the dialog closed or a new flow started meanwhile.
-      if (!isCurrent()) return;
+      // Drop the response if the dialog closed or a new flow started meanwhile —
+      // the response, not the re-read. This call is the write of record: it went
+      // through `_materialize_completed_oauth` before answering, so by the time
+      // there is no dialog left to update, the rows behind the one on screen have
+      // already moved. The close path re-read while this was still in flight.
+      if (!isCurrent()) {
+        resolvedAfterAttempt();
+        return;
+      }
       // Submit can terminate the flow outright (the contract gives status and
       // submit the same terminal shape), so it goes through the same handler
       // rather than storing the flow and waiting for a poll to notice.
       settleRef.current?.(result);
     } catch (err) {
-      if (!isCurrent()) return;
+      // Same fact as the success above, through the same owner: a rejection is not
+      // evidence that nothing was written. `_materialize_reauth` saves the source as
+      // 需处理 with its models stripped and only THEN raises `discovery_failed`, so
+      // an arrival with no dialog left to update still has rows to correct — and it
+      // is the only thing that can, the close path having read while it was in
+      // flight. Silent about the pairs by the default, because the report on screen
+      // belongs to whichever attempt replaced this one.
+      if (!isCurrent()) {
+        resolvedAfterAttempt();
+        return;
+      }
       // Submit reaches the same materialization as the poll, so it can fail the
       // same way — including after the credential change has committed.
       //
