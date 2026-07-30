@@ -1,4 +1,4 @@
-# Harness Callback Authority
+# Harness Callback Ownership and Separation
 
 ## Background
 
@@ -53,7 +53,7 @@ The affected Sessions are:
 The incidents therefore do not prove intermediate callback delivery. They do
 prove that the callback ledger falsely identifies a separate queued child as a
 sent callback, which makes later inspection and automation unable to distinguish
-callback authority from an independent directed Run.
+callback ownership from an independent directed Run.
 
 ## Root Cause
 
@@ -84,8 +84,8 @@ objects and lets an unstarted queue entry satisfy callback delivery.
 
 1. Remove explicit child-delivery substitution from the shared callback
    drainer and its store API.
-2. Re-arm persisted parent callbacks whose recorded callback Run is actually
-   an explicit agent-authored child, then let the normal drainer settle them.
+2. Keep the change forward-only. Historical `callback_status=sent` rows remain
+   inert and are never reset, replayed, or used to create a new callback Run.
 3. Keep the existing terminal-result selection and exactly-once callback
    identity from #919 and #923.
 4. Add consuming SQLite-backed tests through the real message dispatcher and
@@ -98,7 +98,21 @@ objects and lets an unstarted queue entry satisfy callback delivery.
    #1104 currently owns `MESSAGE-DELIVERY-007`; `HFR-430` is already allocated
    on master.
 
+## Historical Compatibility
+
+The incidents predate this forward contract, but their stored delivery state is
+not replayed. An old parent row already marked `callback_status=sent` remains
+sent across upgrade and startup, even when its `callback_run_id` names a
+directed `source_kind=agent` child. No migration re-arms it and no startup path
+creates a replacement callback from its historical terminal text.
+
+Read-only consumers distinguish the two child types from persisted
+`source_kind`: `callback` identifies an automatic callback Run, while `agent`
+retains directed-Run provenance and graph lineage. This classification never
+mutates historical rows and never causes delivery.
+
 ## Scope
 
 This change does not alter queue supersede, cancellation recovery, #1098,
-#1072, or the Markdown silent-literal parser owned by PR #1104.
+#1072, authentication, authorization, ACL behavior, #1074, or the Markdown
+silent-literal parser owned by PR #1104.

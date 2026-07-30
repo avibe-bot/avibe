@@ -25,7 +25,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260730_0039"
+HEAD_REVISION = "20260727_0038"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -98,11 +98,11 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
     assert heads[0] == HEAD_REVISION
 
 
-def test_callback_authority_migration_rearms_only_conflated_parent_runs(
+def test_upgrade_keeps_historical_conflated_callback_rows_sent(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path, revision="20260727_0038")
+    run_migrations(db_path, revision="20260726_0037")
     now = "2026-07-30T00:00:00Z"
 
     with sqlite3.connect(db_path) as conn:
@@ -144,7 +144,7 @@ def test_callback_authority_migration_rearms_only_conflated_parent_runs(
             )
 
         insert_run(
-            "parent_conflated",
+            "historical_parent",
             source_kind="agent",
             callback_session_id="ses_caller",
             callback_status="sent",
@@ -153,20 +153,7 @@ def test_callback_authority_migration_rearms_only_conflated_parent_runs(
         insert_run(
             "directed_child",
             source_kind="agent",
-            parent_run_id="parent_conflated",
-            session_id="ses_caller",
-        )
-        insert_run(
-            "parent_valid",
-            source_kind="agent",
-            callback_session_id="ses_caller",
-            callback_status="sent",
-            callback_run_id="callback_child",
-        )
-        insert_run(
-            "callback_child",
-            source_kind="callback",
-            parent_run_id="parent_valid",
+            parent_run_id="historical_parent",
             session_id="ses_caller",
         )
         conn.commit()
@@ -174,29 +161,36 @@ def test_callback_authority_migration_rearms_only_conflated_parent_runs(
     run_migrations(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        rows = {
-            row[0]: row[1:]
-            for row in conn.execute(
-                """
-                select id, callback_status, callback_error, callback_run_id,
-                       callback_completed_at
-                from agent_runs
-                where id in ('parent_conflated', 'parent_valid')
-                order by id
-                """
-            )
-        }
+        parent = conn.execute(
+            """
+            select callback_status, callback_error, callback_run_id,
+                   callback_completed_at
+            from agent_runs
+            where id = 'historical_parent'
+            """
+        ).fetchone()
+        child = conn.execute(
+            """
+            select source_kind, parent_run_id, session_id
+            from agent_runs
+            where id = 'directed_child'
+            """
+        ).fetchone()
+        callback_count = conn.execute(
+            "select count(*) from agent_runs where source_kind = 'callback'"
+        ).fetchone()
         version = conn.execute(
             "select version_num from alembic_version"
         ).fetchone()
 
-    assert rows["parent_conflated"] == ("pending", None, None, None)
-    assert rows["parent_valid"] == (
+    assert parent == (
         "sent",
         "legacy error",
-        "callback_child",
+        "directed_child",
         now,
     )
+    assert child == ("agent", "historical_parent", "ses_caller")
+    assert callback_count == (0,)
     assert version == (HEAD_REVISION,)
 
 

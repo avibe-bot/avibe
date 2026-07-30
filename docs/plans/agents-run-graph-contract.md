@@ -72,10 +72,11 @@ Amendments (orchestrator-approved):
   (together with their trigger edges); a "show disabled" switch in the canvas
   LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
   payload unchanged.
-- **A12 (2026-07-30, callback authority correction)**: only child Runs with
+- **A12 (2026-07-30, callback ownership correction)**: only child Runs with
   `source_kind='callback'` are callback deliveries. An agent-authored child
   remains an independent spawn even when it targets the parent Run's callback
-  Session; parent/target coincidence never erases that lineage.
+  Session; parent/target coincidence never erases that lineage. This is
+  read-only classification: historical rows are never reset or replayed.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —

@@ -4392,6 +4392,82 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["message"] == "complete delegated result"
 
 
+def test_historical_conflated_sent_callback_stays_inert_on_startup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Startup must not replay a historical directed child as a callback."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    parent = request_store.enqueue_agent_run(
+        session_id="historical-target",
+        message="historical delegated work",
+        agent_name="codex",
+        callback_session_id="historical-caller",
+    )
+    directed = request_store.enqueue_agent_run(
+        session_id="historical-caller",
+        message="historical directed report",
+        agent_name="codex",
+        source_kind="agent",
+        source_actor="historical-target",
+        parent_run_id=parent.id,
+    )
+    sqlite_store = SQLiteBackgroundTaskStore()
+    try:
+        sqlite_store.record_run_message(
+            parent.id,
+            text="stale automatic terminal",
+            terminal_status="succeeded",
+        )
+    finally:
+        sqlite_store.close()
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == parent.id)
+                .values(
+                    callback_status="sent",
+                    callback_error="historical conflation",
+                    callback_run_id=directed.id,
+                    callback_completed_at="2026-07-30T00:00:00Z",
+                )
+            )
+    finally:
+        engine.dispose()
+    assert request_store.sqlite_backend is not None
+    request_store.sqlite_backend.close()
+
+    restarted_store = TaskExecutionStore()
+    service = _callback_service(
+        tmp_path=tmp_path,
+        request_store=restarted_store,
+    )
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    stored_parent = restarted_store.get_run(parent.id)
+    stored_directed = restarted_store.get_run(directed.id)
+    runs = restarted_store.list_runs()
+    assert stored_parent is not None
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_error"] == "historical conflation"
+    assert stored_parent["callback_run_id"] == directed.id
+    assert stored_directed is not None
+    assert stored_directed["source_kind"] == "agent"
+    assert stored_directed["status"] == "queued"
+    assert len(runs) == 2
+    assert not any(run.get("source_kind") == "callback" for run in runs)
+    assert not any(run.get("message") == "stale automatic terminal" for run in runs)
+    assert restarted_store.sqlite_backend is not None
+    restarted_store.sqlite_backend.close()
+
+
 def test_directed_run_and_callback_remain_distinct_while_target_busy(
     tmp_path: Path,
     monkeypatch,
