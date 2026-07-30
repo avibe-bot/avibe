@@ -49,7 +49,7 @@ class _StubAgent(BaseAgent):
 
 
 class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
-    async def test_silent_only_result_reaches_outbound_parser_unchanged(self):
+    async def test_silent_only_result_suppresses_duration_wrapper(self):
         controller = _StubController()
         agent = _StubAgent(controller)
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
@@ -61,10 +61,7 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
             duration_ms=1234,
         )
 
-        self.assertEqual(
-            controller.messages,
-            [("result", "<silent>not relevant</silent>", "markdown")],
-        )
+        self.assertEqual(controller.messages, [("result", "", "markdown")])
         self.assertEqual(message_id, "message-id")
 
     async def test_no_visible_result_with_duration_hidden_settles_via_outbound(self):
