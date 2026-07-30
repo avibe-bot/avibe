@@ -5091,12 +5091,16 @@ def test_twelve_cast_divergent_attempt_counters_do_not_starve_the_notice_behind_
 
     Both readers (``core.failure_notices._attempts_read`` and
     ``storage.background.notice_write_expectation``) now consume ONE model of the
-    CAST (``storage.sqlite_semantics.sqlite_cast_integer``), so the policy's
-    increment and the CAS's assertion are the same number for every JSON shape —
-    the claim lands, stamps the incremented integer over the malformed counter,
-    and the row advances through the ordinary backoff toward delivery or the
-    visible dead letter. Bounded progress, not a broad retry and not a widened
-    batch.
+    CAST (``storage.sqlite_semantics.sqlite_cast_integer``) for the DECODE, so the
+    claim's expectation matches the stored value and the write lands. The two final
+    numbers are deliberately NOT identical for every shape: for a NEGATIVE decode
+    the CAS asserts the raw stored value while the policy clamps to the ladder's
+    start before incrementing (round 20 — an unclamped increment from INT64_MIN
+    would grant ~9.2 quintillion attempts). For every nonnegative shape they are
+    the same number. Either way the claim lands, stamps a real integer over the
+    malformed counter, and the row advances through the ordinary backoff toward
+    delivery or the visible dead letter. Bounded progress, not a broad retry and
+    not a widened batch.
     """
 
     from types import SimpleNamespace
@@ -5184,12 +5188,157 @@ def test_twelve_cast_divergent_attempt_counters_do_not_starve_the_notice_behind_
     stuck = {}
     for index in range(len(divergent)):
         notice = sqlite.owed_failure_notice(f"run-cast-{index:02d}")
-        if notice["state"] == "pending" and not isinstance(notice.get("attempts"), int):
+        # A REAL nonnegative integer — ``-2`` from an unclamped negative increment
+        # would have satisfied a bare isinstance check (the round-20 gate's point).
+        attempts_now = notice.get("attempts")
+        if notice["state"] == "pending" and not (
+            isinstance(attempts_now, int) and not isinstance(attempts_now, bool) and attempts_now >= 1
+        ):
             stuck[f"run-cast-{index:02d}"] = notice
     assert not stuck, (
         "rows with CAST-divergent counters were read by four passes and never "
-        f"advanced — each holds a batch slot for good: {stuck}"
+        f"advanced onto a real nonnegative attempt — each holds a batch slot for good: {stuck}"
     )
+
+
+def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_schedule(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-076 — the round-20 clamp, proven at the consuming end.
+
+    The direct policy test pins ``next_attempt``'s answer; this one proves the
+    machine: for a NEGATIVE stored counter (a ``"-3q"`` hand-edit, a negative JSON
+    scalar, the i64 floor a saturated number decodes to) the real guarded claim
+    matches the RAW negative value — that is what the CAS asserts, deliberately
+    unclamped — and persists attempt exactly 1 with the first declared backoff
+    armed. The same rows then follow the ordinary retry schedule to the ordinary
+    dead letter in the normal bounded attempt count, and enough of them sit ahead
+    of a valid due notice to exercise the batch ordering without starving it.
+
+    Red on the pre-clamp head: the first claim persisted the negative increment
+    (``-2`` from ``"-3q"``; ``INT64_MIN + 1`` from the floor), never attempt 1,
+    and the floor row could not dead-letter in any bounded number of passes.
+    """
+
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.failure_notices import BACKOFF_SECONDS, MAX_ATTEMPTS
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from storage.background import notice_write_expectation
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-negative-behind", deliver_key="slack::channel::C2")
+
+    # One DEFINITION per negative row: rows of one definition share a streak, so
+    # only the canonical would be claimed per pass and the rest would defer —
+    # correct suppression, but it would hide the per-row claim this test exists
+    # to prove. Separate definitions make every row its own canonical.
+    negatives: list[Any] = ["-3q", -3, -(2**63), "-1x", -1, -(2**63)]
+    for index, counter in enumerate(negatives):
+        _task(sqlite, f"task-neg-{index:02d}", deliver_key="slack::channel::C1")
+        _pending_failure(
+            sqlite,
+            f"run-neg-{index:02d}",
+            f"task-neg-{index:02d}",
+            created_at=f"2026-07-27T00:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": counter,
+                "next_attempt_at": None,
+                "failure_id": f"run-neg-{index:02d}",
+            },
+        )
+        # The premise, asserted before any pass runs: the CAS expectation reads the
+        # RAW negative — the clamp is policy-side only. If the expectation clamped
+        # too, the claim would assert a value the row does not hold and never land.
+        expectation = notice_write_expectation(sqlite.owed_failure_notice(f"run-neg-{index:02d}"))
+        assert expectation[1] < 0, (
+            f"the CAS must assert the stored negative as-is, got {expectation!r} for {counter!r}"
+        )
+    _pending_failure(
+        sqlite,
+        "run-neg-behind",
+        "task-negative-behind",
+        created_at="2026-07-27T02:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": "run-neg-behind",
+        },
+    )
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    async def _spy_emit(controller, context, backend, diagnostic, **kwargs):
+        # The valid notice behind the negatives delivers; the negative rows'
+        # deliveries FAIL every time, so they must walk the declared retry
+        # schedule to the ordinary dead letter.
+        failure_id = str(kwargs.get("failure_id"))
+        evidence = kwargs.get("delivery")
+        if failure_id == "run-neg-behind" and evidence is not None:
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
+        service = ScheduledTaskService.__new__(ScheduledTaskService)
+        service.store = store
+        service.request_store = requests
+        service._drain_dirty = False
+        service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+        service._owns_service_instance = lambda: True
+        service.validate_platform = lambda platform: None
+        service._t = lambda key, **kwargs: key
+
+        # PASS 1: the guarded claim matched the raw negative and persisted exactly
+        # attempt 1, with the FIRST declared interval armed — the clamp starting
+        # the ladder rather than extending it downward.
+        asyncio.run(service._drain_failure_notices())
+        now = datetime.now(timezone.utc)
+        for index in range(len(negatives)):
+            notice = sqlite.owed_failure_notice(f"run-neg-{index:02d}")
+            assert notice["attempts"] == 1, (
+                f"the first claim over {negatives[index]!r} must persist attempt exactly 1, "
+                f"got {notice['attempts']!r} (state={notice['state']!r})"
+            )
+            assert notice["state"] == "pending"
+            armed = datetime.fromisoformat(notice["next_attempt_at"])
+            delta = (armed - now).total_seconds()
+            assert -5 <= delta <= BACKOFF_SECONDS[0] + 5, (
+                f"the first backoff must be the first declared interval, got {delta:.1f}s"
+            )
+        assert sqlite.owed_failure_notice("run-neg-behind")["state"] == "sent", (
+            "six negative rows ahead of it must not starve the valid due notice"
+        )
+
+        # PASSES 2..N: rewind the backoff between passes and let the schedule run
+        # out. Every negative row must reach the ordinary dead letter at exactly
+        # the declared bound — MAX_ATTEMPTS — never more.
+        for _ in range(MAX_ATTEMPTS + 1):
+            for index in range(len(negatives)):
+                run_id = f"run-neg-{index:02d}"
+                if sqlite.owed_failure_notice(run_id)["state"] == "pending":
+                    sqlite.update_owed_failure_notice(run_id, next_attempt_at=None)
+            asyncio.run(service._drain_failure_notices())
+
+    for index in range(len(negatives)):
+        notice = sqlite.owed_failure_notice(f"run-neg-{index:02d}")
+        assert notice["state"] == "failed", (
+            f"a negative counter must reach the ordinary dead letter, got {notice['state']!r} "
+            f"for {negatives[index]!r} at attempts={notice['attempts']!r}"
+        )
+        assert notice["attempts"] == MAX_ATTEMPTS, (
+            "the dead letter must arrive at the declared bound, not before or after: "
+            f"{notice['attempts']!r} != {MAX_ATTEMPTS} for {negatives[index]!r}"
+        )
 
 
 def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(
