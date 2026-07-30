@@ -452,6 +452,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 query_started.set()
                 await release_query.wait()
 
+            async def end_input(self):
+                return None
+
             async def interrupt(self):
                 interrupt_called.set()
 
@@ -1441,6 +1444,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         error_result.duration_ms = 0
 
         class _Client:
+            async def disconnect(self):
+                return None
+
             def receive_messages(self):
                 async def _iterate():
                     yield init_message
@@ -1473,23 +1479,24 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent = ClaudeAgent(controller)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
         composite_key = "session-1:/tmp/work"
+        init_consumed = asyncio.Event()
+        release_stream = asyncio.Event()
 
         init_message = type(
             "SystemMessage",
             (),
             {"subtype": "init", "data": {"session_id": "session-sdk"}},
         )()
-        result_message = type(
-            "ResultMessage",
-            (),
-            {"subtype": "success", "result": "done", "duration_ms": 1},
-        )()
 
         class _Client:
+            async def disconnect(self):
+                return None
+
             def receive_messages(self):
                 async def _iterate():
                     yield init_message
-                    yield result_message
+                    init_consumed.set()
+                    await release_stream.wait()
 
                 return _iterate()
 
@@ -1497,11 +1504,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.claude_sessions[composite_key] = runtime_client
         agent.emit_result_message = AsyncMock()
 
-        await agent._receive_messages(runtime_client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                runtime_client,
+                "session-1",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        await init_consumed.wait()
 
         self.assertEqual(getattr(runtime_client, "_vibe_native_session_id"), "session-sdk")
         self.assertEqual(agent._native_session_ids[composite_key], "session-sdk")
         controller.emit_agent_message.assert_not_awaited()
+
+        release_stream.set()
+        await receiver_task
 
     async def test_receive_legacy_refusal_fallback_notifies_without_dropping_replacement_text(self):
         controller = _StubController()
