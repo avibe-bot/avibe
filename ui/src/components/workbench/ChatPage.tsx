@@ -18,6 +18,7 @@ import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessa
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
+import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
@@ -62,6 +63,7 @@ import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
+import { VaultRequestCard } from '../ui/vault-request-card';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
@@ -311,18 +313,13 @@ export const ChatPage: React.FC = () => {
   );
   useRegisterComposerTarget(composerTarget);
 
-  // Pending vault requests for this session → inline cards at the transcript end (Transcript
-  // footer) + a floating approval bar when those cards scroll off-viewport (approvals only).
+  // Pending vault requests for this session. Provision requests are attached to
+  // the Agent reply that announced them; access/sign retain the approval flow.
   const { requests: vaultRequests, refresh: refreshVaultRequests } = usePendingVaultRequests(sessionId ?? '');
-  // All pending approval (access/sign) requests for this session — governs the float's mount and
-  // its open dialog's lifetime; the off-screen subset (reported per-card by VaultChatRequests)
-  // only drives whether the bar itself is shown.
+  // All pending approval (access/sign) requests for this session govern the
+  // float's mount and dialog lifetime. Provision requests never enter it.
   const pendingApprovals = useMemo(
-    () =>
-      vaultRequests.filter((request) => {
-        const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
-        return type === 'access' || type === 'sign';
-      }),
+    () => vaultRequests.filter(isVaultApprovalRequest),
     [vaultRequests],
   );
   const [offscreenApprovals, setOffscreenApprovals] = useState<VaultRequest[]>([]);
@@ -338,6 +335,14 @@ export const ChatPage: React.FC = () => {
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
+  const provisionPlacement = useMemo(
+    () => placeVaultProvisionRequests(messages, vaultRequests),
+    [messages, vaultRequests],
+  );
+  const transcriptTailVaultRequests = useMemo(
+    () => [...pendingApprovals, ...provisionPlacement.unanchored],
+    [pendingApprovals, provisionPlacement],
+  );
   // Mirror the latest messages into a ref (updated every render) so effects that
   // must NOT re-run on every message change — chiefly the deep-link jump effect,
   // whose around-fetch would otherwise be cancelled by an SSE/reconcile update —
@@ -2056,6 +2061,8 @@ export const ChatPage: React.FC = () => {
           highlightedId={highlightedId}
           messageFontSize={messageFontSize}
           onQuickReply={handleQuickReply}
+          provisionRequestsByMessage={provisionPlacement.byMessageId}
+          onVaultRequestResolved={refreshVaultRequests}
           onQuoteSelection={quoteSelectionToComposer}
           onAskInNewSession={askInNewSession}
           readOnly={readOnly}
@@ -2086,7 +2093,7 @@ export const ChatPage: React.FC = () => {
             // approve/deny buttons would write to a session that can't accept it.
             sessionId && !readOnly ? (
               <VaultChatRequests
-                requests={vaultRequests}
+                requests={transcriptTailVaultRequests}
                 onResolved={refreshVaultRequests}
                 onOffscreenApprovalsChange={setOffscreenApprovals}
               />
@@ -2785,6 +2792,8 @@ interface TranscriptProps {
   highlightedId: string | null;
   messageFontSize: number;
   onQuickReply: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  provisionRequestsByMessage: Map<string, VaultRequest[]>;
+  onVaultRequestResolved: () => void;
   // Chat-selection toolbar: quote the selection into the composer, or fork +
   // ask in a new session seeded with the quote.
   onQuoteSelection: (text: string) => void;
@@ -2817,8 +2826,8 @@ interface TranscriptProps {
     showToolCalls: boolean;
     onToggleTools: () => void;
   };
-  // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
-  // vault request cards). Part of the timeline, so it scrolls with the conversation.
+  // Rendered at the end of the scroll content for approval cards and the brief
+  // pre-reply window where a provision request has no Agent message to own yet.
   footer?: React.ReactNode;
 }
 
@@ -2836,6 +2845,8 @@ const Transcript: React.FC<TranscriptProps> = ({
   highlightedId,
   messageFontSize,
   onQuickReply,
+  provisionRequestsByMessage,
+  onVaultRequestResolved,
   onQuoteSelection,
   onAskInNewSession,
   readOnly,
@@ -3220,6 +3231,8 @@ const Transcript: React.FC<TranscriptProps> = ({
                   session={session}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
+                  vaultRequests={provisionRequestsByMessage.get(message.id)}
+                  onVaultRequestResolved={onVaultRequestResolved}
                   readOnly={readOnly}
                   highlighted={message.id === highlightedId}
                 />
@@ -3318,6 +3331,8 @@ type MessageRowProps = {
   session: WorkbenchSession;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  vaultRequests?: VaultRequest[];
+  onVaultRequestResolved?: () => void;
   // Archived session: the row still renders in full — including the quick-reply
   // group and which option was chosen, which is part of the transcript — but the
   // group is frozen, so an old quick reply can no longer POST a doomed message.
@@ -3339,7 +3354,7 @@ type MessageRowProps = {
 // useCallback), so the default shallow compare is correct here.
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders a single row rather than mounting the whole page.
-export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, readOnly, highlighted }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, vaultRequests, onVaultRequestResolved, readOnly, highlighted }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
@@ -3419,6 +3434,13 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
         onChoose={(choice) => onQuickReply(message.id, choice)}
       />
     ) : null;
+  const vaultRequestsNode = vaultRequests?.length && onVaultRequestResolved ? (
+    <div className="flex w-full flex-col gap-2 pt-1">
+      {vaultRequests.map((request) => (
+        <VaultRequestCard key={request.id} request={request} onResolved={onVaultRequestResolved} />
+      ))}
+    </div>
+  ) : null;
 
   // Agent / system replies AND the user's own messages render as markdown (users
   // routinely type lists / code / **emphasis** and expect it formatted). Only
@@ -3590,6 +3612,7 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
           {attachmentsNode}
         </div>
         {quickRepliesNode}
+        {vaultRequestsNode}
         {time}
       </div>
     </div>
