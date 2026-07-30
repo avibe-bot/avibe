@@ -327,7 +327,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 req_info = self._session_manager.get_request_session(request.base_session_id)
                 if req_info:
                     server = await self._get_server()
-                    await server.abort_session(req_info[0], req_info[1])
+                    await self._abort_active_request(
+                        request.base_session_id,
+                        existing_task,
+                        req_info,
+                    )
                     await self._session_manager.wait_for_session_idle(server, req_info[0], req_info[1])
 
                 existing_task.cancel()
@@ -1067,16 +1071,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 for index, message in enumerate(messages)
             )
             try:
+                status_unknown = False
                 native_status = await server.get_session_status(
                     poll_info.opencode_session_id,
                     poll_info.working_path,
                 )
             except Exception as err:
                 logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
+                status_unknown = True
                 native_status = None
 
             session_still_active = (
-                (native_status is not None and native_status.get("type") in {"busy", "retry"})
+                status_unknown
+                or (native_status is not None and native_status.get("type") in {"busy", "retry"})
                 or has_in_progress
                 or last_assistant_finish == "tool-calls"
                 or has_post_assistant_user

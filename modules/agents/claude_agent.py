@@ -79,6 +79,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_generations: dict[str, int] = {}
         self._steering_terminal_barriers: dict[str, list[str]] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
+        self._ambiguous_input_shutdowns: set[str] = set()
         self._steering_closing: set[str] = set()
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
@@ -554,6 +555,7 @@ class ClaudeAgent(BaseAgent):
             or receiver_task.done()
             or composite_key not in active_sessions
             or composite_key in self._steering_closing_keys()
+            or composite_key in self._ambiguous_input_shutdown_keys()
         ):
             return None
         return f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
@@ -617,6 +619,9 @@ class ClaudeAgent(BaseAgent):
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
+        input_shutdowns = getattr(self, "_ambiguous_input_shutdowns", None)
+        if input_shutdowns is not None:
+            input_shutdowns.discard(composite_key)
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
@@ -670,25 +675,59 @@ class ClaudeAgent(BaseAgent):
         if callable(touch_session_activity):
             touch_session_activity(composite_key)
 
-    async def _end_ambiguous_steering_input(self, client, composite_key: str) -> None:
-        """Half-close native input so delivered work finishes before a durable EOF."""
+    @staticmethod
+    def _ambiguous_steering_input_closer(client):
         end_input = getattr(client, "end_input", None)
-        if not callable(end_input):
-            end_input = getattr(getattr(client, "_transport", None), "end_input", None)
-        if not callable(end_input):
+        if callable(end_input):
+            return end_input
+        end_input = getattr(getattr(client, "_transport", None), "end_input", None)
+        return end_input if callable(end_input) else None
+
+    def _ambiguous_input_shutdown_keys(self) -> set[str]:
+        shutdowns = getattr(self, "_ambiguous_input_shutdowns", None)
+        if shutdowns is None:
+            shutdowns = set()
+            self._ambiguous_input_shutdowns = shutdowns
+        return shutdowns
+
+    async def _end_ambiguous_steering_input(
+        self,
+        client,
+        composite_key: str,
+        end_input,
+    ) -> None:
+        """Half-close native input so delivered work finishes before a durable EOF."""
+        if end_input is not None:
+            try:
+                await end_input()
+                self._ambiguous_input_shutdown_keys().add(composite_key)
+                return
+            except Exception:  # noqa: BLE001 - reconciliation remains receiver-owned
+                logger.warning(
+                    "Failed to half-close ambiguous Claude steering input for %s",
+                    composite_key,
+                    exc_info=True,
+                )
+        else:
             logger.warning(
                 "Claude transport cannot half-close ambiguous steering input for %s",
                 composite_key,
             )
-            return
-        try:
-            await end_input()
-        except Exception:  # noqa: BLE001 - reconciliation remains receiver-owned
-            logger.warning(
-                "Failed to half-close ambiguous Claude steering input for %s",
-                composite_key,
-                exc_info=True,
-            )
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            try:
+                await disconnect()
+                self._ambiguous_input_shutdown_keys().add(composite_key)
+                return
+            except Exception:  # noqa: BLE001 - final fallback cancels the receiver
+                logger.error(
+                    "Failed to disconnect Claude after ambiguous input for %s",
+                    composite_key,
+                    exc_info=True,
+                )
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if receiver_task is not None and not receiver_task.done():
+            receiver_task.cancel()
 
     async def steer_active_turn(
         self,
@@ -706,6 +745,7 @@ class ClaudeAgent(BaseAgent):
                 or receiver_task.done()
                 or composite_key not in active_sessions
                 or composite_key in self._steering_closing_keys()
+                or composite_key in self._ambiguous_input_shutdown_keys()
             ):
                 return steer_result(
                     SteerOutcome.REFUSED,
@@ -729,6 +769,7 @@ class ClaudeAgent(BaseAgent):
                     backend=self.name,
                 )
             primary_request_count = len(primary_requests)
+            end_input = self._ambiguous_steering_input_closer(client)
 
             writers = self._steering_writer_keys()
             writers.add(composite_key)
@@ -741,7 +782,11 @@ class ClaudeAgent(BaseAgent):
                         barrier="unknown",
                     )
                     self._touch_steering_activity(composite_key)
-                    await self._end_ambiguous_steering_input(client, composite_key)
+                    await self._end_ambiguous_steering_input(
+                        client,
+                        composite_key,
+                        end_input,
+                    )
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="acknowledgement_ambiguous",
@@ -769,7 +814,11 @@ class ClaudeAgent(BaseAgent):
                             barrier="unknown",
                         )
                         self._touch_steering_activity(composite_key)
-                        await self._end_ambiguous_steering_input(client, composite_key)
+                        await self._end_ambiguous_steering_input(
+                            client,
+                            composite_key,
+                            end_input,
+                        )
                         return steer_result(
                             SteerOutcome.UNKNOWN,
                             reason="acknowledgement_ambiguous",
@@ -796,7 +845,11 @@ class ClaudeAgent(BaseAgent):
                         barrier="unknown",
                     )
                     self._touch_steering_activity(composite_key)
-                    await self._end_ambiguous_steering_input(client, composite_key)
+                    await self._end_ambiguous_steering_input(
+                        client,
+                        composite_key,
+                        end_input,
+                    )
                     return steer_result(
                         SteerOutcome.UNKNOWN,
                         reason="unclassified_transport_failure",
@@ -1514,6 +1567,16 @@ class ClaudeAgent(BaseAgent):
             )
             await self._flush_detached_activity_output(composite_key, context)
             await self._flush_detached_unsolicited_output(composite_key, context)
+            if (
+                composite_key in self._ambiguous_input_shutdown_keys()
+                and not self._has_pending_requests(composite_key)
+            ):
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    preserve_pending_request_state=True,
+                )
+                return
             await self._handle_receiver_eof(
                 composite_key,
                 context,

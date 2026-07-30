@@ -83,6 +83,7 @@ class _ClaudeClient:
     def __init__(self, *, error: Exception | None = None) -> None:
         self.error = error
         self.queries = [("primary", "runtime-key")]
+        self._transport = SimpleNamespace(end_input=AsyncMock())
 
     async def query(self, text: str, *, session_id: str) -> None:
         self.queries.append((text, session_id))
@@ -409,6 +410,60 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
 
 
 @pytest.mark.anyio
+async def test_claude_disconnects_when_ambiguous_input_cannot_be_half_closed() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    client = _ClaudeClient(error=TimeoutError("write acknowledgement timed out"))
+    client._transport = None
+    client.disconnect = AsyncMock()
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(controller, "claude", _steer_request(identity[1]))
+
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+        assert client.queries == [("primary", "runtime-key"), (STEER_TEXT, "runtime-key")]
+        client.disconnect.assert_awaited_once_with()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
+async def test_claude_disconnects_when_ambiguous_input_half_close_fails() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    client = _ClaudeClient(error=TimeoutError("write acknowledgement timed out"))
+    client._transport.end_input = AsyncMock(side_effect=RuntimeError("stdin close failed"))
+    client.disconnect = AsyncMock()
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(controller, "claude", _steer_request(identity[1]))
+
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+        client._transport.end_input.assert_awaited_once_with()
+        client.disconnect.assert_awaited_once_with()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
 async def test_claude_rejects_stale_receiver_generation_and_unavailable_runtime() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
@@ -530,6 +585,61 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
         assert server.abort_calls == [("opencode-session", primary.working_path)]
         assert gate_task.cancelled()
         assert removed_polls == ["opencode-session"]
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None:
+    primary = _primary_request(backend="opencode")
+    replacement = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    prompt_started = asyncio.Event()
+    release_prompt = asyncio.Event()
+    server = _OpenCodeServer(prompt_started=prompt_started, release_prompt=release_prompt)
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    session_lock = asyncio.Lock()
+
+    class _ReplacementSessionManager(_OpenCodeSessionManager):
+        def get_session_lock(self, _base_session_id):
+            return session_lock
+
+        async def wait_for_session_idle(self, *_args):
+            return None
+
+        def pop_request_session(self, _base_session_id):
+            return None
+
+    agent._session_manager = _ReplacementSessionManager(
+        primary.base_session_id,
+        "opencode-session",
+        primary.working_path,
+    )
+    agent.controller = controller
+    agent._get_server = AsyncMock(return_value=server)
+    agent._process_message = AsyncMock(return_value=None)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        steer_task = asyncio.create_task(
+            steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        )
+        await prompt_started.wait()
+
+        replacement_task = asyncio.create_task(agent.handle_message(replacement))
+        await asyncio.sleep(0)
+        assert server.abort_calls == []
+        assert not gate_task.done()
+
+        release_prompt.set()
+        receipt = await steer_task
+        await replacement_task
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert server.abort_calls == [("opencode-session", primary.working_path)]
+        assert gate_task.cancelled()
+        agent._process_message.assert_awaited_once_with(replacement)
     finally:
         await _cancel_tasks(gate_task)
 

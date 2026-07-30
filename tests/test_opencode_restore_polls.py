@@ -50,6 +50,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
         def __init__(self):
             self.messages = [{"info": {"role": "assistant", "time": {}}}]
             self.status = {"type": "busy"}
+            self.status_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
@@ -63,6 +64,8 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
             return None
 
         async def get_session_status(self, session_id, directory):
+            if self.status_error is not None:
+                raise self.status_error
             return self.status
 
         async def prompt_async(self, **kwargs):
@@ -249,6 +252,18 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
 
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert removed == ["oc-1"]
+
+
+def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []}
+    ]
+    agent._test_server.status_error = TimeoutError("status unavailable")
+
+    assert asyncio.run(agent.restore_active_polls()) == 1
+    assert removed == []
 
 
 def test_restored_avibe_poll_marks_session_running():
