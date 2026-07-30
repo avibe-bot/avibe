@@ -527,4 +527,24 @@ describe('agent-authored local file links', () => {
     expect(user).not.toContain('data-local-file-link');
     expect(user).toContain('target="_blank"');
   });
+
+  it('preserves absolute Windows destinations through Markdown URL sanitization', () => {
+    const props = {
+      session: session({ workdir: 'C:\\workspace' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const windowsMessage = {
+      ...linkedMessage('agent'),
+      text: '[open source](C:/workspace/app.py:42)',
+    } as WorkbenchMessage;
+
+    const markup = render(<MessageRow {...props} message={windowsMessage} />);
+    expect(markup).toContain('data-local-file-link="true"');
+    expect(markup).toContain('href="C:/workspace/app.py:42"');
+
+    const userMarkup = render(<MessageRow {...props} message={{ ...windowsMessage, author: 'user', type: 'user' }} />);
+    expect(userMarkup).not.toContain('data-local-file-link');
+    expect(userMarkup).not.toContain('href="C:/workspace/app.py:42"');
+  });
 });

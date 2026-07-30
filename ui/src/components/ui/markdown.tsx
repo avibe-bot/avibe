@@ -10,7 +10,7 @@ import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
-import { resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
+import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
 import {
   MENTION_LINK_SCHEME,
   linkifyMentions,
@@ -72,8 +72,12 @@ function linkifySecretRequests(text: string): string {
 
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
 // only http/https/mailto/tel/relative by default).
-function mentionUrlTransform(url: string): string {
-  if (url.startsWith(`${MENTION_LINK_SCHEME}:`) || url.startsWith(`${SECRET_LINK_SCHEME}:`)) return url;
+function mentionUrlTransform(url: string, allowLocalFiles: boolean): string {
+  if (
+    url.startsWith(`${MENTION_LINK_SCHEME}:`)
+    || url.startsWith(`${SECRET_LINK_SCHEME}:`)
+    || (allowLocalFiles && isAbsoluteWindowsFileHref(url))
+  ) return url;
   return defaultUrlTransform(url);
 }
 
@@ -297,12 +301,13 @@ export const Markdown: React.FC<{
   // (secretRequests) — user bubbles / previews / docs keep them as plain text.
   let rendered = references && references.length ? linkifyMentions(content, references) : content;
   if (secretRequests) rendered = linkifySecretRequests(rendered);
+  const urlTransform = (url: string) => mentionUrlTransform(url, Boolean(onOpenLocalFile));
   return (
     <div className={cn('vr-markdown', className)}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         components={components}
-        urlTransform={mentionUrlTransform}
+        urlTransform={urlTransform}
       >
         {rendered}
       </ReactMarkdown>

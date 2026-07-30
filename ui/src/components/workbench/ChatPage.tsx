@@ -21,7 +21,8 @@ import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
-import { fileMeta } from '../../lib/filesApi';
+import { downloadFile, fileMeta } from '../../lib/filesApi';
+import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/filePreview';
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
@@ -61,7 +62,7 @@ import { Button } from '../ui/button';
 import { ChatImage } from '../ui/chat-image';
 import { FileCard } from '../ui/file-card';
 import { ImageViewerProvider } from '../ui/image-viewer';
-import { FileViewerProvider } from '../ui/file-viewer';
+import { FileViewerProvider, useFileViewer } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -2850,22 +2851,42 @@ const Transcript: React.FC<TranscriptProps> = ({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { openApp } = useWindowManager();
+  const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
-    const filename = recentPathLabel(target.path);
-    let mtime: number | null = null;
+    const pathLabel = recentPathLabel(target.path);
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
+      if (desktop) {
+        openApp('preview', { title: name, params: { path: target.path, name } });
+      } else if (fileViewer) {
+        fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
+      } else {
+        downloadFile(target.path);
+      }
+    };
+    const openEditor = (filename: string, mtime: number | null) => {
+      const launch = { ...target, filename, mtime };
+      if (desktop) openApp('editor', { title: filename, params: launch });
+      else navigate('/apps/editor', { state: launch });
+    };
+
     try {
-      mtime = (await fileMeta(target.path)).mtime;
+      const meta = await fileMeta(target.path);
+      if (previewOverlayKind(meta)) {
+        openPreview(meta.name || pathLabel, meta.size, meta.mime, meta.ext);
+      } else if (isEditableMeta(meta)) {
+        openEditor(meta.name || pathLabel, meta.mtime);
+      } else {
+        downloadFile(target.path);
+      }
     } catch {
-      // Still open the Editor so its normal file error surface explains a path
-      // that disappeared or cannot be read.
+      // Mirror the File Browser's name-only fallback when metadata is unavailable.
+      const fallback = { kind: 'file', name: pathLabel, size: null };
+      if (previewOverlayKind(fallback)) openPreview(pathLabel, null, null, null);
+      else if (isEditableFile(fallback)) openEditor(pathLabel, null);
+      else downloadFile(target.path);
     }
-    const launch = { ...target, filename, mtime };
-    if (window.matchMedia('(min-width: 768px)').matches) {
-      openApp('editor', { title: filename, params: launch });
-    } else {
-      navigate('/apps/editor', { state: launch });
-    }
-  }, [navigate, openApp]);
+  }, [fileViewer, navigate, openApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const forkSourceSessionId =
     typeof session.metadata?.fork_source_session_id === 'string'

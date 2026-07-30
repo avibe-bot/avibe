@@ -5,6 +5,13 @@ export type LocalFileLinkTarget = {
   endColumn?: number;
 };
 
+/** Windows drive paths are valid local destinations, not URL schemes.
+ * Accept encoded separators because Markdown destinations commonly escape
+ * backslashes before the URL sanitizer sees them. */
+export function isAbsoluteWindowsFileHref(href: string): boolean {
+  return /^[A-Za-z]:(?:[\\/]|%(?:2f|5c))/i.test(href);
+}
+
 function decodePath(path: string): string {
   try {
     return decodeURIComponent(path);
@@ -53,16 +60,17 @@ function joinWorkdir(workdir: string, relativePath: string): string {
  * suffixes are kept as an editor reveal target rather than part of the path.
  */
 export function resolveLocalFileLink(href: string, workdir?: string | null): LocalFileLinkTarget | null {
-  const absolute = href.startsWith('/') && !href.startsWith('//') && href !== '/';
+  const absolutePosix = href.startsWith('/') && !href.startsWith('//') && href !== '/';
+  const absoluteWindows = isAbsoluteWindowsFileHref(href);
   const relative = href.startsWith('./') && href !== './';
-  if (!absolute && !relative) return null;
+  if (!absolutePosix && !absoluteWindows && !relative) return null;
 
   // Parse only literal source suffixes. An escaped colon belongs to the
   // filename, so decoding the whole href before this step would be ambiguous.
   const target = splitSourcePosition(href);
   const decodedPath = decodePath(target.path);
   if (!decodedPath) return null;
-  if (absolute) return { ...target, path: decodedPath };
+  if (absolutePosix || absoluteWindows) return { ...target, path: decodedPath };
   if (!workdir || !isAbsoluteWorkdir(workdir)) return null;
 
   return { ...target, path: joinWorkdir(workdir, decodedPath.slice(2)) };

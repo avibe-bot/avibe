@@ -38,6 +38,21 @@ describe('resolveLocalFileLink', () => {
     });
   });
 
+  it('recognizes absolute Windows destinations without treating the drive as a URL scheme', () => {
+    expect(resolveLocalFileLink('C:/workspace/app.py:42')).toEqual({
+      path: 'C:/workspace/app.py',
+      line: 42,
+      column: 0,
+      endColumn: 0,
+    });
+    expect(resolveLocalFileLink('C:%5Cworkspace%5Capp.py:42:7')).toEqual({
+      path: 'C:\\workspace\\app.py',
+      line: 42,
+      column: 6,
+      endColumn: 6,
+    });
+  });
+
   it('decodes filenames only after identifying literal source suffixes', () => {
     expect(resolveLocalFileLink('/tmp/report%3A2026')).toEqual({
       path: '/tmp/report:2026',
@@ -51,7 +66,7 @@ describe('resolveLocalFileLink', () => {
   });
 
   it('leaves web URLs and unresolved relative paths alone', () => {
-    for (const href of ['https://example.com/file', '//cdn.example.com/file', '../file.ts', 'file.ts', '/', './']) {
+    for (const href of ['https://example.com/file', 'c:relative-file', '//cdn.example.com/file', '../file.ts', 'file.ts', '/', './']) {
       expect(resolveLocalFileLink(href, '/workspace')).toBeNull();
     }
     expect(resolveLocalFileLink('./file.ts', null)).toBeNull();
