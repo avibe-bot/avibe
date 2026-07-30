@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   agentNeedsModelSelection,
   listedModelIds,
+  manualModelSources,
   modelChainKey,
   modelIssueCount,
   modelNeedsAction,
@@ -88,6 +89,11 @@ describe('model row projection', () => {
       [source('src_a'), source('src_b'), source('src_c')],
     );
     expect(ordered.map((item) => item.id)).toEqual(['src_b', 'src_a']);
+  });
+
+  it('only offers API-key inventories for manual models', () => {
+    const subscription = { ...source('src_subscription'), kind: 'subscription' as const };
+    expect(manualModelSources([subscription, source('src_key')]).map((item) => item.id)).toEqual(['src_key']);
   });
 
   it('counts an interrupted model and the honest row-zero state independently', () => {

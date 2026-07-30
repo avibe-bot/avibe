@@ -768,6 +768,9 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     expect(drawer).not.toMatch(/serverNamed: failure !== null/);
     // The code rides along so the second reason can be asked at all.
     expect(drawer).toMatch(/code: failure\?\.code \?\? null/);
+    // Invalidating the request generation invalidates its busy state too; an old
+    // finally block is no longer allowed to own the current button.
+    expect(drawer).toMatch(/seq\.current \+= 1;\s+setRunning\(false\);/);
   });
 });
 

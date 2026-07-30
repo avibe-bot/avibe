@@ -197,14 +197,16 @@ export const SourceRow: React.FC<{
           <span className="text-[11px] font-semibold text-muted">
             {t('settings.models.sources.modelCount', { count: source.models.length })}
           </span>
-          <button
-            type="button"
-            onClick={() => onAddModel(source)}
-            className="inline-flex min-h-8 shrink-0 items-center gap-1 text-[11.5px] font-semibold text-mint transition-colors hover:text-mint/80"
-          >
-            <Plus className="size-3.5" />
-            {t('settings.models.sources.addModel')}
-          </button>
+          {source.kind === 'api_key' && (
+            <button
+              type="button"
+              onClick={() => onAddModel(source)}
+              className="inline-flex min-h-8 shrink-0 items-center gap-1 text-[11.5px] font-semibold text-mint transition-colors hover:text-mint/80"
+            >
+              <Plus className="size-3.5" />
+              {t('settings.models.sources.addModel')}
+            </button>
+          )}
         </div>
         {source.models.length === 0 ? (
           <p className="text-[11.5px] text-muted">{t('settings.models.sources.modelsEmpty')}</p>

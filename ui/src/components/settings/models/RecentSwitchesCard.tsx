@@ -51,7 +51,7 @@ export const RecentSwitchesCard: React.FC<{
   hasMore?: boolean;
   loadingMore?: boolean;
   /** Fetch the next older page. Required for 查看全部 to mean 全部. */
-  onLoadMore?: () => void;
+  onLoadMore?: () => void | Promise<void>;
 }> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
@@ -63,6 +63,21 @@ export const RecentSwitchesCard: React.FC<{
 
   const visibleEvents = visibleResolutionEvents(events);
   const shown = expanded ? visibleEvents : visibleEvents.slice(0, COLLAPSED);
+  const rawTailId = events.at(-1)?.id ?? '';
+  const backfilledTailRef = React.useRef<string | null>(null);
+
+  // The API pages the raw journal, while this card deliberately omits route
+  // configuration rows. Walk past mapping-only pages until the collapsed feed
+  // has three user events (or the server says there are no older rows). The raw
+  // tail is the generation key: it advances after every useful page and keeps a
+  // failed/overlapping response from becoming an automatic retry loop.
+  React.useEffect(() => {
+    if (visibleEvents.length >= COLLAPSED || !hasMore || loadingMore || !onLoadMore) return;
+    if (backfilledTailRef.current === rawTailId) return;
+    backfilledTailRef.current = rawTailId;
+    void onLoadMore();
+  }, [hasMore, loadingMore, onLoadMore, rawTailId, visibleEvents.length]);
+
   // 查看全部 opens the fetched rows AND asks for the next page, so the label is
   // true the moment it is pressed rather than only for feeds under one page.
   const canExpand = visibleEvents.length > COLLAPSED || hasMore;
@@ -86,7 +101,18 @@ export const RecentSwitchesCard: React.FC<{
         )}
       </div>
       {shown.length === 0 ? (
-        <div className="px-4 py-8 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.recent.empty')}</div>
+        <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[13px] text-muted sm:px-5">
+          <span>{hasMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
+          {hasMore && !loadingMore && (
+            <button
+              type="button"
+              onClick={() => void onLoadMore?.()}
+              className="min-h-8 font-medium text-mint transition-colors hover:text-mint/80"
+            >
+              {t('settings.models.recent.loadMore')}
+            </button>
+          )}
+        </div>
       ) : (
         <div className="flex flex-col">
           {/* Phones stack the timestamp above the sentence (design.pen M01 m01Ev):
@@ -119,7 +145,7 @@ export const RecentSwitchesCard: React.FC<{
           {expanded && hasMore && (
             <button
               type="button"
-              onClick={() => onLoadMore?.()}
+              onClick={() => void onLoadMore?.()}
               disabled={loadingMore}
               className="min-h-11 border-t border-border px-4 py-3 text-[12.5px] font-medium text-mint transition-colors hover:text-mint/80 disabled:text-muted sm:px-5 sm:text-[13px]"
             >

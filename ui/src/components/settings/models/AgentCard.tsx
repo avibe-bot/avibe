@@ -84,6 +84,7 @@ const ModelProbe: React.FC<{
 
   React.useEffect(() => {
     seq.current += 1;
+    setRunning(false);
     setOutcome(null);
     setErrorReason(null);
   }, [agent.backend, modelId, agent.sources?.policy, agent.sources?.order, agent.mappings]);

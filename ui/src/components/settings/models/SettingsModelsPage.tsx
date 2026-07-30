@@ -28,7 +28,13 @@ import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
-import { listedModelIds, modelChainKey, modelIssueCount, type ModelChainIndex } from './modelRows';
+import {
+  listedModelIds,
+  manualModelSources,
+  modelChainKey,
+  modelIssueCount,
+  type ModelChainIndex,
+} from './modelRows';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
 const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick: () => void }> = ({
@@ -288,6 +294,16 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [feed, showToast, t]);
 
+  const openCustomModel = React.useCallback((sourceId?: string) => {
+    const writableSources = manualModelSources(sources);
+    if (writableSources.length === 0) {
+      setApiKeyOpen(true);
+      return;
+    }
+    const requested = writableSources.find((source) => source.id === sourceId);
+    setCustomModelRequest({ sourceId: requested?.id });
+  }, [sources]);
+
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
@@ -366,7 +382,7 @@ export const SettingsModelsPage: React.FC = () => {
               onOpenOrder={(agent) => setOrderBackend(agent.backend)}
               onOpenModels={(agent) => setMenuBackend(agent.backend)}
               onSetRoute={setModelRoute}
-              onAddModel={() => setCustomModelRequest({})}
+              onAddModel={() => openCustomModel()}
               onRepair={(source, kind) => setRepairTarget({ source, kind })}
               onProbeSettled={() => void refreshSourcesAgents()}
               connectingBackend={connecting}
@@ -379,14 +395,14 @@ export const SettingsModelsPage: React.FC = () => {
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
             onRepair={(source, kind) => setRepairTarget({ source, kind })}
-            onAddModel={(source) => setCustomModelRequest({ sourceId: source.id })}
+            onAddModel={(source) => openCustomModel(source.id)}
           />
           <RecentSwitchesCard
             events={feed.events}
             sources={sources}
             hasMore={!feed.exhausted}
             loadingMore={loadingEvents}
-            onLoadMore={() => void loadOlderEvents()}
+            onLoadMore={loadOlderEvents}
           />
           <AdvancedRow />
         </div>

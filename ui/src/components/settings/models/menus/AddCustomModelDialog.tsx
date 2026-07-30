@@ -22,6 +22,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from '../modelsApi';
+import { manualModelSources } from '../modelRows';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from '../vendorMeta';
 import type { Source } from '../types';
 import { buildIdentifier, type StandardVendors } from './identifiers';
@@ -129,14 +130,16 @@ export const AddCustomModelDialog: React.FC<{
   const [displayName, setDisplayName] = React.useState('');
   const [saving, setSaving] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const writableSources = React.useMemo(() => manualModelSources(sources), [sources]);
 
-  // Seed on open: edit prefill, else the first source that can carry custom
-  // models (an api_key source), else the first source.
+  // Seed on open: existing invalid legacy rows remain selectable in edit mode
+  // so they can be deleted, but create mode only accepts credential-backed
+  // inventories. A subscription inventory is read-only by contract.
   React.useEffect(() => {
     if (!open) return;
     const editing = edit ? sources.find((s) => s.id === edit.sourceId) ?? null : null;
-    const requested = initialSourceId ? sources.find((s) => s.id === initialSourceId) ?? null : null;
-    const preferred = editing ?? requested ?? sources.find((s) => s.kind === 'api_key') ?? sources[0] ?? null;
+    const requested = initialSourceId ? writableSources.find((s) => s.id === initialSourceId) ?? null : null;
+    const preferred = editing ?? requested ?? writableSources[0] ?? null;
     setSource(preferred);
     setModelId(edit?.modelId ?? '');
     setDisplayName(edit?.displayName ?? '');
@@ -159,7 +162,7 @@ export const AddCustomModelDialog: React.FC<{
   };
 
   const submit = async () => {
-    if (!source || !trimmedId || saving) return;
+    if (!source || source.kind !== 'api_key' || !trimmedId || saving) return;
     setSaving(true);
     try {
       await modelsApi.addCustomModel({ source_id: source.id, model_id: trimmedId, display_name: displayName.trim() || null });
@@ -206,7 +209,7 @@ export const AddCustomModelDialog: React.FC<{
 
         <div className="flex flex-col gap-2">
           <FieldLabel>{t('settings.models.menus.custom.sourceLabel')}</FieldLabel>
-          <SourceSelect sources={sources} value={source} onChange={setSource} disabled={Boolean(edit)} />
+          <SourceSelect sources={writableSources} value={source} onChange={setSource} disabled={Boolean(edit)} />
         </div>
 
         <div className="flex flex-col gap-2">
@@ -271,7 +274,13 @@ export const AddCustomModelDialog: React.FC<{
             <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={saving}>
               {t('common.cancel')}
             </Button>
-            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
+            <Button
+              variant="brand"
+              size="sm"
+              className="h-10 sm:h-9"
+              onClick={() => void submit()}
+              disabled={!source || source.kind !== 'api_key' || !trimmedId || saving}
+            >
               <Plus className="size-4" />
               {t(edit ? 'common.save' : 'settings.models.menus.custom.add')}
             </Button>

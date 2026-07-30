@@ -10,6 +10,11 @@ export type ModelChainIndex = Record<string, ModelChainRead>;
 export const modelChainKey = (backend: AgentBackend, modelId: string): string =>
   `${backend}\u0000${modelId}`;
 
+/** Manual inventory is a credential-backed capability; subscriptions are read-only. */
+export function manualModelSources(sources: Source[]): Source[] {
+  return sources.filter((source) => source.kind === 'api_key');
+}
+
 /** Every server-eligible source is a route-target inventory; the order only ranks groups. */
 export function orderedRouteSources(agent: AgentSupply, sources: Source[]): Source[] {
   const eligible = eligibleSources(sources, agent);
