@@ -13,6 +13,17 @@ observations:
       - keep result_text terminal-only and enqueue one terminal callback
       - keep explicit child delivery independent from the parent's automatic callback
       - persist harness-originated prompts with a non-user author and message type
+  - id: OBS-MESSAGE-DELIVERY-002
+    source: live_local_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-007
+    summary: A terminal report containing the literal silent directive in inline Markdown code was truncated before persistence and callback delivery.
+    previous_assumption: Silent directive parsing could safely inspect raw Markdown because literal examples would only appear in non-terminal helper output.
+    observed_behavior: Run 6915939fd9e9, its persisted result message, and callback Run 8476952624d1 all stopped at the inline code opener and lost the substantial trailing report.
+    required_updates:
+      - recognize silent directives only outside Markdown inline and fenced code
+      - preserve code examples byte-for-byte while retaining real silent-block semantics
+      - prove the BaseAgent terminal path, message persistence, Run output ledger, and callback payload together
   - id: OBS-MESSAGE-DELIVERY-003
     source: live_local_diagnosis
     related_scenarios:

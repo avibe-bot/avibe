@@ -48,7 +48,13 @@ from core.scheduled_tasks import (
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
-from storage.models import agent_events, agent_runs, messages, run_definitions
+from storage.models import (
+    agent_events,
+    agent_runs,
+    agent_sessions,
+    messages,
+    run_definitions,
+)
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
 from storage.agent_session_rows import create_agent_session_row
@@ -4929,6 +4935,170 @@ def test_agent_run_keeps_output_ledger_but_callbacks_only_terminal_result(
     ]
     assert [run["message"] for run in callback_runs] == ["terminal delegated result"]
     assert callback_runs[0]["source_actor"] == request.id
+
+
+def test_base_agent_terminal_markdown_example_persists_complete_run_and_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-007."""
+    from core.services import sessions as sessions_service
+    from modules.agents.base import BaseAgent
+    from modules.im.formatters.slack_formatter import SlackFormatter
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    callback_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        callback_session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == callback_session_id)
+        ).mappings().one()
+        target_session = sessions_service.create_session(
+            conn,
+            scope_id=callback_session["scope_id"],
+            agent_backend="codex",
+            agent_name="codex",
+            visibility="background",
+        )
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=target_session["id"],
+        message="inspect the callback regression",
+        agent_name="codex",
+        callback_session_id=callback_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+
+    class _IMClient:
+        formatter = SlackFormatter()
+
+        @staticmethod
+        def should_use_thread_for_reply() -> bool:
+            return False
+
+        @staticmethod
+        async def send_message(context, text, parse_mode=None, reply_to=None):
+            return "persisted-result-message"
+
+        @staticmethod
+        async def send_message_with_buttons(context, text, keyboard, parse_mode=None):
+            return "persisted-result-message"
+
+    class _SettingsManager:
+        @staticmethod
+        def _canonicalize_message_type(message_type: str) -> str:
+            return message_type
+
+        @staticmethod
+        def is_message_type_hidden(settings_key: str, message_type: str) -> bool:
+            return False
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                platform="avibe",
+                reply_enhancements=True,
+                show_duration=False,
+            )
+            self.im_client = _IMClient()
+            self.settings_manager = _SettingsManager()
+            self.session_handler = SimpleNamespace(
+                finalize_scheduled_delivery=lambda *_args, **_kwargs: None
+            )
+            self.dispatcher = ConsolidatedMessageDispatcher(self)
+
+        @staticmethod
+        def _get_settings_key(context) -> str:
+            return context.channel_id
+
+        @staticmethod
+        def _get_session_key(context) -> str:
+            return f"avibe::{context.channel_id}"
+
+        @staticmethod
+        def get_settings_manager_for_context(context):
+            return _SettingsManager()
+
+        def get_im_client_for_context(self, context):
+            return self.im_client
+
+        async def emit_agent_message(self, context, message_type, text, **kwargs):
+            return await self.dispatcher.emit_agent_message(
+                context,
+                message_type,
+                text,
+                **kwargs,
+            )
+
+    class _CodexBaseAgent(BaseAgent):
+        name = "codex"
+
+        async def handle_message(self, request) -> None:
+            return None
+
+    specimen = (
+        "Intermediate assistant text must not leave its Session; "
+        "the literal directive is `<silent>`.\n\n"
+        "2. This substantial trailing section must survive parser cleanup.\n"
+        "3. The persisted message, output ledger, and callback must be identical.\n"
+        "4. This line proves the live 339-character truncation cannot recur."
+    )
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=target_session["id"],
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": target_session["id"],
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": request.id,
+        },
+    )
+
+    asyncio.run(
+        _CodexBaseAgent(_Controller()).emit_result_message(
+            context,
+            specimen,
+            duration_ms=0,
+        )
+    )
+
+    stored_run = request_store.get_run(request.id)
+    assert stored_run is not None
+    assert stored_run["status"] == "succeeded"
+    assert stored_run["result_text"] == specimen
+    assert [item["text"] for item in stored_run["result_payload"]["outputs"]] == [
+        specimen
+    ]
+    with engine.connect() as conn:
+        persisted_messages = conn.execute(
+            select(messages.c.content_text)
+            .where(messages.c.session_id == target_session["id"])
+            .where(messages.c.type == "result")
+        ).scalars().all()
+    assert persisted_messages == [specimen]
+
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=SimpleNamespace(
+                submit_scheduled=lambda *_args, **_kwargs: None,
+                in_flight={},
+            ),
+            handle_scheduled_message=lambda *_args, **_kwargs: None,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    asyncio.run(service._drain_callbacks())
+
+    completed_run = request_store.get_run(request.id)
+    assert completed_run is not None
+    assert completed_run["callback_status"] == "sent"
+    callback_run = request_store.get_run(completed_run["callback_run_id"])
+    assert callback_run is not None
+    assert callback_run["source_kind"] == "callback"
+    assert callback_run["parent_run_id"] == request.id
+    assert callback_run["message"] == specimen
 
 
 def test_settled_deferred_run_delivers_saved_terminal_result(

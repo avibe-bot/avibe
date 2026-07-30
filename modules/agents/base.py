@@ -536,10 +536,10 @@ class BaseAgent(ABC):
         # unless there is actual result_text or suffix to deliver.
         if not show_duration:
             parts = []
-            if visible_result and visible_result.strip():
-                parts.append(visible_result)
-            if visible_suffix:
-                parts.append(visible_suffix)
+            if raw_result and raw_result.strip():
+                parts.append(raw_result)
+            if raw_suffix:
+                parts.append(raw_suffix)
             if parts:
                 formatted = "\n".join(parts)
                 message_id = await self.controller.emit_agent_message(
@@ -583,10 +583,10 @@ class BaseAgent(ABC):
                     token_field=token_field,
                 )
             parts = []
-            if visible_result and visible_result.strip():
-                parts.append(visible_result)
-            if visible_suffix:
-                parts.append(visible_suffix)
+            if raw_result and raw_result.strip():
+                parts.append(raw_result)
+            if raw_suffix:
+                parts.append(raw_suffix)
             body = "\n".join(parts)
             # Footer-only completion (show_duration on, no visible result/suffix):
             # promote the footnote to the visible body so a duration/token-only turn
