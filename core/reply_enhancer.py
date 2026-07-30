@@ -437,13 +437,6 @@ def _markdown_block_ranges(
             code_ranges.append((start, end))
         elif token.type == "inline":
             inline_ranges.append((start, end, token.content))
-        elif (
-            token.type == "html_block"
-            and _has_unclosed_special_html_opener(token.content)
-        ):
-            # A malformed special opener must not hide a later explicit
-            # backtick example from the control-directive scanner.
-            inline_ranges.append((start, end, token.content))
     return code_ranges, inline_ranges
 
 
@@ -648,26 +641,6 @@ def _raw_html_end(
         return None
     match = HTML_TAG_RE.match(text[start:closer])
     return closer if match is not None and match.end() == closer - start else None
-
-
-def _has_unclosed_special_html_opener(text: str) -> bool:
-    """Return whether an HTML block starts with an unterminated special token."""
-    if not (
-        text.startswith(("<!--", "<?", "<![CDATA["))
-        or (
-            len(text) > 2
-            and text.startswith("<!")
-            and text[2].isalpha()
-        )
-    ):
-        return False
-    terminators = {
-        "-->": _substring_positions(text, "-->"),
-        "?>": _substring_positions(text, "?>"),
-        "]]>": _substring_positions(text, "]]>"),
-        ">": _substring_positions(text, ">"),
-    }
-    return _raw_html_end(text, 0, terminators) is None
 
 
 def _extract_buttons(text: str) -> Tuple[List[QuickReplyButton], str]:

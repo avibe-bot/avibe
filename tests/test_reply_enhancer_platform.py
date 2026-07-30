@@ -778,6 +778,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), "<!--\n```\n-->\n\n```")
 
+    def test_silent_parser_does_not_parse_code_spans_in_unterminated_html_blocks(self):
+        for opener in ("<!--", "<?target", "<![CDATA[", "<!DOCTYPE"):
+            with self.subTest(opener=opener):
+                text = f"{opener}\n`<silent>hidden</silent>`"
+
+                self.assertEqual(strip_silent_blocks(text), f"{opener}\n``")
+
     def test_process_reply_keeps_fence_newline_before_quick_replies(self):
         text = "```text\nexample\n```\n---\n[Yes] | [No]"
 
@@ -800,10 +807,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
-    def test_silent_parser_handles_many_malformed_html_comments_linearly(self):
+    def test_silent_parser_strips_many_malformed_html_comments_linearly(self):
         text = "<!--" * 8_000 + " `<silent>literal</silent>`"
 
-        self.assertEqual(strip_silent_blocks(text), text)
+        self.assertEqual(strip_silent_blocks(text), "<!--" * 8_000 + " ``")
 
     def test_reply_enhancer_treats_unicode_digits_as_plain_text(self):
         text = "². item\n①. item"
