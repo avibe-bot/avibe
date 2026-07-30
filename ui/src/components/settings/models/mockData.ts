@@ -148,6 +148,9 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       menu_kind: 'fixed',
       selected_by_agent: null,
       selected_model_id: 'claude-opus-4-6',
+      // A stored request stands behind the id, which is what the server reports
+      // as explicit — the resolver-picked case only exists on the open menu.
+      selected_model_explicit: true,
       current: { model_id: 'claude-opus-4-6', source_id: 'src_claudepro1', channel: 'native_cli' },
       sources: {
         policy: 'custom',
@@ -189,6 +192,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       menu_kind: 'fixed',
       selected_by_agent: 'codex',
       selected_model_id: 'gpt-5.6',
+      selected_model_explicit: true,
       current: { model_id: 'gpt-5.6', source_id: 'src_chatgptplus', channel: 'native_cli' },
       sources: {
         policy: 'follow',
@@ -218,6 +222,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       menu_kind: 'open',
       selected_by_agent: null,
       selected_model_id: null,
+      selected_model_explicit: false,
       current: null,
       sources: null,
       supply_status: null,

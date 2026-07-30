@@ -8,18 +8,22 @@
 // review had named two of them. So the remedy is not five guards: it is one function
 // that returns a CLOSED verdict, and no caller left holding a length.
 //
-// The honesty rule that shapes the union: what today's payload cannot prove is
-// `indeterminate`, never optimistic. Two fields would make more of it provable —
-// `skipped_by` beside `adopted_by` (the eligible-but-skipped complement, which
-// `_adopted_by` filters out server-side) and process availability at backend grain
-// (contracts v4 carries it only on `agent-chain`). Both are server-side and out of
-// this lane. Until they land, the verdicts that depend on them stay indeterminate and
-// the surfaces keyed on them stay quiet — which is the correct behaviour for a
-// confirmation that would otherwise be able to lie. Their arrival is pure wiring:
-// `adoptionVerdict` already takes the complement, and `orderSufficiency` already asks
-// one predicate about each source.
+// The honesty rule that shapes the union: what the payload cannot prove is
+// `indeterminate`, never optimistic. Two server facts were missing when this module
+// was written, and both have since landed — `skipped_by` beside `adopted_by` (the
+// eligible-but-skipped complement, which `_adopted_by` filters out server-side) and
+// `process_availability_reason` on `sources.eligibility` (whether the local machine
+// can launch a source at all, at per-(source, backend) grain). Each is now read by
+// the function that was already shaped to take it: `adoptionVerdict` takes the
+// complement, `orderSufficiency` asks one predicate per source.
+//
+// The rule outlives them, because the arrival is what proves it was right: neither
+// function grew a branch to accommodate the field, and a payload that still omits
+// one keeps returning the same weaker verdict it always did. Silence stays
+// `indeterminate` or the weaker claim, never a false alarm and never a guess.
+import { processAvailabilityOf } from './eligibility';
 import { isUnhealthy } from './supply';
-import type { AdoptedBy, AgentBackend, AgentSupply, Source } from './types';
+import type { AdoptedBy, AgentBackend, AgentSupply, SkippedBy, Source } from './types';
 
 /**
  * The closed verdict. Not every grain can produce every member — each function
@@ -35,21 +39,6 @@ export type Sufficiency =
   | { kind: 'nothing_runnable' }
   | { kind: 'adopted_none' }
   | { kind: 'indeterminate' };
-
-/**
- * The eligible-but-skipped complement of `adopted_by`.
- *
- * Typed locally on purpose: `types.ts` mirrors the FROZEN contracts and never runs
- * ahead of them. When the field ships, this type moves there and the parameter below
- * starts being fed — no logic changes, and the tests that already cover the branch
- * stop being the only thing exercising it.
- */
-export type SkippedBy = {
-  backend: AgentBackend;
-  /** v2's only cause: the backend keeps a `custom` order, which the server never
-   *  extends. An INELIGIBLE backend is not 「skipped」 — it was never a candidate. */
-  reason: 'custom-order-omission';
-};
 
 /**
  * Did the new source actually reach everyone it should have?
@@ -73,19 +62,23 @@ export function adoptionVerdict(
  * Can this backend's enabled order serve the next turn?
  *
  * Returns `adopted_none` | `nothing_runnable` | `covered` | `indeterminate`. Takes the
- * ids rather than the agent so the drawer can ask about the order the user is CURRENTLY
- * editing, which is the order the warning is about.
+ * ids rather than the agent's own order so the drawer can ask about the order the user
+ * is CURRENTLY editing, which is the order the warning is about; the agent comes along
+ * for the server facts that hang off it, never for its saved order.
  *
- * Known v4 caveat: `isUnhealthy` reads the source's own state, and a healthy
- * `native_cli` source can still be unrunnable at chain grain (the CLI process is not
- * installed on this machine). v4 publishes that fact only on `agent-chain`, whose grain
- * is (agent, model). So `covered` here means 「a source reports itself able to serve」,
- * which is the strongest claim this payload supports; the verdict tightens on its own
- * the day availability arrives at backend grain.
+ * Two independent ways to be unable to serve, and the verdict needs BOTH: the
+ * source's own health (`isUnhealthy`) and whether it can be launched here at all
+ * (`processAvailabilityOf`). The second was the documented v4 caveat — a healthy
+ * `native_cli` source whose CLI is not installed on this machine reports itself
+ * perfectly able to serve — and it closed when `process_availability_reason` arrived
+ * on `sources.eligibility` at exactly this grain, per (source, backend). `covered`
+ * now means 「a source can be reached AND launched」; an agent whose payload omits
+ * the field falls back to the old, weaker claim rather than to a false alarm.
  */
 export function orderSufficiency(
   orderIds: readonly string[] | null | undefined,
   sources: readonly Source[] | null | undefined,
+  agent: Pick<AgentSupply, 'sources'>,
 ): Sufficiency {
   if (!orderIds) return { kind: 'indeterminate' };
   if (orderIds.length === 0) return { kind: 'adopted_none' };
@@ -93,7 +86,8 @@ export function orderSufficiency(
 
   const byId = new Map(sources.map((s) => [s.id, s]));
   const resolved = orderIds.map((id) => byId.get(id)).filter((s): s is Source => s !== undefined);
-  if (resolved.some((s) => !isUnhealthy(s.state))) return { kind: 'covered' };
+  const servable = (s: Source) => !isUnhealthy(s.state) && processAvailabilityOf(agent, s.id).runnable;
+  if (resolved.some(servable)) return { kind: 'covered' };
   // Every id we could resolve is down. If some could not be resolved, the two reads
   // disagree and an unknown source is not a broken one.
   return resolved.length === orderIds.length ? { kind: 'nothing_runnable' } : { kind: 'indeterminate' };
@@ -118,7 +112,7 @@ export function connectOutcome(agent: AgentSupply, sources: readonly Source[] | 
   // The PATCH echoed something other than hub: the switch did not take.
   if (agent.mode !== 'hub') return 'failed';
 
-  const verdict = orderSufficiency(agent.sources?.order, sources);
+  const verdict = orderSufficiency(agent.sources?.order, sources, agent);
   // Its own remedy, and it outranks any grade — an empty order has nothing to grade.
   if (verdict.kind === 'adopted_none') return 'noSources';
 

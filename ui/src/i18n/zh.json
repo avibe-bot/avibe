@@ -667,7 +667,8 @@
           "kimi": "Kimi",
           "xai": "Grok"
         },
-        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。"
+        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。",
+        "nativeUnavailable": "{{backend}} CLI 本机不可用"
       },
       "billing": {
         "monthly": "包月",
@@ -858,6 +859,7 @@
         "done": "完成",
         "resetAll": "恢复全部默认",
         "saveFailed": "保存失败，请重试",
+        "enrolled": "已自动把「{{sources}}」加入 {{backend}} 的来源顺序，你选的模型才有来源可用",
         "mapping": {
           "title": "{{backend}} · 模型菜单",
           "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",

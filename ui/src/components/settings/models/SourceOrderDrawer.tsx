@@ -43,7 +43,7 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
 import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
-import { eligibilityOf } from './eligibility';
+import { eligibilityOf, processAvailabilityOf } from './eligibility';
 import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
@@ -181,7 +181,7 @@ export const SourceOrderDrawer: React.FC<{
   const enabledIds = enabledSources.map((s) => s.id);
   // Asked about the order the user is CURRENTLY editing, not about the saved one —
   // the warning is about what pressing 保存 would leave this backend with.
-  const orderVerdict = orderSufficiency(order, sources);
+  const orderVerdict = orderSufficiency(order, sources, agent);
   const rest = sources.filter((s) => !order.includes(s.id));
   const disabledSources = rest.filter((s) => eligibilityOf(agent, s.id).eligible);
   const ineligible = rest
@@ -211,6 +211,19 @@ export const SourceOrderDrawer: React.FC<{
   const identity = (source: Source) => source.account_label ?? source.masked_credential ?? '';
   const join = (parts: (string | false)[]) => parts.filter(Boolean).join(' · ');
 
+  /**
+   * The second segment answers 「why is this row not the one serving」, and there
+   * are two independent answers competing for it. Health first — a cooling or
+   * broken source is the one the user can act on, and its state chip has already
+   * raised the question this segment answers. A HEALTHY source that this machine
+   * cannot launch gets the segment instead, and it must not be spent on 供 … 全系
+   * there: a model count is a promise, and this is the row that cannot keep it.
+   *
+   * Only a per-Agent surface may say it at all (it is per (source, backend)), and
+   * only in muted grey: `needsAttention` is false for a healthy source, so the
+   * line stays the same colour as the chain strip's dim dot rather than borrowing
+   * the gold that means 「and it needs you」.
+   */
   const enabledSubline = (source: Source): string =>
     join([
       identity(source),
@@ -220,7 +233,9 @@ export const SourceOrderDrawer: React.FC<{
         ? (t('settings.models.source.retryIn', { minutes: cooldownEtaMinutes(source.state.retry_at) }) as string)
         : isUnhealthy(source.state)
           ? ''
-          : supplies(source),
+          : processAvailabilityOf(agent, source.id).runnable
+            ? supplies(source)
+            : (t('settings.models.order.nativeUnavailable', { backend: backendName }) as string),
     ]);
 
   const disabledSubline = (source: Source): string => {

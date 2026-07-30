@@ -17,12 +17,17 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { modelsApi } from './modelsApi';
+import { modelsApi, type Adoption } from './modelsApi';
 import { AdoptionNote } from './AdoptionNote';
 import { Field } from './dialogFields';
 import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
-import type { AdoptedBy, Source } from './types';
+import type { Source } from './types';
+
+/** Nothing created yet. `skipped_by: null` rather than `[]` for the reason the
+ *  reader defaults it that way: 「nobody was left out」 is a claim, and no
+ *  creation has made it. */
+const NO_ADOPTION: Adoption = { adopted_by: [], skipped_by: null };
 
 type Phase = 'edit' | 'submitting' | 'done' | 'error';
 
@@ -37,7 +42,9 @@ export const AddApiKeyDialog: React.FC<{
   const [baseUrl, setBaseUrl] = React.useState('');
   const [phase, setPhase] = React.useState<Phase>('edit');
   const [discovered, setDiscovered] = React.useState(0);
-  const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[]>([]);
+  // One state for both halves of the tail: the note and the auto-close timer each
+  // read both, and two states could hold one half of an older response.
+  const [adoption, setAdoption] = React.useState<Adoption>(NO_ADOPTION);
   const [error, setError] = React.useState<string | null>(null);
   const closeTimer = React.useRef<number | null>(null);
   // Bumped on every open/close so a test-and-add resolving after the dialog was
@@ -53,7 +60,7 @@ export const AddApiKeyDialog: React.FC<{
       setBaseUrl(DEFAULT_VENDOR.base_url ?? '');
       setPhase('edit');
       setDiscovered(0);
-      setAdoptedBy([]);
+      setAdoption(NO_ADOPTION);
       setError(null);
     }
     return () => {
@@ -74,7 +81,7 @@ export const AddApiKeyDialog: React.FC<{
     setPhase('submitting');
     setError(null);
     try {
-      const { source, adopted_by } = await modelsApi.createApiKeySource({
+      const { source, adopted_by, skipped_by } = await modelsApi.createApiKeySource({
         kind: 'api_key',
         vendor,
         base_url: baseUrl.trim() || null,
@@ -82,7 +89,7 @@ export const AddApiKeyDialog: React.FC<{
       });
       if (submitSeq.current !== seq) return; // dialog closed/reopened mid-request
       setDiscovered(source.models.length);
-      setAdoptedBy(adopted_by);
+      setAdoption({ adopted_by, skipped_by });
       setPhase('done');
       onAdded(source);
       // Auto-dismiss only when the note is pure confirmation. 「还没有 Agent
@@ -92,10 +99,11 @@ export const AddApiKeyDialog: React.FC<{
       //
       // `covered` and nothing weaker: a non-empty adopter list does not rule out a
       // `custom` backend that skipped the key, and that sentence is an instruction
-      // too. Today's payload cannot prove `covered`, so this nicety is dormant until
-      // the server sends `skipped_by` — a confirmation that can lie under a mixed
-      // outcome is worth less than the second the user spends closing the dialog.
-      if (adoptionVerdict(adopted_by).kind === 'covered') closeTimer.current = window.setTimeout(onClose, 1500);
+      // too. `skipped_by` is what makes `covered` reachable at all — a server that
+      // omits it leaves the verdict `indeterminate`, and the dialog waits, which is
+      // the same answer this site gave before the field existed.
+      if (adoptionVerdict(adopted_by, skipped_by).kind === 'covered')
+        closeTimer.current = window.setTimeout(onClose, 1500);
     } catch (e: any) {
       if (submitSeq.current !== seq) return;
       const code = e?.code || e?.message || 'discovery_failed';
@@ -175,7 +183,7 @@ export const AddApiKeyDialog: React.FC<{
               <CheckCircle2 className="size-4 shrink-0" />
               <span>{t('settings.models.addKey.discovered', { count: discovered })}</span>
             </div>
-            <AdoptionNote adoptedBy={adoptedBy} />
+            <AdoptionNote adoptedBy={adoption.adopted_by} skippedBy={adoption.skipped_by} />
           </div>
         )}
         {phase === 'error' && (

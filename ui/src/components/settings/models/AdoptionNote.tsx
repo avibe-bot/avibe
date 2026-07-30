@@ -12,13 +12,14 @@
 // copy is exactly where the two drifted into saying different things.
 //
 // Which of those two answers can be given is `adoptionVerdict`'s call, not this
-// component's: 「who did not」 is only answerable once the server sends the
-// eligible-but-skipped complement, and until then the note says what it can prove.
+// component's: 「who did not」 is only answerable from the server's own
+// eligible-but-skipped complement, and a response that omits it still gets the
+// sentence the note can prove rather than a guess at the missing half.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { adoptionVerdict, type SkippedBy } from './sufficiency';
-import type { AdoptedBy } from './types';
+import { adoptionVerdict } from './sufficiency';
+import type { AdoptedBy, SkippedBy } from './types';
 
 export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] | null; skippedBy?: SkippedBy[] | null }> = ({
   adoptedBy,

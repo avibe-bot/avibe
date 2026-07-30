@@ -18,6 +18,7 @@ import {
   mockEligibility,
   mockRecommendedOrder,
 } from './mockData';
+import { buildIdentifier } from './menus/identifiers';
 import { canReauth, canReplaceKey, wasBlocked } from './repair';
 import { isUnhealthy } from './supply';
 import type {
@@ -39,6 +40,7 @@ import type {
   ProbeResult,
   ResolutionEvent,
   RuntimeDependency,
+  SkippedBy,
   Source,
   SourcePatch,
   SourceRepaired,
@@ -57,8 +59,16 @@ import { AGENT_CHAIN_CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './t
  * in and at which one-based position. A `custom` backend is absent — not because
  * nothing happened to it, but because nothing did, which is exactly the case the
  * user has to be told about while the dialog is still open.
+ *
+ * `skipped_by` is the server naming that case: the backends that COULD have used
+ * this source and were left out because they keep a `custom` order. It is carried
+ * beside `adopted_by` rather than derived from it, because 「absent」 covers both
+ * that and 「never eligible」, and only the server can tell the two apart. Kept
+ * nullable through this reader: an absent array is a server that did not answer
+ * the question, which is not the same as one answering 「nobody」.
  */
-export type SourceCreated = { source: Source; adopted_by: AdoptedBy[] };
+export type Adoption = { adopted_by: AdoptedBy[]; skipped_by: SkippedBy[] | null };
+export type SourceCreated = { source: Source } & Adoption;
 
 /**
  * The response of BOTH oauth status and submit (api.md → OAuth completion): the
@@ -269,14 +279,33 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 
-/** api.md pins the shape to `{source, adopted_by}` with no extra nesting; the
- *  bare-`Source` arm is the same tolerance every other write here keeps. */
-type SourceCreatedResponse = { source?: Source; adopted_by?: AdoptedBy[] } & Source;
+/**
+ * The adoption tail, defaulted. Both creation routes answer with it — the plain
+ * one and the oauth envelope — and the two defaults below are DIFFERENT rules, so
+ * they get one reader rather than two copies that would eventually agree.
+ *
+ * `adopted_by` is a list of things that happened: absent can only mean none did.
+ * (Absent-is-not-empty holds in the contract for reauth, which never reaches here.)
+ *
+ * `skipped_by` is the answer to 「who was left out」, and `[]` there is a positive
+ * claim that nobody was. A server that never sent the field has not made that
+ * claim, so silence stays null — defaulting it to `[]` would upgrade 「did not
+ * say」 into 「fully covered」, which is the one thing the adoption note exists to
+ * avoid.
+ */
+type AdoptionTail = { adopted_by?: AdoptedBy[]; skipped_by?: SkippedBy[] };
+const adoption = (r: AdoptionTail): Adoption => ({
+  adopted_by: r.adopted_by ?? [],
+  skipped_by: r.skipped_by ?? null,
+});
+
+/** api.md pins the shape to `{source, adopted_by, skipped_by}` with no extra
+ *  nesting; the bare-`Source` arm is the same tolerance every other write here
+ *  keeps. */
+type SourceCreatedResponse = { source?: Source } & AdoptionTail & Source;
 const created = (r: SourceCreatedResponse): SourceCreated => ({
   source: (r.source ?? r) as Source,
-  // Absent is not the same as empty in the contract only for reauth, which never
-  // reaches here; for creation an absent array means nothing adopted it.
-  adopted_by: r.adopted_by ?? [],
+  ...adoption(r),
 });
 
 /** api.md "recovery symmetry": both repair routes answer with this same tail,
@@ -289,9 +318,9 @@ const repaired = (r: SourceRepairedResponse): SourceRepaired => ({
 });
 
 /** The oauth terminal envelope, unwrapped without discarding either tail. */
-export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow & {
+export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow &
+  AdoptionTail & {
     source?: Source;
-    adopted_by?: AdoptedBy[];
     recovered?: boolean;
     interrupted_pairs?: SupplyGap[];
   };
@@ -308,9 +337,10 @@ export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
   return {
     flow,
     // No bare-`Source` tolerance here, unlike `created()`: this envelope always
-    // nests the source under `source`, beside the flow it accompanies. An absent
-    // `adopted_by` beside a present `source` still means nothing adopted it.
-    created: isCreate && r.source ? { source: r.source, adopted_by: r.adopted_by ?? [] } : null,
+    // nests the source under `source`, beside the flow it accompanies. The tail
+    // itself goes through the same `adoption` reader, so the two routes cannot
+    // default one of these arrays differently from the other.
+    created: isCreate && r.source ? { source: r.source, ...adoption(r) } : null,
     // The repair tail. `recovered` is defaulted false rather than optional: it is
     // the server's own 「this source had been blocked」 judgement, and absent must
     // read as 「did not say so」 — never as a client guess that it was.
@@ -421,6 +451,7 @@ class MockStore {
     if (a.mode === 'direct') {
       a.current = null;
       a.selected_model_id = null;
+      a.selected_model_explicit = false;
       a.selected_by_agent = null;
       a.supply_status = null;
       a.model_supply = null;
@@ -487,6 +518,30 @@ class MockStore {
       }));
   }
 
+  /**
+   * The complement, derived the way `_skipped_by` derives it: ELIGIBLE for this
+   * backend, on a `custom` order, and not in it. The eligibility filter is what
+   * makes the two lists different from `MODEL_HUB_BACKENDS` minus `adopted_by` —
+   * a backend that could never use the credential belongs to neither.
+   */
+  private skippedOf(sourceId: string): SkippedBy[] {
+    this.syncAgents();
+    return this.agents
+      .filter(
+        (a) =>
+          a.mode === 'hub' &&
+          a.sources?.policy === 'custom' &&
+          !a.sources.order.includes(sourceId) &&
+          (a.sources.eligibility ?? []).some((e) => e.source_id === sourceId && e.eligible),
+      )
+      .map((a) => ({ backend: a.backend, reason: 'custom_order' as const }));
+  }
+
+  /** Both creation routes answer with the same pair. */
+  private adoptionTail(sourceId: string) {
+    return { adopted_by: this.adoptionOf(sourceId), skipped_by: this.skippedOf(sourceId) };
+  }
+
   createApiKeySource(draft: ApiKeySourceCreate) {
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
@@ -514,7 +569,7 @@ class MockStore {
     };
     this.sources.push(source);
     // simulate probe latency
-    return delay({ source: structuredClone(source), adopted_by: this.adoptionOf(source.id) }, 900);
+    return delay({ source: structuredClone(source), ...this.adoptionTail(source.id) }, 900);
   }
 
   /**
@@ -775,6 +830,9 @@ class MockStore {
       // model the backend defaults to (first built-in / first supplied id).
       agent.sources = { policy: 'follow', order: [], eligibility: null };
       agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
+      // The server's default comes from the STORED per-backend request, so a
+      // non-null id here is explicit; nothing selected is the false case.
+      agent.selected_model_explicit = agent.selected_model_id !== null;
       agent.named_agents = (agent.named_agents ?? []).map((n) => ({
         ...n,
         effective_model_id: agent.selected_model_id ?? null,
@@ -784,17 +842,68 @@ class MockStore {
     return delay(structuredClone(agent));
   }
 
+  /**
+   * `_enroll_target_sources` in miniature (api.md → "Mapping and menu
+   * enrollment"): a target whose suppliers are all outside the order pulls in
+   * EXACTLY ONE — the first in the recommendation — and the order forks to
+   * `custom` only when something was actually appended.
+   *
+   * Modelled here rather than left as a no-op for the reason `oauthResult`
+   * documents: a mock that treats a mutation and its side effect as separate is
+   * a mock that cannot fail the way the product does, and the drawers' 完成
+   * notice exists only because of this side effect.
+   */
+  private enrollTargets(agent: AgentSupply, targetGroups: string[][]) {
+    const order = agent.sources?.order ?? [];
+    const enrolled = new Set(order);
+    const appended: string[] = [];
+    for (const group of targetGroups) {
+      if (group.length === 0 || group.some((id) => enrolled.has(id))) continue;
+      enrolled.add(group[0]);
+      appended.push(group[0]);
+    }
+    if (appended.length === 0) return;
+    agent.sources = { policy: 'custom', order: [...order, ...appended], eligibility: null };
+  }
+
+  /** The suppliers of one target, in the recommendation's order — the list the
+   *  server picks its single enrollee from. */
+  private suppliersOf(backend: AgentBackend, carries: (source: Source) => boolean): string[] {
+    const byId = new Map(this.sources.map((s) => [s.id, s]));
+    return mockRecommendedOrder(this.sources, backend).filter((id) => {
+      const source = byId.get(id);
+      return source ? carries(source) : false;
+    });
+  }
+
   putMappings(backend: AgentBackend, mappings: AgentMapping[]) {
     const agent = this.agents.find((a) => a.backend === backend);
     if (!agent) throw new ApiCallError('source_not_found');
+    this.enrollTargets(
+      agent,
+      mappings
+        .filter((m) => m.enabled)
+        .map((m) => this.suppliersOf(backend, (s) => s.models.some((mm) => mm.id === m.target_model_id))),
+    );
     agent.mappings = mappings;
+    this.syncAgents();
     return delay(structuredClone(agent));
   }
 
   putMenu(menu: AgentMenu) {
     const agent = this.agents.find((a) => a.backend === 'opencode');
     if (!agent) throw new ApiCallError('source_not_found');
+    const standardVendors = new Set(agent.standard_vendors ?? []);
+    this.enrollTargets(
+      agent,
+      menu.checked.map((identifier) =>
+        this.suppliersOf('opencode', (s) =>
+          s.models.some((mm) => buildIdentifier(s.vendor, mm.id, standardVendors) === identifier),
+        ),
+      ),
+    );
     agent.menu = menu;
+    this.syncAgents();
     return delay(structuredClone(agent));
   }
 
@@ -1027,7 +1136,7 @@ class MockStore {
     }
     return {
       flow,
-      created: { source: structuredClone(source), adopted_by: this.adoptionOf(source.id) },
+      created: { source: structuredClone(source), ...this.adoptionTail(source.id) },
       repaired: null,
     };
   }

@@ -10,8 +10,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { AdoptionNote } from './AdoptionNote';
-import type { SkippedBy } from './sufficiency';
-import type { AdoptedBy } from './types';
+import type { AdoptedBy, SkippedBy } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
   const i18n = createInstance();
@@ -64,11 +63,11 @@ describe('AdoptionNote', () => {
     expect(render([entry('futurecli', 2)])).toContain('futurecli');
   });
 
-  // 「谁没有」 is the answer this note exists for, and it is the one today's payload
-  // cannot give: `_adopted_by` filters `policy == "follow"`, so a `custom` backend
-  // that skipped the source is absent for the same reason an ineligible one is. The
-  // note therefore says only what it can prove — and names the omission the moment
-  // the server sends it.
+  // 「谁没有」 is the answer this note exists for, and `adopted_by` alone cannot give
+  // it: `_adopted_by` filters `policy == "follow"`, so a `custom` backend that
+  // skipped the source is absent for the same reason an ineligible one is. That is
+  // what `skipped_by` is for — and a response that omits it is still a response that
+  // did not answer, so the note keeps saying only what it can prove.
   it('claims nothing about who skipped it while the server does not say', () => {
     const html = render([entry('claude', 1)]);
     expect(text(html)).toContain('Claude Code');
@@ -77,7 +76,7 @@ describe('AdoptionNote', () => {
   });
 
   it('names the skipped backends once the server sends them', () => {
-    const html = render([entry('claude', 1)], [{ backend: 'codex', reason: 'custom-order-omission' }]);
+    const html = render([entry('claude', 1)], [{ backend: 'codex', reason: 'custom_order' }]);
     const body = text(html);
     expect(body).toContain('Claude Code');
     expect(body).toContain('Codex');

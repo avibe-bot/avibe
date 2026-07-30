@@ -77,6 +77,12 @@ const directAgent = (): AgentSupply =>
     model_supply: null,
   });
 
+/** The server's per-(source, backend) verdict that this machine cannot launch the
+ *  source. `eligible: true` on purpose — the source MAY serve this backend, which
+ *  is what makes the second question a separate one. */
+const cannotLaunch = (...ids: string[]) =>
+  ids.map((id) => ({ source_id: id, eligible: true, process_availability_reason: 'native_cli_unavailable' as const }));
+
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
   manifest: { name: 'cliproxyapi', version: '1.0.0', source_sha: 'sha', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health, last_check: null },
@@ -150,6 +156,45 @@ describe('chainChips', () => {
   it('draws nothing in Direct mode (AC-7)', () => {
     expect(chainChips(directAgent(), sources)).toEqual([]);
   });
+
+  // The second reason a position gets stepped over, and the one the source itself
+  // cannot report: its credential, its models and its state all read perfectly
+  // healthy, and the CLI that would serve it is not usable on this machine.
+  it('marks a healthy source this machine cannot launch, without calling it unhealthy', () => {
+    const agent = hubAgent({
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_b') },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips[1]).toMatchObject({ unhealthy: false, unavailable: true });
+  });
+
+  it('dims it once the resolver has walked past it, exactly like a broken one', () => {
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', ACTIVE), source('src_b', ACTIVE)]);
+    expect(chips.map((c) => c.tone)).toEqual(['skipped', 'current']);
+  });
+
+  // One row, ONE reason. The two are not mutually exclusive server-side, and the
+  // row renders a single dot, so health takes the tie: it is the actionable one,
+  // and its gold dot is named by the source row's own state chip.
+  it('states one reason per row, and health wins the tie', () => {
+    const agent = hubAgent({
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_b') },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', DEAD)]);
+    expect(chips[1]).toMatchObject({ unhealthy: true, unavailable: false });
+  });
+
+  it('reads a payload that says nothing as launchable', () => {
+    // An older server omits the optional field entirely. Silence must not draw a
+    // dim chain — every position would look stepped over.
+    const agent = hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'] } });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips.map((c) => c.unavailable)).toEqual([false, false]);
+  });
 });
 
 describe('chainRoles', () => {
@@ -170,6 +215,20 @@ describe('chainRoles', () => {
   it('ignores Direct-mode backends entirely', () => {
     const { enrolled } = chainRoles([directAgent()], sources);
     expect(enrolled.size).toBe(0);
+  });
+
+  // `skipped` now has a second cause, and this set is shared with the page pill —
+  // so the widening has to be shown to stay inside the surface that asked for it.
+  it('displaces a source the machine cannot launch, and the pill still says nothing', () => {
+    const agent = hubAgent({
+      current: { model_id: 'm', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_a') },
+    });
+    const inventory = [nativeSource('src_a', ACTIVE), nativeSource('src_b', ACTIVE)];
+    expect([...chainRoles([agent], inventory).displaced]).toEqual(['src_a']);
+    // `pageStatus` reads `displaced` only through `state.status === 'cooldown'`, and
+    // an unlaunchable source is healthy by construction — the two cannot overlap.
+    expect(pageStatus(inventory, [agent], runtime('ok'))).toEqual({ tone: 'ok', kind: 'ok', hubCount: 1 });
   });
 });
 

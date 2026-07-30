@@ -667,7 +667,8 @@
           "kimi": "Kimi",
           "xai": "Grok"
         },
-        "enabledNoneRunnable": "None of {{backend}}’s enabled sources can serve right now, so the next turn fails with no supply. Fix one below, or enable another."
+        "enabledNoneRunnable": "None of {{backend}}’s enabled sources can serve right now, so the next turn fails with no supply. Fix one below, or enable another.",
+        "nativeUnavailable": "{{backend}} CLI unavailable here"
       },
       "billing": {
         "monthly": "Monthly",
@@ -858,6 +859,7 @@
         "done": "Done",
         "resetAll": "Reset all to default",
         "saveFailed": "Couldn't save your changes, please retry",
+        "enrolled": "Added {{sources}} to {{backend}}’s source order so your selection has a supplier",
         "mapping": {
           "title": "{{backend}} · Model menu",
           "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",

@@ -4,6 +4,7 @@
 // supply failure is actually about (AC-9), and what the header pill is allowed to
 // claim. Rules deserve unit tests, and this repo's vitest setup has no DOM, so
 // they are plain functions over the contract types and nothing else.
+import { processAvailabilityOf } from './eligibility';
 import type {
   AgentSupply,
   ModelSupply,
@@ -61,6 +62,10 @@ export type ChainChip = {
   tone: ChainTone;
   /** Draws the gold dot: this source cannot serve right now. */
   unhealthy: boolean;
+  /** Draws the muted dot: healthy, but its CLI is not installed on this machine,
+   *  so this backend cannot launch it. Never true at the same time as `unhealthy`
+   *  — the row states ONE reason, the one that is actually in the way. */
+  unavailable: boolean;
 };
 
 /**
@@ -73,6 +78,16 @@ export type ChainChip = {
  * is a warning about the next failover, not a record of one, and greying it out
  * would claim something that has not happened.
  *
+ * A position can be stepped over for a second reason, and the strip has to draw it
+ * or the frame contradicts itself: a `native_cli` source whose CLI is not installed
+ * on this machine is skipped by the resolver while its own state reads `active`, so
+ * without this the chain would show a healthy position 1 and 当前 sitting at 2 with
+ * nothing between them to explain the move. It is ONE more disjunct in the same
+ * 「walked past」 rule, and one more hue on the same dot — never a second dot and
+ * never a second rule, because the question 「why did the resolver move on」 has one
+ * answer per position. Health wins the tie: it is the one the user can act on, and
+ * the source row next door already names it.
+ *
  * Returns [] in Direct mode: there is no Hub order to draw (AC-7).
  */
 export function chainChips(agent: AgentSupply, sources: Source[]): ChainChip[] {
@@ -82,13 +97,14 @@ export function chainChips(agent: AgentSupply, sources: Source[]): ChainChip[] {
   return order.map((sourceId, i) => {
     const source = sources.find((s) => s.id === sourceId);
     const unhealthy = source ? isUnhealthy(source.state) : false;
+    const unavailable = !unhealthy && !processAvailabilityOf(agent, sourceId).runnable;
     const tone: ChainTone =
       sourceId === currentId
         ? 'current'
-        : unhealthy && currentIndex >= 0 && i < currentIndex
+        : (unhealthy || unavailable) && currentIndex >= 0 && i < currentIndex
           ? 'skipped'
           : 'neutral';
-    return { sourceId, label: source?.display_name ?? sourceId, position: i + 1, tone, unhealthy };
+    return { sourceId, label: source?.display_name ?? sourceId, position: i + 1, tone, unhealthy, unavailable };
   });
 }
 

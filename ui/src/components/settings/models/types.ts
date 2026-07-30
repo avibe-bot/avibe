@@ -152,6 +152,12 @@ export type EligibilityReasonKey =
   | 'models.eligibility.opencode_api_key_only'
   | 'models.eligibility.consent_required';
 
+/** Why a source that MAY serve this backend still cannot be launched on this
+ *  machine. Independent of eligibility and of the source's own health: the
+ *  credential is fine, the CLI process is not there. A `hub` source is always
+ *  null — nothing local to run. */
+export type ProcessAvailabilityReason = 'native_cli_unavailable';
+
 /** Server-computed per (source, backend). The UI renders this and never
  *  re-derives eligibility from source kind/vendor. */
 export type SourceEligibility = {
@@ -159,6 +165,12 @@ export type SourceEligibility = {
   eligible: boolean;
   /** Required (and non-null) when `eligible` is false; null when it is true. */
   reason_key?: EligibilityReasonKey | null;
+  /** Whether this source can serve the CURRENT selection — true/false while
+   *  `selected_model_id` is non-null, null when no selection exists. Membership
+   *  in the model chain, which is a narrower question than being in `order`. */
+  in_current_model_chain?: boolean | null;
+  /** Non-null when the source is enabled and healthy and still cannot run here. */
+  process_availability_reason?: ProcessAvailabilityReason | null;
 };
 
 export type AgentSources = {
@@ -205,6 +217,11 @@ export type AgentSupply = {
   /** The model the next turn would ask for. null in direct mode and when no
    *  selection resolves — an honest null, never a guessed default. */
   selected_model_id?: string | null;
+  /** TRUE iff `selected_model_id` originates from the user's explicit
+   *  configuration request; FALSE also covers a resolver-picked value. The
+   *  server derives it from the stored request BEFORE resolving, which is what
+   *  makes it the one health-free way to read the id — see `dryRunChainKey`. */
+  selected_model_explicit?: boolean;
   /** What the next turn would actually use (composite pill). null in exactly
    *  three cases: mode=direct, supply_status=waiting, supply_status=interrupted. */
   current?: AgentCurrent | null;
@@ -389,6 +406,24 @@ export type AdoptedBy = {
   backend: AgentBackend;
   policy: SourcePolicy;
   position: number;
+};
+
+/**
+ * api.md — the eligible-but-skipped complement of `adopted_by`, returned beside it
+ * by both creation routes.
+ *
+ * It exists because absence in `adopted_by` says two different things: a backend
+ * that could never use this source, and one that could and was left out. Only the
+ * second is worth telling the user about, and only the server can tell them apart —
+ * `_skipped_by` filters on `_eligible_for_agent` before reporting a `custom` order
+ * that omits the id.
+ */
+export type SkippedBy = {
+  backend: AgentBackend;
+  /** v2's only cause: the backend keeps a `custom` order, which the server never
+   *  extends on its own. An INELIGIBLE backend is not 「skipped」 — it was never a
+   *  candidate, and it appears in neither list. */
+  reason: 'custom_order';
 };
 
 // ── oauth-flow.schema.json ──────────────────────────────────────────────
