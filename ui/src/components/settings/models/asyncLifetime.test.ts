@@ -72,6 +72,7 @@ import {
   flowStep,
   initialSeedState,
   isDone,
+  mapWithConcurrency,
   pollFailureSettles,
   releaseFlow,
   savedMappingsKey,
@@ -142,6 +143,27 @@ describe('latest async authority', () => {
     expect(await olderRun).toBe('stale');
     await expect(authority.run(() => Promise.reject(new Error('read failed')))).rejects.toThrow('read failed');
     expect(landed).toEqual(['newest']);
+  });
+});
+
+describe('bounded async map', () => {
+  it('caps concurrent work and preserves input order', async () => {
+    const gates = Array.from({ length: 12 }, () => deferred<number>());
+    let active = 0;
+    let maxActive = 0;
+
+    const run = mapWithConcurrency(gates, 3, async (gate, index) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const value = await gate.promise;
+      active -= 1;
+      return `${index}:${value}`;
+    });
+
+    expect(active).toBe(3);
+    gates.forEach((gate, index) => gate.resolve(index * 2));
+    await expect(run).resolves.toEqual(gates.map((_, index) => `${index}:${index * 2}`));
+    expect(maxActive).toBe(3);
   });
 });
 

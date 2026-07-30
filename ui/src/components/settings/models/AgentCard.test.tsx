@@ -181,6 +181,33 @@ describe('AgentCard model list', () => {
     expect(html).not.toContain(zh.settings.models.routes.manual);
   });
 
+  it('routes a native CLI process blocker to backend settings instead of inventory actions', () => {
+    const nativeSource = {
+      ...source('src_a', 'Claude subscription'),
+      kind: 'subscription' as const,
+      supply_channel: 'native_cli' as const,
+      billing: 'monthly' as const,
+    };
+    const blocked = chain('claude-opus-4-6', {
+      supply_state: 'interrupted',
+      chain: [{
+        source_id: 'src_a',
+        channel: 'native_cli',
+        via_mapping: false,
+        resolved_model_id: null,
+        health: 'healthy',
+        runnable: false,
+        reason: 'native_cli_unavailable',
+        retry_at: null,
+      }],
+    });
+    const html = render([agent()], chains(blocked, chain('claude-sonnet-4-6')), false, [nativeSource]);
+    expect(html).toContain(zh.models.probe.native_cli_unavailable);
+    expect(html).toContain('href="/admin/settings/backends/claude"');
+    expect(html).not.toContain(zh.settings.models.routes.manual);
+    expect(html).not.toContain(zh.settings.models.sources.addModel);
+  });
+
   it('disables every OpenCode model-menu entry while the agent write is pending', () => {
     const open = agent({ backend: 'opencode', menu_kind: 'open', builtin_models: null });
     const pending = new Set(['opencode']);

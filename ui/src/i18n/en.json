@@ -636,7 +636,8 @@
         "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
         "modelCount": "{{count}} model(s)",
         "addModel": "Add model",
-        "modelsEmpty": "No supplied models yet. Add one manually."
+        "modelsEmpty": "No supplied models yet. Add one manually.",
+        "modelsEmptySubscription": "No supplied models were discovered."
       },
       "source": {
         "nativeSupply": "Native supply",

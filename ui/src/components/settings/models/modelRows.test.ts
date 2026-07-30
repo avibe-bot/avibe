@@ -5,6 +5,7 @@ import {
   listedModelIds,
   manualModelSources,
   modelChainKey,
+  modelChainRequests,
   modelIssueCount,
   modelNeedsAction,
   modelSupplierCounts,
@@ -72,6 +73,28 @@ const source = (id: string): Source => ({
 describe('model row projection', () => {
   it('keeps every server-published model surface without duplicates', () => {
     expect(listedModelIds(agent())).toEqual(['builtin-model', 'current-model', 'supply-model', 'mapped-model']);
+  });
+
+  it('does not expose fixed-menu mappings as OpenCode model rows', () => {
+    const open = agent({
+      backend: 'opencode',
+      menu_kind: 'open',
+      selected_model_id: 'checked-model',
+      menu: { view: 'featured', checked: ['checked-model'] },
+      builtin_models: null,
+      model_supply: [],
+      mappings: [{ builtin_id: 'stale-fixed-model', target_model_id: 'target-model', enabled: true }],
+    });
+    expect(listedModelIds(open)).toEqual(['checked-model']);
+  });
+
+  it('deduplicates chain reads by backend and model', () => {
+    expect(modelChainRequests([agent(), agent()])).toEqual([
+      { backend: 'claude', modelId: 'builtin-model' },
+      { backend: 'claude', modelId: 'current-model' },
+      { backend: 'claude', modelId: 'supply-model' },
+      { backend: 'claude', modelId: 'mapped-model' },
+    ]);
   });
 
   it('keeps every eligible source in the route picker, including sources outside this agent order', () => {

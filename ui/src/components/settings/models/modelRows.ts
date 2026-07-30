@@ -7,6 +7,11 @@ export type ModelChainRead =
 
 export type ModelChainIndex = Record<string, ModelChainRead>;
 
+export type ModelChainRequest = {
+  backend: AgentBackend;
+  modelId: string;
+};
+
 export const modelChainKey = (backend: AgentBackend, modelId: string): string =>
   `${backend}\u0000${modelId}`;
 
@@ -43,7 +48,7 @@ export function listedModelIds(agent: AgentSupply): string[] {
   const extras = [
     ...(agent.selected_model_id ? [agent.selected_model_id] : []),
     ...(agent.model_supply ?? []).map((model) => model.model_id),
-    ...(agent.mappings ?? []).map((mapping) => mapping.builtin_id),
+    ...(agent.menu_kind === 'fixed' ? (agent.mappings ?? []).map((mapping) => mapping.builtin_id) : []),
   ];
   const seen = new Set<string>();
   return [...primary, ...extras].filter((modelId) => {
@@ -51,6 +56,19 @@ export function listedModelIds(agent: AgentSupply): string[] {
     seen.add(modelId);
     return true;
   });
+}
+
+/** One chain read per backend/model pair, even if a duplicated Agent row reaches the page. */
+export function modelChainRequests(agents: AgentSupply[]): ModelChainRequest[] {
+  const requests = new Map<string, ModelChainRequest>();
+  for (const agent of agents) {
+    if (agent.mode !== 'hub') continue;
+    for (const modelId of listedModelIds(agent)) {
+      const key = modelChainKey(agent.backend, modelId);
+      if (!requests.has(key)) requests.set(key, { backend: agent.backend, modelId });
+    }
+  }
+  return [...requests.values()];
 }
 
 export function modelNeedsAction(

@@ -636,7 +636,8 @@
         "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
         "modelCount": "{{count}} 个型号",
         "addModel": "添加型号",
-        "modelsEmpty": "还没有可供给的型号，请手动添加。"
+        "modelsEmpty": "还没有可供给的型号，请手动添加。",
+        "modelsEmptySubscription": "还没有发现可供给的型号。"
       },
       "source": {
         "nativeSupply": "原生供给",

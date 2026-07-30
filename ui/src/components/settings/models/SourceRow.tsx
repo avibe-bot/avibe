@@ -15,10 +15,11 @@
 // indented to match the frame. The sm+ layout is byte-for-byte the desktop
 // frame, so the fixed-width chip columns still align down the list.
 import * as React from 'react';
-import { Plus } from 'lucide-react';
+import { LogIn, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { BillingChip, ExperimentalChip, StateChip } from './chips';
 import { SupplyTooltip } from './SupplyTooltip';
@@ -209,7 +210,21 @@ export const SourceRow: React.FC<{
           )}
         </div>
         {source.models.length === 0 ? (
-          <p className="text-[11.5px] text-muted">{t('settings.models.sources.modelsEmpty')}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11.5px] text-muted">
+              {t(
+                source.kind === 'subscription'
+                  ? 'settings.models.sources.modelsEmptySubscription'
+                  : 'settings.models.sources.modelsEmpty',
+              )}
+            </p>
+            {source.kind === 'subscription' && onRepair && (
+              <Button variant="outline" size="xs" className="h-7 shrink-0" onClick={() => onRepair(source, 'reauth')}>
+                <LogIn />
+                {t('settings.models.sourceActions.reauth')}
+              </Button>
+            )}
+          </div>
         ) : (
           <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto pr-1">
             {source.models.map((model) => (

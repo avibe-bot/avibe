@@ -28,6 +28,29 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
   };
 };
 
+/** Maps a potentially large read set without allowing it to fan out unbounded. */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  read: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (!Number.isFinite(limit) || limit < 1) throw new RangeError('limit must be at least 1');
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await read(items[index], index);
+    }
+  };
+
+  const workerCount = Math.min(Math.floor(limit), items.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
 // ── What speaks for a row when no read does ────────────────────────────────
 /**
  * Takes a write's echoed Agent row into the page's list.

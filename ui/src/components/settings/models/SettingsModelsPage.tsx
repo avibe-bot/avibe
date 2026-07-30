@@ -16,7 +16,7 @@ import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
-import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import {
   emptyFeed,
   feedAfterHeadRead,
@@ -29,9 +29,9 @@ import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import {
-  listedModelIds,
   manualModelSources,
   modelChainKey,
+  modelChainRequests,
   modelIssueCount,
   type ModelChainIndex,
 } from './modelRows';
@@ -60,19 +60,20 @@ const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick
   );
 };
 
+const CHAIN_READ_CONCURRENCY = 6;
+
 const readModelChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => {
-  const pairs = agents
-    .filter((agent) => agent.mode === 'hub')
-    .flatMap((agent) => listedModelIds(agent).map((modelId) => ({ agent, modelId })));
-  const reads = await Promise.all(
-    pairs.map(async ({ agent, modelId }) => {
-      const key = modelChainKey(agent.backend, modelId);
+  const reads = await mapWithConcurrency(
+    modelChainRequests(agents),
+    CHAIN_READ_CONCURRENCY,
+    async ({ backend, modelId }) => {
+      const key = modelChainKey(backend, modelId);
       try {
-        return [key, { kind: 'ready' as const, chain: await modelsApi.getAgentChain(agent.backend, modelId) }] as const;
+        return [key, { kind: 'ready' as const, chain: await modelsApi.getAgentChain(backend, modelId) }] as const;
       } catch {
         return [key, { kind: 'error' as const }] as const;
       }
-    }),
+    },
   );
   return Object.fromEntries(reads);
 };

@@ -286,6 +286,9 @@ const ModelRow: React.FC<{
   const headIndex = read?.kind === 'ready' && head ? read.chain.chain.indexOf(head) : -1;
   const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
   const needsAction = modelNeedsAction(agent, modelId, read, runtime);
+  const nativeProcessBlock = read?.kind === 'ready' && read.chain.supply_state === 'interrupted'
+    ? read.chain.chain.find((link) => link.reason === 'native_cli_unavailable') ?? null
+    : null;
   const repair = blockedRepair(read, sources);
   const raisedRepair = repair && isRaisedRepair(repair.kind)
     ? { source: repair.source, kind: repair.kind }
@@ -309,6 +312,10 @@ const ModelRow: React.FC<{
     tone = 'attention';
     status = t('settings.models.modelStatus.needsAction') as string;
     detail = t('settings.models.modelStatus.runtime') as string;
+  } else if (nativeProcessBlock) {
+    tone = 'attention';
+    status = t('settings.models.modelStatus.needsAction') as string;
+    detail = t('models.probe.native_cli_unavailable') as string;
   } else if (needsAction) {
     tone = 'attention';
     status = t('settings.models.modelStatus.needsAction') as string;
@@ -341,6 +348,10 @@ const ModelRow: React.FC<{
     ) : runtimeBlocked ? (
       <Button asChild variant="outline" size="xs" className="h-7 shrink-0">
         <Link to="/admin/settings/dependencies">{t('settings.models.modelStatus.runtimeAction')}</Link>
+      </Button>
+    ) : nativeProcessBlock ? (
+      <Button asChild variant="outline" size="xs" className="h-7 shrink-0">
+        <Link to={`/admin/settings/backends/${agent.backend}`}>{t('settings.models.modelStatus.runtimeAction')}</Link>
       </Button>
     ) : repair?.kind === 'retest' ? (
       <Button
