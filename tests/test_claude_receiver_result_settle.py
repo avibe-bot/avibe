@@ -309,7 +309,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 
-    async def test_successful_steer_supersedes_concurrent_receiver_eof(self):
+    async def test_concurrent_receiver_eof_makes_steering_ack_ambiguous(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
         agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
@@ -323,6 +323,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[composite_key] = [primary_request]
         agent.emit_result_message = AsyncMock(return_value=None)
         agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        agent._cleanup_runtime_session = AsyncMock()
+        agent._release_service_runtime_turn = Mock()
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         finish_receiver = asyncio.Event()
@@ -385,10 +387,17 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         receipt = await steer_task
         await receiver_task
-        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
-        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        self.assertIs(receipt.outcome, SteerOutcome.UNKNOWN)
+        self.assertEqual(receipt.reason, "receiver_generation_changed")
+        self.assertNotIn(composite_key, agent._pending_requests)
         agent.emit_result_message.assert_not_awaited()
-        agent.controller.emit_agent_message.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_awaited_once()
+        agent._cleanup_runtime_session.assert_awaited_once_with(
+            composite_key,
+            current_receiver_task=receiver_task,
+            preserve_pending_request_state=True,
+        )
+        agent._release_service_runtime_turn.assert_called_once_with(context)
 
     async def test_concurrent_receiver_crash_makes_steering_ack_ambiguous(self):
         mark_idle_calls: list[str] = []
@@ -541,6 +550,164 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["query", "interrupt"])
         agent._cleanup_runtime_session.assert_awaited_once_with(composite_key)
         self.assertIn(composite_key, agent._steering_closing_keys())
+
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_stop_claims_result_owner_before_waiting_terminal_frame(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-stop-result:/tmp/work"
+        primary_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        agent._cleanup_runtime_session = AsyncMock()
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        interrupt_started = asyncio.Event()
+        release_interrupt = asyncio.Event()
+        result_ready = asyncio.Event()
+        result_generation_captured = asyncio.Event()
+
+        class _Client:
+            async def interrupt(self):
+                interrupt_started.set()
+                await release_interrupt.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await result_ready.wait()
+                    yield _ResultMessage()
+                    await asyncio.Event().wait()
+
+                return _iterate()
+
+        client = _Client()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-stop-result",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        steering_generation = agent._steering_generation
+
+        def _capture_receiver_generation(key):
+            generation = steering_generation(key)
+            if asyncio.current_task() is receiver_task:
+                result_generation_captured.set()
+            return generation
+
+        agent._steering_generation = _capture_receiver_generation
+        stop_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            composite_session_id=composite_key,
+            stop_failure_reason=None,
+        )
+
+        stop_task = asyncio.create_task(agent.handle_stop(stop_request))
+        await interrupt_started.wait()
+        result_ready.set()
+        await result_generation_captured.wait()
+        release_interrupt.set()
+
+        self.assertTrue(await stop_task)
+        await asyncio.sleep(0)
+        self.assertNotIn(composite_key, agent._pending_requests)
+        agent.emit_result_message.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_awaited_once()
+
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_successful_steer_supersedes_concurrent_system_auth_failure(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-system-auth:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent._detect_message_type = lambda _message: "system"
+        agent.claude_client.format_message = lambda *args, **kwargs: "invalid bearer token"
+        agent._handle_auth_failure_result = AsyncMock(return_value=True)
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        auth_ready = asyncio.Event()
+        auth_generation_captured = asyncio.Event()
+
+        class _Client:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await auth_ready.wait()
+                    yield SimpleNamespace(subtype="error")
+                    await asyncio.Event().wait()
+
+                return _iterate()
+
+        client = _Client()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-system-auth",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        steering_generation = agent._steering_generation
+
+        def _capture_receiver_generation(key):
+            generation = steering_generation(key)
+            if asyncio.current_task() is receiver_task:
+                auth_generation_captured.set()
+            return generation
+
+        agent._steering_generation = _capture_receiver_generation
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        request = SteerRequest(
+            target_session_id="session-system-auth",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="continue after system error",
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+        await query_started.wait()
+        auth_ready.set()
+        await auth_generation_captured.wait()
+        release_query.set()
+
+        receipt = await steer_task
+        await asyncio.sleep(0)
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        agent._handle_auth_failure_result.assert_not_awaited()
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)

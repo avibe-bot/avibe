@@ -335,6 +335,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
         steer_state: _OpenCodeSteerState | None = None
+        poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
         model_hub_launch: ModelHubLaunch | None = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
@@ -671,7 +672,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             logger.error(f"OpenCode request failed: {error_text}", exc_info=True)
             await self.record_model_hub_native_failure(request.context, error_text)
             try:
-                await server.abort_session(session_id, request.working_path)
+                abort_server = poll_server or server
+                await abort_server.abort_session(session_id, request.working_path)
             except Exception as abort_err:
                 logger.warning(f"Failed to abort OpenCode session after error: {abort_err}")
 

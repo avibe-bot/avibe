@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 
 from core.services.agent_steering import (
+    ActiveSteerTarget,
     SteerOutcome,
     SteerRequest,
     active_steer_identity,
@@ -531,6 +532,162 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
         assert removed_polls == ["opencode-session"]
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_coordinator_error_aborts_through_steering_owner(
+    monkeypatch,
+) -> None:
+    primary = _primary_request(backend="opencode")
+    poll_started = asyncio.Event()
+    fail_poll = asyncio.Event()
+    steer_started = asyncio.Event()
+    release_steer = asyncio.Event()
+    events: list[str] = []
+
+    class _Server:
+        prompt_count = 0
+
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return [{"info": {"id": "primary-user", "role": "user"}, "parts": []}]
+
+        async def get_session_status(self, session_id, directory):
+            return {"type": "busy"}
+
+        async def prompt_async(self, **kwargs):
+            self.prompt_count += 1
+            if self.prompt_count == 1:
+                events.append("primary")
+                return
+            steer_started.set()
+            await release_steer.wait()
+            events.append("steer")
+
+        async def abort_session(self, session_id, directory):
+            events.append("abort")
+            return True
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, agent):
+            return None
+
+    class _SessionManager:
+        request_session = None
+
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "opencode-session"
+
+        def set_request_session(self, base_session_id, session_id, directory, session_key):
+            self.request_session = (session_id, directory, session_key)
+
+        def get_request_session(self, base_session_id):
+            return self.request_session
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            return None
+
+        def remove_active_poll(self, session_id):
+            return None
+
+    class _PollLoop:
+        async def run_prompt_poll(self, *args, **kwargs):
+            poll_started.set()
+            await fail_poll.wait()
+            raise RuntimeError("poll coordinator failed")
+
+    server = _Server()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            platform="avibe",
+            reply_enhancements=False,
+            show_pages_prompt=False,
+            remote_access=None,
+            language="en",
+            opencode=SimpleNamespace(
+                default_model=None,
+                default_provider=None,
+                default_reasoning_effort=None,
+            ),
+        ),
+        model_hub_runtime=None,
+        processing_indicator=SimpleNamespace(snapshot_request=lambda request: {}),
+        get_opencode_overrides=lambda context: (None, None, None),
+    )
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent.sessions = _Sessions()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._get_server = AsyncMock(return_value=server)
+    agent._delete_ack = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent._prepare_message_with_files = lambda request: request.message
+    agent.mark_runtime_turn_started = lambda context: None
+    agent.record_model_hub_native_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        lambda **kwargs: "system prompt",
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        lambda *args, **kwargs: None,
+    )
+    backend_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        backend_failure,
+    )
+
+    process_task = asyncio.create_task(agent._process_message(primary))
+    agent._active_requests[primary.base_session_id] = process_task
+    await poll_started.wait()
+    state = agent._steering_states[primary.base_session_id]
+    target = ActiveSteerTarget(
+        runtime_key=primary.base_session_id,
+        logical_turn_id="logical-turn",
+        context=primary.context,
+        agent_request=primary,
+        agent=agent,
+    )
+    request = _steer_request(state.native_turn_id)
+    steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+    await steer_started.wait()
+    fail_poll.set()
+    await asyncio.sleep(0)
+    assert events == ["primary"]
+
+    release_steer.set()
+    receipt = await steer_task
+    await process_task
+
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    assert events == ["primary", "steer", "abort"]
+    backend_failure.assert_awaited_once()
 
 
 @pytest.mark.anyio
