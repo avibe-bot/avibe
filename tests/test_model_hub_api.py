@@ -2098,7 +2098,23 @@ def test_failed_hub_create_consumes_known_ref_without_fabricating_source_state(
     assert service.revocations.list() == []
 
 
-def test_hub_reauth_retry_materializes_failed_pending_flow(tmp_path):
+@pytest.mark.parametrize(
+    ("terminal_state", "disposition", "retained_credential_ref"),
+    [
+        (
+            "failed",
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "cred_hub_existing",
+        ),
+        ("cancelled", RetainedMaterialDisposition.UNKNOWN, None),
+    ],
+)
+def test_hub_reauth_retry_materializes_pending_flow(
+    tmp_path,
+    terminal_state,
+    disposition,
+    retained_credential_ref,
+):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_huboauth01",
@@ -2129,11 +2145,15 @@ def test_hub_reauth_retry_materializes_failed_pending_flow(tmp_path):
     adapter.flows[first["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[first["flow_id"]].__dict__,
-            "state": "failed",
-            "error_key": "models.oauth.binding_failed",
+            "state": terminal_state,
+            "error_key": (
+                "models.oauth.binding_failed"
+                if terminal_state == "failed"
+                else None
+            ),
             "channel": "hub",
-            "retained_material_disposition": RetainedMaterialDisposition.FLOW_SOURCE_REF,
-            "retained_credential_ref": "cred_hub_existing",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": retained_credential_ref,
         }
     )
 

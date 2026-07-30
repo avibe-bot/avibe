@@ -2788,7 +2788,7 @@ class ModelHubService:
                             )
                         }
                     if (
-                        pending_flow.state == "failed"
+                        pending_flow.state in {"failed", "cancelled"}
                         and pending_binding.channel == "hub"
                     ):
                         config = (
