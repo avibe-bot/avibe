@@ -212,11 +212,16 @@ class CLIProxyEngineAdapter:
                 credential_ref,
             )
             metadata = await asyncio.to_thread(
-                self.state_store.credential_metadata,
+                self.state_store.credential_metadata_if_present,
                 credential_ref,
             )
         except EngineStateError:
             return False
+        # Revocation is ordered after both auth-file deletions. Therefore an
+        # absent ref proves cleanup already converged, including never-created
+        # refs whose postcondition held vacuously.
+        if metadata is None:
+            return True
         auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
         if not isinstance(auth_name, str) or not auth_name:
             return False

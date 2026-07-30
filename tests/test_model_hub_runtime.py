@@ -194,6 +194,79 @@ def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
     asyncio.run(run())
 
 
+def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
+    tmp_path: Path,
+) -> None:
+    class Client:
+        delete_calls = 0
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("DELETE", "/auth-files")
+            self.delete_calls += 1
+            return {"status": "ok"}
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client_if_running(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            auth_file.name,
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        cleanup_journal = {credential_ref}
+
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+        assert credential_ref in cleanup_journal  # Crash before journal clear.
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+        cleanup_journal.remove(credential_ref)
+
+        assert cleanup_journal == set()
+        assert client.delete_calls == 1
+
+    asyncio.run(run())
+
+
+def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
+    tmp_path: Path,
+) -> None:
+    class Supervisor:
+        def client_if_running(self):
+            raise AssertionError("an absent ref must not reach the engine")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        assert (
+            await adapter.cleanup_orphaned_oauth_material(
+                "cred_00000000000000000000000000000000"
+            )
+            is True
+        )
+
+    asyncio.run(run())
+
+
 def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
