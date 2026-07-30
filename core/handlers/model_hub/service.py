@@ -2019,16 +2019,17 @@ class ModelHubService:
     def _enroll_target_sources(
         config: ModelHubConfig,
         agent: ModelHubAgentSupplyConfig,
-        target_source_ids: list[str],
+        target_source_groups: list[list[str]],
     ) -> None:
         effective_order = config.effective_source_order(agent.backend)
         enrolled = set(effective_order)
         appended = []
-        for source_id in target_source_ids:
-            if source_id in enrolled:
+        for source_ids in target_source_groups:
+            if any(source_id in enrolled for source_id in source_ids):
                 continue
-            enrolled.add(source_id)
-            appended.append(source_id)
+            selected_source_id = source_ids[0]
+            enrolled.add(selected_source_id)
+            appended.append(selected_source_id)
         if not appended:
             return
         agent.sources.policy = "custom"
@@ -2220,10 +2221,9 @@ class ModelHubService:
                 config,
                 agent,
                 [
-                    source_id
+                    target_sources[mapping.target_model_id]
                     for mapping in parsed
                     if mapping.enabled
-                    for source_id in target_sources[mapping.target_model_id]
                 ],
             )
             agent.mappings = parsed
@@ -2251,9 +2251,8 @@ class ModelHubService:
                 config,
                 agent,
                 [
-                    source_id
+                    target_sources[identifier]
                     for identifier in parsed.checked
-                    for source_id in target_sources[identifier]
                 ],
             )
             agent.menu = parsed

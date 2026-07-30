@@ -1451,7 +1451,11 @@ def test_mapping_auto_enrolls_eligible_non_enrolled_source(tmp_path):
     added.models = [
         ModelHubModelConfig(id="mapped-model", provenance="discovered")
     ]
-    config.sources.append(added)
+    excluded = _source("src_mapping02", "Excluded mapping fallback")
+    excluded.models = [
+        ModelHubModelConfig(id="mapped-model", provenance="discovered")
+    ]
+    config.sources.extend([added, excluded])
     original_order = list(config.agents["claude"].sources.order)
 
     agent = asyncio.run(
@@ -1483,7 +1487,15 @@ def test_opencode_menu_auto_enrolls_eligible_non_enrolled_source(tmp_path):
             provenance="manual",
         )
     ]
-    config.sources.append(added)
+    excluded = _source("src_openmenu02", "Excluded menu fallback")
+    excluded.vendor = "openrouter"
+    excluded.models = [
+        ModelHubModelConfig(
+            id="anthropic/claude-sonnet-4",
+            provenance="manual",
+        )
+    ]
+    config.sources.extend([added, excluded])
     original_order = list(config.agents["opencode"].sources.order)
 
     agent = asyncio.run(
@@ -1502,6 +1514,98 @@ def test_opencode_menu_auto_enrolls_eligible_non_enrolled_source(tmp_path):
     assert agent["menu"]["checked"] == [
         "openrouter/anthropic/claude-sonnet-4"
     ]
+
+
+@pytest.mark.parametrize("mutation", ["mapping", "menu"])
+def test_menu_acceptance_preserves_excluded_supplier_when_target_is_enrolled(
+    tmp_path,
+    mutation,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    excluded = _source("src_excluded01", "Explicitly excluded fallback")
+    config.sources.append(excluded)
+    backend = "claude" if mutation == "mapping" else "opencode"
+    original_order = list(config.agents[backend].sources.order)
+
+    if mutation == "mapping":
+        agent = asyncio.run(
+            service.set_mappings(
+                "claude",
+                [
+                    {
+                        "builtin_id": "claude-opus-4-6",
+                        "target_model_id": "claude-opus-4-6",
+                        "enabled": True,
+                    }
+                ],
+            )
+        )
+    else:
+        agent = asyncio.run(
+            service.set_opencode_menu(
+                {
+                    "view": "featured",
+                    "checked": ["anthropic/claude-opus-4-6"],
+                }
+            )
+        )
+
+    assert agent["sources"]["order"] == original_order
+    assert excluded.id not in agent["sources"]["order"]
+
+
+@pytest.mark.parametrize("mutation", ["mapping", "menu"])
+def test_menu_acceptance_incrementally_deduplicates_selected_supplier(
+    tmp_path,
+    mutation,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    selected = _source("src_multimap01", "Selected supplier")
+    excluded = _source("src_multimap02", "Excluded fallback")
+    for source in (selected, excluded):
+        source.models = [
+            ModelHubModelConfig(id="target-one", provenance="manual"),
+            ModelHubModelConfig(id="target-two", provenance="manual"),
+        ]
+    config.sources.extend([selected, excluded])
+    backend = "claude" if mutation == "mapping" else "opencode"
+    original_order = list(config.agents[backend].sources.order)
+
+    if mutation == "mapping":
+        agent = asyncio.run(
+            service.set_mappings(
+                "claude",
+                [
+                    {
+                        "builtin_id": "claude-opus-4-6",
+                        "target_model_id": "target-one",
+                        "enabled": True,
+                    },
+                    {
+                        "builtin_id": "claude-sonnet-4-6",
+                        "target_model_id": "target-two",
+                        "enabled": True,
+                    },
+                ],
+            )
+        )
+    else:
+        agent = asyncio.run(
+            service.set_opencode_menu(
+                {
+                    "view": "featured",
+                    "checked": [
+                        "anthropic/target-one",
+                        "anthropic/target-two",
+                    ],
+                }
+            )
+        )
+
+    assert agent["sources"]["order"] == [*original_order, selected.id]
+    assert excluded.id not in agent["sources"]["order"]
 
 
 def test_follow_order_exhaustively_enrolls_eligible_sources_and_stays_follow(
