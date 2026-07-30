@@ -219,10 +219,11 @@ export const repairOutcome = (tail: SourceRepaired): RepairOutcome =>
 /**
  * Whether the journey may close itself.
  *
- * Provable from the tail alone, unlike the adoption auto-close next door: that
- * one stays dormant because `covered` needs a `skipped_by` the contract does not
- * carry yet, whereas 「nothing was stranded, and the source came back working」 is
- * two fields the server sends.
+ * Provable from the tail alone: 「nothing was stranded, and the source came back
+ * working」 is two fields the server sends. The adoption auto-close next door now
+ * stands on the same footing — `covered` needs `skipped_by`, and that field has
+ * since landed — so the two differ in which fields they read, not in whether they
+ * can reach a verdict at all.
  *
  * An allowlist rather than `!== 'gaps'`: L4's rule is that the 1.4s dismissal is
  * for a plain success and 「every other verdict leaves an instruction on screen
@@ -343,26 +344,31 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  *   by an edit that did not matter, which the user answers by re-running 一次试跑
  *   — the same asymmetry the inventory paragraph below settles the same way.
  *   `savedMenuKey` already reads this list in order for the drawer's own baseline.
- * - `selected_model_id` for every backend EXCEPT opencode. On the fixed-menu
- *   backends the hub path echoes `requested_model` back verbatim in every return
- *   (only `target_model` takes the mapping), so it is the configured request. On
- *   opencode with no explicit request the resolver loops `menu.checked` and returns
- *   the first identifier whose source is runnable — `unavailable_source_ids` and
- *   cooldown gating decide which one wins, so there it is a health-derived pick and
- *   `checked` is the honest stand-in for what the user chose.
+ * - `selected_model_id`, but only while `selected_model_explicit` says the user is
+ *   the one who asked for it. One rule for every backend, because the flag states
+ *   the rule the backends were a proxy for: it is a CONFIG fact, derived from the
+ *   stored request before anything resolves (`service.py:2109` —
+ *   `mode == "hub" and bool(requested_model)`), while `selected_model_id` is the
+ *   resolver's echo of that same request. On the fixed-menu backends the two agree
+ *   and the guard changes nothing: the hub path echoes `requested_model` back
+ *   verbatim in every return (only `target_model` takes the mapping), so a
+ *   non-null id there always had a request behind it, and an unset request stays
+ *   empty through to a null id. On opencode it separates the two cases that used to
+ *   be one — an explicit request comes back merely normalized and IS now keyed on,
+ *   while an empty one sends the resolver walking `checked` for the first
+ *   identifier whose source is runnable (`resolver.py:171-182`), a pick that
+ *   `unavailable_source_ids` and cooldown gating decide and that `checked` above
+ *   stands in for.
  *
- * That last exclusion is coarser than the truth, and knowingly so: an OpenCode
- * request that IS explicit comes back normalized but otherwise untouched, so it is
- * a selection this key drops. The payload has no way to tell the two apart — the
- * agent config carries no model at all, and every projected model on it is the same
- * resolver output — and both client-side approximations are worse than the gap.
- * Keying on the value erases a failure report on any single-source setup, because
- * the probe that failed cools the only source the head model had and the pick moves.
- * Gating the member on `supply_status` (sound: the loop only ever returns a
- * candidate WITH a source, so `waiting`/`interrupted` proves the request was
- * explicit) does the same thing through the guard instead of the value. The fix is
- * a server-side discriminator — explicitness beside `selected_model_id` — and this
- * stays as it is until there is one.
+ *   Reading the flag is what makes the member health-free, and it is why this
+ *   waited for the server instead of approximating. Both client-side stand-ins
+ *   keyed on something the failing probe itself moves: on the VALUE, a
+ *   single-source setup erases its own report, because the probe cools the only
+ *   source the head model had and the pick moves; on `supply_status` (sound —
+ *   the loop only ever returns a candidate WITH a source, so
+ *   `waiting`/`interrupted` proves the request was explicit) the same erasure,
+ *   through the guard rather than the value. `selected_model_explicit` moves only
+ *   when the user edits the request, so the report survives its own failure.
  *
  * - the sources' model INVENTORIES, and this one is not the user's edit at all.
  *   Everything above is a surface the user changes from this page, and the
@@ -403,7 +409,7 @@ export const dryRunChainKey = (
   [
     policy,
     order.join('>'),
-    agent.backend === 'opencode' ? '' : (agent.selected_model_id ?? ''),
+    agent.selected_model_explicit ? (agent.selected_model_id ?? '') : '',
     (agent.mappings ?? [])
       .map((m) => `${m.builtin_id}>${m.target_model_id}:${m.enabled ? 'on' : 'off'}`)
       .sort()

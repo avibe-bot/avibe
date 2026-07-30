@@ -19,6 +19,7 @@ import { MenuDrawer } from './MenuDrawer';
 import { eligibleSources } from '../eligibility';
 import { buildTargetModels, type TargetModel } from './identifiers';
 import { SupplyDots } from './supplyBits';
+import { useAnnounceEnrollment } from './enrollment';
 import { useCompactSourceLabel } from './sourceLabel';
 
 // Fixed-menu backends expose their built-in model catalog via agent.builtin_models
@@ -143,7 +144,8 @@ export const MappingDrawer: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onClose: () => void;
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed — see `agentsWithEcho`. */
+  onSaved: (echoed: AgentSupply) => void;
 }> = ({ open, backend, agent, sources, onClose, onSaved }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -152,6 +154,9 @@ export const MappingDrawer: React.FC<{
   // (`agent.sources.eligibility`) — anything else is rejected by the live API
   // with `mapping_target_unavailable`.
   const targets = React.useMemo(() => buildTargetModels(eligibleSources(sources, agent)), [sources, agent]);
+  // Accepting an override may also enroll its supplier into this backend's source
+  // order (api.md → "Mapping and menu enrollment"). Read off the echo at commit.
+  const announceEnrollment = useAnnounceEnrollment(backend, sources);
 
   const [draft, setDraft] = React.useState<AgentMapping[]>(() => seedDraft(agent));
   const initialRef = React.useRef<AgentMapping[]>(draft);
@@ -203,8 +208,12 @@ export const MappingDrawer: React.FC<{
       // supplier source was deleted); it reverts to 跟随原生 instead of being
       // resubmitted and rejected as mapping_target_unavailable.
       const targetIds = new Set(targets.map((tg) => tg.id));
-      await modelsApi.putMappings(backend, draft.filter((m) => m.enabled && targetIds.has(m.target_model_id)));
-      onSaved();
+      const echoed = await modelsApi.putMappings(
+        backend,
+        draft.filter((m) => m.enabled && targetIds.has(m.target_model_id)),
+      );
+      announceEnrollment(agent, echoed);
+      onSaved(echoed);
       onClose();
     } catch {
       showToast(t('settings.models.menus.saveFailed') as string, 'error');

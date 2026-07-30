@@ -372,6 +372,9 @@ describe('dryRunPlan — whether 试跑 has anything to run (SourceOrderDrawer)'
 describe('dryRunChainKey — which edits make a 试跑 report stop being about anything', () => {
   const base = agent({
     selected_model_id: 'claude-opus-4-6',
+    // What the server sends beside a non-null id on a fixed-menu backend: the hub
+    // path echoes the stored request, so an id there always had a request behind it.
+    selected_model_explicit: true,
     mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: true }],
     menu: { view: 'featured', checked: ['zhipuai/glm-5.2'] },
   });
@@ -397,6 +400,34 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
       same,
     );
     expect(key({ menu: { view: 'featured', checked: [] } })).not.toBe(same);
+  });
+
+  it('keys on the selected model only while the user is the one who asked for it', () => {
+    // Round 15 escalated this gap and #1110 closed it. `selected_model_id` is the
+    // resolver's ECHO: on opencode with no explicit request the resolver walks
+    // `checked` and returns the first identifier whose source is runnable, so
+    // keying on it would let a failing probe cool the head, move the pick, and
+    // erase the very report the click produced. `selected_model_explicit` is the
+    // config fact behind that echo, so the member is present for an explicit pick
+    // on ANY backend and absent for a resolved one — no backend special case left.
+    const opencode = {
+      backend: 'opencode',
+      menu_kind: 'open',
+      menu: { view: 'featured', checked: ['zhipuai/glm-5.2', 'anthropic/claude-opus-4-6'] },
+    } as const;
+    const resolved = key({ ...opencode, selected_model_id: 'zhipuai/glm-5.2', selected_model_explicit: false });
+    // A pick the resolver made is not a surface the user selected with: which of
+    // the two runnable identifiers came back cannot move this key.
+    expect(
+      key({ ...opencode, selected_model_id: 'anthropic/claude-opus-4-6', selected_model_explicit: false }),
+    ).toBe(resolved);
+    // The same identifier, this time because the user asked for it — a different
+    // configuration, and now a different key.
+    const asked = key({ ...opencode, selected_model_id: 'zhipuai/glm-5.2', selected_model_explicit: true });
+    expect(asked).not.toBe(resolved);
+    // And an explicit opencode selection moves the key when it changes, which is
+    // exactly what the old backend exclusion dropped.
+    expect(key({ ...opencode, selected_model_id: 'zhipuai/glm-5.3', selected_model_explicit: true })).not.toBe(asked);
   });
 
   it('holds still for everything the server derives from those', () => {
@@ -483,15 +514,12 @@ describe('dryRunChainKey — which edits make a 试跑 report stop being about a
     );
   });
 
-  it('reads opencode by its own selection surface, not by the pick', () => {
-    // `selected_model_id` is config for a fixed menu, but for opencode with an
-    // empty request `resolve_model_hub_turn` walks `menu.checked` and returns the
-    // first identifier whose source is runnable — so a cooldown MOVES it. Keying
-    // on it there would smuggle head health back in through the model field and
-    // re-create the self-erasing report above.
-    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const };
-    expect(key({ ...oc, selected_model_id: 'zhipuai/glm-5.2' })).toBe(key({ ...oc, selected_model_id: 'openai/gpt-6' }));
-    // What the user actually selects with there still counts.
+  it('falls back to the opencode selection surface when the resolver made the pick', () => {
+    // The other half of the rule above: with the model member gone, what the user
+    // selects with on an open menu is the checked list itself, and that still moves
+    // the key. Otherwise excluding a resolved pick would leave opencode with no
+    // selection member at all.
+    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const, selected_model_explicit: false };
     expect(key({ ...oc, menu: { view: 'full', checked: ['openai/gpt-6'] } })).not.toBe(key(oc));
   });
 

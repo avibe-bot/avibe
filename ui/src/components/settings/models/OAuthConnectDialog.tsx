@@ -37,13 +37,13 @@ import {
 } from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
-import { apiFailure, modelsApi, type OAuthResult } from './modelsApi';
+import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
 import { oauthFailureKey, serverText, type OAuthJourney } from './serverCopy';
 import { adoptionVerdict } from './sufficiency';
 import { SupplyGapNote } from './SupplyGapNote';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
-import type { AdoptedBy, Source, SupplyChannel, SupplyGap } from './types';
+import type { Source, SupplyChannel, SupplyGap } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
@@ -86,8 +86,11 @@ export const OAuthConnectDialog: React.FC<{
   //
   // `null` means the terminal response did not report a creation — which is not
   // 「没有 Agent 采用」 and must not be rendered as it.
-  const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[] | null>(null);
-  // The reauth counterpart of `adoptedBy`, read through the same owner the key
+  //
+  // The whole tail rather than the adopter list alone, held as one value: the note
+  // reads both halves, and two states can hold one half of an older arrival.
+  const [adoption, setAdoption] = React.useState<Adoption | null>(null);
+  // The reauth counterpart of `adoption`, read through the same owner the key
   // replacement uses so 「did that fix it?」 has one answer on the page.
   const [repair, setRepair] = React.useState<RepairOutcome | null>(null);
   // What a FAILED reauth stranded on its way down. Not the same thing as
@@ -264,10 +267,11 @@ export const OAuthConnectDialog: React.FC<{
           t(toast?.key ?? 'settings.models.oauth.status.success') as string,
           toast?.tone ?? 'success',
         );
-        // Unlike the adoption auto-close below this one is PROVABLE: 「nothing was
-        // stranded」 is a field the server sends, so a clean repair may dismiss
-        // itself while a gap report stays on screen to be read. An absent tail
-        // says nothing to read either, so it closes too.
+        // Same shape as the adoption auto-close below, on the same footing now that
+        // both halves are server facts: 「nothing was stranded」 is a field the
+        // server sends, so a clean repair may dismiss itself while a gap report
+        // stays on screen to be read. An absent tail says nothing to read either,
+        // so it closes too.
         if (!verdict || repairSettles(verdict))
           successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
       } else if (step.action === 'succeed') {
@@ -275,14 +279,20 @@ export const OAuthConnectDialog: React.FC<{
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
         // is refused as `flow_not_found` on a connect that in fact succeeded.
-        setAdoptedBy(created ? created.adopted_by : null);
+        setAdoption(created ? { adopted_by: created.adopted_by, skipped_by: created.skipped_by } : null);
         showToast(t('settings.models.oauth.status.success') as string, 'success');
         // Same rule as the API-key dialog, through the same owner: 1.4s auto-dismiss
         // is for a pure 「连接成功」, and every other verdict leaves an instruction on
         // screen that 1.4s is not long enough to read. The old `!== 0` also read an
         // ABSENT creation as adopted, which auto-dismissed the one case that knows
         // least — `adoptionVerdict(null)` is indeterminate, so it now waits.
-        if (adoptionVerdict(created?.adopted_by ?? null).kind === 'covered')
+        //
+        // `covered` and nothing weaker, and `skipped_by` is what makes it reachable
+        // at all: a non-empty adopter list never ruled out a `custom` backend that
+        // was left out, and that sentence is an instruction too. A response that
+        // omits the field leaves the verdict `indeterminate` and the dialog open —
+        // the same answer this site gave before the field existed.
+        if (adoptionVerdict(created?.adopted_by ?? null, created?.skipped_by).kind === 'covered')
           successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
       }
       // Both branches above end with the same fact about the page behind them, and
@@ -359,7 +369,7 @@ export const OAuthConnectDialog: React.FC<{
     transition({ kind: 'reset' });
     setCode('');
     setSubmitting(false);
-    setAdoptedBy(null);
+    setAdoption(null);
     setRepair(null);
     setStranded([]);
     void (async () => {
@@ -656,8 +666,10 @@ export const OAuthConnectDialog: React.FC<{
               </div>
               {/* Only when the response actually reported the creation: an absent
                   `adopted_by` is not an empty one, and 「没有 Agent 采用」 would be
-                  a claim this response never made. */}
-              <AdoptionNote adoptedBy={adoptedBy} />
+                  a claim this response never made. The two halves come off ONE
+                  value, so the note can never read a skip list from one arrival
+                  against an adopter list from another. */}
+              <AdoptionNote adoptedBy={adoption?.adopted_by ?? null} skippedBy={adoption?.skipped_by} />
             </div>
           ) : (
             active && (

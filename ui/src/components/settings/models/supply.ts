@@ -4,6 +4,7 @@
 // supply failure is actually about (AC-9), and what the header pill is allowed to
 // claim. Rules deserve unit tests, and this repo's vitest setup has no DOM, so
 // they are plain functions over the contract types and nothing else.
+import { offCurrentModelChain, processAvailabilityOf } from './eligibility';
 import type {
   AgentSupply,
   ModelSupply,
@@ -61,6 +62,10 @@ export type ChainChip = {
   tone: ChainTone;
   /** Draws the gold dot: this source cannot serve right now. */
   unhealthy: boolean;
+  /** Draws the muted dot: healthy, on the route, and still not launchable here —
+   *  this process cannot sign the backend's CLI in with it. Never true at the same
+   *  time as `unhealthy`: the row states ONE reason, the one in the way. */
+  unavailable: boolean;
 };
 
 /**
@@ -73,6 +78,26 @@ export type ChainChip = {
  * is a warning about the next failover, not a record of one, and greying it out
  * would claim something that has not happened.
  *
+ * A position can be stepped over for a second reason, and the strip has to draw it
+ * or the frame contradicts itself: a `native_cli` source this process cannot sign
+ * the CLI in with is skipped by the resolver while its own state reads `active`, so
+ * without this the chain would show a healthy position 1 and 当前 sitting at 2 with
+ * nothing between them to explain the move. It is ONE more disjunct in the same
+ * 「walked past」 rule, and one more hue on the same dot — never a second dot and
+ * never a second rule, because the question 「why did the resolver move on」 has one
+ * answer per position. Health wins the tie: it is the one the user can act on, and
+ * the source row next door already names it.
+ *
+ * That second disjunct is gated on route membership, and the gate is about what the
+ * marker CLAIMS. 「Not launchable here」 names a CAUSE for the failover, and a
+ * position the server reports as `in_current_model_chain: false` was going to be
+ * walked past with the CLI signed in and the state green — it does not carry the
+ * selected model at all. Marking it would blame the move on a remedy that changes
+ * nothing. Health needs no such gate: 「cannot serve right now」 is true of the
+ * source wherever it sits in whosever order. And the gate is on the Agent row only —
+ * the all-sources drawer keeps the ungated fact, which is the surface the user goes
+ * to in order to act on it.
+ *
  * Returns [] in Direct mode: there is no Hub order to draw (AC-7).
  */
 export function chainChips(agent: AgentSupply, sources: Source[]): ChainChip[] {
@@ -82,15 +107,40 @@ export function chainChips(agent: AgentSupply, sources: Source[]): ChainChip[] {
   return order.map((sourceId, i) => {
     const source = sources.find((s) => s.id === sourceId);
     const unhealthy = source ? isUnhealthy(source.state) : false;
+    const unavailable =
+      !unhealthy && !offCurrentModelChain(agent, sourceId) && !processAvailabilityOf(agent, sourceId).runnable;
     const tone: ChainTone =
       sourceId === currentId
         ? 'current'
-        : unhealthy && currentIndex >= 0 && i < currentIndex
+        : (unhealthy || unavailable) && currentIndex >= 0 && i < currentIndex
           ? 'skipped'
           : 'neutral';
-    return { sourceId, label: source?.display_name ?? sourceId, position: i + 1, tone, unhealthy };
+    return { sourceId, label: source?.display_name ?? sourceId, position: i + 1, tone, unhealthy, unavailable };
   });
 }
+
+/**
+ * Is this row's 供 … 全系 a promise this machine cannot keep — healthy, and still
+ * not something the Agent's process can be launched against?
+ *
+ * A model count is a promise, and the two answers that can retract it compete for
+ * one segment of copy. Health wins, exactly as it does in the strip above: a
+ * cooling or broken source is the one the user can act on, and its state chip has
+ * already raised the question. So this is only about the row that looks fine.
+ *
+ * Ungated by route membership, and deliberately so — unlike `unavailable` in
+ * `chainChips`, where the gate exists because that marker blames a FAILOVER on a
+ * cause and must not name one for a position the resolver was walking past
+ * anyway. A row in a source list is not explaining a move; it is answering 「what
+ * would I get by turning this on」. And a 未启用 source sits outside
+ * `agent.sources.order`, which is the only list `in_current_model_chain` is an
+ * answer about, so a gate there would read an ORDER fact as a MODEL one.
+ *
+ * Per (source, backend), like `processAvailabilityOf` it reads — never a property
+ * of the source row on its own.
+ */
+export const healthyButUnrunnable = (agent: Pick<AgentSupply, 'sources'>, source: Source): boolean =>
+  !isUnhealthy(source.state) && !processAvailabilityOf(agent, source.id).runnable;
 
 // ── AC-9: who a supply problem is about ─────────────────────────────────
 export type SupplyAttribution = {
