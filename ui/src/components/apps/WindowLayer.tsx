@@ -9,7 +9,11 @@ import { useWindowManager, type WindowInstance } from '../../context/WindowManag
 import { useShowPageInventory } from '../useShowPages';
 import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { AppWindow } from './AppWindow';
-import { showPageWindowSource, type ShowPageWindowStatus } from './showPageWindowState';
+import {
+  showPageWindowSource,
+  showPageWindowStatusAfterRead,
+  type ShowPageWindowStatus,
+} from './showPageWindowState';
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
 
@@ -30,19 +34,19 @@ const ShowPageWindow: React.FC<{
     if (!sessionId) return;
     let cancelled = false;
     api
-      .getSession(sessionId, { cache: false, handleError: false })
-      .then((session) => {
+      .getSessionResult(sessionId)
+      .then((result) => {
         if (cancelled) return;
-        if (!session || typeof session.id !== 'string' || session.status === 'archived') {
-          setStatus('missing');
-          return;
-        }
-        setStatus('ready');
+        setStatus((current) => showPageWindowStatusAfterRead(current, result));
+        const session = result.session;
+        if (!session || typeof session.id !== 'string' || session.status === 'archived') return;
         const liveTitle = (session.title ?? '').trim();
         if (liveTitle) setTitle(win.id, liveTitle);
       })
       .catch(() => {
-        if (!cancelled) setStatus('missing');
+        if (!cancelled) {
+          setStatus((current) => showPageWindowStatusAfterRead(current, { status: null, session: null }));
+        }
       });
     return () => {
       cancelled = true;

@@ -1,6 +1,33 @@
 import { describe, expect, it } from 'vitest';
 
-import { showPageWindowSource } from './showPageWindowState';
+import { showPageWindowSource, showPageWindowStatusAfterRead } from './showPageWindowState';
+
+describe('showPageWindowStatusAfterRead', () => {
+  it('keeps a ready frame through a non-authoritative read failure', () => {
+    expect(showPageWindowStatusAfterRead('ready', { status: 500, session: null })).toBe('ready');
+    expect(showPageWindowStatusAfterRead('ready', { status: null, session: null })).toBe('ready');
+  });
+
+  it('treats not-found and archived sessions as authoritative missing states', () => {
+    expect(showPageWindowStatusAfterRead('ready', { status: 404, session: null })).toBe('missing');
+    expect(
+      showPageWindowStatusAfterRead('loading', {
+        status: 200,
+        session: { id: 'ses_1', status: 'archived' },
+      }),
+    ).toBe('missing');
+  });
+
+  it('accepts an active session and rejects a failed initial read', () => {
+    expect(
+      showPageWindowStatusAfterRead('loading', {
+        status: 200,
+        session: { id: 'ses_1', status: 'active' },
+      }),
+    ).toBe('ready');
+    expect(showPageWindowStatusAfterRead('loading', { status: 500, session: null })).toBe('missing');
+  });
+});
 
 describe('showPageWindowSource', () => {
   it('optimistically frames an active session while its row loads', () => {
