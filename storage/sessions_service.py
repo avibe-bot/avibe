@@ -6,7 +6,7 @@ import re
 import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import Connection, case, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -29,6 +29,7 @@ from storage.agent_session_rows import (
     snapshot_scope_workdir,
 )
 from storage.models import (
+    agents,
     agent_sessions,
     metadata,
     run_definitions,
@@ -1238,9 +1239,31 @@ class SQLiteSessionsService:
                 if not isinstance(agent_maps, dict):
                     continue
                 scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
+                resolved_imported_identities: dict[str, tuple[str, str | None, str | None]] = {}
+                normalized_anchors: dict[tuple[str, str], str] = {}
+                anchor_owner_candidates: dict[
+                    str, list[tuple[str, str, str | None, str | None]]
+                ] = {}
+                for candidate_name, candidate_thread_map in agent_maps.items():
+                    if not isinstance(candidate_thread_map, dict):
+                        continue
+                    candidate_variant = str(candidate_name) or "default"
+                    candidate_identity = _resolve_imported_agent_identity(conn, candidate_variant)
+                    resolved_imported_identities[candidate_variant] = candidate_identity
+                    for candidate_thread_id in candidate_thread_map:
+                        candidate_thread_key = str(candidate_thread_id)
+                        candidate_anchor = _base_session_anchor(candidate_thread_key)
+                        normalized_anchors[(candidate_variant, candidate_thread_key)] = candidate_anchor
+                        anchor_owner_candidates.setdefault(candidate_anchor, []).append(
+                            (candidate_variant, *candidate_identity)
+                        )
                 for agent_name, thread_map in agent_maps.items():
                     if not isinstance(thread_map, dict):
                         continue
+                    imported_variant = str(agent_name) or "default"
+                    imported_backend, imported_agent_id, imported_agent_name = resolved_imported_identities[
+                        imported_variant
+                    ]
                     for thread_id, native_session_id in thread_map.items():
                         thread_key = str(thread_id)
                         # Normalise OpenCode ``base:/cwd`` composites to the bare
@@ -1248,23 +1271,280 @@ class SQLiteSessionsService:
                         # subagent ``base:<name>`` anchors are preserved. Workdir is
                         # snapshotted from scope settings, never inferred from the
                         # legacy anchor suffix.
-                        base_anchor = _base_session_anchor(thread_key)
+                        base_anchor = normalized_anchors[(imported_variant, thread_key)]
                         dedup_key = (scope_id, base_anchor)
                         if dedup_key in seen_anchor_rows:
                             continue
                         encoded_session_id = encode_session_value(native_session_id)
-                        row_key = _session_row_key(
+                        existing_anchor_row = _find_scope_anchor_row(
+                            conn,
                             scope_id=scope_id,
-                            agent_variant=str(agent_name) or "default",
                             session_anchor=base_anchor,
-                            native_session_id=encoded_session_id,
                         )
-                        row_id = (
-                            _find_row_id_for_scope_anchor(
+                        skip_mapping = False
+                        while existing_anchor_row is not None:
+                            if str(existing_anchor_row["status"] or "") == "archived":
+                                logger.warning(
+                                    "Skipping legacy session import because an archived row owns the anchor "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            observed_backend = str(existing_anchor_row["agent_backend"] or "")
+                            observed_variant = str(existing_anchor_row["agent_variant"] or "")
+                            observed_agent_id = str(existing_anchor_row["agent_id"] or "")
+                            observed_agent_name = str(existing_anchor_row["agent_name"] or "")
+                            observed_native_session_id = str(existing_anchor_row["native_session_id"] or "")
+                            existing_backend = observed_backend.strip()
+                            existing_variant = observed_variant.strip() or "default"
+                            existing_agent_id = observed_agent_id.strip() or None
+                            existing_agent_name = observed_agent_name.strip() or None
+                            existing_native_session_id = observed_native_session_id.strip()
+                            existing_is_owned = _is_owned_backend(existing_backend)
+                            existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
+                            import_matches_existing_owner = _import_matches_existing_owner(
+                                existing_backend=existing_backend,
+                                existing_variant=existing_variant,
+                                existing_agent_id=existing_agent_id,
+                                existing_agent_name=existing_agent_name,
+                                imported_backend=imported_backend,
+                                imported_variant=imported_variant,
+                                imported_agent_id=imported_agent_id,
+                                imported_agent_name=imported_agent_name,
+                            )
+                            # Prefer a legacy mapping for the reserved owner when one
+                            # exists; otherwise an unbound route reservation is
+                            # provisional and may be adopted by the imported session.
+                            has_existing_owner_mapping = any(
+                                _import_matches_existing_owner(
+                                    existing_backend=existing_backend,
+                                    existing_variant=existing_variant,
+                                    existing_agent_id=existing_agent_id,
+                                    existing_agent_name=existing_agent_name,
+                                    imported_backend=candidate_backend,
+                                    imported_variant=candidate_variant,
+                                    imported_agent_id=candidate_agent_id,
+                                    imported_agent_name=candidate_agent_name,
+                                )
+                                for (
+                                    candidate_variant,
+                                    candidate_backend,
+                                    candidate_agent_id,
+                                    candidate_agent_name,
+                                ) in anchor_owner_candidates.get(base_anchor, ())
+                            )
+                            adopts_unbound_route = (
+                                not existing_native_session_id
+                                and not import_matches_existing_owner
+                                and not has_existing_owner_mapping
+                            )
+                            existing_identity_is_durable = (
+                                existing_is_owned
+                                or existing_variant_is_owned
+                                or bool(existing_native_session_id)
+                            )
+                            preserves_existing_identity = (
+                                existing_identity_is_durable and not adopts_unbound_route
+                            )
+                            sentinel_variant_compatible = (
+                                existing_is_owned
+                                and _is_sentinel_variant(existing_variant)
+                                and (
+                                    imported_backend == "unknown" or existing_backend == imported_backend
+                                )
+                            )
+                            replaces_route_owner = not import_matches_existing_owner and (
+                                not existing_is_owned
+                                or adopts_unbound_route
+                                or sentinel_variant_compatible
+                            )
+                            same_agent_identity = (
+                                imported_agent_id is not None and existing_agent_id == imported_agent_id
+                            )
+                            same_agent_name = (
+                                imported_agent_name is not None
+                                and existing_agent_name is not None
+                                and _normalize_agent_name_key(existing_agent_name)
+                                == _normalize_agent_name_key(imported_agent_name)
+                            )
+                            imported_variant_matches_existing_agent = (
+                                existing_agent_name is not None
+                                and _normalize_agent_name_key(imported_variant)
+                                == _normalize_agent_name_key(existing_agent_name)
+                            )
+                            backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
+                            variant_conflicts = (
+                                not import_matches_existing_owner
+                                and not sentinel_variant_compatible
+                            )
+                            if not adopts_unbound_route and (
+                                (existing_variant_is_owned and variant_conflicts)
+                                or (existing_is_owned and backend_conflicts)
+                            ):
+                                logger.warning(
+                                    "Skipping legacy session import that would relabel anchor row to a different owner "
+                                    "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
+                                    "imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    existing_backend,
+                                    existing_variant,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            identity_conflicts = (
+                                preserves_existing_identity
+                                and imported_backend == "unknown"
+                                and imported_agent_id is None
+                                and imported_agent_name is None
+                                and (existing_agent_id is not None or existing_agent_name is not None)
+                                and not imported_variant_matches_existing_agent
+                            )
+                            if preserves_existing_identity and imported_agent_id is not None and existing_agent_id not in {
+                                None,
+                                imported_agent_id,
+                            }:
+                                identity_conflicts = True
+                            if (
+                                preserves_existing_identity
+                                and imported_agent_name is not None
+                                and not same_agent_identity
+                                and not same_agent_name
+                                and existing_agent_name not in {
+                                    None,
+                                    imported_agent_name,
+                                }
+                            ):
+                                identity_conflicts = True
+                            if identity_conflicts:
+                                logger.warning(
+                                    "Skipping legacy session import that would replace the durable Agent identity "
+                                    "scope_id=%s anchor=%s existing_agent_id=%s existing_agent_name=%s "
+                                    "imported_agent_id=%s imported_agent_name=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    existing_agent_id,
+                                    existing_agent_name,
+                                    imported_agent_id,
+                                    imported_agent_name,
+                                )
+                                skip_mapping = True
+                                break
+                            backfills_agent_id = imported_agent_id is not None and existing_agent_id is None
+                            backfills_agent_name = imported_agent_name is not None and existing_agent_name is None
+                            update_values: dict[str, Any] = {"updated_at": now}
+                            if not existing_is_owned or adopts_unbound_route:
+                                update_values["agent_variant"] = imported_variant
+                                update_values["agent_backend"] = (
+                                    imported_backend if imported_backend != "unknown" else existing_backend or "default"
+                                )
+                            if replaces_route_owner:
+                                update_values["model"] = None
+                                update_values["reasoning_effort"] = None
+                                update_values["metadata_json"] = json.dumps(
+                                    reconcile_explicit_overrides(
+                                        _json_loads(existing_anchor_row["metadata_json"], {}),
+                                        cleared=OVERRIDABLE_SETTING_COLUMNS,
+                                    ),
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                )
+                            if not preserves_existing_identity:
+                                update_values["agent_id"] = imported_agent_id
+                                update_values["agent_name"] = imported_agent_name
+                            if sentinel_variant_compatible and existing_variant != imported_variant:
+                                update_values["agent_variant"] = imported_variant
+                            if backfills_agent_id:
+                                update_values["agent_id"] = imported_agent_id
+                            if backfills_agent_name:
+                                update_values["agent_name"] = imported_agent_name
+                            update_stmt = (
+                                agent_sessions.update()
+                                .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
+                                .where(agent_sessions.c.status != "archived")
+                                .where(func.coalesce(agent_sessions.c.agent_backend, "") == observed_backend)
+                                .where(func.coalesce(agent_sessions.c.agent_variant, "") == observed_variant)
+                                .where(func.coalesce(agent_sessions.c.agent_id, "") == observed_agent_id)
+                                .where(func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name)
+                                .where(
+                                    func.coalesce(agent_sessions.c.native_session_id, "")
+                                    == observed_native_session_id
+                                )
+                            )
+                            if conn.execute(update_stmt.values(**update_values)).rowcount:
+                                break
+                            logger.warning(
+                                "Lost the legacy-import anchor update race for session %s; re-resolving the anchor "
+                                "instead (imported backend=%s variant=%s)",
+                                existing_anchor_row["id"],
+                                imported_backend,
+                                imported_variant,
+                            )
+                            refreshed_anchor_row = _find_scope_anchor_row(
                                 conn,
                                 scope_id=scope_id,
                                 session_anchor=base_anchor,
                             )
+                            if refreshed_anchor_row is None:
+                                logger.warning(
+                                    "Skipping legacy session import because the anchor disappeared during update "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            refreshed_native_session_id = str(
+                                refreshed_anchor_row["native_session_id"] or ""
+                            )
+                            refreshed_route = tuple(
+                                str(refreshed_anchor_row[column] or "")
+                                for column in ("agent_backend", "agent_variant")
+                            )
+                            if refreshed_route != (observed_backend, observed_variant):
+                                logger.warning(
+                                    "Skipping legacy session import after losing a concurrent route claim "
+                                    "scope_id=%s anchor=%s imported_backend=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    imported_backend,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            if (
+                                refreshed_native_session_id != observed_native_session_id
+                                and refreshed_native_session_id != encoded_session_id
+                            ):
+                                logger.warning(
+                                    "Skipping legacy session import after losing a concurrent native-session claim "
+                                    "scope_id=%s anchor=%s winner_native_session_id=%s imported_variant=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    refreshed_native_session_id,
+                                    imported_variant,
+                                )
+                                skip_mapping = True
+                                break
+                            existing_anchor_row = refreshed_anchor_row
+                        if skip_mapping:
+                            continue
+                        row_key = _session_row_key(
+                            scope_id=scope_id,
+                            agent_variant=imported_variant,
+                            session_anchor=base_anchor,
+                            native_session_id=encoded_session_id,
+                        )
+                        row_id = (
+                            str(existing_anchor_row["id"]) if existing_anchor_row is not None else None
                             or existing_session_ids.get(row_key)
                             or _new_session_id(used_session_ids)
                         )
@@ -1272,8 +1552,10 @@ class SQLiteSessionsService:
                         stmt = sqlite_insert(agent_sessions).values(
                             id=row_id,
                             scope_id=scope_id,
-                            agent_backend=_agent_backend(str(agent_name)),
-                            agent_variant=str(agent_name) or "default",
+                            agent_id=imported_agent_id,
+                            agent_name=imported_agent_name,
+                            agent_backend=imported_backend,
+                            agent_variant=imported_variant,
                             model=None,
                             reasoning_effort=None,
                             session_anchor=base_anchor,
@@ -1291,8 +1573,6 @@ class SQLiteSessionsService:
                                 index_elements=[agent_sessions.c.id],
                                 set_={
                                     "scope_id": stmt.excluded.scope_id,
-                                    "agent_backend": stmt.excluded.agent_backend,
-                                    "agent_variant": stmt.excluded.agent_variant,
                                     "session_anchor": stmt.excluded.session_anchor,
                                     "native_session_id": stmt.excluded.native_session_id,
                                     "status": stmt.excluded.status,
@@ -1628,6 +1908,75 @@ def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
 
 
+def _is_owned_backend(agent_backend: str) -> bool:
+    return str(agent_backend or "").strip() not in {"", "default", "unknown"}
+
+
+def _is_sentinel_variant(agent_variant: str) -> bool:
+    return str(agent_variant or "").strip() in {"", "default"}
+
+
+def _normalize_agent_name_key(agent_name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", str(agent_name or "").strip().lower()).strip("-_")
+
+
+def _import_matches_existing_owner(
+    *,
+    existing_backend: str,
+    existing_variant: str,
+    existing_agent_id: str | None,
+    existing_agent_name: str | None,
+    imported_backend: str,
+    imported_variant: str,
+    imported_agent_id: str | None,
+    imported_agent_name: str | None,
+) -> bool:
+    """Compare owners from most-specific Agent identity to generic backend aliases."""
+    if existing_agent_id is not None and imported_agent_id is not None:
+        return existing_agent_id == imported_agent_id
+    if existing_agent_name is not None:
+        existing_name_key = _normalize_agent_name_key(existing_agent_name)
+        return existing_name_key in {
+            _normalize_agent_name_key(imported_variant),
+            _normalize_agent_name_key(imported_agent_name or ""),
+        }
+    if existing_agent_id is not None:
+        return False
+
+    existing_variant_key = _normalize_agent_name_key(existing_variant)
+    imported_variant_key = _normalize_agent_name_key(imported_variant)
+    if not _is_sentinel_variant(existing_variant) and existing_variant_key not in _BACKEND_AGENT_NAMES:
+        return existing_variant_key == imported_variant_key
+    if imported_agent_id is not None or imported_agent_name is not None:
+        return False
+    return imported_variant_key == existing_variant_key or (
+        imported_backend == existing_backend
+        and imported_backend != "unknown"
+        and imported_variant_key == _normalize_agent_name_key(existing_backend)
+    )
+
+
+def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
+    """Resolve a legacy mapping name through built-ins and the Vibe Agent catalog."""
+    requested = str(agent_name or "").strip()
+    normalized = _normalize_agent_name_key(requested)
+    if normalized:
+        catalog_agent = conn.execute(
+            select(agents.c.id, agents.c.name, agents.c.backend)
+            .where(or_(agents.c.name == requested, agents.c.normalized_name == normalized))
+            .limit(1)
+        ).mappings().one_or_none()
+        if catalog_agent is not None:
+            catalog_backend = str(catalog_agent["backend"] or "").strip()
+            if catalog_backend not in _BACKEND_AGENT_NAMES:
+                return ("unknown", None, None)
+            return (catalog_backend, str(catalog_agent["id"]), str(catalog_agent["name"]))
+    backend = _agent_backend(requested)
+    if backend != "unknown":
+        return (backend, None, None)
+    return ("unknown", None, None)
+
+
 def _agent_session_name_predicate(agent_name: str) -> Any:
     requested = str(agent_name) or "default"
     backend = _agent_backend(requested)
@@ -1824,6 +2173,36 @@ def _find_row_id_for_scope_anchor(
         .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def _find_scope_anchor_row(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_anchor: str,
+) -> Mapping[str, Any] | None:
+    return (
+        conn.execute(
+            select(
+                agent_sessions.c.id,
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.agent_variant,
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.native_session_id,
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.metadata_json,
+                agent_sessions.c.status,
+            )
+            .where(agent_sessions.c.scope_id == scope_id)
+            .where(agent_sessions.c.session_anchor == str(session_anchor))
+            .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
 
 
 def _runtime_record_values(
