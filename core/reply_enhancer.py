@@ -218,12 +218,19 @@ def process_reply(
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
     """
-    text = strip_silent_blocks(text)
-    secret_requests = _extract_secret_requests(text)
-    files = _extract_file_links(text)
-    text_no_files = text if keep_file_links else (_strip_file_links(text) if files else text)
+    text, markdown_mask = _strip_silent_blocks_with_mask(text)
+    secret_requests = _extract_secret_requests(text, markdown_mask)
+    files = _extract_file_links(text, markdown_mask)
+    if keep_file_links or not files:
+        text_no_files = text
+        mask_no_files = markdown_mask
+    else:
+        text_no_files, mask_no_files = _strip_file_links_with_mask(
+            text,
+            markdown_mask,
+        )
     if include_quick_replies:
-        buttons, text_clean = _extract_buttons(text_no_files)
+        buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
     else:
         buttons, text_clean = [], text_no_files
     return EnhancedReply(text=text_clean.rstrip(), files=files, buttons=buttons, secret_requests=secret_requests)
@@ -239,25 +246,25 @@ def strip_file_links(text: str) -> str:
 
 def strip_silent_blocks(text: str) -> str:
     """Remove silent directives outside Markdown code spans and fences."""
-    if not text:
-        return text
-    if "<silent" not in text.lower():
-        return text
+    return _strip_silent_blocks_with_mask(text)[0]
 
-    masked = _mask_markdown_code(text)
-    ranges: List[Tuple[int, int]] = []
-    search_from = 0
-    while opener := _SILENT_OPEN_RE.search(masked, search_from):
-        closing = _SILENT_CLOSE_RE.search(text, opener.end())
-        if closing is None:
-            ranges.append((opener.start(), len(text)))
-            break
-        ranges.append((opener.start(), closing.end()))
-        search_from = closing.end()
+
+def _strip_silent_blocks_with_mask(text: str) -> Tuple[str, str]:
+    """Remove controls and retain the original Markdown eligibility mask."""
+    if not text:
+        return text, text
+    if "<silent" not in text.lower():
+        return text, _mask_markdown_code(text)
+
+    candidates = _silent_control_candidates(text)
+    ranges, markdown_mask = _silent_control_ranges_and_mask(text, candidates)
 
     if not ranges:
-        return text
-    return _trim_blank_boundary_lines(_remove_ranges(text, ranges))
+        return text, markdown_mask
+
+    cleaned = _remove_ranges(text, ranges)
+    cleaned_mask = _remove_ranges(markdown_mask, ranges)
+    return _trim_blank_boundary_lines_with_mask(cleaned, cleaned_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +272,13 @@ def strip_silent_blocks(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _extract_file_links(text: str) -> List[FileLink]:
+def _extract_file_links(
+    text: str,
+    markdown_mask: str | None = None,
+) -> List[FileLink]:
     """Return ``FileLink`` instances found outside Markdown code."""
     results: List[FileLink] = []
-    for match in _file_link_matches(text):
+    for match in _file_link_matches(text, markdown_mask):
         bang, label, url = match.groups()
         parsed = urlparse(url)
         if parsed.scheme != "file":
@@ -296,24 +306,37 @@ def _file_uri_to_local_path(parsed) -> str:
 
 def _strip_file_links(text: str) -> str:
     """Replace file links outside Markdown code with their labels."""
-    matches = _file_link_matches(text)
-    if not matches:
-        return text
+    return _strip_file_links_with_mask(text, _mask_markdown_code(text))[0]
 
-    parts: List[str] = []
+
+def _strip_file_links_with_mask(text: str, markdown_mask: str) -> Tuple[str, str]:
+    """Replace eligible file links while keeping text and mask aligned."""
+    matches = _file_link_matches(text, markdown_mask)
+    if not matches:
+        return text, markdown_mask
+
+    text_parts: List[str] = []
+    mask_parts: List[str] = []
     cursor = 0
     for match in matches:
-        parts.append(text[cursor : match.start()])
-        parts.append(match.group(2))
+        text_parts.append(text[cursor : match.start()])
+        text_parts.append(match.group(2))
+        mask_parts.append(markdown_mask[cursor : match.start()])
+        mask_parts.append(match.group(2))
         cursor = match.end()
-    parts.append(text[cursor:])
-    return "".join(parts)
+    text_parts.append(text[cursor:])
+    mask_parts.append(markdown_mask[cursor:])
+    return "".join(text_parts), "".join(mask_parts)
 
 
-def _file_link_matches(text: str) -> List[re.Match]:
+def _file_link_matches(
+    text: str,
+    markdown_mask: str | None = None,
+) -> List[re.Match]:
     """Find eligible link ranges using a mask, then recover original groups."""
     matches: List[re.Match] = []
-    for masked_match in _FILE_LINK_RE.finditer(_mask_markdown_code(text)):
+    mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
+    for masked_match in _FILE_LINK_RE.finditer(mask):
         original_match = _FILE_LINK_RE.fullmatch(
             text,
             masked_match.start(),
@@ -324,11 +347,14 @@ def _file_link_matches(text: str) -> List[re.Match]:
     return matches
 
 
-def _extract_secret_requests(text: str) -> List[SecretRequest]:
+def _extract_secret_requests(
+    text: str,
+    markdown_mask: str | None = None,
+) -> List[SecretRequest]:
     """Return ordered, de-duplicated ``$<NAME>`` markers found outside code spans."""
     if not text or "$<" not in text:
         return []
-    masked = _mask_markdown_code(text)
+    masked = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
     out: List[SecretRequest] = []
     seen: set[str] = set()
     for match in _SECRET_REQUEST_RE.finditer(masked):
@@ -343,15 +369,28 @@ def _mask_markdown_code(text: str) -> str:
     """Blank Markdown code regions without changing string offsets."""
     if not any(marker in text for marker in ("`", "~~~", "    ", "\t")):
         return text
-    block_ranges, inline_source_ranges = _markdown_block_ranges(text)
-    ranges = sorted(
-        [
-            *block_ranges,
-            *_inline_code_ranges(text, inline_source_ranges),
-        ]
-    )
+    ranges, _ = _markdown_code_ranges(text)
     if not ranges:
         return text
+
+    return _mask_ranges(text, ranges)
+
+
+def _markdown_code_ranges(
+    text: str,
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Return all Markdown code ranges and the block-code subset."""
+    if not any(marker in text for marker in ("`", "~~~", "    ", "\t")):
+        return [], []
+    block_ranges, inline_source_ranges = _markdown_block_ranges(text)
+    ranges = sorted(
+        [*block_ranges, *_inline_code_ranges(text, inline_source_ranges)]
+    )
+    return ranges, block_ranges
+
+
+def _mask_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
+    """Blank ranges while preserving newlines and every source offset."""
 
     parts: List[str] = []
     cursor = 0
@@ -365,6 +404,113 @@ def _mask_markdown_code(text: str) -> str:
     return "".join(parts)
 
 
+def _silent_control_candidates(text: str) -> List[Tuple[int, int]]:
+    """Return every lexical opener before applying Markdown eligibility."""
+    return [match.span() for match in _SILENT_OPEN_RE.finditer(text)]
+
+
+def _silent_ranges_for_openers(
+    text: str,
+    openers: List[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    """Pair confirmed openers while treating each real control as opaque."""
+    ranges: List[Tuple[int, int]] = []
+    covered_until = 0
+    for start, opener_end in openers:
+        if start < covered_until:
+            continue
+        closing = _SILENT_CLOSE_RE.search(text, opener_end)
+        end = closing.end() if closing is not None else len(text)
+        ranges.append((start, end))
+        covered_until = end
+        if closing is None:
+            break
+    return ranges
+
+
+def _silent_control_ranges_and_mask(
+    text: str,
+    candidates: List[Tuple[int, int]],
+) -> Tuple[List[Tuple[int, int]], str]:
+    """Resolve controls with hidden contents opaque to block Markdown.
+
+    A real control can contain a fence that makes later controls look like code.
+    First reparse a same-length source with confirmed controls hidden; this
+    preserves genuine code literals after the control. A final batch refinement
+    caps the work for adversarial chains of hidden, unmatched fences.
+    """
+    code_ranges, block_ranges = _markdown_code_ranges(text)
+    controls = _candidates_outside_ranges(candidates, code_ranges)
+    parsed_controls: List[Tuple[int, int]] = []
+
+    for _ in range(2):
+        control_ranges = _silent_ranges_for_openers(text, controls)
+        invalid_blocks = [
+            block_range
+            for block_range in block_ranges
+            if _position_in_ranges(block_range[0], control_ranges)
+        ]
+        if not invalid_blocks:
+            break
+
+        opaque_source = _mask_ranges(text, control_ranges)
+        code_ranges, block_ranges = _markdown_code_ranges(opaque_source)
+        parsed_controls = controls
+        discovered = _candidates_outside_ranges(candidates, code_ranges)
+        expanded = sorted({*controls, *discovered})
+        controls = expanded
+
+    control_ranges = _silent_ranges_for_openers(text, controls)
+    invalid_blocks = [
+        block_range
+        for block_range in block_ranges
+        if _position_in_ranges(block_range[0], control_ranges)
+    ]
+    if invalid_blocks:
+        provisional = sorted(
+            {
+                *controls,
+                *(
+                    candidate
+                    for candidate in candidates
+                    if _position_in_ranges(candidate[0], invalid_blocks)
+                ),
+            }
+        )
+        provisional_ranges = _silent_ranges_for_openers(text, provisional)
+        opaque_source = _mask_ranges(text, provisional_ranges)
+        code_ranges, _ = _markdown_code_ranges(opaque_source)
+        parsed_controls = provisional
+        discovered = _candidates_outside_ranges(candidates, code_ranges)
+        controls = sorted({*controls, *discovered})
+
+    if parsed_controls and parsed_controls != controls:
+        control_ranges = _silent_ranges_for_openers(text, controls)
+        opaque_source = _mask_ranges(text, control_ranges)
+        code_ranges, _ = _markdown_code_ranges(opaque_source)
+    return _silent_ranges_for_openers(text, controls), _mask_ranges(
+        text,
+        code_ranges,
+    )
+
+
+def _candidates_outside_ranges(
+    candidates: List[Tuple[int, int]],
+    excluded_ranges: List[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    """Return candidates whose opener is not covered by an excluded range."""
+    return [
+        candidate
+        for candidate in candidates
+        if not _position_in_ranges(candidate[0], excluded_ranges)
+    ]
+
+
+def _position_in_ranges(position: int, ranges: List[Tuple[int, int]]) -> bool:
+    """Return whether *position* falls inside any source range."""
+    return any(start <= position < end for start, end in ranges)
+
+
 def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
     """Remove sorted, non-overlapping character ranges from *text*."""
     parts: List[str] = []
@@ -376,16 +522,19 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
-def _trim_blank_boundary_lines(text: str) -> str:
-    """Remove blank boundary lines without stripping content indentation."""
+def _trim_blank_boundary_lines_with_mask(text: str, mask: str) -> Tuple[str, str]:
+    """Apply text-derived boundary trimming to an aligned Markdown mask."""
     lines = text.splitlines(keepends=True)
+    mask_lines = mask.splitlines(keepends=True)
     start = 0
     end = len(lines)
     while start < end and not lines[start].strip(" \t\r\n"):
         start += 1
     while end > start and not lines[end - 1].strip(" \t\r\n"):
         end -= 1
-    return "".join(lines[start:end]).rstrip("\r\n")
+    cleaned = "".join(lines[start:end]).rstrip("\r\n")
+    cleaned_mask = "".join(mask_lines[start:end])[: len(cleaned)]
+    return cleaned, cleaned_mask
 
 
 def _markdown_block_ranges(
@@ -614,9 +763,13 @@ def _raw_html_end(
     return closer if match is not None and match.end() == closer - start else None
 
 
-def _extract_buttons(text: str) -> Tuple[List[QuickReplyButton], str]:
+def _extract_buttons(
+    text: str,
+    markdown_mask: str | None = None,
+) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
-    masked_match = _BUTTON_BLOCK_RE.search(_mask_markdown_code(text))
+    mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
+    masked_match = _BUTTON_BLOCK_RE.search(mask)
     if masked_match is None:
         return [], text
     m = _BUTTON_BLOCK_RE.fullmatch(

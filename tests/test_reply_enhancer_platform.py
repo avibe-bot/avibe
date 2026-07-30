@@ -849,6 +849,91 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), "Before\n\nTail remains.")
 
+    def test_silent_parser_keeps_hidden_fences_from_masking_later_blocks(self):
+        text = (
+            "Before\n"
+            "<silent>\n```\nhidden\n</silent>\n"
+            "<silent>second secret</silent>\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "Before\n\n\nTail remains.")
+
+    def test_silent_parser_restores_code_literals_after_hidden_fence(self):
+        text = (
+            "Before\n"
+            "<silent>\n````\nhidden\n</silent>\n"
+            "```text\n"
+            "<silent>literal\n```\n</silent>\n"
+            "<silent>remove two</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "Before\n\n"
+            "```text\n"
+            "<silent>literal\n```\n</silent>\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_does_not_pair_code_opener_with_real_closer(self):
+        text = (
+            "```text\n"
+            "<silent>unterminated literal\n"
+            "```\n"
+            "<silent>remove real block</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "```text\n"
+            "<silent>unterminated literal\n"
+            "```\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_bounds_hidden_unmatched_fence_refinement(self):
+        blocks = "".join(
+            f"<silent>\n{'`' * length}\nhidden\n</silent>\n"
+            for length in range(205, 4, -1)
+        )
+
+        with patch.object(
+            reply_enhancer._BLOCK_MARKDOWN,
+            "parse",
+            wraps=reply_enhancer._BLOCK_MARKDOWN.parse,
+        ) as parse:
+            result = strip_silent_blocks(f"Before\n{blocks}Tail remains.")
+
+        self.assertNotIn("<silent", result)
+        self.assertTrue(result.startswith("Before\n"))
+        self.assertTrue(result.endswith("Tail remains."))
+        self.assertLessEqual(parse.call_count, 4)
+
+    def test_process_reply_keeps_original_enhancement_eligibility(self):
+        text = (
+            "`<silent>hidden</silent>``\n"
+            "[report](file:///tmp/report.txt)\n"
+            "$<REPORT_TOKEN>\n"
+            "---\n"
+            "[Continue] | [Stop]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, "```\nreport\n$<REPORT_TOKEN>")
+        self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
+        self.assertEqual(
+            [request.name for request in reply.secret_requests],
+            ["REPORT_TOKEN"],
+        )
+        self.assertEqual(
+            [button.text for button in reply.buttons],
+            ["Continue", "Stop"],
+        )
+
     def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
         text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
 
