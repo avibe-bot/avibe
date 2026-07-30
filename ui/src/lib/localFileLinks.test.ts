@@ -91,12 +91,25 @@ describe('resolveLocalFileLink', () => {
   it('leaves current application routes as same-origin browser links', () => {
     for (const href of [
       '/chat/session-123',
+      '/apps/show/session-123',
       '/apps/files',
+      '/apps/files/',
       '/admin/settings/backends/codex',
       '/settings/models?source=custom',
       '/doctor/logs#latest',
     ]) {
       expect(resolveLocalFileLink(href, '/workspace')).toBeNull();
+    }
+  });
+
+  it('does not reserve application route namespaces as filesystem roots', () => {
+    for (const path of [
+      '/projects/report.md',
+      '/apps/source.ts',
+      '/chat/session-123/notes.md',
+      '/admin/settings/custom.json',
+    ]) {
+      expect(resolveLocalFileLink(path, '/workspace')).toEqual({ path });
     }
   });
 });

@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Check, Copy } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
-import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
+import { ChatImage, LinkedImageContent, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
@@ -113,6 +113,57 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   );
 };
 
+const MarkdownImage: React.FC<{
+  src?: string;
+  alt?: string;
+  interactive: boolean;
+  localFileWorkdir?: string | null;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
+}> = ({ src, alt, interactive, localFileWorkdir, onOpenLocalFile }) => {
+  if (!src) return null;
+
+  const url = String(src);
+  if (interactive && isProxyMediaUrl(url)) {
+    // Pixel dimensions ride on the proxy URL (``?w=&h=``) so the image's
+    // box is reserved before it loads — no scroll shift on the transcript.
+    const { width, height } = readMediaDims(url);
+    return <ChatImage src={url} alt={alt || ''} width={width} height={height} />;
+  }
+
+  const label = `🖼 ${alt || url}`;
+  const localFile = interactive && onOpenLocalFile
+    ? resolveLocalFileLink(url, localFileWorkdir)
+    : null;
+  let unlinked: React.ReactNode;
+  if (localFile) {
+    unlinked = (
+      <a
+        href={url}
+        data-local-file-link="true"
+        onClick={(event) => {
+          event.preventDefault();
+          void onOpenLocalFile?.(localFile);
+        }}
+        onAuxClick={(event) => event.preventDefault()}
+      >
+        {label}
+      </a>
+    );
+  } else {
+    unlinked = interactive ? (
+      <a href={url} target="_blank" rel="noopener noreferrer nofollow">
+        {label}
+      </a>
+    ) : (
+      <span>{label}</span>
+    );
+  }
+
+  // The surrounding Markdown link owns the click. Rendering another anchor
+  // here would create invalid nested links and invoke both local-file handlers.
+  return <LinkedImageContent linked={<span>{label}</span>} unlinked={unlinked} />;
+};
+
 export const Markdown: React.FC<{
   content: string;
   className?: string;
@@ -171,42 +222,15 @@ export const Markdown: React.FC<{
       // render a real inline <img> for our OWN same-origin media proxy; every
       // other URL stays a click-through link (or plain text when
       // non-interactive) so nothing is fetched without an explicit action.
-      img: ({ src, alt }) => {
-        if (!src) return null;
-        const url = String(src);
-        if (interactive && isProxyMediaUrl(url)) {
-          // Pixel dimensions ride on the proxy URL (``?w=&h=``) so the image's
-          // box is reserved before it loads — no scroll shift on the transcript.
-          const { width, height } = readMediaDims(url);
-          return <ChatImage src={url} alt={alt || ''} width={width} height={height} />;
-        }
-        const label = `🖼 ${alt || url}`;
-        const localFile = interactive && onOpenLocalFile
-          ? resolveLocalFileLink(url, localFileWorkdir)
-          : null;
-        if (localFile) {
-          return (
-            <a
-              href={url}
-              data-local-file-link="true"
-              onClick={(event) => {
-                event.preventDefault();
-                void onOpenLocalFile?.(localFile);
-              }}
-              onAuxClick={(event) => event.preventDefault()}
-            >
-              {label}
-            </a>
-          );
-        }
-        return interactive ? (
-          <a href={url} target="_blank" rel="noopener noreferrer nofollow">
-            {label}
-          </a>
-        ) : (
-          <span>{label}</span>
-        );
-      },
+      img: ({ src, alt }) => (
+        <MarkdownImage
+          src={src ? String(src) : undefined}
+          alt={alt || undefined}
+          interactive={interactive}
+          localFileWorkdir={localFileWorkdir}
+          onOpenLocalFile={onOpenLocalFile}
+        />
+      ),
       // Links to our media proxy are agent-produced files → render the
       // download card (filename + type + download / preview). Other links keep
       // the normal anchor (interactive) or collapse to plain text inside a

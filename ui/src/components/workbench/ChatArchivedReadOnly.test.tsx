@@ -572,4 +572,23 @@ describe('agent-authored local file links', () => {
     expect(routeMarkup).toContain('href="/apps/files"');
     expect(routeMarkup).toContain('target="_blank"');
   });
+
+  it('lets the outer local link own clicks for a linked local image', () => {
+    const linkedImageMessage = {
+      ...linkedMessage('agent'),
+      text: '[![preview](/tmp/preview.png)](/tmp/report.md)',
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow
+        message={linkedImageMessage}
+        session={session({ workdir: '/workspace/project' })}
+        messageFontSize={13}
+        onOpenLocalFile={() => undefined}
+      />,
+    );
+
+    expect(markup.match(/data-local-file-link/g)).toHaveLength(1);
+    expect(markup).toContain('href="/tmp/report.md"');
+    expect(markup).not.toContain('href="/tmp/preview.png"');
+  });
 });
