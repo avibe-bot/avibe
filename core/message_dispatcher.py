@@ -1470,7 +1470,14 @@ class ConsolidatedMessageDispatcher:
                 manager = getattr(self.controller, "session_turns", None)
                 if manager is not None:
                     manager.on_terminal_result(context, is_error=is_error)
-        text = strip_silent_blocks(text)
+        raw_text = text
+        enhanced = None
+        if canonical_type == "result" and level != "silent":
+            quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
+            enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
+            text = enhanced.visible_text
+        else:
+            text = strip_silent_blocks(raw_text)
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
         # we release the SSE waiter and return BEFORE any delivery / persistence /
@@ -1542,11 +1549,8 @@ class ConsolidatedMessageDispatcher:
         # quick-reply button block before delivery/streaming, so persisting the
         # raw text would surface markup in the inbox preview / chat transcript
         # that was never shown. Computed once here and reused for delivery below.
-        enhanced = None
         persist_text = text
         if canonical_type == "result":
-            quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
-            enhanced = process_reply(text, include_quick_replies=quick_replies_on)
             persist_text = enhanced.text if enhanced.text.strip() else text
 
         if native_output_id and agent_message_exists(target_context, native_output_id):
@@ -1600,7 +1604,7 @@ class ConsolidatedMessageDispatcher:
                     result_type = "error" if is_error else "result"
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
-                            text,
+                            raw_text,
                             include_quick_replies=quick_replies_on,
                             keep_file_links=True,
                         )
@@ -1956,7 +1960,7 @@ class ConsolidatedMessageDispatcher:
                         # render the button group (IM channels render native buttons
                         # from the same ``enhanced.buttons``).
                         avibe_enhanced = process_reply(
-                            text, include_quick_replies=quick_replies_on, keep_file_links=True
+                            raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
                         )
                         avibe_text = self._fold_footer(avibe_enhanced.text or persist_text, folded_footer)
                         persisted_output = persist_agent_message(

@@ -13,7 +13,6 @@ from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from core.agent_session_context import resolve_context_agent_session_target
 from core.message_output import MessageOutput, terminal_turn_output
-from core.reply_enhancer import strip_silent_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -514,32 +513,16 @@ class BaseAgent(ABC):
 
         raw_result = result_text or ""
         raw_suffix = suffix or ""
-        visible_result = strip_silent_blocks(raw_result)
-        visible_suffix = strip_silent_blocks(raw_suffix) if raw_suffix else None
-        has_silent_directive = "<silent" in raw_result.lower() or "<silent" in raw_suffix.lower()
         message_id: Optional[str] = None
-
-        if has_silent_directive and not visible_result.strip() and not (visible_suffix or "").strip():
-            message_id = await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                parse_mode=parse_mode,
-                is_error=is_error,
-                output=output,
-            )
-            if request and settles_request:
-                await self._remove_ack_reaction(request)
-            return message_id
 
         # When show_duration is disabled, skip the entire result line
         # unless there is actual result_text or suffix to deliver.
         if not show_duration:
             parts = []
-            if visible_result and visible_result.strip():
-                parts.append(visible_result)
-            if visible_suffix:
-                parts.append(visible_suffix)
+            if raw_result and raw_result.strip():
+                parts.append(raw_result)
+            if raw_suffix:
+                parts.append(raw_suffix)
             if parts:
                 formatted = "\n".join(parts)
                 message_id = await self.controller.emit_agent_message(
@@ -583,10 +566,10 @@ class BaseAgent(ABC):
                     token_field=token_field,
                 )
             parts = []
-            if visible_result and visible_result.strip():
-                parts.append(visible_result)
-            if visible_suffix:
-                parts.append(visible_suffix)
+            if raw_result and raw_result.strip():
+                parts.append(raw_result)
+            if raw_suffix:
+                parts.append(raw_suffix)
             body = "\n".join(parts)
             # Footer-only completion (show_duration on, no visible result/suffix):
             # promote the footnote to the visible body so a duration/token-only turn

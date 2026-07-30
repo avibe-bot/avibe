@@ -128,6 +128,7 @@ class EnhancedReply:
     """Result of processing an agent reply through the enhancer."""
 
     text: str  # Cleaned message text (file links & button block removed)
+    visible_text: str = ""  # Source text after silent controls are removed
     files: List[FileLink] = field(default_factory=list)
     buttons: List[QuickReplyButton] = field(default_factory=list)
     secret_requests: List[SecretRequest] = field(default_factory=list)
@@ -218,6 +219,7 @@ def process_reply(
     uploaded to the platform separately).
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
+    visible_text = text
     secret_requests = _extract_secret_requests(text, markdown_mask)
     files = _extract_file_links(text, markdown_mask)
     if keep_file_links or not files:
@@ -232,7 +234,13 @@ def process_reply(
         buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
     else:
         buttons, text_clean = [], text_no_files
-    return EnhancedReply(text=text_clean.rstrip(), files=files, buttons=buttons, secret_requests=secret_requests)
+    return EnhancedReply(
+        text=text_clean.rstrip(),
+        visible_text=visible_text,
+        files=files,
+        buttons=buttons,
+        secret_requests=secret_requests,
+    )
 
 
 def strip_file_links(text: str) -> str:

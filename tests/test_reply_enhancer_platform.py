@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -12,6 +12,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.reply_enhancer import process_reply, strip_silent_blocks
 from core.system_prompt_injection import build_system_prompt_injection
 from config import paths
+from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
 
 
@@ -82,6 +83,13 @@ class _StubController:
 
     def get_settings_manager_for_context(self, context=None):
         return self.settings_manager
+
+
+class _StubAgent(BaseAgent):
+    name = "stub"
+
+    async def handle_message(self, request: AgentRequest) -> None:
+        return None
 
 
 class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
@@ -1050,6 +1058,50 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [button.text for button in reply.buttons],
             ["Continue", "Stop"],
+        )
+
+    async def test_base_agent_result_keeps_attachment_eligibility_after_silent_removal(self):
+        class _DispatchingController(_StubController):
+            def __init__(self):
+                super().__init__("slack")
+                self.config.show_duration = False
+                self.dispatcher = ConsolidatedMessageDispatcher(self)
+
+            async def emit_agent_message(self, context, message_type, text, **kwargs):
+                return await self.dispatcher.emit_agent_message(
+                    context,
+                    message_type,
+                    text,
+                    **kwargs,
+                )
+
+        controller = _DispatchingController()
+        upload_file_links = AsyncMock()
+        controller.dispatcher._upload_file_links = upload_file_links
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+        )
+        source = (
+            "`<silent>hidden</silent>``\n"
+            "[report](file:///tmp/report.txt)"
+        )
+
+        await _StubAgent(controller).emit_result_message(
+            context,
+            source,
+            duration_ms=0,
+        )
+
+        uploaded_files = upload_file_links.await_args.args[2]
+        self.assertEqual(
+            [(file.label, file.path) for file in uploaded_files],
+            [("report", "/tmp/report.txt")],
+        )
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("C1", "```\nreport", "markdown")],
         )
 
     def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
