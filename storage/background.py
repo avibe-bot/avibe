@@ -2762,28 +2762,6 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             return self._run_from_row(row) if row else None
 
-    def find_explicit_session_delivery(
-        self,
-        *,
-        parent_run_id: str,
-        session_id: str,
-    ) -> Optional[dict[str, Any]]:
-        """Return a child Agent Run explicitly delivered to the callback Session."""
-
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                select(agent_runs)
-                .where(agent_runs.c.run_type == "agent_run")
-                .where(agent_runs.c.source_kind == "agent")
-                .where(agent_runs.c.parent_run_id == parent_run_id)
-                .where(agent_runs.c.session_id == session_id)
-                .where(agent_runs.c.message.is_not(None))
-                .where(func.length(func.trim(agent_runs.c.message)) > 0)
-                .order_by(agent_runs.c.created_at, agent_runs.c.id)
-                .limit(1)
-            ).mappings().first()
-            return self._run_from_row(row) if row else None
-
     def recover_processing_runs(self) -> None:
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
