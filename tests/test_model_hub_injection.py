@@ -482,6 +482,36 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
     assert (launch.channel, launch.source_id) == ("hub", hub_openai.id)
 
 
+def test_runtime_launch_uses_discovered_native_alias_target(tmp_path: Path) -> None:
+    relay = _source(
+        "src_alias001",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20251101",),
+    )
+    config = _hub_config(
+        sources=[relay],
+        order=[relay.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter({relay.id: "route-alias"}),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+
+    launch = asyncio.run(
+        _router(service).resolve("claude", "claude-opus-4-5")
+    )
+
+    assert launch.source_id == relay.id
+    assert launch.target_model == "claude-opus-4-5-20251101"
+    assert launch.runtime_model == "route-alias/claude-opus-4-5-20251101"
+
+
 def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
     service = _service(
         tmp_path,

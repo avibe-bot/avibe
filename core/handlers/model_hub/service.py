@@ -2381,9 +2381,12 @@ class ModelHubService:
                 now=now,
                 unavailable_source_ids=unavailable,
             )
+            effective_model = (
+                resolution.model_for_source(source) or resolution.target_model
+            )
             resolved_model = (
-                resolution.target_model
-                if resolution.mapping_applied or backend == "opencode"
+                effective_model
+                if effective_model != resolution.requested_model
                 else None
             )
             chain.append(
@@ -3292,6 +3295,9 @@ class ModelHubService:
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
         for source in candidates:
+            target_model = (
+                resolution.model_for_source(source) or resolution.target_model
+            )
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,

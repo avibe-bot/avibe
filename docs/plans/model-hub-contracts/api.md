@@ -58,6 +58,12 @@ Ordering is backend-owned through the sources routes.
   provider; the resolver sends the bare model id upstream.
 - A mapping rewrites a menu id to an upstream model id. A mapping never chooses a
   source.
+- Without an explicit mapping, a vendor-native fixed menu may resolve a stable menu
+  alias per source. Claude version aliases select the latest dated id for that exact
+  version; `opus`, `sonnet`, `haiku`, `opus[1m]`, and `sonnet[1m]` select the latest
+  discovered id in their family. A dated request remains exact. Alias candidates come
+  only from that source's discovered inventory; manual models, foreign-vendor sources,
+  and undiscovered passthrough ids do not qualify. Explicit mappings take precedence.
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 
@@ -433,7 +439,9 @@ Status and submit return the same terminal shape:
 ## Chain and probe
 
 In Hub mode, `AgentChain.chain` is the effective source order filtered by backend
-eligibility and model support, with mapping applied. Cooling, source-blocked and
+eligibility and the server's per-source effective-model derivation. That derivation
+applies an explicit mapping first, otherwise applies the vendor-native alias rule above,
+then verifies the resulting id against source inventory. Cooling, source-blocked and
 process-unavailable native CLI members stay in the chain at their original positions.
 Each item carries `channel`, source-global `health`, process-aware `runnable`, and
 nullable `reason`. The complete axiom is:

@@ -432,6 +432,20 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
 
     chain_schema = _schema("agent-chain.schema.json")
     chain_validator = Draft7Validator(chain_schema)
+    native_alias = next(
+        example
+        for example in chain_schema["examples"]
+        if example["model_id"] == "claude-opus-4-5"
+        and example["chain"]
+        and example["chain"][0]["resolved_model_id"] is not None
+        and example["chain"][0]["via_mapping"] is False
+    )
+    chain_validator.validate(native_alias)
+    invalid_native_alias = copy.deepcopy(native_alias)
+    invalid_native_alias["chain"][0]["resolved_model_id"] = "glm-5.2"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(invalid_native_alias)
+
     native_unavailable = copy.deepcopy(chain_schema["examples"][-1])
     chain_validator.validate(native_unavailable)
 
