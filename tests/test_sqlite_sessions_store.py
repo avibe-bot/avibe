@@ -716,6 +716,96 @@ def test_save_state_preserves_unregistered_custom_variant_on_default_sentinel(tm
         service.close()
 
 
+def test_save_state_adopts_unregistered_custom_variant_on_concrete_backend_sentinel(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "codex"
+        assert row["agent_variant"] == "reviewer"
+        assert row["native_session_id"] == "reviewer-native"
+        mappings = service.load_state().session_mappings["slack::C123"]
+        assert mappings["reviewer"]["slack_171717.123"] == "reviewer-native"
+        assert "default" not in mappings
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("legacy_backend", ["default", "unknown"])
+def test_save_state_preserves_durable_agent_identity_on_legacy_backend(
+    tmp_path: Path, legacy_backend: str
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend=legacy_backend,
+                agent_variant="reviewer",
+                session_anchor="slack_171717.123",
+                native_session_id="reviewer-native",
+                workdir="/tmp",
+                agent_id="agent-reviewer-deleted",
+                agent_name="reviewer",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "reviewer": {
+                            "slack_171717.123": "reviewer-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == legacy_backend
+        assert row["agent_variant"] == "reviewer"
+        assert row["agent_id"] == "agent-reviewer-deleted"
+        assert row["agent_name"] == "reviewer"
+        assert row["native_session_id"] == "reviewer-native"
+    finally:
+        service.close()
+
+
 def test_save_state_sets_registered_custom_agent_identity_on_existing_owned_row(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -776,7 +866,8 @@ def test_save_state_sets_registered_custom_agent_identity_on_existing_owned_row(
         service.close()
 
 
-def test_save_state_preserves_existing_owned_agent_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing_backend", ["codex", "default", "unknown"])
+def test_save_state_preserves_existing_agent_identity(tmp_path: Path, existing_backend: str) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
     try:
@@ -804,7 +895,7 @@ def test_save_state_preserves_existing_owned_agent_identity(tmp_path: Path) -> N
             session_id = create_agent_session_row(
                 conn,
                 scope_id=scope_id,
-                agent_backend="codex",
+                agent_backend=existing_backend,
                 agent_variant="reviewer",
                 session_anchor="slack_171717.123",
                 native_session_id="existing-native",
@@ -829,7 +920,7 @@ def test_save_state_preserves_existing_owned_agent_identity(tmp_path: Path) -> N
 
         row = service.get_agent_session_by_id(session_id)
         assert row is not None
-        assert row["agent_backend"] == "codex"
+        assert row["agent_backend"] == existing_backend
         assert row["agent_variant"] == "reviewer"
         assert row["agent_id"] == "agent-reviewer-old"
         assert row["agent_name"] == "reviewer-old"

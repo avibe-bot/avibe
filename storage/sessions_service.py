@@ -1268,13 +1268,22 @@ class SQLiteSessionsService:
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
                             existing_agent_id = str(existing_anchor_row["agent_id"] or "").strip() or None
                             existing_agent_name = str(existing_anchor_row["agent_name"] or "").strip() or None
+                            existing_native_session_id = str(
+                                existing_anchor_row["native_session_id"] or ""
+                            ).strip()
                             existing_is_owned = _is_owned_backend(existing_backend)
                             existing_variant_is_owned = not _is_sentinel_variant(existing_variant)
+                            existing_identity_is_durable = (
+                                existing_is_owned
+                                or existing_variant_is_owned
+                                or bool(existing_native_session_id)
+                            )
                             sentinel_variant_compatible = (
                                 existing_is_owned
                                 and _is_sentinel_variant(existing_variant)
-                                and imported_backend != "unknown"
-                                and existing_backend == imported_backend
+                                and (
+                                    imported_backend == "unknown" or existing_backend == imported_backend
+                                )
                             )
                             same_variant = existing_variant == imported_variant
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
@@ -1296,15 +1305,19 @@ class SQLiteSessionsService:
                                 skip_mapping = True
                                 break
                             identity_conflicts = False
-                            if existing_is_owned and imported_agent_id is not None and existing_agent_id not in {
+                            if existing_identity_is_durable and imported_agent_id is not None and existing_agent_id not in {
                                 None,
                                 imported_agent_id,
                             }:
                                 identity_conflicts = True
-                            if existing_is_owned and imported_agent_name is not None and existing_agent_name not in {
-                                None,
-                                imported_agent_name,
-                            }:
+                            if (
+                                existing_identity_is_durable
+                                and imported_agent_name is not None
+                                and existing_agent_name not in {
+                                    None,
+                                    imported_agent_name,
+                                }
+                            ):
                                 identity_conflicts = True
                             if identity_conflicts:
                                 logger.warning(
@@ -1337,13 +1350,14 @@ class SQLiteSessionsService:
                                         separators=(",", ":"),
                                         ensure_ascii=False,
                                     )
+                            if not existing_identity_is_durable:
                                 update_values["agent_id"] = imported_agent_id
                                 update_values["agent_name"] = imported_agent_name
                             if sentinel_variant_compatible and existing_variant != imported_variant:
                                 update_values["agent_variant"] = imported_variant
-                            if existing_is_owned and imported_agent_id is not None and existing_agent_id is None:
+                            if imported_agent_id is not None and existing_agent_id is None:
                                 update_values["agent_id"] = imported_agent_id
-                            if existing_is_owned and imported_agent_name is not None and existing_agent_name is None:
+                            if imported_agent_name is not None and existing_agent_name is None:
                                 update_values["agent_name"] = imported_agent_name
                             if len(update_values) <= 1:
                                 break
@@ -1356,10 +1370,17 @@ class SQLiteSessionsService:
                                 update_stmt = update_stmt.where(
                                     func.coalesce(agent_sessions.c.agent_backend, "") == existing_backend
                                 ).where(func.coalesce(agent_sessions.c.agent_variant, "default") == existing_variant)
-                            if existing_is_owned and imported_agent_id is not None and existing_agent_id is None:
-                                update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_id, "") == "")
-                            if existing_is_owned and imported_agent_name is not None and existing_agent_name is None:
-                                update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_name, "") == "")
+                            if not existing_identity_is_durable:
+                                update_stmt = update_stmt.where(
+                                    func.coalesce(agent_sessions.c.agent_id, "") == (existing_agent_id or "")
+                                ).where(
+                                    func.coalesce(agent_sessions.c.agent_name, "") == (existing_agent_name or "")
+                                )
+                            else:
+                                if imported_agent_id is not None and existing_agent_id is None:
+                                    update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_id, "") == "")
+                                if imported_agent_name is not None and existing_agent_name is None:
+                                    update_stmt = update_stmt.where(func.coalesce(agent_sessions.c.agent_name, "") == "")
                             if conn.execute(update_stmt.values(**update_values)).rowcount:
                                 break
                             logger.warning(
@@ -1989,6 +2010,7 @@ def _find_scope_anchor_row(
                 agent_sessions.c.agent_variant,
                 agent_sessions.c.agent_id,
                 agent_sessions.c.agent_name,
+                agent_sessions.c.native_session_id,
                 agent_sessions.c.model,
                 agent_sessions.c.reasoning_effort,
                 agent_sessions.c.metadata_json,
