@@ -42,6 +42,7 @@ from storage.migrations import (
 )
 from storage.models import agent_runs, agent_sessions, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 
 logger = logging.getLogger(__name__)
@@ -820,10 +821,12 @@ def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int
     """
 
     source = notice if isinstance(notice, dict) else {}
-    try:
-        attempts = int(source.get("attempts") or 0)
-    except (TypeError, ValueError):
-        attempts = 0
+    # CAST semantics, not int(): SQLite parses a numeric PREFIX ('3x' → 3,
+    # '1e100' → 1) and saturates at the i64 bounds, where int() raises or
+    # overflows past what the CAS will read back. A divergent read here is a
+    # claim that can never match — the row stays eligible and unchanged on every
+    # drain pass, occupying one of the ten batch slots forever.
+    attempts = sqlite_cast_integer(source.get("attempts"))
     return (str(source.get("state") or ""), attempts, _expected_next_attempt_at(source))
 
 
@@ -885,6 +888,41 @@ def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
     drain ADVANCES them: the claim stamps a real instant over the unreadable one.
     Degrade and advance, as ``notice_write_expectation`` does for ``attempts``.
 
+    THE WHOLE DOMAIN, decided explicitly rather than left to whichever of the two
+    languages happens to answer first. Only the first two rows are reachable through
+    this module's writers; the rest need a hand-edited row or a foreign writer, and are
+    given a stated treatment anyway because the failure mode of an unstated one is
+    silence:
+
+    ==================== ============ =============================================
+    stored value         eligible?    treatment
+    ==================== ============ =============================================
+    absent / null / ``""`` yes        no wait ever armed — ``coalesce(..., '')``
+    text                 ``value <= now``  UNSTRIPPED lexicographic compare, both
+                                      sides, because SQLite does not strip: a padded
+                                      instant is EARLY (``" 9999-…"`` sorts on its
+                                      leading space), never late
+    integer / real /     yes          numeric storage class sorts below every text
+    ``true`` / ``false``              bound, so SQL admits it at every instant;
+                                      admitted here too and NORMALIZED BY THE CLAIM,
+                                      which stamps a real instant over it. Bounded
+                                      progress: one pass and the row is a normal
+                                      notice again
+    object / array       NO           reads back as JSON text beginning ``{``/``[``,
+                                      which sorts above every ISO instant, so the
+                                      SEEK never returns it: it occupies no batch
+                                      slot and starves nothing. It also never
+                                      delivers. Chosen over admitting it in Python
+                                      only, which is the divergence this function
+                                      exists to remove; the underlying failure stays
+                                      visible through the definition's ``last_error``
+                                      and ``definition_health`` (the run is still
+                                      ``failed``), so what is lost is the push, not
+                                      the record. Pinned by
+                                      ``test_a_container_retry_instant_is_ineligible_
+                                      on_both_sides_and_starves_nothing``
+    ==================== ============ =============================================
+
     The field carries two things that are one thing to this predicate: the retry
     BACKOFF after a failed attempt, and the LEASE a claimant arms before it performs
     the external send (see ``core.failure_notices.CLAIM_LEASE_SECONDS``). Both mean
@@ -905,9 +943,10 @@ def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
         # ``now``. ``bool`` is an ``int`` here and is one in SQLite too — ``json_extract``
         # reads JSON ``true``/``false`` back as 1/0.
         return True
-    # An object or an array reads back as its JSON TEXT, which starts with a brace or a
-    # bracket and therefore sorts after every digit — ineligible on both sides for any
-    # instant this century, and spelled out rather than assumed.
+    # An object or an array reads back as its JSON TEXT, which begins with a brace or a
+    # bracket and therefore sorts above every ISO instant — ineligible on both sides,
+    # and spelled out as a comparison rather than hardcoded as ``False`` so the two
+    # sides stay one rule rather than two agreeing accidents.
     return _json_dumps(raw) <= now
 
 

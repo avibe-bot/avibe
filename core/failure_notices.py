@@ -37,6 +37,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from storage.sqlite_semantics import sqlite_cast_integer
+
 from core.run_settlement import (
     DISPATCH_FAILURE_REASONS,
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
@@ -476,29 +478,24 @@ def decide(
 
 
 def _attempts_read(value: Any) -> int:
-    """``attempts`` as an integer, degrading to 0 for anything unreadable.
+    """``attempts`` as SQLite's CAS will read it — CAST semantics, not ``int()``.
 
-    The field lives in a JSON blob, so it can hold a string, a list, a dict or
-    nothing at all — and ``int(value or 0)`` raises ``ValueError`` on the first and
-    ``TypeError`` on the next two. Raising here is worse than it looks: the drain's
-    per-row handler catches it, so nothing crashes, but the exception escapes BEFORE
-    the claim and therefore writes NO state. The row keeps its malformed value, stays
-    eligible, and re-occupies a slot in the batch of ten on every 2 s tick — every
-    notice behind it starved, with a log line per tick and a drain that looks busy.
-
-    Degrading to 0 is not a fresh choice: ``storage.background.notice_write_expectation``
-    already normalizes this same field the same way for the CAS predicate, and SQLite's
-    ``CAST(coalesce(json_extract(...), 0) AS INTEGER)`` reads a nonnumeric JSON value as
-    0 as well. All three readings therefore agree, which is what lets the guarded write
-    MATCH and the row advance through claim, backoff and — if it keeps failing — the
-    visible dead letter. A different degraded value here would refuse the claim on every
-    pass and reach the same wedge by a quieter road.
+    The field lives in a JSON blob, so it can hold anything; the value this policy
+    increments and the value the guarded write asserts MUST be the same number, or
+    the claim can never match and the row stays eligible and unchanged on every
+    drain pass — one of the ten batch slots occupied forever, every notice behind
+    it starved. The first version of this function degraded to 0 on any conversion
+    error, which agreed with SQLite for ``"abc"`` but diverged for every
+    numeric-PREFIX string (``"3x"`` reads 3 under ``CAST``, 0 under ``int()``),
+    for ``"1e100"`` (1 vs 0), and for out-of-range numbers (SQLite saturates at
+    the signed-64-bit bounds; ``int()`` does not) — exactly the split the round-18
+    review named. Both readers now consume one dependency-neutral model of
+    ``CAST(... AS INTEGER)`` (``storage.sqlite_semantics.sqlite_cast_integer``),
+    pinned by an executable parity oracle against real SQLite, so a drift fails
+    against the engine rather than surviving as an argument.
     """
 
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
+    return sqlite_cast_integer(value)
 
 
 def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
@@ -518,4 +515,9 @@ def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
     attempts = _attempts_read(notice.get("attempts")) + 1
     if attempts >= MAX_ATTEMPTS:
         return attempts, None
-    return attempts, BACKOFF_SECONDS[attempts - 1]
+    # ``max(..., 0)`` because CAST semantics can read a negative counter from an
+    # out-of-band value ("-3q" reads -3): the CAS still asserts the raw number so
+    # the claim lands and the counter advances one per pass toward the ordinary
+    # range — bounded progress — but a negative index here would silently wrap to
+    # the END of the ladder and hand the earliest retries the longest waits.
+    return attempts, BACKOFF_SECONDS[max(attempts - 1, 0)]

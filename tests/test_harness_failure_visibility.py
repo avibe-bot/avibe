@@ -2275,6 +2275,22 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
         {"state": "pending", "attempts": 1, "next_attempt_at": -1.5063173670565552e-212},
         {"state": "pending", "attempts": 1, "next_attempt_at": {"a": 1}},
         {"state": "pending", "attempts": 1, "next_attempt_at": [1]},
+        # ``attempts`` in the shapes where SQLite's CAST diverges from ``int()`` — the
+        # round-19 finding. CAST parses a numeric PREFIX and saturates at the i64
+        # bounds, so each of these is a row the listing admits whose claim could never
+        # match under an ``int()``-based expectation: eligible, unchanged, and holding
+        # a batch slot on every pass.
+        {"state": "pending", "attempts": "3x"},
+        {"state": "pending", "attempts": "1e100"},
+        {"state": "pending", "attempts": " 5 "},
+        {"state": "pending", "attempts": "  +7x"},
+        {"state": "pending", "attempts": "-3q"},
+        {"state": "pending", "attempts": "3.9"},
+        {"state": "pending", "attempts": 9223372036854775808},
+        {"state": "pending", "attempts": 1e100},
+        {"state": "pending", "attempts": True},
+        {"state": "pending", "attempts": [2]},
+        {"state": "pending", "attempts": {"n": 2}},
     ]
 
     import json as _json
@@ -2302,8 +2318,12 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
         # agreement above is not a predicate that matches everything. One neighbour per
         # field, INCLUDING ``next_attempt_at`` — a predicate that silently ignored the
         # third element would pass every other assertion in this test.
+        # The wrong-attempts neighbour steps DOWN at the saturation bound: +1 there
+        # cannot bind as an SQLite integer parameter at all (OverflowError), and a
+        # CAST-saturated expectation is exactly the shape that sits on the bound.
+        wrong_attempts = expect[1] + 1 if expect[1] < 2**63 - 1 else expect[1] - 1
         for wrong in (
-            (expect[0], expect[1] + 1, expect[2]),
+            (expect[0], wrong_attempts, expect[2]),
             (expect[0] + "x", expect[1], expect[2]),
             (expect[0], expect[1], expect[2] + "x"),
         ):
@@ -4871,6 +4891,12 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
     ``notice_write_expectation`` already does for a malformed ``attempts`` — the claim
     stamps a real ISO instant over the unreadable one, so the poisoned row leaves the
     front of the queue by being HANDLED rather than by being avoided.
+
+    MORE POISONED ROWS THAN THE BATCH LIMIT, and every off-domain shape among them:
+    twelve numerics (which sort ahead of the valid notice), padded instants (text, so
+    they sort behind it), and containers (never eligible on either side, so they are
+    never listed at all — the domain table in ``owed_notice_eligible`` states that
+    treatment, and this test pins that it starves nothing).
     """
 
     from types import SimpleNamespace
@@ -4882,10 +4908,11 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
     _task(sqlite, "task-poisoned", deliver_key="slack::channel::C1")
     _task(sqlite, "task-behind", deliver_key="slack::channel::C2")
 
-    # Exactly one batch worth of rows whose retry instant is not a string. Every one is
-    # ``<= now`` in SQL and sorts ahead of every ISO instant and ahead of the empty
-    # string a freshly stamped notice reads as.
-    for index in range(10):
+    # MORE than one batch worth of rows whose retry instant is a JSON number. Every one
+    # is ``<= now`` in SQL and sorts ahead of every ISO instant and ahead of the empty
+    # string a freshly stamped notice reads as, so all twelve are ahead of the valid
+    # notice below.
+    for index in range(12):
         _pending_failure(
             sqlite,
             f"run-poisoned-{index:02d}",
@@ -4896,6 +4923,36 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
                 "attempts": 0,
                 "next_attempt_at": 30000 + index,
                 "failure_id": f"run-poisoned-{index:02d}",
+            },
+        )
+    # Padded instants: still TEXT, so they sort behind the valid notice, and eligible on
+    # both sides only because neither side strips.
+    for index in range(3):
+        _pending_failure(
+            sqlite,
+            f"run-padded-{index:02d}",
+            "task-poisoned",
+            created_at=f"2026-07-27T01:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 0,
+                "next_attempt_at": " 9999-01-01T00:00:00+00:00",
+                "failure_id": f"run-padded-{index:02d}",
+            },
+        )
+    # Containers: ineligible on BOTH sides, so the seek never returns them. They occupy
+    # no slot and starve nothing — the other half of the domain's explicit treatment.
+    for index, value in enumerate(({"at": "2020-01-01T00:00:00+00:00"}, [1], [])):
+        _pending_failure(
+            sqlite,
+            f"run-container-{index:02d}",
+            "task-poisoned",
+            created_at=f"2026-07-27T00:00:0{index}+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 0,
+                "next_attempt_at": value,
+                "failure_id": f"run-container-{index:02d}",
             },
         )
     # ...and one ordinary notice behind them, eligible now.
@@ -4914,12 +4971,16 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
 
     # The batch the SQL LIMIT filled must not arrive HOLLOW. Ten rows were admitted
     # before the limit; if the Python re-check drops them afterwards the drain gets an
-    # empty pass while eleven notices are owed, and gets the same empty pass forever.
+    # empty pass while nineteen notices are owed, and gets the same empty pass forever.
     listed = [item["id"] for item in sqlite.list_owed_failure_notices(limit=10)]
     assert len(listed) == 10, (
-        "the limited batch came back short while eleven notices were owed: the rows SQL "
+        "the limited batch came back short while nineteen notices were owed: the rows SQL "
         "admitted were dropped by the Python re-check AFTER the limit, so the batch is a "
         f"hole rather than a queue (listed={listed})"
+    )
+    assert not [run_id for run_id in listed if run_id.startswith("run-container-")], (
+        "a container-valued retry instant was listed; it is ineligible on both sides "
+        f"and must never consume a slot (listed={listed})"
     )
 
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -4963,16 +5024,142 @@ def test_ten_unstampable_retry_instants_do_not_starve_the_notice_behind_them(
     from datetime import datetime, timezone
 
     later = datetime.now(timezone.utc).isoformat()
-    stuck = {
-        f"run-poisoned-{index:02d}": sqlite.owed_failure_notice(f"run-poisoned-{index:02d}")
-        for index in range(10)
-    }
+    admitted = [f"run-poisoned-{index:02d}" for index in range(12)]
+    admitted += [f"run-padded-{index:02d}" for index in range(3)]
+    stuck = {run_id: sqlite.owed_failure_notice(run_id) for run_id in admitted}
     stuck = {
         run_id: notice for run_id, notice in stuck.items() if owed_notice_eligible(notice, later)
     }
     assert not stuck, (
         "rows the listing admitted are still immediately eligible after being read by "
         f"four passes; each holds a batch slot for good: {stuck}"
+    )
+    # The containers made no progress, which is the stated treatment rather than an
+    # oversight: they are ineligible on both sides, so no pass ever reads them. What
+    # they must not do is hold a slot — proved by the valid notice above having been
+    # delivered while they sat there.
+    for index in range(3):
+        container = sqlite.owed_failure_notice(f"run-container-{index:02d}")
+        assert container["state"] == "pending" and not owed_notice_eligible(container, later), (
+            "a container-valued retry instant changed the domain's answer: it is "
+            f"ineligible and undelivered by design ({container})"
+        )
+
+
+def test_twelve_cast_divergent_attempt_counters_do_not_starve_the_notice_behind_them(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-076 — the round-19 finding: the OTHER field's CAST split.
+
+    Same starvation as the retry-instant test above, reached through ``attempts``.
+    The listing admits a pending notice regardless of its counter, but the claim
+    asserts the counter through SQLite's ``CAST(... AS INTEGER)`` — which parses a
+    numeric PREFIX (``"3x"`` reads 3, ``"1e100"`` reads 1) and saturates at the
+    signed-64-bit bounds, where Python's ``int()`` raises and the old reader
+    degraded to 0. An expectation of 0 against a stored ``"3x"`` is a claim that
+    can never match: the row is selected, refused, and unchanged on every pass,
+    holding a batch slot forever, with every notice behind it starved.
+
+    Both readers (``core.failure_notices._attempts_read`` and
+    ``storage.background.notice_write_expectation``) now consume ONE model of the
+    CAST (``storage.sqlite_semantics.sqlite_cast_integer``), so the policy's
+    increment and the CAS's assertion are the same number for every JSON shape —
+    the claim lands, stamps the incremented integer over the malformed counter,
+    and the row advances through the ordinary backoff toward delivery or the
+    visible dead letter. Bounded progress, not a broad retry and not a widened
+    batch.
+    """
+
+    from types import SimpleNamespace
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cast", deliver_key="slack::channel::C1")
+    _task(sqlite, "task-cast-behind", deliver_key="slack::channel::C2")
+
+    # MORE divergent counters than the batch limit, in every shape the finding
+    # names: numeric-prefix strings, scientific-notation prefixes, padded digits,
+    # signed prefixes, reals-as-text, and out-of-range numbers. Each reads as a
+    # different integer under CAST than under the old int()-or-0 read.
+    divergent = ["3x", "1e100", " 5 ", "  +7x", "-3q", "3.9", "2x", "4y",
+                 9223372036854775808, 1e100, "1e19", "8 8"]
+    for index, counter in enumerate(divergent):
+        _pending_failure(
+            sqlite,
+            f"run-cast-{index:02d}",
+            "task-cast",
+            created_at=f"2026-07-27T00:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": counter,
+                "next_attempt_at": None,
+                "failure_id": f"run-cast-{index:02d}",
+            },
+        )
+    _pending_failure(
+        sqlite,
+        "run-cast-behind",
+        "task-cast-behind",
+        created_at="2026-07-27T02:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": "run-cast-behind",
+        },
+    )
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    delivered: list[str] = []
+
+    async def _spy_emit(controller, context, backend, diagnostic, **kwargs):
+        delivered.append(str(kwargs.get("failure_id")))
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
+        service = ScheduledTaskService.__new__(ScheduledTaskService)
+        service.store = store
+        service.request_store = requests
+        service._drain_dirty = False
+        service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+        service._owns_service_instance = lambda: True
+        service.validate_platform = lambda platform: None
+        service._t = lambda key, **kwargs: key
+        for _ in range(4):
+            asyncio.run(service._drain_failure_notices())
+
+    assert sqlite.owed_failure_notice("run-cast-behind")["state"] == "sent", (
+        "a valid notice was starved by rows whose attempt counter the claim could "
+        f"never re-assert; delivered={delivered}"
+    )
+    # And the divergent rows made bounded progress under the guarded claim: none is
+    # still holding a malformed counter AND immediately eligible. Each was either
+    # delivered, dead-lettered on running off the ladder (counters that CAST past
+    # MAX_ATTEMPTS dead-letter on their first read — the '1e100'-as-number and
+    # out-of-range shapes), or advanced onto a real integer with a real backoff.
+    from datetime import datetime, timezone
+
+    later = datetime.now(timezone.utc).isoformat()
+    stuck = {}
+    for index in range(len(divergent)):
+        notice = sqlite.owed_failure_notice(f"run-cast-{index:02d}")
+        if notice["state"] == "pending" and not isinstance(notice.get("attempts"), int):
+            stuck[f"run-cast-{index:02d}"] = notice
+    assert not stuck, (
+        "rows with CAST-divergent counters were read by four passes and never "
+        f"advanced — each holds a batch slot for good: {stuck}"
     )
 
 
@@ -5039,6 +5226,119 @@ def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(
     # assertion in the old test still held.
     assert "AND" in rendered.split(OWED_NOTICE_INDEX, 1)[1].split("\n")[0], (
         f"the backoff term must be constrained by the index, not filtered per row; plan was:\n{rendered}"
+    )
+
+
+def test_the_eligibility_seek_still_constrains_both_terms_with_off_domain_rows(
+    tmp_path: Path,
+) -> None:
+    """HFR-086 — the plan must survive the values the domain normalization admits.
+
+    A PIN, not a repair: HFR-086 above proves the seek constrains both terms over
+    text-only rows, and the eligibility domain now admits values that are not text at
+    all. Whether an index over a JSON expression still yields a two-term range
+    constraint when the indexed values span several STORAGE CLASSES is a property of
+    SQLite, not of this code — so it is asserted rather than argued.
+
+    The reasoning it replaces: a numeric key sorts below every text key, so the
+    ``<= now`` upper bound still bounds it and the range stays a range; a container key
+    sorts above every ISO instant, so it falls outside the bound and is never visited.
+    Both are conclusions about the b-tree, and the way to keep a conclusion true is to
+    fail the build when it stops being.
+
+    Stronger than HFR-086 on the two failure modes that make the tick unbounded again:
+    no ``TEMP B-TREE`` (the ``ORDER BY`` must still be served by the index) and no
+    ``SCAN`` of ``agent_runs`` (one off-domain row must not cost a full walk).
+    """
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    sqlite_store, _requests = _store(tmp_path)
+    _task(sqlite_store, "task-mixed")
+    # Text rows, all in backoff: the population HFR-086 pins.
+    for index in range(40):
+        _pending_failure(
+            sqlite_store,
+            f"run-text-{index:03d}",
+            "task-mixed",
+            created_at=f"2026-07-27T00:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 3,
+                "next_attempt_at": "2099-01-01T00:00:00+00:00",
+                "failure_id": f"run-text-{index:03d}",
+            },
+        )
+    # ...and every off-domain shape, interleaved through the same index: numerics and
+    # booleans (below the bound, so INSIDE the range), padded instants (text, early),
+    # and containers (above every instant, so outside the range).
+    off_domain: list[Any] = [
+        30000,
+        30001,
+        -5,
+        0,
+        3.5,
+        1e25,
+        True,
+        False,
+        " 9999-01-01T00:00:00+00:00",
+        " 2020-01-01T00:00:00+00:00",
+        {"a": 1},
+        [1],
+    ]
+    for index, value in enumerate(off_domain):
+        _pending_failure(
+            sqlite_store,
+            f"run-offdomain-{index:03d}",
+            "task-mixed",
+            created_at=f"2026-07-26T00:{index:02d}:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 0,
+                "next_attempt_at": value,
+                "failure_id": f"run-offdomain-{index:03d}",
+            },
+        )
+
+    captured: list[tuple[str, Any]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement and statement.strip().upper().startswith("SELECT"):
+            captured.append((statement, parameters))
+
+    event.listen(sqlite_store.engine, "before_cursor_execute", _capture)
+    try:
+        listed = sqlite_store.list_owed_failure_notices(now="2026-07-27T12:00:00+00:00")
+    finally:
+        event.remove(sqlite_store.engine, "before_cursor_execute", _capture)
+
+    # The rows the domain admits came back, and nothing the domain excludes did — the
+    # plan below is a plan for the query that actually answers this population.
+    ids = {str(item["id"]) for item in listed}
+    assert ids and all(run_id.startswith("run-offdomain-") for run_id in ids), (
+        f"the seek returned rows outside the admitted domain: {sorted(ids)}"
+    )
+
+    statement, parameters = captured[-1]
+    raw = sqlite3.connect(str(tmp_path / "state" / "vibe.sqlite"))
+    try:
+        plan = [row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters)]
+    finally:
+        raw.close()
+    rendered = "\n".join(plan)
+
+    assert OWED_NOTICE_INDEX in rendered, f"plan was:\n{rendered}"
+    assert "AND" in rendered.split(OWED_NOTICE_INDEX, 1)[1].split("\n")[0], (
+        "both the state and the next-attempt terms must stay CONSTRAINED with "
+        f"off-domain values in the index; plan was:\n{rendered}"
+    )
+    assert "TEMP B-TREE" not in rendered.upper(), (
+        f"the ORDER BY fell back to a temp sort; plan was:\n{rendered}"
+    )
+    assert "SCAN" not in rendered.upper(), (
+        f"one off-domain row cost a full table walk; plan was:\n{rendered}"
     )
 
 
@@ -8515,11 +8815,13 @@ def test_the_last_success_read_is_one_bounded_indexed_seek(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "attempts",
-    ["x", "", "3.5", ["1"], {"n": 1}, None],
+    "attempts,expected_attempt",
+    [("x", 1), ("", 1), ("3.5", 4), (["1"], 1), ({"n": 1}, 1), (None, 1)],
     ids=["nonnumeric", "blank", "float-string", "list", "dict", "null"],
 )
-def test_a_malformed_attempts_value_degrades_instead_of_raising(attempts) -> None:
+def test_a_malformed_attempts_value_degrades_instead_of_raising(
+    attempts, expected_attempt
+) -> None:
     """HFR-076, subordinate — ``attempts`` is JSON, so it can be anything.
 
     ``int(notice.get("attempts") or 0)`` raises ``ValueError`` on a nonnumeric string
@@ -8530,16 +8832,21 @@ def test_a_malformed_attempts_value_degrades_instead_of_raising(attempts) -> Non
     the batch of ten forever. Starvation of every notice behind it, with a log line per
     tick and a drain that looks busy rather than broken.
 
-    Degrading to 0 is the same choice ``notice_write_expectation`` already made for the
-    same field, and the two MUST agree: it normalizes to 0 for the CAS predicate while
-    SQL's ``CAST(coalesce(...,0) AS INTEGER)`` reads a nonnumeric JSON value as 0 too,
-    so the guarded write matches and the row advances through claim, backoff and — if
-    it keeps failing — the dead letter.
+    CORRECTED IN ROUND 19: the round-12 version degraded EVERYTHING unreadable to 0,
+    which agreed with SQLite for these shapes except one — ``"3.5"`` reads 3 under
+    ``CAST(... AS INTEGER)``'s numeric-prefix parse, not 0 — so the expected pair here
+    was pinning a Python-only answer the CAS would refuse forever. Both readers now
+    consume one model of the CAST (``storage.sqlite_semantics.sqlite_cast_integer``),
+    so the float-string row expects the CAST's answer: attempt 4, not attempt 1. The
+    truly nonnumeric shapes still read 0 on both sides.
     """
 
     from core.failure_notices import BACKOFF_SECONDS, next_attempt
 
-    assert next_attempt({"state": "pending", "attempts": attempts}) == (1, BACKOFF_SECONDS[0])
+    assert next_attempt({"state": "pending", "attempts": attempts}) == (
+        expected_attempt,
+        BACKOFF_SECONDS[expected_attempt - 1],
+    )
 
 
 def test_the_python_and_sql_readings_of_a_malformed_attempts_agree(tmp_path: Path) -> None:
