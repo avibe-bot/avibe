@@ -21,6 +21,7 @@ import { AddCustomModelDialog } from './AddCustomModelDialog';
 import { eligibleSources as filterEligible } from '../eligibility';
 import { buildMenuGroups, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
+import { useAnnounceEnrollment } from './enrollment';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
 
@@ -73,7 +74,8 @@ export const OpenCodeMenuDrawer: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onClose: () => void;
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed — see `agentsWithEcho`. */
+  onSaved: (echoed: AgentSupply) => void;
   /** Re-fetch sources after a custom model is added/edited. */
   onRefresh: () => void;
 }> = ({ open, agent, sources, onClose, onSaved, onRefresh }) => {
@@ -96,6 +98,9 @@ export const OpenCodeMenuDrawer: React.FC<{
   // force-deleted source) is dropped rather than shown as an invisible checked
   // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
   const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
+  // Ticking a model may also enroll its supplier into OpenCode's source order
+  // (api.md → "Mapping and menu enrollment"). Read off the echo at commit.
+  const announceEnrollment = useAnnounceEnrollment('opencode', sources);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -152,8 +157,9 @@ export const OpenCodeMenuDrawer: React.FC<{
       // `checked` is already self-healed at open and only grows via toggles/adds
       // of available (or just-added) identifiers, so send it as-is — filtering
       // here would strip a just-added custom model before onRefresh lands.
-      await modelsApi.putMenu({ view, checked: [...checked] });
-      onSaved();
+      const echoed = await modelsApi.putMenu({ view, checked: [...checked] });
+      announceEnrollment(agent, echoed);
+      onSaved(echoed);
       onClose();
     } catch {
       showToast(t('settings.models.menus.saveFailed') as string, 'error');

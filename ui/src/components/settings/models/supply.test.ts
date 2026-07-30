@@ -4,11 +4,15 @@
 // otherwise "simplify" back into a boolean.
 import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   attribution,
   chainChips,
   chainRoles,
   hasAttribution,
+  healthyButUnrunnable,
   isUnhealthy,
   needsAttention,
   pageStatus,
@@ -76,6 +80,18 @@ const directAgent = (): AgentSupply =>
     supply_status: null,
     model_supply: null,
   });
+
+/** The server's per-(source, backend) verdict that this machine cannot launch the
+ *  source. `eligible: true` on purpose — the source MAY serve this backend, which
+ *  is what makes the second question a separate one. */
+const cannotLaunch = (...ids: string[]) =>
+  ids.map((id) => ({ source_id: id, eligible: true, process_availability_reason: 'native_cli_unavailable' as const }));
+
+/** The same verdict on a source the selected model does not come from at all.
+ *  `in_current_model_chain` is a claim about the ROUTE, built from the eligible
+ *  sources carrying the model BEFORE health or runnability narrows them. */
+const cannotLaunchOffRoute = (...ids: string[]) =>
+  cannotLaunch(...ids).map((e) => ({ ...e, in_current_model_chain: false }));
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
   manifest: { name: 'cliproxyapi', version: '1.0.0', source_sha: 'sha', assets: [] },
@@ -150,6 +166,142 @@ describe('chainChips', () => {
   it('draws nothing in Direct mode (AC-7)', () => {
     expect(chainChips(directAgent(), sources)).toEqual([]);
   });
+
+  // The second reason a position gets stepped over, and the one the source itself
+  // cannot report: its credential, its models and its state all read perfectly
+  // healthy, and the CLI that would serve it is not usable on this machine.
+  it('marks a healthy source this machine cannot launch, without calling it unhealthy', () => {
+    const agent = hubAgent({
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_b') },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips[1]).toMatchObject({ unhealthy: false, unavailable: true });
+  });
+
+  it('dims it once the resolver has walked past it, exactly like a broken one', () => {
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', ACTIVE), source('src_b', ACTIVE)]);
+    expect(chips.map((c) => c.tone)).toEqual(['skipped', 'current']);
+  });
+
+  // One row, ONE reason. The two are not mutually exclusive server-side, and the
+  // row renders a single dot, so health takes the tie: it is the actionable one,
+  // and its gold dot is named by the source row's own state chip.
+  it('states one reason per row, and health wins the tie', () => {
+    const agent = hubAgent({
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_b') },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', DEAD)]);
+    expect(chips[1]).toMatchObject({ unhealthy: true, unavailable: false });
+  });
+
+  it('reads a payload that says nothing as launchable', () => {
+    // An older server omits the optional field entirely. Silence must not draw a
+    // dim chain — every position would look stepped over.
+    const agent = hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'] } });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips.map((c) => c.unavailable)).toEqual([false, false]);
+  });
+
+  // The marker names a CAUSE for the failover, so it may only be spent on a
+  // position the failover was ever going to consider. This one does not carry the
+  // selected model: the resolver walks past it with the CLI signed in and the state
+  // green, and pointing at a remedy that changes nothing about the route is worse
+  // than pointing at nothing.
+  it('does not blame availability for a position the model never came from', () => {
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunchOffRoute('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', ACTIVE), source('src_b', ACTIVE)]);
+    expect(chips[0]).toMatchObject({ unavailable: false, unhealthy: false, tone: 'neutral' });
+  });
+
+  it('keeps the marker when the server claims nothing about the route', () => {
+    // `in_current_model_chain` is null with nothing selected and absent from a server
+    // that predates the field. Silence is not exclusion: with no selected model the
+    // order IS the route, so this position really was stepped over for this reason.
+    const agent = hubAgent({
+      selected_model_id: null,
+      sources: {
+        policy: 'follow',
+        order: ['src_a', 'src_b'],
+        eligibility: cannotLaunch('src_b').map((e) => ({ ...e, in_current_model_chain: null })),
+      },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips[1]).toMatchObject({ unavailable: true });
+  });
+
+  it('still dims an off-route source that is genuinely broken', () => {
+    // The gate is on the availability disjunct only. 「Cannot serve right now」 is
+    // true of the source wherever it sits, and its gold dot is an early warning
+    // about the next failover rather than a reading of this one's route.
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunchOffRoute('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', DEAD), source('src_b', ACTIVE)]);
+    expect(chips[0]).toMatchObject({ unhealthy: true, unavailable: false, tone: 'skipped' });
+  });
+});
+
+describe('healthyButUnrunnable', () => {
+  const agentWith = (eligibility: NonNullable<AgentSupply['sources']>['eligibility']) =>
+    hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility } });
+
+  it('retracts a healthy row’s promise this machine cannot keep', () => {
+    // 供 … 全系 is a promise, and the source looks fine — nothing else on the row
+    // would tell the user that turning it on gets them nothing here.
+    expect(healthyButUnrunnable(agentWith(cannotLaunch('src_b')), nativeSource('src_b', ACTIVE))).toBe(true);
+  });
+
+  it('leaves the segment to health when the source is not serving', () => {
+    // Two answers compete for one segment of copy. A cooling or broken source is
+    // the one the user can act on, and its state chip has already raised it.
+    const agent = agentWith(cannotLaunch('src_b'));
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', COOLING))).toBe(false);
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', DEAD))).toBe(false);
+    expect(healthyButUnrunnable(agent, nativeSource('src_b', EXHAUSTED))).toBe(false);
+  });
+
+  it('says nothing about a source this machine can launch', () => {
+    // Silence is runnable — the server names only what it has ruled out.
+    expect(healthyButUnrunnable(agentWith([]), nativeSource('src_b', ACTIVE))).toBe(false);
+    expect(healthyButUnrunnable(agentWith(cannotLaunch('src_a')), nativeSource('src_b', ACTIVE))).toBe(false);
+    expect(healthyButUnrunnable(hubAgent({ sources: null }), nativeSource('src_b', ACTIVE))).toBe(false);
+  });
+
+  it('does not read the route’s answer as the model’s', () => {
+    // Deliberately ungated, unlike `unavailable` in `chainChips`: that marker blames
+    // a FAILOVER on a cause. A source row answers 「what would I get by turning this
+    // on」, and `in_current_model_chain` is only an answer about `sources.order` — so
+    // every 未启用 row reads `false` there, and a gate would silence exactly the rows
+    // that need it earliest.
+    expect(healthyButUnrunnable(agentWith(cannotLaunchOffRoute('src_c')), nativeSource('src_c', ACTIVE))).toBe(true);
+    // The server builds `eligibility` over every configured source, not just the
+    // ordered ones, so a row outside the order still carries its own verdict.
+    const offOrder = hubAgent({ sources: { policy: 'follow', order: ['src_a'], eligibility: cannotLaunch('src_c') } });
+    expect(healthyButUnrunnable(offOrder, nativeSource('src_c', ACTIVE))).toBe(true);
+  });
+
+  it('is what BOTH of the order drawer’s source lines ask', () => {
+    // Round 4. The retraction was in the 启用 line only, so a row admitted it one
+    // step after the step it was about: availability is per (source, backend) and
+    // has nothing to do with where the source sits in the order.
+    const drawer = readFileSync(join(__dirname, 'SourceOrderDrawer.tsx'), 'utf8');
+
+    expect([...drawer.matchAll(/healthyButUnrunnable\(agent, source\)/g)].length).toBe(2);
+    // The 未启用 branch REPLACES the line rather than joining it: both 供 … 全系 and
+    // its rewritten form are the promise being retracted, and the line is two
+    // segments wide.
+    expect(drawer).toMatch(/if \(healthyButUnrunnable\(agent, source\)\) return join\(\[identity\(source\), nativeUnavailable\(\)\]\);/);
+    // And nothing reaches around the shared predicate to the raw reader.
+    expect(drawer).not.toMatch(/processAvailabilityOf/);
+  });
 });
 
 describe('chainRoles', () => {
@@ -170,6 +322,20 @@ describe('chainRoles', () => {
   it('ignores Direct-mode backends entirely', () => {
     const { enrolled } = chainRoles([directAgent()], sources);
     expect(enrolled.size).toBe(0);
+  });
+
+  // `skipped` now has a second cause, and this set is shared with the page pill —
+  // so the widening has to be shown to stay inside the surface that asked for it.
+  it('displaces a source the machine cannot launch, and the pill still says nothing', () => {
+    const agent = hubAgent({
+      current: { model_id: 'm', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunch('src_a') },
+    });
+    const inventory = [nativeSource('src_a', ACTIVE), nativeSource('src_b', ACTIVE)];
+    expect([...chainRoles([agent], inventory).displaced]).toEqual(['src_a']);
+    // `pageStatus` reads `displaced` only through `state.status === 'cooldown'`, and
+    // an unlaunchable source is healthy by construction — the two cannot overlap.
+    expect(pageStatus(inventory, [agent], runtime('ok'))).toEqual({ tone: 'ok', kind: 'ok', hubCount: 1 });
   });
 });
 

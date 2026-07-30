@@ -195,6 +195,46 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_agent_supply_contract_accepts_unmapped_native_alias_current():
+    payload = {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "selected_by_agent": None,
+        "selected_model_id": "claude-opus-4-5",
+        "selected_model_explicit": True,
+        "current": {
+            "model_id": "claude-opus-4-5-20251101",
+            "source_id": "src_anthropic1",
+            "channel": "hub",
+        },
+        "sources": {
+            "policy": "follow",
+            "order": ["src_anthropic1"],
+            "eligibility": [
+                {
+                    "source_id": "src_anthropic1",
+                    "eligible": True,
+                    "reason_key": None,
+                    "in_current_model_chain": True,
+                    "process_availability_reason": None,
+                }
+            ],
+        },
+        "supply_status": "ok",
+        "mappings": [],
+        "menu": None,
+        "model_supply": [
+            {"model_id": "claude-opus-4-5", "chain_length": 1}
+        ],
+        "builtin_models": ["claude-opus-4-5"],
+        "standard_vendors": None,
+        "named_agents": [],
+    }
+
+    _assert_valid("agent-supply.schema.json", payload)
+
+
 def test_v4_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
@@ -432,6 +472,20 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
 
     chain_schema = _schema("agent-chain.schema.json")
     chain_validator = Draft7Validator(chain_schema)
+    native_alias = next(
+        example
+        for example in chain_schema["examples"]
+        if example["model_id"] == "claude-opus-4-5"
+        and example["chain"]
+        and example["chain"][0]["resolved_model_id"] is not None
+        and example["chain"][0]["via_mapping"] is False
+    )
+    chain_validator.validate(native_alias)
+    invalid_native_alias = copy.deepcopy(native_alias)
+    invalid_native_alias["chain"][0]["resolved_model_id"] = "glm-5.2"
+    with pytest.raises(ValidationError):
+        chain_validator.validate(invalid_native_alias)
+
     native_unavailable = copy.deepcopy(chain_schema["examples"][-1])
     chain_validator.validate(native_unavailable)
 

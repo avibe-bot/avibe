@@ -166,8 +166,12 @@ import { cn } from "@/lib/utils"
 
 Those paths resolve to `@avibe/show-ui/*` inside the shared dependency store.
 
-Theme customization is token-based through `@avibe/show-ui/theme`, so agents
-can use presets or override CSS variables without editing component source.
+Theme customization uses the standard shadcn token contract (`--background`,
+`--foreground`, `--card`, `--primary`, `--muted`, `--border`, `--ring`,
+`--radius`, and peers). Complete CSS color values drive both semantic Tailwind
+classes and native `var(...)` references. Dark mode overrides the same tokens
+under `.dark` or `[data-theme="dark"]`; the optional provider is available at
+the familiar `@/components/ui/theme` alias for runtime-computed subtree values.
 
 ## Shared Dependencies
 

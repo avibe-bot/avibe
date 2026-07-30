@@ -395,6 +395,7 @@
       "claudeMethodFallback": "如果当前平台不支持按钮，请执行 `/setup claude claudeai` 或 `/setup claude console`。",
       "resetPrompt": "{backend} 看起来已经掉线了。请点击下面的按钮重新发起 OAuth 登录。",
       "resetPromptPlain": "{backend} 看起来已经掉线了。请发送 `/setup {backend}` 重新发起 OAuth 登录。",
+      "apiKeyRecoveryPrompt": "{backend} 拒绝了当前配置的 API Key。请在设置中检查 API Key 和 Base URL，保存后重试。",
       "manualFallback": "如果当前平台不支持按钮，请执行 `/setup {backend}`。",
       "codexInstructions": "Codex 登录修复已开始。\n\n1. 在浏览器打开这个地址：\n{url}\n\n2. 输入这个一次性验证码：\n`{code}`\n\nBot 会继续等待，并在登录完成后回消息确认。",
       "claudeInstructions": "Claude 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器回调页面会显示最终的 `authorizationCode#state`，请直接把它发回当前聊天。",

@@ -2381,9 +2381,12 @@ class ModelHubService:
                 now=now,
                 unavailable_source_ids=unavailable,
             )
+            effective_model = (
+                resolution.model_for_source(source) or resolution.target_model
+            )
             resolved_model = (
-                resolution.target_model
-                if resolution.mapping_applied or backend == "opencode"
+                effective_model
+                if effective_model != resolution.requested_model
                 else None
             )
             chain.append(
@@ -2641,14 +2644,14 @@ class ModelHubService:
                     source,
                     decision,
                     agent=cast(EventAgent, backend),
-                    model_id=resolved_model,
+                    model_id=chain_payload["model_id"],
                     detail_key=error_key,
                 )
             elif event_reason is not None:
                 await self._set_source_blocker(
                     source.id,
                     backend=cast(BackendName, backend),
-                    model_id=resolved_model,
+                    model_id=chain_payload["model_id"],
                     detail_key=error_key,
                     reason=event_reason,
                 )
@@ -3129,7 +3132,7 @@ class ModelHubService:
                 self._record_event(
                     agent=cast(EventAgent, resolution.backend),
                     kind="recover",
-                    model_id=resolution.target_model,
+                    model_id=resolution.requested_model,
                     reason="recovery",
                     to_source=source.id,
                     to_label=source.display_name,
@@ -3292,10 +3295,13 @@ class ModelHubService:
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
         for source in candidates:
+            target_model = (
+                resolution.model_for_source(source) or resolution.target_model
+            )
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3328,7 +3334,7 @@ class ModelHubService:
             if outcome is None:
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3348,7 +3354,7 @@ class ModelHubService:
                 if outcome is None:
                     self._emit_switch(
                         agent=event_agent,
-                        model_id=target_model,
+                        model_id=model_id,
                         failed_source=failed_source,
                         failed_reason=failed_reason,
                         source=source,
@@ -3367,7 +3373,7 @@ class ModelHubService:
             if decision.action == "return":
                 self._emit_switch(
                     agent=event_agent,
-                    model_id=target_model,
+                    model_id=model_id,
                     failed_source=failed_source,
                     failed_reason=failed_reason,
                     source=source,
@@ -3394,7 +3400,7 @@ class ModelHubService:
                         source,
                         decision,
                         agent=event_agent,
-                        model_id=target_model,
+                        model_id=model_id,
                     )
                 elif event_reason != "permission_denied":
                     detail_key = {
@@ -3407,7 +3413,7 @@ class ModelHubService:
                     await self._set_source_blocker(
                         source.id,
                         backend=cast(BackendName, backend),
-                        model_id=target_model,
+                        model_id=model_id,
                         detail_key=detail_key,
                         reason=event_reason,
                     )

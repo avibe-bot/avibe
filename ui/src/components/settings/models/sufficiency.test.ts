@@ -17,7 +17,7 @@ import {
   isSupplyWarning,
   orderSufficiency,
 } from './sufficiency';
-import type { AdoptedBy, AgentSupply, Source, SourceState, SourceStatus } from './types';
+import type { AdoptedBy, AgentSupply, Source, SourceEligibility, SourceState, SourceStatus } from './types';
 
 const source = (id: string, status: SourceStatus): Source => ({
   id,
@@ -31,11 +31,30 @@ const source = (id: string, status: SourceStatus): Source => ({
   models: [],
 });
 
-const hub = (order: string[], supply_status: AgentSupply['supply_status'] = null): AgentSupply => ({
+/** Sources the server says this Agent's machine cannot launch — healthy, eligible,
+ *  and still unable to take the turn. The rows carry `eligible: true` on purpose:
+ *  the two questions are independent, and this one has to bite on its own. */
+const unlaunchable = (ids: readonly string[]): SourceEligibility[] =>
+  ids.map((id) => ({ source_id: id, eligible: true, process_availability_reason: 'native_cli_unavailable' }));
+
+/** The Agent-grain facts `orderSufficiency` hangs off. Its `order` is deliberately
+ *  the WRONG list — the ids under test come in as the first argument. */
+const facts = (...cannotLaunch: string[]): Pick<AgentSupply, 'sources'> => ({
+  sources: { policy: 'follow', order: ['not-the-list-under-test'], eligibility: unlaunchable(cannotLaunch) },
+});
+
+/** Direct mode, and every payload that omits the optional field: nothing claimed. */
+const NO_FACTS: Pick<AgentSupply, 'sources'> = { sources: null };
+
+const hub = (
+  order: string[],
+  supply_status: AgentSupply['supply_status'] = null,
+  cannotLaunch: string[] = [],
+): AgentSupply => ({
   backend: 'claude',
   mode: 'hub',
   menu_kind: 'fixed',
-  sources: { policy: 'follow', order },
+  sources: { policy: 'follow', order, eligibility: unlaunchable(cannotLaunch) },
   supply_status,
 });
 
@@ -73,28 +92,38 @@ describe('adoptionVerdict — the creation dialogs (AdoptionNote, AddApiKeyDialo
   it('names the skipped backends when the server states them', () => {
     const verdict = adoptionVerdict(
       [adopted('claude', 1)],
-      [{ backend: 'codex', reason: 'custom-order-omission' }],
+      [{ backend: 'codex', reason: 'custom_order' }],
     );
     expect(verdict).toEqual({ kind: 'partly_skipped', backends: ['codex'] });
   });
 
-  it('still reports adopted_none when everyone skipped', () => {
-    // Nobody adopted it: the remedy is the same 「go add it somewhere」 line, and
-    // splitting that into a second sentence would say less, not more.
-    expect(adoptionVerdict([], [{ backend: 'codex', reason: 'custom-order-omission' }])).toEqual({
-      kind: 'adopted_none',
+  it('names the orders when nobody adopted it and the server said who left it out', () => {
+    // Not a corner case: this is the normal shape of an install where every eligible
+    // backend keeps a hand-picked order, and it is the case `skipped_by` was added
+    // for. The remedy matches `adopted_none`, and the difference is the whole value —
+    // 「go add it somewhere」 vs. 「go add it in these two」.
+    expect(adoptionVerdict([], [{ backend: 'codex', reason: 'custom_order' }])).toEqual({
+      kind: 'skipped_all',
+      backends: ['codex'],
     });
+  });
+
+  it('stays at adopted_none when an empty adopter list is all the server sent', () => {
+    // Nothing to name, from either direction: no complement at all, and a complement
+    // that is itself empty (nothing eligible was left out either).
+    expect(adoptionVerdict([], null)).toEqual({ kind: 'adopted_none' });
+    expect(adoptionVerdict([], [])).toEqual({ kind: 'adopted_none' });
   });
 });
 
 describe('orderSufficiency — the drawer (SourceOrderDrawer) and the connect toasts', () => {
   it('separates 「nothing enabled」 from 「nothing works」, because the remedies differ', () => {
-    expect(orderSufficiency([], [source('a', 'active')])).toEqual({ kind: 'adopted_none' });
-    expect(orderSufficiency(['a'], [source('a', 'needs_action')])).toEqual({ kind: 'nothing_runnable' });
+    expect(orderSufficiency([], [source('a', 'active')], NO_FACTS)).toEqual({ kind: 'adopted_none' });
+    expect(orderSufficiency(['a'], [source('a', 'needs_action')], NO_FACTS)).toEqual({ kind: 'nothing_runnable' });
   });
 
   it('is covered when any enabled source can serve, not when the list is non-empty', () => {
-    expect(orderSufficiency(['a', 'b'], [source('a', 'error'), source('b', 'standby')])).toEqual({
+    expect(orderSufficiency(['a', 'b'], [source('a', 'error'), source('b', 'standby')], NO_FACTS)).toEqual({
       kind: 'covered',
     });
   });
@@ -102,17 +131,154 @@ describe('orderSufficiency — the drawer (SourceOrderDrawer) and the connect to
   it('counts a cooling source as unable to serve right now', () => {
     // `cooldown` heals itself, but the turn taken during it still fails, and this
     // verdict answers 「the NEXT turn」.
-    expect(orderSufficiency(['a'], [source('a', 'cooldown')])).toEqual({ kind: 'nothing_runnable' });
+    expect(orderSufficiency(['a'], [source('a', 'cooldown')], NO_FACTS)).toEqual({ kind: 'nothing_runnable' });
   });
 
   it('will not claim nothing runs when an enabled id is missing from the inventory', () => {
     // The two reads can disagree; an id we cannot resolve is unknown, not broken.
-    expect(orderSufficiency(['a', 'ghost'], [source('a', 'error')])).toEqual({ kind: 'indeterminate' });
+    expect(orderSufficiency(['a', 'ghost'], [source('a', 'error')], NO_FACTS)).toEqual({ kind: 'indeterminate' });
   });
 
   it('is indeterminate where the source inventory is not loaded', () => {
-    expect(orderSufficiency(['a'], null)).toEqual({ kind: 'indeterminate' });
-    expect(orderSufficiency(null, [source('a', 'active')])).toEqual({ kind: 'indeterminate' });
+    expect(orderSufficiency(['a'], null, NO_FACTS)).toEqual({ kind: 'indeterminate' });
+    expect(orderSufficiency(null, [source('a', 'active')], NO_FACTS)).toEqual({ kind: 'indeterminate' });
+  });
+
+  // The v4 caveat this closes: a `native_cli` source whose CLI is not usable on this
+  // machine reports itself perfectly healthy, because the credential IS fine.
+  it('counts a healthy source this machine cannot launch as unable to serve', () => {
+    expect(orderSufficiency(['a'], [source('a', 'active')], facts('a'))).toEqual({ kind: 'nothing_runnable' });
+  });
+
+  it('needs BOTH halves before it says covered', () => {
+    // One reachable-and-launchable source is enough; neither half alone is.
+    expect(orderSufficiency(['a', 'b'], [source('a', 'active'), source('b', 'active')], facts('a'))).toEqual({
+      kind: 'covered',
+    });
+    expect(orderSufficiency(['a', 'b'], [source('a', 'active'), source('b', 'cooldown')], facts('a'))).toEqual({
+      kind: 'nothing_runnable',
+    });
+  });
+
+  it('reads silence as runnable rather than inventing an outage', () => {
+    // Direct mode, a server that omits the optional field, and a source with no row
+    // all mean 「nothing claimed」 — the weaker claim, never the false alarm.
+    expect(orderSufficiency(['a'], [source('a', 'active')], NO_FACTS)).toEqual({ kind: 'covered' });
+    expect(orderSufficiency(['a'], [source('a', 'active')], facts())).toEqual({ kind: 'covered' });
+    expect(orderSufficiency(['a'], [source('a', 'active')], facts('b'))).toEqual({ kind: 'covered' });
+  });
+
+  it('grades the ids it was handed, never the order saved on the Agent', () => {
+    // The drawer asks about the list the user is CURRENTLY editing. `facts()` carries
+    // a decoy order for exactly this: the Agent comes along for the server facts that
+    // hang off it, and for nothing else.
+    expect(orderSufficiency(['a'], [source('a', 'active')], facts())).toEqual({ kind: 'covered' });
+  });
+});
+
+/** The same Agent-grain facts with the route gate's two inputs made explicit: the
+ *  order the server's answer was ABOUT, and per-source membership in the selected
+ *  model's chain. An id left out of `membership` has no eligibility row at all —
+ *  the payload that never mentions it. */
+const routed = (
+  savedOrder: readonly string[],
+  membership: Record<string, boolean | null>,
+  cannotLaunch: readonly string[] = [],
+): Pick<AgentSupply, 'sources'> => ({
+  sources: {
+    policy: 'custom',
+    order: [...savedOrder],
+    eligibility: Object.entries(membership).map(([id, inChain]) => ({
+      source_id: id,
+      eligible: true,
+      in_current_model_chain: inChain,
+      process_availability_reason: cannotLaunch.includes(id) ? 'native_cli_unavailable' : null,
+    })),
+  },
+});
+
+describe('orderSufficiency — of the sources the selected model can actually reach', () => {
+  it('stops a source that cannot serve THIS turn from answering for it', () => {
+    // The finding. Enabled: a healthy metered key that does not stock the selected
+    // model, and the one source that does — a native CLI this machine cannot launch.
+    // A rollup over 「can any of these serve something」 says 「fine」 about a turn that
+    // has already been decided to fail.
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['a', 'b'], { a: false, b: true }, ['b']),
+      ),
+    ).toEqual({ kind: 'nothing_runnable' });
+  });
+
+  it('still lets an on-route source answer for it', () => {
+    // The other side of the same gate: dropping the off-route ones may not turn a
+    // working order into a warning.
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['a', 'b'], { a: false, b: true }),
+      ),
+    ).toEqual({ kind: 'covered' });
+  });
+
+  it('warns when the route is empty because nothing enabled stocks the model', () => {
+    // Not 「everything is down」 — everything here is healthy and launchable, and the
+    // next turn still has no supplier. One verdict, because the warning offers both
+    // remedies and the user has to do one of them either way.
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['a', 'b'], { a: false, b: false }),
+      ),
+    ).toEqual({ kind: 'nothing_runnable' });
+  });
+
+  it('does not apply the answer to an id the answer was not about', () => {
+    // The false alarm this gate has to not become. `in_current_model_chain` is
+    // computed by walking `config.effective_source_order(backend)` — the very list
+    // the payload reports as `sources.order` — so a source the user has just enabled
+    // in the drawer and not yet saved reads `false` because it was outside that walk,
+    // for a reason about the ORDER and not about the model. Gated on that, the drawer
+    // would say 「下一个回合会失败，再启用一个」 at the exact moment the user enabled
+    // the one that fixes it.
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['b'], { a: false, b: true }, ['b']),
+      ),
+    ).toEqual({ kind: 'covered' });
+  });
+
+  it('reads a null or absent membership as the silence it is', () => {
+    // `null` is what every row carries while no model is selected: there is no route,
+    // so there is nothing to be off. An absent row is a payload that never spoke.
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['a', 'b'], { a: null, b: true }, ['b']),
+      ),
+    ).toEqual({ kind: 'covered' });
+    expect(
+      orderSufficiency(
+        ['a', 'b'],
+        [source('a', 'active'), source('b', 'active')],
+        routed(['a', 'b'], { b: true }, ['b']),
+      ),
+    ).toEqual({ kind: 'covered' });
+  });
+
+  it('keeps 「unknown id」 ahead of the route gate', () => {
+    // An id the inventory cannot resolve is still unknown, not broken — even when
+    // everything the gate DID resolve is off the route.
+    expect(
+      orderSufficiency(['a', 'ghost'], [source('a', 'active')], routed(['a', 'ghost'], { a: false })),
+    ).toEqual({ kind: 'indeterminate' });
   });
 });
 
@@ -138,6 +304,30 @@ describe('connectOutcome — the two mode-switch toasts', () => {
     // old code answered it with the order's length.
     expect(connectOutcome(hub(['a']), [source('a', 'needs_action')])).toBe('nothingRunnable');
     expect(connectOutcome(hub(['a']), [source('a', 'active')])).toBe('connected');
+  });
+
+  it('warns about an order it cannot launch, even though every source reads healthy', () => {
+    // The switch just took, the server has no model to resolve yet, and the only
+    // enabled source is a native CLI this machine cannot run. Health alone would
+    // call this connected.
+    expect(connectOutcome(hub(['a'], null, ['a']), [source('a', 'active')])).toBe('nothingRunnable');
+  });
+
+  it('still defers to the grade the server did give', () => {
+    // `supply_status` is the server's own answer about the resolved model, computed
+    // where this fact came from. Our inventory read does not get to overrule it.
+    expect(connectOutcome(hub(['a'], 'ok', ['a']), [source('a', 'active')])).toBe('connected');
+  });
+
+  it('is never reached by the route gate, because the two states cannot coexist', () => {
+    // The verdict's route gate only bites where a model is selected, and this caller
+    // only consults the verdict where `supply_status` is null — which is the server
+    // saying it had no model to resolve, the same condition that makes
+    // `in_current_model_chain` null for every row. So the narrowing has nothing to
+    // say here, and a payload that somehow carried both would still be answered by
+    // the membership rather than by the grade's absence.
+    const noSelection = { ...hub(['a', 'b']), sources: routed(['a', 'b'], { a: null, b: null }).sources };
+    expect(connectOutcome(noSelection, [source('a', 'active'), source('b', 'active')])).toBe('connected');
   });
 
   it('says 「I did not check」 rather than 「fine」 where the inventory is absent', () => {

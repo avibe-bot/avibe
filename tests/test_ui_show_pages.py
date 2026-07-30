@@ -478,6 +478,9 @@ def test_show_page_history_route_uses_recovery_when_runtime_unavailable(monkeypa
     assert response.status_code == 200
     assert b"Loading Show Page" in response.content
     assert b"Ready to visualize" in response.content
+    assert b"standard shadcn variables" in response.content
+    assert b"--background" in response.content
+    assert b"components from @/components/ui and @avibe/show-ui" not in response.content
     assert [call[1] for call in manager.calls] == ["/sessions/ses123/app/reports/daily"]
 
 
@@ -980,6 +983,8 @@ def test_private_show_page_materializes_workspace_before_runtime_proxy(monkeypat
     styles_css = (page_dir / "src" / "styles.css").read_text(encoding="utf-8")
     assert styles_css.startswith('@import "tailwindcss";'), styles_css[:60]
     assert '@import "@avibe/show-ui/theme.css";' in styles_css, styles_css[:90]
+    assert "background: var(--background)" in styles_css
+    assert "--avs-" not in styles_css
     assert manager.calls[0][1] == "/sessions/ses123/app/"
 
 

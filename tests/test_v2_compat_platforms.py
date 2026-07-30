@@ -142,3 +142,19 @@ def test_to_app_config_exposes_opencode_default_model_fields() -> None:
     assert compat.opencode.default_model == "gpt-5.4"
     assert compat.opencode.default_reasoning_effort == "high"
     assert compat.opencode.default_provider == "openai"
+
+
+def test_to_app_config_exposes_codex_auth_mode() -> None:
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.agents.codex.auth_mode = "api_key"
+
+    compat = to_app_config(config)
+
+    assert compat.codex is not None
+    assert compat.codex.auth_mode == "api_key"

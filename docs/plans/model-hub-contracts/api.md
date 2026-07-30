@@ -58,6 +58,14 @@ Ordering is backend-owned through the sources routes.
   provider; the resolver sends the bare model id upstream.
 - A mapping rewrites a menu id to an upstream model id. A mapping never chooses a
   source.
+- Without an explicit mapping, a vendor-native fixed menu may resolve a stable menu
+  alias per source. Claude version aliases select the latest dated id for that exact
+  version; `opus`, `sonnet`, `haiku`, `opus[1m]`, and `sonnet[1m]` select the latest
+  discovered id in their family. A dated request remains exact. Alias candidates come
+  only from that source's discovered inventory; manual models, foreign-vendor sources,
+  and undiscovered passthrough ids do not qualify. A native CLI source preserves an
+  exact CLI alias instead of replacing it with a bundled-catalog model. Explicit
+  mappings take precedence.
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 
@@ -132,6 +140,12 @@ which is a list of bare names inside a mutation result.
 `selected_model_explicit` is TRUE iff `selected_model_id` originates from the
 user's explicit configuration request. FALSE means no explicit model selection,
 including a resolver-picked value or no selected model.
+
+For a fixed native menu, `current.model_id` is the effective upstream id for the
+selected source. It may therefore differ from `selected_model_id` without an
+explicit mapping when built-in native alias resolution chooses a discovered dated
+model. Chain and probe inputs remain the caller-facing `selected_model_id`; each
+candidate derives its own effective upstream id.
 
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
@@ -433,7 +447,9 @@ Status and submit return the same terminal shape:
 ## Chain and probe
 
 In Hub mode, `AgentChain.chain` is the effective source order filtered by backend
-eligibility and model support, with mapping applied. Cooling, source-blocked and
+eligibility and the server's per-source effective-model derivation. That derivation
+applies an explicit mapping first, otherwise applies the vendor-native alias rule above,
+then verifies the resulting id against source inventory. Cooling, source-blocked and
 process-unavailable native CLI members stay in the chain at their original positions.
 Each item carries `channel`, source-global `health`, process-aware `runnable`, and
 nullable `reason`. The complete axiom is:

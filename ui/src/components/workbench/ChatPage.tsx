@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -9,8 +9,10 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
+import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
+import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
@@ -18,6 +20,11 @@ import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../l
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
+import { downloadFile, fileMeta } from '../../lib/filesApi';
+import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/filePreview';
+import { recentPathLabel } from '../../lib/editorRecents';
+import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import {
   activityItemKind,
@@ -37,6 +44,7 @@ import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
+import { ShowPageLaunchControl } from './ShowPageLaunchControl';
 import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import {
@@ -54,7 +62,7 @@ import { Button } from '../ui/button';
 import { ChatImage } from '../ui/chat-image';
 import { FileCard } from '../ui/file-card';
 import { ImageViewerProvider } from '../ui/image-viewer';
-import { FileViewerProvider } from '../ui/file-viewer';
+import { FileViewerProvider, useFileViewer } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -79,15 +87,6 @@ import {
   type LiveActivityState,
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
-
-// The chat host marks its Show Page iframe with ``vibe-embed=1`` (annotation
-// contract §6) so the in-page overlay switches to embedded mode — floating
-// toolbar hidden, controlled via postMessage from the header control. Applied
-// wherever the iframe src is composed (first open + visibility re-point).
-const SHOW_PAGE_EMBED_PARAM = 'vibe-embed=1';
-function embedShowPageSrc(path: string): string {
-  return path.includes('?') ? `${path}&${SHOW_PAGE_EMBED_PARAM}` : `${path}?${SHOW_PAGE_EMBED_PARAM}`;
-}
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -189,6 +188,24 @@ export const ChatPage: React.FC = () => {
   // before the composer bridge target, which depends on showPageMode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  // One authority invalidates an in-flight restore/open when the user explicitly
+  // chooses Chat (including a same-session ?view=chat navigation).
+  const showPageRequestRef = useRef(0);
+  useEffect(
+    () => () => {
+      // External launches resolve after an async ensure. Once this page has
+      // unmounted, none of those prepared actions may still open or pin it.
+      showPageRequestRef.current += 1;
+    },
+    [],
+  );
+  const showPageRestoreAttemptRef = useRef<string | null>(null);
+  const selectChatView = useCallback((sid: string, remember: boolean) => {
+    showPageRequestRef.current += 1;
+    setShowPageMode(false);
+    setShowPageBusy(false);
+    if (remember) writeChatViewMode(sid, 'chat');
+  }, []);
   // Sessions whose first-open visualize prompt failed to send — retry it on the
   // next toggle (the page row already exists, so `existed` alone won't re-prompt).
   const showPagePromptRetryRef = useRef<Set<string>>(new Set());
@@ -222,12 +239,13 @@ export const ChatPage: React.FC = () => {
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
   const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
   useEffect(() => {
-    // ChatPage is reused across :sessionId — clear all show-page state so the
-    // next chat starts in chat view with a live (not stuck-busy) toggle.
-    setShowPageMode(false);
+    // ChatPage is reused across :sessionId. Clear the previous frame immediately;
+    // once the new session row loads, the restore effect below applies its own
+    // remembered view through the same open path as a user click.
+    showPageRestoreAttemptRef.current = null;
+    selectChatView(sessionId ?? '', false);
     setShowPageUrl(null);
-    setShowPageBusy(false);
-  }, [sessionId]);
+  }, [selectChatView, sessionId]);
 
   // Honor the ?view=chat "show me the chat" signal ONCE: leave Show Page mode and strip
   // the param. This makes the intent work even for a same-session jump (where the
@@ -235,11 +253,13 @@ export const ChatPage: React.FC = () => {
   // stripping it (like the ?msg jump below) keeps it a no-op on every render afterwards.
   useEffect(() => {
     if (!showChatSignal) return;
-    setShowPageMode(false);
+    const sid = sessionId ?? '';
+    showPageRestoreAttemptRef.current = sid || null;
+    selectChatView(sid, true);
     const next = new URLSearchParams(window.location.search);
     next.delete('view');
     setSearchParams(next, { replace: true });
-  }, [showChatSignal, setSearchParams]);
+  }, [selectChatView, sessionId, showChatSignal, setSearchParams]);
 
   // Publish this chat's composer to the ComposerBridge so the sidebar's
   // "reference this session" action can insert a #<session> mention into the
@@ -672,6 +692,9 @@ export const ChatPage: React.FC = () => {
       // archive onto the chat now mounted (markSessionArchived guards the row
       // identity too; this also skips the needless refresh).
       if (archivedSessionId !== sessionIdRef.current) return;
+      showPageRequestRef.current += 1;
+      setShowPageBusy(false);
+      writeChatViewMode(archivedSessionId, 'chat');
       setSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
     },
@@ -1145,7 +1168,11 @@ export const ChatPage: React.FC = () => {
       onSessionActivity: (data) => {
         if (data.session_id === sessionIdRef.current && data.event === 'archived') {
           // The session you're viewing was archived (here or in another tab) —
-          // archive is terminal, so leave the chat.
+          // archive is terminal, so cancel any prepared external launch before
+          // leaving the chat.
+          showPageRequestRef.current += 1;
+          setShowPageBusy(false);
+          writeChatViewMode(data.session_id, 'chat');
           goBack();
           return;
         }
@@ -1394,64 +1421,102 @@ export const ChatPage: React.FC = () => {
     [api, sessionId],
   );
 
-  // Toggle the chat surface ↔ the session's Show Page (iframe). The first open
-  // ensures the page exists; if it was just created, ask the agent to build the
-  // visualization. Errors surface via the apiFetch toast layer.
+  // One action path serves inline view changes and external launches. Every
+  // target first ensures the page and sends the same first-build prompt; only
+  // the inline target changes this chat's remembered surface.
+  const performShowPageAction = useCallback(
+    async (sid: string, target: 'inline' | 'prepare'): Promise<boolean> => {
+      const request = ++showPageRequestRef.current;
+      setShowPageBusy(true);
+      try {
+        const res = await api.ensureShowPage(sid);
+        // Bail if the user switched chats or explicitly selected Chat while ensure
+        // was in flight. The request id closes the same-session ?view=chat race.
+        if (sessionIdRef.current !== sid || showPageRequestRef.current !== request) return false;
+        if (res?.ok) {
+          if (target === 'inline') {
+            // Public pages are served under /p/<share_id>/; private under /show/<id>/.
+            setShowPageUrl(
+              showPageEmbeddedPath(
+                res.visibility === 'public' && res.share_id
+                  ? `/p/${encodeURIComponent(res.share_id)}/`
+                  : `/show/${encodeURIComponent(sid)}/`,
+              ),
+            );
+            setShowPageMode(true);
+            writeChatViewMode(sid, 'show-page');
+          }
+          // First open (or a prior prompt that failed to send) asks the agent to
+          // build the visualization. sendMessage returns false on a failed send;
+          // track it so the NEXT toggle retries — the page row exists after this,
+          // so `existed` alone would never re-prompt a created-but-unprompted page.
+          // Never on a read-only (archived) session: the store refuses to CREATE a
+          // page there, but a session archived after a failed prompt is still in the
+          // retry set, and re-prompting it would only 409. The header no longer
+          // offers the toggle at all once the session reads archived, so this is the
+          // callback-level backstop for an invocation that raced that render.
+          if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
+            void sendMessage(t('chat.showPage.prompt')).then((sent) => {
+              if (sent === false) showPagePromptRetryRef.current.add(sid);
+              else showPagePromptRetryRef.current.delete(sid);
+            });
+          }
+          return true;
+        }
+        return false;
+      } catch {
+        // apiFetch already surfaced a toast; stay in chat view.
+        return false;
+      } finally {
+        if (sessionIdRef.current === sid && showPageRequestRef.current === request) {
+          setShowPageBusy(false);
+        }
+      }
+    },
+    [readOnly, api, sendMessage, t],
+  );
+
+  const openShowPage = useCallback(
+    (sid: string) => performShowPageAction(sid, 'inline'),
+    [performShowPageAction],
+  );
+
+  const prepareShowPageLaunch = useCallback(
+    (sid: string) => performShowPageAction(sid, 'prepare'),
+    [performShowPageAction],
+  );
+
   const toggleShowPage = useCallback(async () => {
     const sid = sessionId;
     if (!sid) return;
     if (showPageMode) {
-      setShowPageMode(false);
+      selectChatView(sid, true);
       return;
     }
-    setShowPageBusy(true);
-    try {
-      const res = await api.ensureShowPage(sid);
-      // Bail if the user switched chats while ensure was in flight — otherwise a
-      // stale resolve would flip the NEW chat into iframe mode + send its prompt.
-      if (sessionIdRef.current !== sid) return;
-      if (res?.ok) {
-        // Public pages are served under /p/<share_id>/; private under /show/<id>/.
-        setShowPageUrl(
-          embedShowPageSrc(
-            res.visibility === 'public' && res.share_id
-              ? `/p/${encodeURIComponent(res.share_id)}/`
-              : `/show/${encodeURIComponent(sid)}/`,
-          ),
-        );
-        setShowPageMode(true);
-        // First open (or a prior prompt that failed to send) asks the agent to
-        // build the visualization. sendMessage returns false on a failed send;
-        // track it so the NEXT toggle retries — the page row exists after this,
-        // so `existed` alone would never re-prompt a created-but-unprompted page.
-        // Never on a read-only (archived) session: the store refuses to CREATE a
-        // page there, but a session archived after a failed prompt is still in the
-        // retry set, and re-prompting it would only 409. The header no longer
-        // offers the toggle at all once the session reads archived, so this is the
-        // callback-level backstop for an invocation that raced that render.
-        if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
-          void sendMessage(t('chat.showPage.prompt')).then((sent) => {
-            if (sent === false) showPagePromptRetryRef.current.add(sid);
-            else showPagePromptRetryRef.current.delete(sid);
-          });
-        }
-      }
-    } catch {
-      // apiFetch already surfaced a toast; stay in chat view.
-    } finally {
-      // Always clear — the in-flight request is done regardless of which chat is
-      // now mounted (ChatPage is reused across sessions; a guarded clear would
-      // strand the shared busy flag on a session the user switched to).
-      setShowPageBusy(false);
+    await openShowPage(sid);
+  }, [openShowPage, selectChatView, sessionId, showPageMode]);
+
+  // Restore a session's last selected surface after its authoritative row loads.
+  // Explicit chat/message deep links win, and archived sessions permanently fall
+  // back to Chat because their Show Page is offline.
+  useEffect(() => {
+    const sid = sessionId;
+    if (!sid || session?.id !== sid || showPageRestoreAttemptRef.current === sid) return;
+    showPageRestoreAttemptRef.current = sid;
+    if (readOnly) {
+      writeChatViewMode(sid, 'chat');
+      return;
     }
-  }, [sessionId, showPageMode, readOnly, api, sendMessage, t]);
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
+    void openShowPage(sid);
+  }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
   // so it never stays on a route that now 404s.
   const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
     const path = localPath(next);
-    if (path) setShowPageUrl(embedShowPageSrc(path));
+    if (path) setShowPageUrl(showPageEmbeddedPath(path));
   }, []);
 
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
@@ -1607,7 +1672,7 @@ export const ChatPage: React.FC = () => {
     // Wait until THIS session's initial data is present (refresh resolved and
     // the loaded session matches the route) — before that the loaded-vs-around
     // decision and the scroll target wouldn't be meaningful.
-    if (loading || !session || session.id !== sessionId) return;
+    if (loading || session?.id !== sessionId) return;
 
     handledJumpRef.current = targetMsg;
     const requestSessionId = sessionId;
@@ -1616,7 +1681,8 @@ export const ChatPage: React.FC = () => {
     // surface (transcript) is hidden behind the iframe — a scroll + highlight
     // there would be unseen. Exit Show Page mode so the chat is visible for the
     // jump (the user came here from a search result, so they want the message).
-    setShowPageMode(false);
+    showPageRestoreAttemptRef.current = sessionId;
+    selectChatView(sessionId, true);
 
     // Clear only ``msg`` (preserve any other query params) so a re-render /
     // visibility gap-recovery can't re-fire the jump. Read the live URL so we
@@ -1682,7 +1748,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [deepLinkMessageId, sessionId, loading, session?.id, api, startHighlight, setSearchParams]);
+  }, [deepLinkMessageId, sessionId, loading, session?.id, api, selectChatView, startHighlight, setSearchParams]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
@@ -1935,6 +2001,7 @@ export const ChatPage: React.FC = () => {
           showPageMode={showPageActive}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
+          onPrepareShowPageLaunch={prepareShowPageLaunch}
           onShowPageVisibilityChange={handleShowPagePayload}
           onShareOpenChange={setShareOpen}
           annotation={annotation}
@@ -1957,7 +2024,7 @@ export const ChatPage: React.FC = () => {
         // isolation isn't the security boundary anyway. We still drop the exotic
         // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
-          ref={annotation.iframeRef}
+          ref={annotation.setIframe}
           onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
           src={showPageUrl}
@@ -2479,6 +2546,7 @@ interface ChatHeaderBarProps {
   showPageMode: boolean;
   showPageBusy: boolean;
   onToggleShowPage: () => void;
+  onPrepareShowPageLaunch: (sessionId: string) => Promise<boolean>;
   onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
   onShareOpenChange?: (open: boolean) => void;
   annotation: AnnotationBridge;
@@ -2493,7 +2561,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
   const { t } = useTranslation();
   const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
@@ -2612,26 +2680,14 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onPopoverOpenChange={onAnnotateOpenChange}
               />
             )}
-            <Button
-              type="button"
-              variant={showPageMode ? 'secondary' : 'ghost'}
-              onClick={onToggleShowPage}
-              disabled={showPageBusy}
-              aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              className="h-7 shrink-0 gap-1.5 px-2"
-            >
-              {showPageBusy ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : showPageMode ? (
-                <MessageSquare className="size-3.5" />
-              ) : (
-                <Presentation className="size-3.5" />
-              )}
-              <span className="hidden text-xs font-medium md:inline">
-                {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-              </span>
-            </Button>
+            <ShowPageLaunchControl
+              sessionId={session.id}
+              title={session.title}
+              showPageMode={showPageMode}
+              busy={showPageBusy}
+              onToggle={onToggleShowPage}
+              onPrepareLaunch={onPrepareShowPageLaunch}
+            />
             {showPageActions.share && (
               <ShowPageShareControl
                 sessionId={session.id}
@@ -2793,6 +2849,44 @@ const Transcript: React.FC<TranscriptProps> = ({
   footer,
 }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { openApp } = useWindowManager();
+  const fileViewer = useFileViewer();
+  const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
+    const pathLabel = recentPathLabel(target.path);
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
+      if (desktop) {
+        openApp('preview', { title: name, params: { path: target.path, name } });
+      } else if (fileViewer) {
+        fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
+      } else {
+        downloadFile(target.path);
+      }
+    };
+    const openEditor = (filename: string, mtime: number | null) => {
+      const launch = { ...target, filename, mtime };
+      if (desktop) openApp('editor', { title: filename, params: launch });
+      else navigate('/apps/editor', { state: launch });
+    };
+
+    try {
+      const meta = await fileMeta(target.path);
+      if (previewOverlayKind(meta)) {
+        openPreview(meta.name || pathLabel, meta.size, meta.mime, meta.ext);
+      } else if (isEditableMeta(meta)) {
+        openEditor(meta.name || pathLabel, meta.mtime);
+      } else {
+        downloadFile(target.path);
+      }
+    } catch {
+      // Mirror the File Browser's name-only fallback when metadata is unavailable.
+      const fallback = { kind: 'file', name: pathLabel, size: null };
+      if (previewOverlayKind(fallback)) openPreview(pathLabel, null, null, null);
+      else if (isEditableFile(fallback)) openEditor(pathLabel, null);
+      else downloadFile(target.path);
+    }
+  }, [fileViewer, navigate, openApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const forkSourceSessionId =
     typeof session.metadata?.fork_source_session_id === 'string'
@@ -3169,6 +3263,7 @@ const Transcript: React.FC<TranscriptProps> = ({
                   session={session}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
+                  onOpenLocalFile={openLocalFile}
                   readOnly={readOnly}
                   highlighted={message.id === highlightedId}
                 />
@@ -3267,6 +3362,7 @@ type MessageRowProps = {
   session: WorkbenchSession;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  onOpenLocalFile?: (target: LocalFileLinkTarget) => void | Promise<void>;
   // Archived session: the row still renders in full — including the quick-reply
   // group and which option was chosen, which is part of the transcript — but the
   // group is frozen, so an old quick reply can no longer POST a doomed message.
@@ -3288,7 +3384,7 @@ type MessageRowProps = {
 // useCallback), so the default shallow compare is correct here.
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders a single row rather than mounting the whole page.
-export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, readOnly, highlighted }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, onOpenLocalFile, readOnly, highlighted }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
@@ -3389,6 +3485,8 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
       // keeps the card it had before that row had its own type.
       secretRequests={agentAuthored}
+      localFileWorkdir={agentAuthored ? session.workdir : undefined}
+      onOpenLocalFile={agentAuthored ? onOpenLocalFile : undefined}
       // …and on an archived transcript the card is locked: archiving EXPIRED the
       // session's provision requests, so an enabled Provide button would tell the
       // reader an agent is waiting for this secret when none is.

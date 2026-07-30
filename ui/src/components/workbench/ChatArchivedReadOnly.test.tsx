@@ -266,6 +266,7 @@ describe('read-only header withdraws the Show Page controls', () => {
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
         annotation={{
           state: null,
           iframeRef: { current: null },
@@ -401,6 +402,7 @@ describe('archived conflicts converge whatever the verb', () => {
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
+        onPrepareShowPageLaunch={async () => false}
         annotation={{
           state: null,
           iframeRef: { current: null },
@@ -498,5 +500,95 @@ describe('read-only transcript locks the secret-request cards', () => {
       expect(markup).not.toContain(en.vaults.request.provide);
       expect(countButtons(markup)).toBe(0);
     }
+  });
+});
+
+describe('agent-authored local file links', () => {
+  const linkedMessage = (author: 'agent' | 'user'): WorkbenchMessage => ({
+    ...agentWithQuickReplies(),
+    author,
+    type: author === 'agent' ? 'result' : 'user',
+    text: '[open report](./reports/result.md)',
+    content: {},
+  }) as WorkbenchMessage;
+
+  it('opts only Agent replies into the Editor link handler', () => {
+    const props = {
+      session: session({ workdir: '/workspace/project' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+
+    const agent = render(<MessageRow {...props} message={linkedMessage('agent')} />);
+    expect(agent).toContain('data-local-file-link="true"');
+    expect(agent).not.toContain('target="_blank"');
+
+    const user = render(<MessageRow {...props} message={linkedMessage('user')} />);
+    expect(user).not.toContain('data-local-file-link');
+    expect(user).toContain('target="_blank"');
+  });
+
+  it('preserves absolute Windows destinations through Markdown URL sanitization', () => {
+    const props = {
+      session: session({ workdir: 'C:\\workspace' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const windowsMessage = {
+      ...linkedMessage('agent'),
+      text: '[open source](C:/workspace/app.py:42)',
+    } as WorkbenchMessage;
+
+    const markup = render(<MessageRow {...props} message={windowsMessage} />);
+    expect(markup).toContain('data-local-file-link="true"');
+    expect(markup).toContain('href="C:/workspace/app.py:42"');
+
+    const userMarkup = render(<MessageRow {...props} message={{ ...windowsMessage, author: 'user', type: 'user' }} />);
+    expect(userMarkup).not.toContain('data-local-file-link');
+    expect(userMarkup).not.toContain('href="C:/workspace/app.py:42"');
+  });
+
+  it('opens UNC files locally while leaving Workbench routes as browser links', () => {
+    const props = {
+      session: session({ workdir: '\\\\server\\share' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const uncMessage = {
+      ...linkedMessage('agent'),
+      text: '[open source](%5C%5Cserver%5Cshare%5Capp.py:42)',
+    } as WorkbenchMessage;
+    const routeMessage = {
+      ...linkedMessage('agent'),
+      text: '[open files](/apps/files)',
+    } as WorkbenchMessage;
+
+    const uncMarkup = render(<MessageRow {...props} message={uncMessage} />);
+    expect(uncMarkup).toContain('data-local-file-link="true"');
+    expect(uncMarkup).toContain('href="%5C%5Cserver%5Cshare%5Capp.py:42"');
+
+    const routeMarkup = render(<MessageRow {...props} message={routeMessage} />);
+    expect(routeMarkup).not.toContain('data-local-file-link');
+    expect(routeMarkup).toContain('href="/apps/files"');
+    expect(routeMarkup).toContain('target="_blank"');
+  });
+
+  it('lets the outer local link own clicks for a linked local image', () => {
+    const linkedImageMessage = {
+      ...linkedMessage('agent'),
+      text: '[![preview](/tmp/preview.png)](/tmp/report.md)',
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow
+        message={linkedImageMessage}
+        session={session({ workdir: '/workspace/project' })}
+        messageFontSize={13}
+        onOpenLocalFile={() => undefined}
+      />,
+    );
+
+    expect(markup.match(/data-local-file-link/g)).toHaveLength(1);
+    expect(markup).toContain('href="/tmp/report.md"');
+    expect(markup).not.toContain('href="/tmp/preview.png"');
   });
 });

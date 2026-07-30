@@ -5,11 +5,61 @@ import { APP_REGISTRY, type AppId } from '../../apps/registry';
 import { dockIndexFromShortcut } from '../../apps/dockShortcuts';
 import { dockIdToSession, useDock } from '../../context/DockContext';
 import { useApi } from '../../context/ApiContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
+import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
 import { useShowPageInventory } from '../useShowPages';
+import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { AppWindow } from './AppWindow';
-import { inTerminalSurface, inTextEntrySurface } from './windowChords';
+import {
+  showPageWindowSource,
+  showPageWindowStatusAfterRead,
+  type ShowPageWindowStatus,
+} from './showPageWindowState';
+import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
+
+const ShowPageWindow: React.FC<{
+  archived: boolean;
+  iconVersion: string | null;
+  layerHeight: number;
+  layerWidth: number;
+  revalidateVersion: number;
+  sessionId: string;
+  win: WindowInstance;
+}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
+  const api = useApi();
+  const { setTitle } = useWindowManager();
+  const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    api
+      .getSessionResult(sessionId)
+      .then((result) => {
+        if (cancelled) return;
+        setStatus((current) => showPageWindowStatusAfterRead(current, result));
+        const session = result.session;
+        if (!session || typeof session.id !== 'string' || session.status === 'archived') return;
+        const liveTitle = (session.title ?? '').trim();
+        if (liveTitle) setTitle(win.id, liveTitle);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStatus((current) => showPageWindowStatusAfterRead(current, { status: null, session: null }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, revalidateVersion, sessionId, setTitle, win.id]);
+
+  const src = showPageWindowSource(sessionId, status, archived);
+  return (
+    <ShowPageAnnotationHost src={src}>
+      <AppWindow win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
+    </ShowPageAnnotationHost>
+  );
+};
 
 // The portal layer that hosts app windows. Covers the workbench main area (right
 // of the 240px sidebar on desktop). The layer itself is pointer-events-none so
@@ -29,6 +79,8 @@ export const WindowLayer: React.FC = () => {
   const anyShown = shouldGuardUnload(windows);
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const [archivedSessionIds, setArchivedSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [showPageRevalidateVersion, setShowPageRevalidateVersion] = useState(0);
   const windowsRef = useRef(windows);
   const dockRef = useRef({ order, pins, pages });
 
@@ -61,10 +113,8 @@ export const WindowLayer: React.FC = () => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
-      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
-      if (!winEl || !ref.current?.contains(winEl)) return;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
-      const targetId = winEl.getAttribute('data-window-id');
+      const targetId = windowIdForKeyboardTarget(active, ref.current);
       if (!targetId) return;
       const key = e.key.toLowerCase();
       if (key === 'w') {
@@ -89,9 +139,7 @@ export const WindowLayer: React.FC = () => {
       if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
       const active = document.activeElement;
       if (inTextEntrySurface(active)) return;
-      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
-      if (!winEl || !ref.current?.contains(winEl)) return;
-      const targetId = winEl.getAttribute('data-window-id');
+      const targetId = windowIdForKeyboardTarget(active, ref.current);
       if (!targetId) return;
       e.preventDefault();
       if (confirmClose(targetId)) close(targetId);
@@ -173,13 +221,27 @@ export const WindowLayer: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [focus, openApp, restore, t]);
 
-  // Session PATCHes already broadcast `session.activity`. Keep every open
-  // Show Page window's persisted title/params live when a rename comes from the
-  // Library, chat header, CLI, or another browser tab.
+  // Session mutations broadcast `session.activity`. Keep every open Show Page
+  // window's title live, and treat archive as terminal for the frame plus every
+  // parent-owned page control.
   useEffect(
     () =>
       api.connectWorkbenchEvents({
+        onConnected: () => {
+          // Re-read after EVERY subscription is established. This closes both
+          // the initial GET-to-first-connect gap and any later reconnect gap.
+          setShowPageRevalidateVersion((version) => version + 1);
+        },
         onSessionActivity: (data) => {
+          if (data.event === 'archived') {
+            setArchivedSessionIds((current) => {
+              if (current.has(data.session_id)) return current;
+              const next = new Set(current);
+              next.add(data.session_id);
+              return next;
+            });
+            return;
+          }
           if (data.event !== 'updated' || !Object.prototype.hasOwnProperty.call(data, 'title')) return;
           const title = data.title?.trim() || t('chat.untitled');
           windowsRef.current
@@ -212,9 +274,23 @@ export const WindowLayer: React.FC = () => {
       {windows.map((w) => {
         // For a showpage window, join the inventory (already loaded above — no new
         // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
-        const sid = w.appId === 'showpage' ? (w.params?.sessionId as string | undefined) : undefined;
+        const sid = w.appId === 'showpage' && typeof w.params?.sessionId === 'string' ? w.params.sessionId : undefined;
         const iconVersion = sid ? pages.find((p) => p.session_id === sid)?.icon_version ?? null : null;
-        return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
+        if (w.appId !== 'showpage') {
+          return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
+        }
+        return (
+          <ShowPageWindow
+            key={w.id}
+            archived={Boolean(sid && archivedSessionIds.has(sid))}
+            iconVersion={iconVersion}
+            layerHeight={size.h}
+            layerWidth={size.w}
+            revalidateVersion={showPageRevalidateVersion}
+            sessionId={sid ?? ''}
+            win={w}
+          />
+        );
       })}
     </div>
   );
