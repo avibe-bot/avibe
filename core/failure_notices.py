@@ -480,11 +480,16 @@ def decide(
 def _attempts_read(value: Any) -> int:
     """``attempts`` as SQLite's CAS will read it — CAST semantics, not ``int()``.
 
-    The field lives in a JSON blob, so it can hold anything; the value this policy
-    increments and the value the guarded write asserts MUST be the same number, or
-    the claim can never match and the row stays eligible and unchanged on every
-    drain pass — one of the ten batch slots occupied forever, every notice behind
-    it starved. The first version of this function degraded to 0 on any conversion
+    The field lives in a JSON blob, so it can hold anything; what this policy and
+    the guarded write MUST share is the raw SQLite DECODE of the stored value —
+    diverge there and the claim can never match, so the row stays eligible and
+    unchanged on every drain pass: one of the ten batch slots occupied forever,
+    every notice behind it starved. Shared decode, not necessarily the same final
+    number: for a NEGATIVE decode the CAS expectation stays raw (asserting the row
+    as it is stored, so the claim still lands) while the policy consumer
+    (``next_attempt``) clamps its input to the ladder's start before incrementing,
+    so a hand-edited counter can never buy more than ``MAX_ATTEMPTS`` attempts.
+    The first version of this function degraded to 0 on any conversion
     error, which agreed with SQLite for ``"abc"`` but diverged for every
     numeric-PREFIX string (``"3x"`` reads 3 under ``CAST``, 0 under ``int()``),
     for ``"1e100"`` (1 vs 0), and for out-of-range numbers (SQLite saturates at

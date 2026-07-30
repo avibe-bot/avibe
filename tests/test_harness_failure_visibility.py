@@ -5302,24 +5302,30 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
 
     import pytest as _pytest
 
-    import core.failure_notices as failure_notices
+    import storage.background as storage_background
+
+    # ONE FROZEN INSTANT for every clock the consuming path reads, so pass-two
+    # eligibility is deterministic BY CONSTRUCTION: the listing's default ``now``
+    # (``storage.background._utc_now_iso``) and every eligibility/claim/retry
+    # calculation in ``core.scheduled_tasks`` (its module ``datetime``). The
+    # production 2-second first rung stays UNCHANGED — pass 1 stamps
+    # ``frozen + BACKOFF_SECONDS[0]`` and pass 2 lists at ``frozen``, which is
+    # provably inside the backoff no matter how long the process is suspended
+    # between the passes; there is no wall-clock read left for preemption to
+    # advance. Stored deadlines are then asserted EXACTLY from the frozen
+    # instant. (The drain's pass budget uses ``time.monotonic`` and is not
+    # frozen; with the spy emitter it never truncates.)
+    frozen = datetime(2026, 7, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001 - datetime API shape
+            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
 
     with _pytest.MonkeyPatch.context() as patch:
         patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
-        # A DETERMINISTIC pass-2 window: the real first rung is 2 seconds, and on a
-        # preempted worker that could elapse between the passes — pass 2 would then
-        # legitimately reselect the expired first batch and the boundary assertions
-        # would fail against correct production behavior. Widening ONLY the first
-        # rung removes the race without touching production code, keeps the
-        # ladder's length (MAX_ATTEMPTS is unchanged), and makes the rung-1 check
-        # sharper: a lower bound of first_interval cannot be satisfied by rung 2
-        # (8s) or the claim lease (600s), where the real 2s rung with clock slop
-        # sat within a few seconds of rung 2. The dead-letter walk below rewinds
-        # ``next_attempt_at`` between passes, so the remaining rungs never gate it.
-        first_interval = 3600.0
-        patch.setattr(
-            failure_notices, "BACKOFF_SECONDS", (first_interval,) + BACKOFF_SECONDS[1:]
-        )
+        patch.setattr(scheduled_tasks, "datetime", _FrozenDatetime)
+        patch.setattr(storage_background, "_utc_now_iso", lambda: frozen.isoformat())
         service = ScheduledTaskService.__new__(ScheduledTaskService)
         service.store = store
         service.request_store = requests
@@ -5332,27 +5338,20 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
         # PASS 1 claims exactly the first batch. Snapshot the boundary between the
         # passes — pass 2 runs inside the (widened) first backoff to prove the
         # batch does not get reselected.
-        # Each pass is BRACKETED by two instants and the backoff assertions derive
-        # both bounds from them: the rung is stamped at some point inside the
-        # bracket, so ``armed - before`` is at least the rung and at most the rung
-        # plus the bracket's own width. Preemption during a drain widens the
-        # measured bracket instead of eating into a fixed tolerance — no wall-clock
-        # scheduling assumption is left in the assertion.
+        # PASS 1 claims exactly the first batch; the boundary is snapshotted
+        # between the passes.
         first_batch = list(range(10))
         remainder = list(range(10, len(negatives)))
-        before_pass_one = datetime.now(timezone.utc)
         asyncio.run(service._drain_failure_notices())
-        after_pass_one = datetime.now(timezone.utc)
         remainder_after_pass_one = {
             index: sqlite.owed_failure_notice(f"run-neg-{index:02d}") for index in remainder
         }
         valid_after_pass_one = sqlite.owed_failure_notice("run-neg-behind")["state"]
 
-        # PASS 2, immediately: the first batch is backed off, so the bounded drain
-        # must advance PAST it to the remaining negatives and the valid notice.
-        before_pass_two = datetime.now(timezone.utc)
+        # PASS 2, at the SAME frozen instant: the first batch is backed off by
+        # construction, so the bounded drain must advance PAST it to the
+        # remaining negatives and the valid notice.
         asyncio.run(service._drain_failure_notices())
-        after_pass_two = datetime.now(timezone.utc)
 
         # The boundary, as pass 1 left it: rows past the limit were simply not
         # pulled — unclaimed, so no attempt consumed and no backoff armed, and the
@@ -5382,16 +5381,13 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
                 f"got {notice['attempts']!r} (state={notice['state']!r})"
             )
             assert notice["state"] == "pending"
+            # EXACT, from the frozen instant: the retry stamp is
+            # ``frozen + BACKOFF_SECONDS[0]`` to the microsecond — rung 1, not
+            # rung 2 and not the claim lease, with no timing tolerance at all.
             armed = datetime.fromisoformat(notice["next_attempt_at"])
-            delta = (armed - before_pass_one).total_seconds()
-            bracket = (after_pass_one - before_pass_one).total_seconds()
-            # The lower bound alone already discriminates rung 1 (3600s) from
-            # every shorter interval a wrong stamp could arm — rung 2 (8s) and
-            # the claim lease (600s) — and it cannot be eroded by preemption:
-            # the stamp happened at or after ``before_pass_one``.
-            assert first_interval - 1 <= delta <= first_interval + bracket + 1, (
-                f"the first backoff must be the ladder's FIRST rung, got {delta:.1f}s "
-                f"(pass bracket {bracket:.1f}s)"
+            assert armed == frozen + timedelta(seconds=BACKOFF_SECONDS[0]), (
+                f"the first backoff must be exactly the ladder's FIRST rung from the "
+                f"frozen instant, got {notice['next_attempt_at']!r}"
             )
         # PASS 2's claims: the remainder crossed the boundary on the very next
         # bounded pass — attempt exactly 1, first interval armed — and the valid
@@ -5404,11 +5400,9 @@ def test_negative_attempt_counters_claim_at_the_raw_value_and_dead_letter_on_sch
             )
             assert notice["state"] == "pending"
             armed = datetime.fromisoformat(notice["next_attempt_at"])
-            delta = (armed - before_pass_two).total_seconds()
-            bracket = (after_pass_two - before_pass_two).total_seconds()
-            assert first_interval - 1 <= delta <= first_interval + bracket + 1, (
-                f"the remainder's first backoff must be the ladder's FIRST rung, got {delta:.1f}s "
-                f"(pass bracket {bracket:.1f}s)"
+            assert armed == frozen + timedelta(seconds=BACKOFF_SECONDS[0]), (
+                f"the remainder's first backoff must be exactly the ladder's FIRST rung "
+                f"from the frozen instant, got {notice['next_attempt_at']!r}"
             )
         assert sqlite.owed_failure_notice("run-neg-behind")["state"] == "sent", (
             "thirteen negative rows ahead of it must not starve the valid due notice "
