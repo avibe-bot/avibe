@@ -288,19 +288,14 @@ describe('healthyButUnrunnable', () => {
     expect(healthyButUnrunnable(offOrder, nativeSource('src_c', ACTIVE))).toBe(true);
   });
 
-  it('is what BOTH of the order drawer’s source lines ask', () => {
-    // Round 4. The retraction was in the 启用 line only, so a row admitted it one
-    // step after the step it was about: availability is per (source, backend) and
-    // has nothing to do with where the source sits in the order.
+  it('is absent from the ordering-only drawer', () => {
+    // Supply truth moved to model rows. The drawer no longer makes availability
+    // claims and therefore has no reason to derive process or model state.
     const drawer = readFileSync(join(__dirname, 'SourceOrderDrawer.tsx'), 'utf8');
 
-    expect([...drawer.matchAll(/healthyButUnrunnable\(agent, source\)/g)].length).toBe(2);
-    // The 未启用 branch REPLACES the line rather than joining it: both 供 … 全系 and
-    // its rewritten form are the promise being retracted, and the line is two
-    // segments wide.
-    expect(drawer).toMatch(/if \(healthyButUnrunnable\(agent, source\)\) return join\(\[identity\(source\), nativeUnavailable\(\)\]\);/);
-    // And nothing reaches around the shared predicate to the raw reader.
+    expect(drawer).not.toMatch(/healthyButUnrunnable/);
     expect(drawer).not.toMatch(/processAvailabilityOf/);
+    expect(drawer).not.toMatch(/viaMapping|via_mapping|builtin_models|models\.some/);
   });
 });
 

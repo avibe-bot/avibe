@@ -9,7 +9,6 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
-import { currencySymbol } from './format';
 import { ACCENT_DOT, type Accent } from './vendorMeta';
 import type { AgentMode, SourceState } from './types';
 
@@ -29,19 +28,12 @@ const CHIP_MOBILE = 'rounded-full py-1';
 const BILLING_CHIP = cn(CHIP_MOBILE, 'font-medium sm:w-[58px] sm:justify-center');
 
 /**
- * 包月 / 按量 $ — content-width on phones, fixed-width column on sm+.
- *
- * The metered symbol tracks the source's REPORTED currency (USD when absent).
- * A static `$` contradicted the usage cell for a source that genuinely reports
- * CNY/EUR — it would read `按量 $` beside `¥12.4`. The symbol still comes from
- * format.ts's single map, never hand-written here; an unmappable code drops the
- * symbol rather than printing a wrong one (the amount cell carries the truth).
+ * Billing type — content-width on phones, fixed-width column on sm+.
  */
 export const BillingChip: React.FC<{
   billing: 'monthly' | 'metered';
-  currency?: string | null;
   className?: string;
-}> = ({ billing, currency, className }) => {
+}> = ({ billing, className }) => {
   const { t } = useTranslation();
   if (billing === 'monthly') {
     return (
@@ -50,12 +42,9 @@ export const BillingChip: React.FC<{
       </Badge>
     );
   }
-  const symbol = currencySymbol(currency);
   return (
     <Badge variant="warning" className={cn(BILLING_CHIP, className)}>
-      {symbol
-        ? t('settings.models.billing.meteredWithSymbol', { symbol })
-        : t('settings.models.billing.metered')}
+      {t('settings.models.billing.metered')}
     </Badge>
   );
 };
@@ -117,7 +106,7 @@ export const CurrentChip: React.FC = () => {
 };
 
 /**
- * 中枢 Hub / 直连 Direct — a fixed 104px column on desktop so the pills line up
+ * Managed / Direct — a fixed 104px column on desktop so the pills line up
  * down the Agent list (V6 01), content-width beside the name on a phone (M01).
  *
  * Direct carries the `unplug` glyph on mobile only: the desktop frame drops it
@@ -150,4 +139,3 @@ export const ExperimentalChip: React.FC = () => {
     </Badge>
   );
 };
-

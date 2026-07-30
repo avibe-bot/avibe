@@ -612,13 +612,18 @@
     "openSetup": "打开设置向导",
     "models": {
       "title": "模型",
-      "subtitle": "来源连一次，全局共用；每个 Agent 自己决定用哪些、先用谁，失败自动切换、恢复自动切回。",
+      "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
+      "status": {
+        "allHealthy": "全部正常",
+        "needsAction": "{{count}} 个模型需要处理",
+        "noIssues": "没有需要处理的模型"
+      },
       "statusPill": {
         "ok": "一切正常 · {{count}} 个 Agent 已接入中枢",
         "none": "还没有 Agent 接入中枢",
-        "engineDown": "供给引擎未就绪 · 中枢暂时无法供给",
+        "engineDown": "模型服务未就绪 · 暂时无法供给",
         "interrupted": "{{count}} 个 Agent 供给中断 · 需要处理",
         "waiting": "{{count}} 个 Agent 正在等待来源恢复",
         "needsAction": "{{source}} {{detail}}",
@@ -627,8 +632,12 @@
       },
       "sources": {
         "title": "来源",
-        "subtitle": "全局一份的账号库；谁先谁后，在下方各 Agent 里调",
-        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。"
+        "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
+        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
+        "modelCount": "{{count}} 个型号",
+        "addModel": "添加型号",
+        "modelsEmpty": "还没有可供给的型号，请手动添加。",
+        "modelsEmptySubscription": "还没有发现可供给的型号。"
       },
       "source": {
         "nativeSupply": "原生供给",
@@ -647,40 +656,25 @@
         "groupEnabled": "启用 · {{count}} 个来源",
         "groupDisabled": "未启用 · {{count}}",
         "groupIneligible": "不适用 · {{count}}",
-        "following": "跟随推荐中",
-        "followingLong": "跟随推荐中 · 新来源自动加入",
-        "restore": "恢复推荐顺序",
+        "customized": "已改为手动",
+        "restore": "恢复默认",
         "enable": "启用",
         "enableAria": "启用 {{name}}",
         "disable": "取消启用",
-        "openMenu": "模型菜单与映射",
-        "supplies": "供 {{family}} 全系",
-        "viaMapping": "经模型菜单改写后可供 {{backend}} 使用",
-        "viaMappingShort": "经映射后可供 {{backend}}",
-        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会因为供给中断而失败——中枢不会替它回退到直连。从下面的「未启用」里加一个进来。",
+        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会失败。请从下方启用一个来源。",
         "ineligibleUnknown": "不能供 {{backend}} 使用",
-        "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用",
-        "family": {
-          "anthropic": "Claude",
-          "openai": "GPT",
-          "zhipuai": "GLM",
-          "kimi": "Kimi",
-          "xai": "Grok"
-        },
-        "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。",
-        "nativeUnavailable": "本机无法使用 {{backend}} CLI 登录"
+        "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用"
       },
       "billing": {
         "monthly": "包月",
-        "metered": "按量",
-        "meteredWithSymbol": "按量 {{symbol}}"
+        "metered": "按量"
       },
       "state": {
-        "active": "使用中",
-        "standby": "备用",
-        "cooldown": "暂不可用",
+        "active": "正常",
+        "standby": "正常",
+        "cooldown": "冷却中（自动恢复）",
         "needs_action": "需要处理",
-        "error": "不可用"
+        "error": "需要处理"
       },
       "usage": {
         "monthSpend": "本月 {{amount}}"
@@ -689,7 +683,7 @@
         "label": "供应："
       },
       "mode": {
-        "hub": "中枢 Hub",
+        "hub": "统一管理",
         "direct": "直连 Direct"
       },
       "errors": {
@@ -705,12 +699,16 @@
         "hubNoSupply": "已接入中枢 · 没有启用任何来源，下一个回合会失败",
         "directNote": "仍在用 CLI 原生配置供给，未接入中枢",
         "sourceOrder": "来源顺序",
+        "modelListCount": "{{count}} 个型号",
+        "enableManaged": "统一管理",
+        "emptyModels": "这个 Agent 还没有型号。",
+        "manageModels": "管理型号",
         "menuKind": {
-          "fixed": "菜单固定",
+          "fixed": "内置型号",
           "open": "菜单开放"
         },
         "policy": {
-          "follow": "跟随推荐",
+          "follow": "默认顺序",
           "custom": "自定义"
         },
         "attribution": {
@@ -718,6 +716,57 @@
           "waiting": "{{names}} 正在等待来源恢复",
           "unassigned": "{{models}} 暂无来源可供给"
         }
+      },
+      "modelStatus": {
+        "ok": "正常",
+        "cooldown": "冷却中（自动恢复）",
+        "needsAction": "需要处理",
+        "checking": "正在确认",
+        "direct": "直连",
+        "noSource": "没有可用来源",
+        "blocked": "当前来源不可用",
+        "currentSwitched": "当前已自动换到 {{source}}",
+        "currentSource": "当前由 {{source}} 供给",
+        "source": "由 {{source}} 供给",
+        "unknown": "暂时无法确认",
+        "retry": "重试",
+        "runtime": "模型服务未就绪",
+        "runtimeAction": "去处理"
+      },
+      "emptySelection": {
+        "title": "尚未选择型号",
+        "body": "这个 Agent 现在没有当前型号，下一次运行前需要选择。",
+        "action": "选择型号"
+      },
+      "routes": {
+        "title": "供给方式",
+        "global": "跟随 {{backend}} 来源顺序",
+        "manual": "指定路由",
+        "liveSource": "当前由 {{source}} 供给 · {{model}}",
+        "globalPending": "正在恢复 {{backend}} 来源顺序…",
+        "globalActual": "按 {{backend}} 来源顺序，当前会由 {{source}} 供给。",
+        "globalUnavailable": "{{backend}} 来源顺序里暂时没有可用来源。",
+        "chooseTarget": "选择目标型号",
+        "searchPlaceholder": "搜索来源或型号",
+        "empty": "没有匹配的型号",
+        "availableCount": "{{count}} 个",
+        "manualBadge": "手动",
+        "addManual": "手动输入型号",
+        "multipleSources": "{{model}} · {{count}} 个来源可供给",
+        "orderDecidesSource": "实际来源由 {{backend}} 来源顺序决定",
+        "compatibility": "目标型号的思维链、缓存和工具语义可能与原型号不同。",
+        "openMenuGlobal": "开放型号按 {{backend}} 来源顺序供给，当前由 {{source}} 负责。",
+        "none": "暂无来源",
+        "expand": "展开供给方式"
+      },
+      "probe": {
+        "action": "试一下",
+        "running": "正在测试",
+        "nativeReady": "{{source}} 已就绪，可直接运行。",
+        "hubOk": "{{source}} 返回正常 · {{ms}} ms",
+        "failed": "{{source}} 未通过：{{detail}}",
+        "unknown": "来源未通过测试",
+        "error": "测试失败，请重试"
       },
       "recent": {
         "title": "最近切换",
@@ -853,8 +902,8 @@
         "enabled": "已自动加入 {{list}} 的来源顺序",
         "entry": "{{name}}（第 {{position}} 位）",
         "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
-        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用",
-        "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用"
+        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用",
+        "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用"
       },
       "menus": {
         "done": "完成",
@@ -863,7 +912,7 @@
         "enrolled": "已自动把「{{sources}}」加入 {{backend}} 的来源顺序，你选的模型才有来源可用",
         "mapping": {
           "title": "{{backend}} · 模型菜单",
-          "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",
+          "subtitle": "{{backend}} 只认这些内置 model ID；每个 ID 可指定其他型号供给，只影响 {{backend}}。",
           "builtinCol": "内置 MODEL ID",
           "supplyCol": "实际供给",
           "followNative": "跟随原生 · 按来源顺序供给",
@@ -891,8 +940,8 @@
           }
         },
         "custom": {
-          "title": "添加自定义模型",
-          "subtitle": "补登来源清单里没有的模型，加入 OpenCode 菜单。",
+          "title": "手动添加型号",
+          "subtitle": "补登这个来源清单里没有的型号，可用于型号选择和指定路由。",
           "sourceLabel": "来源（它能供应这个模型）",
           "modelIdLabel": "模型 ID",
           "modelIdPlaceholder": "glm-5.2-air",
@@ -901,28 +950,28 @@
           "previewLabel": "OPENCODE 标识 · 自动生成",
           "previewEmpty": "填入模型 ID 后预览",
           "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
-          "add": "添加到菜单",
+          "add": "添加型号",
           "failed": "添加失败，请重试",
           "delete": "删除模型",
           "deleteConfirmTitle": "移除自定义模型？",
           "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
           "deleted": "已移除自定义模型",
           "deleteFailed": "移除失败，请重试",
-          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单/映射里取消后再删除。"
+          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单或指定路由里取消后再删除。"
         }
       },
       "supplyMode": {
         "title": "供给方式",
-        "currentHub": "当前：中枢 Hub",
+        "currentHub": "当前：统一管理",
         "currentDirect": "当前：直连 Direct",
-        "switchedHub": "已切换到中枢 Hub",
+        "switchedHub": "已切换到统一管理",
         "switchedDirect": "已切换到直连 Direct",
         "switchFailed": "切换失败，请重试",
         "hub": {
           "title": "中枢模式 · Hub",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、来源顺序、映射都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
+          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、来源顺序、指定路由都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
         },
         "direct": {
           "title": "直连模式 · Direct",

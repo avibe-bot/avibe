@@ -18,6 +18,7 @@ import type {
   SourcePolicy,
   SourceRepaired,
   SourceState,
+  SupplyChannel,
   SupplyGap,
 } from './types';
 
@@ -439,17 +440,17 @@ export const dryRunChainKey = (
  * wall-clock expiry it cannot prove.
  */
 export type DryRunOutcome =
-  | { kind: 'ok'; sourceName: string; latencyMs: number | null }
+  | { kind: 'ok'; sourceName: string; latencyMs: number | null; channel: SupplyChannel }
   /** v4 widened the key set past `state.detail_key`: the native branch reports
    *  process unavailability, the case the paragraph above is about, and no
    *  source-state key can express it. */
-  | { kind: 'failed'; sourceName: string; detailKey: ProbeErrorKey | null };
+  | { kind: 'failed'; sourceName: string; detailKey: ProbeErrorKey | null; channel: SupplyChannel };
 
 export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutcome {
   const sourceName = nameOf(sources, probe.source_id);
   return probe.reachable
-    ? { kind: 'ok', sourceName, latencyMs: probe.latency_ms }
-    : { kind: 'failed', sourceName, detailKey: probe.error };
+    ? { kind: 'ok', sourceName, latencyMs: probe.latency_ms, channel: probe.channel }
+    : { kind: 'failed', sourceName, detailKey: probe.error, channel: probe.channel };
 }
 
 /**

@@ -2,6 +2,19 @@
 // pages from the TAIL, so both directions are merges into one accumulated list
 // and neither may throw the other's rows away.
 import type { ResolutionEvent } from './types';
+import type { Accent } from './vendorMeta';
+
+const isActionRequired = (event: ResolutionEvent): boolean =>
+  event.severity === 'action_required' ||
+  (event.severity == null && (event.kind === 'needs_action' || event.kind === 'supply_interrupted'));
+
+/** Presentation grade for a server-authored event; never rewords its historical copy. */
+export const eventAccent = (event: ResolutionEvent): Accent => {
+  if (isActionRequired(event) || event.billing_note === 'entered_metered') return 'gold';
+  if (event.kind === 'recover' || event.reason === 'recovery') return 'mint';
+  if (event.kind === 'cooldown' || event.kind === 'skip') return 'muted';
+  return 'cyan';
+};
 
 /**
  * 最近切换 as the page knows it: the rows, and whether its far end has been seen.

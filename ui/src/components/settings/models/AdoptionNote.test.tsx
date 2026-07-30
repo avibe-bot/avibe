@@ -80,7 +80,7 @@ describe('AdoptionNote', () => {
     const body = text(html);
     expect(body).toContain('Claude Code');
     expect(body).toContain('Codex');
-    expect(body).toContain('自定义顺序');
+    expect(body).toContain('已改为手动');
   });
 
   it('names them even when nobody adopted it at all', () => {
@@ -90,7 +90,7 @@ describe('AdoptionNote', () => {
     // half must NOT appear: there is no list to name.
     const body = text(render([], [{ backend: 'codex', reason: 'custom_order' }]));
     expect(body).toContain('Codex');
-    expect(body).toContain('自定义顺序');
+    expect(body).toContain('已改为手动');
     expect(body).not.toContain('已自动加入');
   });
 

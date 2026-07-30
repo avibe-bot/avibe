@@ -22,24 +22,6 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
 export const MODELS_API_MODE: 'mock' | 'live' = 'live';
 
 /**
- * Wires 模型菜单与映射 — the 来源顺序 drawer's hand-off into L5's mapping / menu
- * drawers, which is the only way in since V6 gave the Agent row's action slot to
- * 来源顺序. ON now that L5 is merged.
- */
-export const MODEL_MENUS_ENABLED = true;
-
-/**
- * Offers 试跑 in the 来源顺序 drawer — one real turn through the chain.
- *
- * ON: `POST /api/models/agents/<backend>/probe` landed with the
- * provenance/channel-aware-probe lane, which is the merge this flip was waiting
- * for — the same way MODEL_MENUS_ENABLED above waited for the drawers it opens.
- * The route answers per channel: hub attempts the request upstream and times it,
- * native_cli re-verifies the CLI's readiness and times nothing.
- */
-export const DRY_RUN_ENABLED = true;
-
-/**
  * Offers the consent-gated hub-held subscription option (`subscription_hub_
  * experimental`, spec §4.1/§7) inside the connect-subscription dialog. OFF by
  * default: subscriptions connect via the sanctioned native_cli channel only.

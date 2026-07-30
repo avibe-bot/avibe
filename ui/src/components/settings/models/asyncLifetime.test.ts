@@ -72,6 +72,7 @@ import {
   flowStep,
   initialSeedState,
   isDone,
+  mapWithConcurrency,
   pollFailureSettles,
   releaseFlow,
   savedMappingsKey,
@@ -145,6 +146,27 @@ describe('latest async authority', () => {
   });
 });
 
+describe('bounded async map', () => {
+  it('caps concurrent work and preserves input order', async () => {
+    const gates = Array.from({ length: 12 }, () => deferred<number>());
+    let active = 0;
+    let maxActive = 0;
+
+    const run = mapWithConcurrency(gates, 3, async (gate, index) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const value = await gate.promise;
+      active -= 1;
+      return `${index}:${value}`;
+    });
+
+    expect(active).toBe(3);
+    gates.forEach((gate, index) => gate.resolve(index * 2));
+    await expect(run).resolves.toEqual(gates.map((_, index) => `${index}:${index * 2}`));
+    expect(maxActive).toBe(3);
+  });
+});
+
 describe('agentsWithEcho — what speaks for a row when no read does', () => {
   const claude = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a'] } });
   const codex = agent({ backend: 'codex', sources: { policy: 'follow', order: ['src_b'] } });
@@ -184,13 +206,16 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   it('is how every Agent write on the page reports itself', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
 
-    expect(page).toMatch(/setAgents\(\(prev\) => agentsWithEcho\(prev, echoed\)\)/);
+    expect(page).toMatch(/const next = agentsWithEcho\(prev, echoed\)/);
     // The mode PATCH echoes the same row the drawers' writes do.
     expect(page).toMatch(/await agentSaved\(echoed\)/);
 
     const handlers = [...page.matchAll(/onSaved=\{([^}]*)\}/g)].map((m) => m[1]);
-    expect(handlers.length).toBeGreaterThanOrEqual(3);
-    expect(handlers.filter((h) => !h.includes('agentSaved'))).toEqual([]);
+    expect(handlers.length).toBeGreaterThanOrEqual(2);
+    expect(handlers.filter((h) => h.includes('agentSaved')).length).toBeGreaterThanOrEqual(2);
+    // The shared manual-model dialog is a source write and intentionally has no
+    // Agent echo; it refreshes the model surface instead.
+    expect(page).toMatch(/<AddCustomModelDialog[\s\S]*?onSaved=\{\(\) => void refreshSourcesAgents\(\)\}/);
   });
 });
 
@@ -381,9 +406,13 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     expect(drawer).toMatch(/orderWrite\.track\(async \(\) => \{/);
     expect(drawer).toMatch(/await Promise\.resolve\(onSaved\(echoed\)\)\.catch\(\(\) => \{\}\);/);
 
-    expect(page).toMatch(/createPendingWrites\(setOrderWrites\)/);
-    expect(page).toMatch(/pending: orderWrites\.has\(orderAgent\.backend\)/);
-    expect(page).toMatch(/track: \(work\) => orderWriteRegistry\.track\(orderAgent\.backend, work\)/);
+    expect(page).toMatch(/createPendingWrites\(setAgentWrites\)/);
+    expect(page).toMatch(/pending: agentWrites\.has\(orderAgent\.backend\)/);
+    expect(page).toMatch(/track: \(work\) => agentWriteRegistry\.track\(orderAgent\.backend, work\)/);
+    // Every OpenCode menu door disables at the card, and the page repeats the
+    // guard at the ownership boundary so a stale click cannot bypass it.
+    expect(page).toMatch(/agent\.backend === menuBackend && !agentWrites\.has\(agent\.backend\)/);
+    expect(page).toMatch(/if \(!agentWrites\.has\(agent\.backend\)\) setMenuBackend\(agent\.backend\)/);
   });
 });
 
