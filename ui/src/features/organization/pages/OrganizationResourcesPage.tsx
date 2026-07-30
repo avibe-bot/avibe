@@ -91,9 +91,11 @@ function ResourceAccessDialog({
   const [conflict, setConflict] = useState(false);
   const [authoritativeResource, setAuthoritativeResource] = useState<OrganizationResource | null>(null);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
+  const comparisonResourceRef = useRef<OrganizationResource | null>(null);
 
   useEffect(() => {
     if (!resource) return;
+    comparisonResourceRef.current = resource;
     setLevel(resource.access?.access_level ?? 'private');
     setGroupIds(resource.access?.group_ids ?? []);
     setRevision(resource.access?.revision ?? 0);
@@ -147,8 +149,9 @@ function ResourceAccessDialog({
 
   const save = () => {
     if (!resource || !selectedOrganizationId || (level === 'scope' && groupIds.length === 0)) return;
-    const currentLevel = resource.access?.access_level ?? 'private';
-    const currentGroupIds = resource.access?.group_ids ?? [];
+    const comparisonResource = comparisonResourceRef.current ?? resource;
+    const currentLevel = comparisonResource.access?.access_level ?? 'private';
+    const currentGroupIds = comparisonResource.access?.group_ids ?? [];
     if (requiresResourceAccessNarrowingConfirmation(
       currentLevel,
       currentGroupIds,
@@ -166,6 +169,7 @@ function ResourceAccessDialog({
       onOpenChange(false);
       return;
     }
+    comparisonResourceRef.current = authoritativeResource;
     setLevel(authoritativeResource.access?.access_level ?? 'private');
     setGroupIds(authoritativeResource.access?.group_ids ?? []);
     setRevision(authoritativeResource.access?.revision ?? 0);

@@ -93,9 +93,11 @@ function MemberDialog({
   const [authoritativeMember, setAuthoritativeMember] = useState<OrganizationMember | null>(null);
   const [revision, setRevision] = useState(0);
   const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false);
+  const comparisonMemberRef = useRef<OrganizationMember | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    comparisonMemberRef.current = member;
     setEmail(member?.email ?? '');
     setRole(member?.role === 'admin' ? 'admin' : 'member');
     setGroupIds(member?.groups.map((group) => group.id) ?? []);
@@ -150,6 +152,7 @@ function MemberDialog({
       onOpenChange(false);
       return;
     }
+    comparisonMemberRef.current = authoritativeMember;
     setEmail(authoritativeMember.email);
     setRole(authoritativeMember.role === 'admin' ? 'admin' : 'member');
     setGroupIds(authoritativeMember.groups.map((group) => group.id));
@@ -160,7 +163,8 @@ function MemberDialog({
   };
 
   const requestSave = () => {
-    if (member && requiresMemberRoleDowngradeConfirmation(member.role, role)) {
+    const comparisonMember = comparisonMemberRef.current ?? member;
+    if (comparisonMember && requiresMemberRoleDowngradeConfirmation(comparisonMember.role, role)) {
       setDowngradeConfirmOpen(true);
       return;
     }

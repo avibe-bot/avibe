@@ -636,9 +636,11 @@ function ProjectAccessDialog({
   const [authoritativeProject, setAuthoritativeProject] = useState<OrganizationProject | null>(null);
   const [revision, setRevision] = useState(0);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
+  const comparisonProjectRef = useRef<OrganizationProject | null>(null);
 
   useEffect(() => {
     if (!project) return;
+    comparisonProjectRef.current = project;
     setMode(projectMode(project));
     setBindings(project.access.bindings);
     setRevision(project.access.revision);
@@ -711,9 +713,10 @@ function ProjectAccessDialog({
       setError('duplicate_project_access_principal');
       return;
     }
+    const comparisonProject = comparisonProjectRef.current ?? project;
     if (requiresProjectAccessNarrowingConfirmation(
-      projectMode(project),
-      project.access.bindings,
+      projectMode(comparisonProject),
+      comparisonProject.access.bindings,
       mode,
       wireBindings,
     )) {
@@ -728,6 +731,7 @@ function ProjectAccessDialog({
       onOpenChange(false);
       return;
     }
+    comparisonProjectRef.current = authoritativeProject;
     setMode(projectMode(authoritativeProject));
     setBindings(authoritativeProject.access.bindings);
     setRevision(authoritativeProject.access.revision);
