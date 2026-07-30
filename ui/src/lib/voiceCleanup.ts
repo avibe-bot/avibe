@@ -54,11 +54,18 @@ const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
 const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const MENTION_AT_START = /^[@#]<([^>\n]+)>/u;
 const MENTION_AT_END = /[@#]<([^>\n]+)>$/u;
+const LEADING_OUTER_PUNCTUATION = /^[\p{Ps}\p{Pi}"'“‘]+/u;
+const TRAILING_OUTER_PUNCTUATION = /[\p{Pe}\p{Pf}.!,?:;…，。！？：；、"'’”]+$/u;
 
 const boundaryCharacter = (text: string, side: 'start' | 'end'): string => {
-  const mention = side === 'start' ? text.match(MENTION_AT_START) : text.match(MENTION_AT_END);
+  const boundaryText = side === 'start'
+    ? text.replace(LEADING_OUTER_PUNCTUATION, '')
+    : text.replace(TRAILING_OUTER_PUNCTUATION, '');
+  const mention = side === 'start'
+    ? boundaryText.match(MENTION_AT_START)
+    : boundaryText.match(MENTION_AT_END);
   if (mention) return side === 'start' ? (mention[1].at(0) ?? '') : (mention[1].at(-1) ?? '');
-  return side === 'start' ? (text.at(0) ?? '') : (text.at(-1) ?? '');
+  return side === 'start' ? (boundaryText.at(0) ?? '') : (boundaryText.at(-1) ?? '');
 };
 
 const needsBoundarySpace = (left: string, right: string): boolean => {

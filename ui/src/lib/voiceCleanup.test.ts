@@ -44,6 +44,20 @@ describe('voice cleanup', () => {
     expect(applyVoiceInsertion(beforeCjkMention.text, beforeCjkMention, '一下')).toBe('问一下@<小明>');
   });
 
+  it('adds Latin boundary spaces outside terminal and opening punctuation', () => {
+    const beforeWord = voiceInsertionSnapshot('Send today', 5, 5);
+    const afterLabel = voiceInsertionSnapshot('Note:publish', 5, 5);
+    const beforeQuotedWord = voiceInsertionSnapshot('Say "today"', 4, 4);
+
+    expect(applyVoiceInsertion(beforeWord.text, beforeWord, 'the update.')).toBe(
+      'Send the update. today',
+    );
+    expect(applyVoiceInsertion(afterLabel.text, afterLabel, 'now')).toBe('Note: now publish');
+    expect(applyVoiceInsertion(beforeQuotedWord.text, beforeQuotedWord, 'please')).toBe(
+      'Say please "today"',
+    );
+  });
+
   it('refuses to insert when the draft no longer matches the snapshot', () => {
     const snapshot = voiceInsertionSnapshot('original', 8, 8);
 

@@ -370,6 +370,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
   const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
+  const [recordingStarting, setRecordingStarting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
@@ -386,6 +387,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
+  const voiceDraftReadOnly = recordingStarting || recording || transcribing;
 
   useLayoutEffect(() => {
     disabledRef.current = disabled;
@@ -764,6 +766,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     const insertion = capturedInsertion ?? captureVoiceInsertion();
     recordingStartRef.current = true;
+    setRecordingStarting(true);
     let stream: MediaStream | null = null;
     let startingPipeline: VoiceRecordingPipeline | null = null;
     let startingSession: VoiceRecordingSession | null = null;
@@ -880,6 +883,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     } finally {
       recordingStartRef.current = false;
+      if (!unmountedRef.current) setRecordingStarting(false);
     }
   };
 
@@ -924,8 +928,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     (hasComposerText || readyAttachments.length > 0)
     && !uploading
     && !disabled
-    && !recording
-    && !transcribing;
+    && !voiceDraftReadOnly;
   // ``busy && disabled`` is an incoherent pair for ANY caller: ``disabled`` means
   // this composer may not act on the session, yet the busy branch renders an
   // ENABLED Stop button (it never consulted ``disabled``) and its "working"
@@ -1036,7 +1039,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               ref={fileInputRef}
               type="file"
               multiple
-              disabled={disabled || recording}
+              disabled={disabled || voiceDraftReadOnly}
               className="hidden"
               onChange={(e) => {
                 if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
@@ -1053,7 +1056,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // A disabled composer cannot send, so staging attachments is a
               // dead end. Opening a native picker can also hide the page, so
               // keep it unavailable until an active recording has stopped.
-              disabled={disabled || recording}
+              disabled={disabled || voiceDraftReadOnly}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
             >
@@ -1080,13 +1083,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   disabled={isVoiceControlDisabled(
                     disabled,
                     recording,
-                    transcribing,
+                    transcribing || recordingStarting,
                     Boolean(voiceRetainedSession),
                   )}
                   aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                   className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
                 >
-                  {transcribing ? (
+                  {transcribing || recordingStarting ? (
                     <Loader2 className="size-4 animate-spin" />
                   ) : recording ? (
                     <Square className="size-4" />
@@ -1154,7 +1157,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             ref={mentionRef}
             className="flex-1"
             placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
-            disabled={disabled || recording || transcribing}
+            disabled={disabled || voiceDraftReadOnly}
             autoFocus={autoFocus}
             initialText={initialDraft}
             onSearchAgents={onSearchAgents!}
@@ -1168,7 +1171,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // editor is also set non-editable while disabled, which should keep
             // the paste event from reaching Lexical at all — this is the
             // explicit gate rather than a reliance on that.
-            onPasteFiles={mediaEnabled && !disabled && !recording && !transcribing
+            onPasteFiles={mediaEnabled && !disabled && !voiceDraftReadOnly
               ? (files) => void uploadFiles(files)
               : undefined}
             onChange={(text, references, isDraftSeed) => {
@@ -1207,7 +1210,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // did, so a disabled composer still accepted typing (only the Send
             // button was inert). Fixed here so every caller inherits it.
             disabled={disabled}
-            readOnly={recording || transcribing}
+            readOnly={voiceDraftReadOnly}
             placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
