@@ -72,6 +72,10 @@ Amendments (orchestrator-approved):
   (together with their trigger edges); a "show disabled" switch in the canvas
   LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
   payload unchanged.
+- **A12 (2026-07-30, callback authority correction)**: only child Runs with
+  `source_kind='callback'` are callback deliveries. An agent-authored child
+  remains an independent spawn even when it targets the parent Run's callback
+  Session; parent/target coincidence never erases that lineage.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —
@@ -185,7 +189,8 @@ Semantics:
 - Edge node references: sessions by `session_id`; trigger chips by
   `def:<definition_id>`.
 - `spawn` edges: aggregated per (caller session → callee session) from runs
-  with `source_kind='agent'` and `source_actor` set.
+  with `source_kind='agent'` and `source_actor` set. Callback deliveries use
+  `source_kind='callback'` and never enter spawn aggregation.
 - `callback` edges: emitted when `callback_session_id` is set **and**
   `callback_status` is non-null (amendment A4 — sync runs that only record a
   return route draw nothing). Target may equal the spawn caller; the client
