@@ -5808,10 +5808,17 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
     """
 
     import json
+    from datetime import datetime, timedelta, timezone
 
     from storage.background import SQLiteBackgroundTaskStore
     from storage.pagination import PageRequest
     from vibe import cli
+
+    # Seeded RELATIVE to the wall clock, because the CLI path computes health
+    # from ``datetime.now`` — a fixed calendar date here was a time bomb that
+    # started aging runs out of the 72 h window three days after it was written.
+    def _instant(hours_ago: float) -> str:
+        return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 
     store = SQLiteBackgroundTaskStore()
     try:
@@ -5824,8 +5831,8 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
                     "status": "failed",
                     "definition_id": "task-cli",
                     "error": "boom",
-                    "created_at": f"2026-07-27T0{index}:00:00+00:00",
-                    "completed_at": f"2026-07-27T0{index}:30:00+00:00",
+                    "created_at": _instant(8 - index),
+                    "completed_at": _instant(7.5 - index),
                 }
             )
         store.enqueue_run(
@@ -5834,8 +5841,8 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
                 "request_type": "scheduled",
                 "status": "succeeded",
                 "definition_id": "task-cli",
-                "created_at": "2026-07-27T04:00:00+00:00",
-                "completed_at": "2026-07-27T04:30:00+00:00",
+                "created_at": _instant(4),
+                "completed_at": _instant(3.5),
             }
         )
         # What ``mark_task_result`` leaves behind after that final success.
@@ -5849,7 +5856,7 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
                 "enabled": True,
                 "created_at": _EPOCH,
                 "updated_at": _EPOCH,
-                "last_run_at": "2026-07-27T04:30:00+00:00",
+                "last_run_at": _instant(3.5),
                 "last_error": None,
             }
         )
