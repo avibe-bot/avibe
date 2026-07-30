@@ -3027,24 +3027,22 @@ class ModelHubService:
                     self._oauth_adapter(binding.channel).cancel_oauth(flow_id),
                     flow_id=flow_id,
                 )
-                cancelled = await self._oauth_status(
-                    flow_id,
-                    binding.channel,
-                )
-                if (
-                    cancelled.state == "success"
-                    or (
-                        binding.channel == "hub"
-                        and (
-                            cancelled.state == "failed"
-                            or (
-                                binding.intent == "reauth"
-                                and cancelled.state == "cancelled"
-                            )
-                        )
+                if binding.channel == "hub":
+                    cancelled = await self._oauth_status(
+                        flow_id,
+                        binding.channel,
                     )
-                ):
-                    terminal = (binding, cancelled)
+                    if (
+                        cancelled.state == "success"
+                        or cancelled.state == "failed"
+                        or (
+                            binding.intent == "reauth"
+                            and cancelled.state == "cancelled"
+                        )
+                    ):
+                        terminal = (binding, cancelled)
+                    else:
+                        self.oauth_flows.forget(flow_id)
                 else:
                     self.oauth_flows.forget(flow_id)
         if terminal is not None:
