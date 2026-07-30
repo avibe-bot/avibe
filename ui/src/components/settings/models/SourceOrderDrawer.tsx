@@ -48,7 +48,7 @@ import { DRY_RUN_ENABLED } from './featureFlags';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { apiFailure, modelsApi } from './modelsApi';
-import { dryRunOutcome, dryRunPlan, dryRunRowView, probeWroteState, type DryRunOutcome } from './repair';
+import { dryRunOutcome, dryRunPlan, dryRunRowView, probeArrival, type DryRunOutcome } from './repair';
 import { movedOrder, sameIds } from './reorder';
 import { serverText } from './serverCopy';
 import { orderSufficiency } from './sufficiency';
@@ -528,7 +528,9 @@ const DryRunRow: React.FC<{
    *  `dryRunRowView` owns that rule. */
   saving: boolean;
   /** Re-read sources + agents, the drawer's own `onSaved`: a failing 试跑 is a
-   *  write, so the page it sits on is stale until this runs. */
+   *  write, so the page it sits on is stale until this runs — and `probeArrival`
+   *  owns the part that is easy to get wrong, that this is owed even for an answer
+   *  the row will not draw. */
   reread: () => void;
 }> = ({ agent, sources, chainKey, saving, reread }) => {
   const { t } = useTranslation();
@@ -565,18 +567,24 @@ const DryRunRow: React.FC<{
     setErrorText(null);
     try {
       const probe = await modelsApi.probeAgent(backend);
-      if (seq.current !== mine) return;
-      setOutcome(dryRunOutcome(probe, sources));
-      // Store the verdict first, then re-read: `probeWroteState` owns which
-      // outcomes changed the server, and the row states and ● 当前 on the page
-      // behind this sheet are stale until the page re-reads them.
-      if (probeWroteState(probe)) reread();
+      // `seq` guards the REPORT, not the refetch. An edit to the chain while this
+      // was in flight makes the answer moot, but not the cooldown it wrote — and
+      // that edit's own refetch went out before this returned, so it cannot have
+      // seen it. `probeArrival` owns the split; the verdict is stored first, then
+      // the page behind this sheet is corrected.
+      const arrival = probeArrival({ kind: 'result', probe }, seq.current === mine);
+      if (arrival.report) setOutcome(dryRunOutcome(probe, sources));
+      if (arrival.reread) reread();
     } catch (err) {
-      if (seq.current !== mine) return;
+      const failure = apiFailure(err);
+      const arrival = probeArrival({ kind: 'thrown', serverNamed: failure !== null }, seq.current === mine);
       // The server's own reason when it named one (`probe_no_candidate` carries a
       // detail key), the generic line when it didn't — the same degradation the
       // rest of the page gives a server-chosen key.
-      setErrorText(serverText(t, apiFailure(err)?.detail, 'settings.models.dryRun.error'));
+      if (arrival.report) setErrorText(serverText(t, failure?.detail, 'settings.models.dryRun.error'));
+      // A failure the route never named is not one of its checked outcomes: the
+      // probe may have run and written with the answer lost on the way back.
+      if (arrival.reread) reread();
     } finally {
       if (seq.current === mine) setRunning(false);
     }

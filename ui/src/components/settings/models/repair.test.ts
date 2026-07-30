@@ -17,6 +17,7 @@ import {
   dryRunOutcome,
   dryRunPlan,
   dryRunRowView,
+  probeArrival,
   probeWroteState,
   reauthBodyKey,
   reauthCost,
@@ -450,6 +451,57 @@ describe('probeWroteState — whether 试跑 left a mark the page has to re-read
     // a cooldown on success — so a green 试跑 must NOT refetch, or every check
     // costs the page two extra requests for nothing.
     expect(probeWroteState(probe({ channel, latency_ms: channel === 'hub' ? 412 : null }))).toBe(false);
+  });
+});
+
+describe('probeArrival — an answer nobody wants can still be one the page owes', () => {
+  const failing = probe({ reachable: false, latency_ms: null, error: 'models.source.cooldown.server_error' });
+
+  it('shows and re-reads when the failure is still the answer to the question asked', () => {
+    expect(probeArrival({ kind: 'result', probe: failing }, true)).toEqual({ report: true, reread: true });
+  });
+
+  it('re-reads a failure the row will NOT draw', () => {
+    // The case: the user reorders while the probe is out. That edit bumped `seq`,
+    // so this response is no longer about the chain on screen — but it cooled a
+    // source down, and the edit's own PUT refetch went out BEFORE this returned, so
+    // it read the source back healthy. Dropping the arrival wholesale is what left
+    // the row green under a head the server had already moved.
+    expect(probeArrival({ kind: 'result', probe: failing }, false)).toEqual({ report: false, reread: true });
+  });
+
+  it('re-reads nothing for a reachable probe, current or stale', () => {
+    // Provably no write: the block sits entirely under `if not reachable`, and no
+    // path clears a cooldown on success.
+    expect(probeArrival({ kind: 'result', probe: probe() }, true)).toEqual({ report: true, reread: false });
+    expect(probeArrival({ kind: 'result', probe: probe() }, false)).toEqual({ report: false, reread: false });
+  });
+
+  it('trusts a throw the server NAMED to have written nothing', () => {
+    // `probe_no_candidate` is raised before any write, and an engine failure
+    // propagates out above the write block — the outcomes `probeWroteState` checked
+    // one by one, and every one of them arrives as a structured failure.
+    expect(probeArrival({ kind: 'thrown', serverNamed: true }, true)).toEqual({ report: true, reread: false });
+  });
+
+  it('re-reads a throw the server did not name', () => {
+    // Not one of the route's outcomes at all — a lost connection, an unparseable
+    // body. The probe may have run and written with the answer lost on the way
+    // back, and unknown is not the same as no. Owed even when the row is stale and
+    // will draw no error line.
+    expect(probeArrival({ kind: 'thrown', serverNamed: false }, true)).toEqual({ report: true, reread: true });
+    expect(probeArrival({ kind: 'thrown', serverNamed: false }, false)).toEqual({ report: false, reread: true });
+  });
+
+  it('is how the drawer reads its own probe, at both arrivals', () => {
+    // The regression this replaces was a `return` on the staleness guard ABOVE the
+    // refetch, so the shape matters as much as the rule: no early exit may sit
+    // between a probe arriving and the page being corrected.
+    const drawer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'SourceOrderDrawer.tsx'), 'utf8');
+
+    expect(drawer).not.toMatch(/if \(seq\.current !== mine\) return;/);
+    expect((drawer.match(/probeArrival\(/g) ?? []).length).toBe(2);
+    expect(drawer).toMatch(/if \(arrival\.reread\) reread\(\);/);
   });
 });
 

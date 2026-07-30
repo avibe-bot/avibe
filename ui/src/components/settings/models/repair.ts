@@ -346,11 +346,53 @@ export function dryRunOutcome(probe: ProbeResult, sources: Source[]): DryRunOutc
  * the write block sits entirely under `if not reachable`, and no path clears a
  * cooldown on success.
  *
- * A THROWN probe needs no re-read for the same reason, checked outcome by
- * outcome: `probe_no_candidate` is raised before any write, and an engine failure
- * propagates out of `_engine_call` above the write block.
+ * A thrown probe the server NAMED needs no re-read for the same reason, checked
+ * outcome by outcome: `probe_no_candidate` is raised before any write, and an
+ * engine failure propagates out of `_engine_call` above the write block. A throw
+ * the server did not name is not one of those outcomes — see `probeArrival`.
  */
 export const probeWroteState = (probe: ProbeResult): boolean => !probe.reachable;
+
+/**
+ * What a probe's arrival still gets to do. Two questions that look like one and
+ * are not: whether this answer may be SHOWN, and whether the page behind the
+ * sheet has to be RE-READ.
+ *
+ * They come apart the moment the user edits the chain while a probe is in flight.
+ * The edit bumps the sequence, so the response stops being the answer to anything
+ * on screen — and dropping it there dropped the acknowledgment that it WROTE.
+ * Nothing else covers that: the edit's own PUT refetch is issued while this probe
+ * is still out, so it can read the source back exactly as it was before the
+ * cooldown landed, leaving a healthy row and a ● 当前 the server has already
+ * moved. Staleness is a fact about the QUESTION; the write is a fact about the
+ * server, and no guard over the first may decide the second.
+ *
+ * A THROW is the same split with a different answer to the second half.
+ * `probeWroteState`'s outcome-by-outcome check covers the failures the route
+ * NAMES, and every one of those arrives as a structured `ApiCallError`. A throw
+ * with no server name is not one of the route's outcomes at all — a lost
+ * connection, an unparseable body — so the probe may have run and written with
+ * the response never reaching us. Unknown is not the same as no, and this takes
+ * `probeWroteState`'s own trade: one extra read costs a request, while being
+ * wrong the other way costs a page that silently disagrees with the server.
+ */
+export type ProbeAnswer =
+  | { kind: 'result'; probe: ProbeResult }
+  /** `serverNamed` is `apiFailure(err) !== null` — the route said which failure
+   *  this is, which is exactly what makes it one of the checked outcomes. */
+  | { kind: 'thrown'; serverNamed: boolean };
+
+export type ProbeArrival = {
+  /** Whether this answer is still the answer to what the row is asking. */
+  report: boolean;
+  /** Whether the source rows and ● 当前 behind this sheet are now stale. */
+  reread: boolean;
+};
+
+export const probeArrival = (answer: ProbeAnswer, stillCurrent: boolean): ProbeArrival => ({
+  report: stillCurrent,
+  reread: answer.kind === 'result' ? probeWroteState(answer.probe) : !answer.serverNamed,
+});
 
 /**
  * What the 试跑 row IS right now — which is not the same question as what the
