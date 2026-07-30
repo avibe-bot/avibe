@@ -482,6 +482,133 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
     assert (launch.channel, launch.source_id) == ("hub", hub_openai.id)
 
 
+def test_runtime_launch_uses_discovered_native_alias_target(tmp_path: Path) -> None:
+    relay = _source(
+        "src_alias001",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20251101",),
+    )
+    config = _hub_config(
+        sources=[relay],
+        order=[relay.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter({relay.id: "route-alias"}),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+
+    launch = asyncio.run(
+        _router(service).resolve("claude", "claude-opus-4-5")
+    )
+
+    assert launch.source_id == relay.id
+    assert launch.target_model == "claude-opus-4-5-20251101"
+    assert launch.runtime_model == "route-alias/claude-opus-4-5-20251101"
+
+
+@pytest.mark.parametrize("requested_model", ["opus", "sonnet[1m]"])
+def test_native_cli_preserves_exact_cli_alias(
+    tmp_path: Path,
+    requested_model: str,
+) -> None:
+    native = _source(
+        "src_native_alias",
+        kind="subscription",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="native_cli",
+        model_ids=(
+            requested_model,
+            "claude-opus-5",
+            "claude-sonnet-5",
+        ),
+    )
+    config = _hub_config(
+        sources=[native],
+        order=[native.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+
+    launch = asyncio.run(_router(service).resolve("claude", requested_model))
+
+    assert launch.channel == "native_cli"
+    assert launch.source_id == native.id
+    assert launch.target_model == requested_model
+    assert launch.runtime_model == requested_model
+
+
+def test_runtime_alias_failover_correlates_by_requested_menu_id(tmp_path: Path) -> None:
+    requested_model = "claude-opus-4-5"
+    primary = _source(
+        "src_alias_primary",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20251101",),
+    )
+    backup = _source(
+        "src_alias_backup",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("claude-opus-4-5-20250929",),
+    )
+    config = _hub_config(
+        sources=[primary, backup],
+        order=[primary.id, backup.id],
+        agents=_agents(),
+    )
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter(
+            {
+                primary.id: "route-primary",
+                backup.id: "route-backup",
+            }
+        ),
+        now=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    router = _router(service)
+
+    primary_launch = asyncio.run(router.resolve("claude", requested_model))
+    context = SimpleNamespace()
+    bind_launch(context, primary_launch)
+    assert asyncio.run(router.record_native_failure(context, "429 rate limit")) is True
+
+    backup_launch = asyncio.run(router.resolve("claude", requested_model))
+
+    assert primary_launch.target_model == "claude-opus-4-5-20251101"
+    assert backup_launch.target_model == "claude-opus-4-5-20250929"
+    assert backup_launch.source_id == backup.id
+    transition_events = [
+        event
+        for event in service.events.list(limit=20)
+        if event["kind"] in {"cooldown", "switch"}
+    ]
+    assert [event["kind"] for event in transition_events] == [
+        "switch",
+        "cooldown",
+    ]
+    assert {event["model_id"] for event in transition_events} == {
+        requested_model
+    }
+
+
 def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
     service = _service(
         tmp_path,
