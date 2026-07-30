@@ -1239,9 +1239,31 @@ class SQLiteSessionsService:
                 if not isinstance(agent_maps, dict):
                     continue
                 scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
+                resolved_imported_identities: dict[str, tuple[str, str | None, str | None]] = {}
+                normalized_anchors: dict[tuple[str, str], str] = {}
+                anchor_owner_candidates: dict[
+                    str, list[tuple[str, str, str | None, str | None]]
+                ] = {}
+                for candidate_name, candidate_thread_map in agent_maps.items():
+                    if not isinstance(candidate_thread_map, dict):
+                        continue
+                    candidate_variant = str(candidate_name) or "default"
+                    candidate_identity = _resolve_imported_agent_identity(conn, candidate_variant)
+                    resolved_imported_identities[candidate_variant] = candidate_identity
+                    for candidate_thread_id in candidate_thread_map:
+                        candidate_thread_key = str(candidate_thread_id)
+                        candidate_anchor = _base_session_anchor(candidate_thread_key)
+                        normalized_anchors[(candidate_variant, candidate_thread_key)] = candidate_anchor
+                        anchor_owner_candidates.setdefault(candidate_anchor, []).append(
+                            (candidate_variant, *candidate_identity)
+                        )
                 for agent_name, thread_map in agent_maps.items():
                     if not isinstance(thread_map, dict):
                         continue
+                    imported_variant = str(agent_name) or "default"
+                    imported_backend, imported_agent_id, imported_agent_name = resolved_imported_identities[
+                        imported_variant
+                    ]
                     for thread_id, native_session_id in thread_map.items():
                         thread_key = str(thread_id)
                         # Normalise OpenCode ``base:/cwd`` composites to the bare
@@ -1249,14 +1271,10 @@ class SQLiteSessionsService:
                         # subagent ``base:<name>`` anchors are preserved. Workdir is
                         # snapshotted from scope settings, never inferred from the
                         # legacy anchor suffix.
-                        base_anchor = _base_session_anchor(thread_key)
+                        base_anchor = normalized_anchors[(imported_variant, thread_key)]
                         dedup_key = (scope_id, base_anchor)
                         if dedup_key in seen_anchor_rows:
                             continue
-                        imported_variant = str(agent_name) or "default"
-                        imported_backend, imported_agent_id, imported_agent_name = _resolve_imported_agent_identity(
-                            conn, imported_variant
-                        )
                         encoded_session_id = encode_session_value(native_session_id)
                         existing_anchor_row = _find_scope_anchor_row(
                             conn,
@@ -1290,20 +1308,8 @@ class SQLiteSessionsService:
                             # Prefer a legacy mapping for the reserved owner when one
                             # exists; otherwise an unbound route reservation is
                             # provisional and may be adopted by the imported session.
-                            has_existing_owner_mapping = False
-                            for candidate_name, candidate_thread_map in agent_maps.items():
-                                if not isinstance(candidate_thread_map, dict) or not any(
-                                    _base_session_anchor(str(candidate_thread_id)) == base_anchor
-                                    for candidate_thread_id in candidate_thread_map
-                                ):
-                                    continue
-                                candidate_variant = str(candidate_name) or "default"
-                                (
-                                    candidate_backend,
-                                    candidate_agent_id,
-                                    candidate_agent_name,
-                                ) = _resolve_imported_agent_identity(conn, candidate_variant)
-                                if _import_matches_existing_owner(
+                            has_existing_owner_mapping = any(
+                                _import_matches_existing_owner(
                                     existing_backend=existing_backend,
                                     existing_variant=existing_variant,
                                     existing_agent_id=existing_agent_id,
@@ -1312,9 +1318,14 @@ class SQLiteSessionsService:
                                     imported_variant=candidate_variant,
                                     imported_agent_id=candidate_agent_id,
                                     imported_agent_name=candidate_agent_name,
-                                ):
-                                    has_existing_owner_mapping = True
-                                    break
+                                )
+                                for (
+                                    candidate_variant,
+                                    candidate_backend,
+                                    candidate_agent_id,
+                                    candidate_agent_name,
+                                ) in anchor_owner_candidates.get(base_anchor, ())
+                            )
                             adopts_unbound_route = (
                                 not existing_native_session_id
                                 and not import_matches_existing_owner

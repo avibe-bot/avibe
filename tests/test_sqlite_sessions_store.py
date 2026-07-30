@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
+import storage.sessions_service as sessions_service_module
 from config import paths
 from config.v2_sessions import ActivePollInfo, SessionState, SessionsStore
 from modules.sessions_facade import SessionsFacade
@@ -1154,6 +1155,58 @@ def test_save_state_preserves_durable_agent_identity_on_legacy_backend(
         assert row["agent_id"] == "agent-reviewer-deleted"
         assert row["agent_name"] == "reviewer"
         assert row["native_session_id"] == "reviewer-native"
+    finally:
+        service.close()
+
+
+def test_save_state_indexes_legacy_owner_candidates_once_per_scope(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    thread_count = 12
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            for index in range(thread_count):
+                create_agent_session_row(
+                    conn,
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    session_anchor=f"slack_{index}",
+                    native_session_id="",
+                    workdir="/tmp",
+                    metadata={"legacy_scope_key": "slack::C123"},
+                    require_workdir=False,
+                )
+
+        with (
+            patch.object(
+                sessions_service_module,
+                "_resolve_imported_agent_identity",
+                wraps=sessions_service_module._resolve_imported_agent_identity,
+            ) as resolve_identity,
+            patch.object(
+                sessions_service_module,
+                "_base_session_anchor",
+                wraps=sessions_service_module._base_session_anchor,
+            ) as normalize_anchor,
+        ):
+            service.save_state(
+                SessionState(
+                    session_mappings={
+                        "slack::C123": {
+                            "codex": {
+                                f"slack_{index}": f"codex-native-{index}"
+                                for index in range(thread_count)
+                            }
+                        }
+                    }
+                )
+            )
+
+        assert resolve_identity.call_count == 1
+        assert normalize_anchor.call_count == thread_count
     finally:
         service.close()
 
