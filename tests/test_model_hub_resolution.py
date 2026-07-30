@@ -685,6 +685,60 @@ def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     assert resolved.source_id == "src_primary01"
 
 
+def test_agent_supply_eligibility_is_complete_chain_and_process_inventory(
+    tmp_path,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    native = config.sources[0]
+    native.kind = "subscription"
+    native.vendor = "anthropic"
+    native.supply_channel = "native_cli"
+    native.credential_ref = None
+    outside_chain = _source("src_outside01", "Outside current chain")
+    outside_chain.models = [
+        ModelHubModelConfig(id="other-model", provenance="discovered")
+    ]
+    config.sources.append(outside_chain)
+    service.native_source_ready = (
+        lambda _backend, source: source.id != native.id
+    )
+
+    agent = service.get_agent_sources("claude")
+    eligibility = {
+        row["source_id"]: row
+        for row in agent["sources"]["eligibility"]
+    }
+
+    assert set(eligibility) == {source.id for source in config.sources}
+    assert eligibility[native.id] == {
+        "source_id": native.id,
+        "eligible": True,
+        "reason_key": None,
+        "in_current_model_chain": True,
+        "process_availability_reason": "native_cli_unavailable",
+    }
+    assert eligibility["src_backup001"]["in_current_model_chain"] is True
+    assert eligibility[outside_chain.id]["in_current_model_chain"] is False
+    assert (
+        eligibility[outside_chain.id]["process_availability_reason"]
+        is None
+    )
+
+    service.store.requested_models["claude"] = ""
+    unselected = service.get_agent_sources("claude")
+    assert unselected["selected_model_id"] is None
+    assert all(
+        row["in_current_model_chain"] is None
+        for row in unselected["sources"]["eligibility"]
+    )
+    assert next(
+        row
+        for row in unselected["sources"]["eligibility"]
+        if row["source_id"] == native.id
+    )["process_availability_reason"] == "native_cli_unavailable"
+
+
 def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
@@ -1388,6 +1442,270 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     config.agents["claude"].mode = "direct"
     asyncio.run(service.delete_source("src_primary01"))
     assert [source.id for source in service.store.load().sources] == ["src_backup001"]
+
+
+def test_mapping_auto_enrolls_eligible_non_enrolled_source(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    added = _source("src_mapping01", "Mapping target")
+    added.models = [
+        ModelHubModelConfig(id="mapped-model", provenance="discovered")
+    ]
+    excluded = _source("src_mapping02", "Excluded mapping fallback")
+    excluded.models = [
+        ModelHubModelConfig(id="mapped-model", provenance="discovered")
+    ]
+    config.sources.extend([added, excluded])
+    original_order = list(config.agents["claude"].sources.order)
+
+    agent = asyncio.run(
+        service.set_mappings(
+            "claude",
+            [
+                {
+                    "builtin_id": "claude-opus-4-6",
+                    "target_model_id": "mapped-model",
+                    "enabled": True,
+                }
+            ],
+        )
+    )
+
+    assert agent["sources"]["policy"] == "custom"
+    assert agent["sources"]["order"] == [*original_order, added.id]
+    assert config.agents["claude"].mappings[0].target_model_id == "mapped-model"
+
+
+def test_opencode_menu_auto_enrolls_eligible_non_enrolled_source(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    added = _source("src_openmenu01", "Open menu target")
+    added.vendor = "openrouter"
+    added.models = [
+        ModelHubModelConfig(
+            id="anthropic/claude-sonnet-4",
+            provenance="manual",
+        )
+    ]
+    excluded = _source("src_openmenu02", "Excluded menu fallback")
+    excluded.vendor = "openrouter"
+    excluded.models = [
+        ModelHubModelConfig(
+            id="anthropic/claude-sonnet-4",
+            provenance="manual",
+        )
+    ]
+    config.sources.extend([added, excluded])
+    original_order = list(config.agents["opencode"].sources.order)
+
+    agent = asyncio.run(
+        service.set_opencode_menu(
+            {
+                "view": "featured",
+                "checked": [
+                    "openrouter/anthropic/claude-sonnet-4",
+                ],
+            }
+        )
+    )
+
+    assert agent["sources"]["policy"] == "custom"
+    assert agent["sources"]["order"] == [*original_order, added.id]
+    assert agent["menu"]["checked"] == [
+        "openrouter/anthropic/claude-sonnet-4"
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["mapping", "menu"])
+def test_menu_acceptance_preserves_excluded_supplier_when_target_is_enrolled(
+    tmp_path,
+    mutation,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    excluded = _source("src_excluded01", "Explicitly excluded fallback")
+    config.sources.append(excluded)
+    backend = "claude" if mutation == "mapping" else "opencode"
+    original_order = list(config.agents[backend].sources.order)
+
+    if mutation == "mapping":
+        agent = asyncio.run(
+            service.set_mappings(
+                "claude",
+                [
+                    {
+                        "builtin_id": "claude-opus-4-6",
+                        "target_model_id": "claude-opus-4-6",
+                        "enabled": True,
+                    }
+                ],
+            )
+        )
+    else:
+        agent = asyncio.run(
+            service.set_opencode_menu(
+                {
+                    "view": "featured",
+                    "checked": ["anthropic/claude-opus-4-6"],
+                }
+            )
+        )
+
+    assert agent["sources"]["order"] == original_order
+    assert excluded.id not in agent["sources"]["order"]
+
+
+@pytest.mark.parametrize("mutation", ["mapping", "menu"])
+def test_menu_acceptance_incrementally_deduplicates_selected_supplier(
+    tmp_path,
+    mutation,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    selected = _source("src_multimap01", "Selected supplier")
+    excluded = _source("src_multimap02", "Excluded fallback")
+    for source in (selected, excluded):
+        source.models = [
+            ModelHubModelConfig(id="target-one", provenance="manual"),
+            ModelHubModelConfig(id="target-two", provenance="manual"),
+        ]
+    config.sources.extend([selected, excluded])
+    backend = "claude" if mutation == "mapping" else "opencode"
+    original_order = list(config.agents[backend].sources.order)
+
+    if mutation == "mapping":
+        agent = asyncio.run(
+            service.set_mappings(
+                "claude",
+                [
+                    {
+                        "builtin_id": "claude-opus-4-6",
+                        "target_model_id": "target-one",
+                        "enabled": True,
+                    },
+                    {
+                        "builtin_id": "claude-sonnet-4-6",
+                        "target_model_id": "target-two",
+                        "enabled": True,
+                    },
+                ],
+            )
+        )
+    else:
+        agent = asyncio.run(
+            service.set_opencode_menu(
+                {
+                    "view": "featured",
+                    "checked": [
+                        "anthropic/target-one",
+                        "anthropic/target-two",
+                    ],
+                }
+            )
+        )
+
+    assert agent["sources"]["order"] == [*original_order, selected.id]
+    assert excluded.id not in agent["sources"]["order"]
+
+
+def test_follow_order_exhaustively_enrolls_eligible_sources_and_stays_follow(
+    tmp_path,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    anthropic_native = _source("src_claude01", "Claude native")
+    anthropic_native.kind = "subscription"
+    anthropic_native.supply_channel = "native_cli"
+    anthropic_native.vendor = "anthropic"
+    anthropic_native.credential_ref = None
+    openai_native = _source("src_codex001", "Codex native")
+    openai_native.kind = "subscription"
+    openai_native.supply_channel = "native_cli"
+    openai_native.vendor = "openai"
+    openai_native.credential_ref = None
+    config.sources.extend([anthropic_native, openai_native])
+    for agent in config.agents.values():
+        agent.sources.policy = "follow"
+        agent.sources.order = []
+
+    for backend, agent in config.agents.items():
+        eligible = {
+            source.id
+            for source in config.sources
+            if config.source_eligible_for_backend(source, backend)
+        }
+        assert set(config.effective_source_order(backend)) == eligible
+        assert agent.sources.policy == "follow"
+
+    claude = asyncio.run(
+        service.set_mappings(
+            "claude",
+            [
+                {
+                    "builtin_id": "claude-opus-4-6",
+                    "target_model_id": "claude-opus-4-6",
+                    "enabled": True,
+                }
+            ],
+        )
+    )
+    opencode = asyncio.run(
+        service.set_opencode_menu(
+            {
+                "view": "featured",
+                "checked": ["anthropic/claude-opus-4-6"],
+            }
+        )
+    )
+
+    assert claude["sources"]["policy"] == "follow"
+    assert opencode["sources"]["policy"] == "follow"
+
+
+@pytest.mark.parametrize("mutation", ["mapping", "menu"])
+def test_menu_mutations_reject_ineligible_sources_without_enrolling(
+    tmp_path,
+    mutation,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    candidate = _source("src_ineligible01", "Ineligible target")
+    candidate.kind = "subscription"
+    candidate.supply_channel = "native_cli"
+    candidate.vendor = "openai"
+    candidate.credential_ref = None
+    candidate.models = [
+        ModelHubModelConfig(id="ineligible-model", provenance="discovered")
+    ]
+    config.sources.append(candidate)
+    before = _serialized_config(service)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        if mutation == "mapping":
+            asyncio.run(
+                service.set_mappings(
+                    "claude",
+                    [
+                        {
+                            "builtin_id": "claude-opus-4-6",
+                            "target_model_id": "ineligible-model",
+                            "enabled": True,
+                        }
+                    ],
+                )
+            )
+        else:
+            asyncio.run(
+                service.set_opencode_menu(
+                    {
+                        "view": "featured",
+                        "checked": ["openai/ineligible-model"],
+                    }
+                )
+            )
+
+    assert exc_info.value.code == "mapping_target_unavailable"
+    assert _serialized_config(service) == before
 
 
 class NarrowingCredentialAdapter(FakeAdapter):

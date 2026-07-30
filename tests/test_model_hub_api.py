@@ -21,6 +21,7 @@ from core.handlers.model_hub.adapter import (
     OAuthFlowState,
     RawCallOutcome,
     RawOutcomeKind,
+    RetainedMaterialDisposition,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
@@ -97,6 +98,9 @@ class FakeAdapter:
         self.native_signed_in = True
         self.native_account_label = None
         self.oauth_start_calls = []
+        self.orphan_cleanup_calls = []
+        self.orphan_cleanup_succeeds = False
+        self.cancel_disposition = RetainedMaterialDisposition.NONE
 
     async def ensure_installed(self):
         return await self.status()
@@ -126,6 +130,10 @@ class FakeAdapter:
 
     async def revoke_credential(self, credential_ref):
         self.revoked.append(credential_ref)
+
+    async def cleanup_orphaned_oauth_material(self, credential_ref):
+        self.orphan_cleanup_calls.append(credential_ref)
+        return self.orphan_cleanup_succeeds
 
     async def sync_sources(self, bindings):
         self.synced.append(tuple(bindings))
@@ -194,6 +202,16 @@ class FakeAdapter:
         self.cancelled.append(flow_id)
         if self.fail_cancel:
             raise RuntimeError("temporary engine failure")
+        flow = self.flows[flow_id]
+        if flow.state not in {"success", "failed", "cancelled"}:
+            self.flows[flow_id] = OAuthFlowState(
+                **{
+                    **flow.__dict__,
+                    "state": "cancelled",
+                    "retained_material_disposition": self.cancel_disposition,
+                    "retained_credential_ref": None,
+                }
+            )
 
     def completed_source_status(self, flow_id):
         if flow_id not in self.flows:
@@ -649,12 +667,19 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert response.status_code == 201
     body = response.get_json()
     _assert_envelope(body)
-    assert set(body) == {"ok", "contract_version", "source", "adopted_by"}
+    assert set(body) == {
+        "ok",
+        "contract_version",
+        "source",
+        "adopted_by",
+        "skipped_by",
+    }
     assert {item["backend"] for item in body["adopted_by"]} == {
         "claude",
         "codex",
         "opencode",
     }
+    assert body["skipped_by"] == []
     source = body["source"]
     _assert_valid("source.schema.json", source)
     source_id = source["id"]
@@ -830,6 +855,15 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
             "model_supply",
             "named_agents",
         } <= set(agent)
+        if agent["sources"] is not None:
+            for row in agent["sources"]["eligibility"]:
+                assert set(row) == {
+                    "source_id",
+                    "eligible",
+                    "reason_key",
+                    "in_current_model_chain",
+                    "process_availability_reason",
+                }
         _assert_valid("agent-supply.schema.json", agent)
 
     event_example = _schema("resolution-event.schema.json")["examples"][0]
@@ -932,7 +966,9 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         "contract_version",
         "source",
         "adopted_by",
+        "skipped_by",
     }
+    assert oauth_creation["skipped_by"] == []
     consented_source = oauth_creation["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
@@ -1673,7 +1709,106 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
     assert binding.completed is True
 
 
-def test_failed_undiscriminated_hub_reauth_fails_closed(tmp_path):
+@pytest.mark.parametrize(
+    ("terminal_state", "disposition", "retained_credential_ref"),
+    [
+        (
+            "failed",
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "cred_hub_existing",
+        ),
+        ("failed", RetainedMaterialDisposition.UNKNOWN, None),
+        ("cancelled", RetainedMaterialDisposition.UNKNOWN, None),
+    ],
+)
+@pytest.mark.parametrize("entrypoint", ["status", "submit"])
+def test_hub_reauth_irreversible_dispositions_fail_closed(
+    tmp_path,
+    terminal_state,
+    disposition,
+    retained_credential_ref,
+    entrypoint,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            ),
+            ModelHubModelConfig(
+                id="manual-model",
+                provenance="manual",
+            ),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": terminal_state,
+            "error_key": (
+                "models.oauth.binding_failed"
+                if terminal_state == "failed"
+                else None
+            ),
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": retained_credential_ref,
+        }
+    )
+
+    if entrypoint == "status":
+        result = asyncio.run(service.oauth_status(flow["flow_id"]))
+    else:
+        async def return_terminal(_flow_id, _value):
+            return adapter.flows[flow["flow_id"]]
+
+        adapter.submit_oauth = return_terminal
+        result = asyncio.run(
+            service.oauth_submit(
+                {
+                    "flow_id": flow["flow_id"],
+                    "value": "oauth-code",
+                }
+            )
+        )
+
+    assert result["flow"]["state"] == terminal_state
+    persisted = store.config.sources[0]
+    assert persisted.credential_ref == "cred_hub_existing"
+    assert [model.id for model in persisted.models] == ["manual-model"]
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"
+    assert adapter.revoked == []
+    assert adapter.orphan_cleanup_calls == []
+    assert service.revocations.list() == []
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    [
+        RetainedMaterialDisposition.NONE,
+        RetainedMaterialDisposition.FOREIGN_SOURCE_REF,
+    ],
+)
+def test_failed_hub_reauth_non_owned_material_preserves_prior_state(
+    tmp_path,
+    disposition,
+):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_huboauth01",
@@ -1706,22 +1841,345 @@ def test_failed_undiscriminated_hub_reauth_fails_closed(tmp_path):
             **adapter.flows[flow["flow_id"]].__dict__,
             "state": "failed",
             "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": None,
+        }
+    )
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["flow"]["state"] == "failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+    assert adapter.revoked == []
+    assert adapter.orphan_cleanup_calls == []
+    assert service.revocations.list() == []
+
+
+def test_failed_hub_reauth_orphan_is_journaled_and_retried_by_ref(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": RetainedMaterialDisposition.ORPHAN_REF,
+            "retained_credential_ref": "cred_hub_orphan",
+        }
+    )
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["flow"]["state"] == "failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+    assert adapter.revoked == []
+    assert adapter.orphan_cleanup_calls == ["cred_hub_orphan"]
+    pending = service.revocations.list()
+    assert [
+        (entry.source_id, entry.credential_ref, entry.operation)
+        for entry in pending
+    ] == [
+        (
+            source.id,
+            "cred_hub_orphan",
+            "cleanup_orphaned_oauth_material",
+        )
+    ]
+
+    restarted_adapter = FakeAdapter()
+    restarted_adapter.orphan_cleanup_succeeds = True
+    restarted = ModelHubService(
+        store=store,
+        adapter=restarted_adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+        revocations=CredentialRevocationJournal(
+            tmp_path / "revocations.json"
+        ),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(restarted._ensure_engine_synced())
+
+    assert restarted_adapter.orphan_cleanup_calls == ["cred_hub_orphan"]
+    assert restarted.revocations.list() == []
+
+
+def test_failed_hub_create_orphan_is_journaled_before_flow_can_be_forgotten(
+    tmp_path,
+):
+    service, _, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start(
+            {
+                "vendor": "anthropic",
+                "channel": "hub",
+                "experimental_consent": True,
+            }
+        )
+    )["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": RetainedMaterialDisposition.ORPHAN_REF,
+            "retained_credential_ref": "cred_create_orphan",
         }
     )
 
     result = asyncio.run(service.oauth_status(flow["flow_id"]))
 
     assert result["flow"]["state"] == "failed"
-    persisted = store.config.sources[0]
-    assert persisted.credential_ref == "cred_hub_existing"
-    assert [model.id for model in persisted.models] == ["manual-model"]
-    assert persisted.state.status == "needs_action"
-    assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"
-    assert adapter.revoked == []
+    assert adapter.orphan_cleanup_calls == ["cred_create_orphan"]
+    assert [
+        (entry.source_id, entry.credential_ref, entry.operation)
+        for entry in service.revocations.list()
+    ] == [
+        (
+            flow["source_id"],
+            "cred_create_orphan",
+            "cleanup_orphaned_oauth_material",
+        )
+    ]
+
+    asyncio.run(service.oauth_cancel(flow["flow_id"]))
+
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
+    assert service.revocations.list()
+
+
+def test_completed_orphan_cleanup_replay_clears_surviving_service_journal(
+    tmp_path,
+):
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    class Client:
+        def management_request(
+            self,
+            method,
+            path,
+            *,
+            query=None,
+            payload=None,
+            timeout=None,
+        ):
+            assert (method, path) == ("DELETE", "/auth-files")
+            return {"status": "ok"}
+
+    class Supervisor:
+        def __init__(self, client):
+            self._client = client
+
+        def client_if_running(self):
+            return self._client
+
+    class RuntimeCleanupAdapter(FakeAdapter):
+        def __init__(self, runtime_adapter):
+            super().__init__()
+            self.runtime_adapter = runtime_adapter
+
+        async def cleanup_orphaned_oauth_material(self, credential_ref):
+            self.orphan_cleanup_calls.append(credential_ref)
+            return await self.runtime_adapter.cleanup_orphaned_oauth_material(
+                credential_ref
+            )
+
+    state = EngineStateStore(tmp_path / "runtime-state")
+    state.prepare_instance("install-1")
+    auth_file = state.auth_dir / "claude-account.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.chmod(0o600)
+    credential_ref = state.bind_oauth_credential(
+        "src_pending01",
+        "anthropic",
+        auth_file.name,
+    )
+    runtime_adapter = CLIProxyEngineAdapter(
+        supervisor=Supervisor(Client()),  # type: ignore[arg-type]
+        state_store=state,
+    )
+    journal = CredentialRevocationJournal(tmp_path / "revocations.json")
+    journal.add(
+        "src_pending01",
+        credential_ref,
+        operation="cleanup_orphaned_oauth_material",
+    )
+
+    assert (
+        asyncio.run(
+            runtime_adapter.cleanup_orphaned_oauth_material(credential_ref)
+        )
+        is True
+    )
+    assert journal.list()
+
+    adapter = RuntimeCleanupAdapter(runtime_adapter)
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth-flows.json"),
+        revocations=journal,
+    )
+
+    asyncio.run(service._ensure_engine_synced())
+
+    assert adapter.orphan_cleanup_calls == [credential_ref]
+    assert journal.list() == []
+
+
+@pytest.mark.parametrize(
+    ("disposition", "retained_credential_ref", "expected_revoked"),
+    [
+        (
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "cred_create_flow",
+            ["cred_create_flow"],
+        ),
+        (RetainedMaterialDisposition.NONE, None, []),
+        (RetainedMaterialDisposition.FOREIGN_SOURCE_REF, None, []),
+        (RetainedMaterialDisposition.UNKNOWN, None, []),
+    ],
+)
+def test_failed_hub_create_consumes_known_ref_without_fabricating_source_state(
+    tmp_path,
+    disposition,
+    retained_credential_ref,
+    expected_revoked,
+):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start(
+            {
+                "vendor": "anthropic",
+                "channel": "hub",
+                "experimental_consent": True,
+            }
+        )
+    )["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": retained_credential_ref,
+        }
+    )
+
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["flow"]["state"] == "failed"
+    assert store.config.sources == []
+    assert adapter.revoked == expected_revoked
+    assert adapter.orphan_cleanup_calls == []
     assert service.revocations.list() == []
 
 
-def test_hub_reauth_retry_materializes_failed_pending_flow(tmp_path):
+def test_failed_hub_create_keeps_flow_when_ref_cleanup_is_not_durable(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start(
+            {
+                "vendor": "anthropic",
+                "channel": "hub",
+                "experimental_consent": True,
+            }
+        )
+    )["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "retained_credential_ref": "cred_create_flow",
+        }
+    )
+
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    async def fail_revocation(credential_ref):
+        adapter.revoked.append(credential_ref)
+        raise RuntimeError("engine is unavailable")
+
+    service.revocations.add = fail_journal_write
+    adapter.revoke_credential = fail_revocation
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "engine_down"
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_create_flow"]
+    assert service.revocations.list() == []
+    assert service.oauth_flows.binding(flow["flow_id"]) is not None
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "disposition", "retained_credential_ref"),
+    [
+        (
+            "failed",
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            "cred_hub_existing",
+        ),
+        ("cancelled", RetainedMaterialDisposition.UNKNOWN, None),
+    ],
+)
+def test_hub_reauth_retry_materializes_pending_flow(
+    tmp_path,
+    terminal_state,
+    disposition,
+    retained_credential_ref,
+):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_huboauth01",
@@ -1752,8 +2210,15 @@ def test_hub_reauth_retry_materializes_failed_pending_flow(tmp_path):
     adapter.flows[first["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[first["flow_id"]].__dict__,
-            "state": "failed",
-            "error_key": "models.oauth.binding_failed",
+            "state": terminal_state,
+            "error_key": (
+                "models.oauth.binding_failed"
+                if terminal_state == "failed"
+                else None
+            ),
+            "channel": "hub",
+            "retained_material_disposition": disposition,
+            "retained_credential_ref": retained_credential_ref,
         }
     )
 
@@ -2420,6 +2885,9 @@ def test_cancel_materializes_terminal_failed_hub_reauth(tmp_path):
             **adapter.flows[flow["flow_id"]].__dict__,
             "state": "failed",
             "error_key": "models.oauth.binding_failed",
+            "channel": "hub",
+            "retained_material_disposition": RetainedMaterialDisposition.UNKNOWN,
+            "retained_credential_ref": None,
         }
     )
 
@@ -2434,6 +2902,56 @@ def test_cancel_materializes_terminal_failed_hub_reauth(tmp_path):
     )
     assert service.oauth_flows.binding(flow["flow_id"]) is None
     assert adapter.cancelled == []
+
+
+def test_cancel_materializes_post_cancel_unknown_hub_reauth(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            ),
+            ModelHubModelConfig(
+                id="manual-model",
+                provenance="manual",
+            ),
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "verifying",
+            "channel": "hub",
+        }
+    )
+    adapter.cancel_disposition = RetainedMaterialDisposition.UNKNOWN
+
+    asyncio.run(service.oauth_cancel(flow["flow_id"]))
+
+    persisted = store.config.sources[0]
+    assert [model.id for model in persisted.models] == ["manual-model"]
+    assert persisted.state.status == "needs_action"
+    assert (
+        persisted.state.detail_key
+        == "models.source.needs_action.oauth_expired"
+    )
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
+    assert adapter.cancelled == [flow["flow_id"]]
 
 
 def test_oauth_completion_requires_the_persisted_pending_source_identity(tmp_path):
@@ -2659,6 +3177,7 @@ def test_follow_auto_adopts_new_sources_while_custom_stays_frozen(tmp_path):
         "codex",
         "opencode",
     }
+    assert first["skipped_by"] == []
 
     asyncio.run(
         service.set_agent_sources(
@@ -2680,6 +3199,9 @@ def test_follow_auto_adopts_new_sources_while_custom_stays_frozen(tmp_path):
 
     assert store.config.agents["claude"].sources.order == [first_id]
     assert "claude" not in {item["backend"] for item in second["adopted_by"]}
+    assert second["skipped_by"] == [
+        {"backend": "claude", "reason": "custom_order"}
+    ]
     assert set(store.config.effective_source_order("codex")) == {
         first_id,
         second_id,

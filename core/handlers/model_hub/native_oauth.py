@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
-from .adapter import OAuthFlowState
+from .adapter import OAuthFlowState, RetainedMaterialDisposition
 from .events import contains_credential_material
 from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
 
@@ -286,6 +286,9 @@ class AgentAuthNativeOAuthAdapter:
             error_key=error_key,
             expires_at_iso=binding.expires_at_iso,
             credential_ref=None,
+            channel="native_cli",
+            retained_material_disposition=RetainedMaterialDisposition.NONE,
+            retained_credential_ref=None,
         )
 
     async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:
