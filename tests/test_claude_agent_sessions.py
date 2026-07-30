@@ -516,6 +516,52 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(runtime_key, agent._steering_generations)
         self.assertNotIn(runtime_key, agent._steering_closing)
 
+    async def test_handle_stop_failure_keeps_runtime_nonsteerable(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+
+        class _Client:
+            async def interrupt(self):
+                raise TimeoutError("interrupt acknowledgement timed out")
+
+        async def _receiver():
+            await asyncio.Future()
+
+        agent = ClaudeAgent(controller)
+        controller.emit_agent_message = AsyncMock()
+        client = _Client()
+        receiver_task = asyncio.create_task(_receiver())
+        controller.claude_sessions[runtime_key] = client
+        controller.receiver_tasks[runtime_key] = receiver_task
+        controller.session_handler.active_sessions = {runtime_key}
+        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={}))
+        agent._pending_requests[runtime_key] = [pending_request]
+        target = ActiveSteerTarget(
+            runtime_key=runtime_key,
+            logical_turn_id="logical-turn",
+            context=pending_request.context,
+            agent_request=pending_request,
+            agent=agent,
+        )
+        stop_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            composite_session_id=runtime_key,
+            stop_failure_reason=None,
+        )
+
+        try:
+            self.assertIsNotNone(agent.steering_native_turn_id(target))
+            self.assertFalse(await agent.handle_stop(stop_request))
+
+            self.assertEqual(stop_request.stop_failure_reason, "interrupt_failed")
+            self.assertIn(runtime_key, agent._steering_closing_keys())
+            self.assertIsNone(agent.steering_native_turn_id(target))
+            self.assertEqual(agent._pending_requests[runtime_key], [pending_request])
+            self.assertFalse(receiver_task.done())
+        finally:
+            receiver_task.cancel()
+            await asyncio.gather(receiver_task, return_exceptions=True)
+
     async def test_handle_stop_cleans_up_when_silent_result_emit_fails(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"

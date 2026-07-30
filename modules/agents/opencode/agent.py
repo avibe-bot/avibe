@@ -193,6 +193,19 @@ class _SteeringAwareOpenCodeServer:
                             self._state.status_reconciliation_failures
                             >= _STATUS_RECONCILIATION_FAILURE_LIMIT
                         ):
+                            evidence_boundary = (
+                                awaiting
+                                if awaiting is not None
+                                else self._state.baseline_message_ids
+                            )
+                            if final_snapshot and self._has_final_assistant_after(
+                                messages,
+                                evidence_boundary,
+                            ):
+                                self._state.awaiting_after_message_ids = None
+                                self._state.reconcile_initial_status = False
+                                self._state.closing = True
+                                return messages
                             return self._terminal_reconciliation_failure(
                                 session_id,
                                 messages,
@@ -906,6 +919,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         system=state.system,
                         tools={"question": False},
                     )
+                except aiohttp.ClientConnectorError:
+                    raise
                 except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError):
                     state.awaiting_after_message_ids = before_insert
                     raise

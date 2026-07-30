@@ -892,7 +892,6 @@ class ClaudeAgent(BaseAgent):
                 try:
                     await client.interrupt()
                 except Exception:
-                    self._steering_closing_keys().discard(composite_key)
                     raise
                 # Claim the pending Result owner before releasing the lock. A
                 # terminal frame queued behind interrupt must not settle this

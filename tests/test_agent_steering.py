@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -1136,6 +1137,7 @@ async def test_opencode_status_reconciliation_failures_are_bounded() -> None:
     )
     agent = _opencode_agent(primary, gate_task, server)
     state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"primary-assistant"}
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
         messages = await asyncio.wait_for(
@@ -1196,6 +1198,7 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
 
     monkeypatch.setattr("modules.agents.opencode.poll_loop.asyncio.sleep", _fast_sleep)
     state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"primary-assistant"}
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
         result = await asyncio.wait_for(
@@ -1215,6 +1218,42 @@ async def test_opencode_normal_poll_delivers_terminal_reconciliation_failure(
         assert server.prompt_calls == []
         emit_failure.assert_awaited_once()
         assert emit_failure.await_args.kwargs["failure_id"].endswith(":1")
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_final_output_survives_unavailable_status_probe() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status_error=ConnectionError("status unavailable"),
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert messages[-1]["info"]["id"] == "primary-assistant"
+        assert state.terminal_status_failure_messages is None
+        assert state.closing is True
+        assert server.list_calls == 3
     finally:
         await _cancel_tasks(gate_task)
 
@@ -1240,6 +1279,7 @@ async def test_restored_opencode_status_reconciliation_becomes_terminal_snapshot
     agent = _opencode_agent(primary, gate_task, server)
     state = agent._steering_states[primary.base_session_id]
     state.restored = True
+    state.awaiting_after_message_ids = {"primary-assistant"}
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
         messages = await asyncio.wait_for(
@@ -1286,6 +1326,45 @@ async def test_opencode_maps_async_prompt_failures(error: Exception, expected: S
         assert receipt.outcome is expected
         assert server.abort_calls == []
         assert len(server.prompt_calls) == 1
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_connector_refusal_preserves_reconciliation_boundary() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    connector_error = aiohttp.ClientConnectorError(
+        ConnectionKey("127.0.0.1", 4096, False, False, None, None, None),
+        OSError("connect failed"),
+    )
+    server = _OpenCodeServer(
+        error=connector_error,
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+
+        assert receipt.outcome is SteerOutcome.REFUSED
+        assert receipt.reason == "runtime_unavailable"
+        assert state.awaiting_after_message_ids == set()
     finally:
         await _cancel_tasks(gate_task)
 
