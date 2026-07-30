@@ -4396,6 +4396,8 @@ def test_directed_run_and_callback_remain_distinct_while_target_busy(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(
         monkeypatch,
@@ -4479,6 +4481,8 @@ def test_silent_terminal_skips_callback_and_keeps_directed_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
     target_session_id = _make_avibe_session(
         monkeypatch,
         tmp_path,
@@ -4614,6 +4618,8 @@ def test_callback_consumes_only_full_terminal_once_across_backends(
     monkeypatch,
     backend: str,
 ) -> None:
+    """Scenario: MESSAGE-DELIVERY-008."""
+
     target_session_id = _make_avibe_session(
         monkeypatch,
         tmp_path,

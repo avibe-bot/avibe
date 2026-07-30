@@ -25,7 +25,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260727_0038"
+HEAD_REVISION = "20260730_0039"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -96,6 +96,108 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 
     assert len(heads) == 1
     assert heads[0] == HEAD_REVISION
+
+
+def test_callback_authority_migration_rearms_only_conflated_parent_runs(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260727_0038")
+    now = "2026-07-30T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        def insert_run(
+            run_id: str,
+            *,
+            source_kind: str,
+            parent_run_id: str | None = None,
+            session_id: str | None = None,
+            callback_session_id: str | None = None,
+            callback_status: str | None = None,
+            callback_run_id: str | None = None,
+        ) -> None:
+            conn.execute(
+                """
+                insert into agent_runs (
+                    id, run_type, status, source_kind, parent_run_id, session_id,
+                    callback_session_id, callback_status, callback_error,
+                    callback_run_id, callback_completed_at, cancel_requested,
+                    created_at, completed_at, updated_at, metadata_json
+                ) values (
+                    ?, 'agent_run', 'succeeded', ?, ?, ?, ?, ?, 'legacy error',
+                    ?, ?, 0, ?, ?, ?, '{}'
+                )
+                """,
+                (
+                    run_id,
+                    source_kind,
+                    parent_run_id,
+                    session_id,
+                    callback_session_id,
+                    callback_status,
+                    callback_run_id,
+                    now if callback_status else None,
+                    now,
+                    now if callback_status else None,
+                    now,
+                ),
+            )
+
+        insert_run(
+            "parent_conflated",
+            source_kind="agent",
+            callback_session_id="ses_caller",
+            callback_status="sent",
+            callback_run_id="directed_child",
+        )
+        insert_run(
+            "directed_child",
+            source_kind="agent",
+            parent_run_id="parent_conflated",
+            session_id="ses_caller",
+        )
+        insert_run(
+            "parent_valid",
+            source_kind="agent",
+            callback_session_id="ses_caller",
+            callback_status="sent",
+            callback_run_id="callback_child",
+        )
+        insert_run(
+            "callback_child",
+            source_kind="callback",
+            parent_run_id="parent_valid",
+            session_id="ses_caller",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                """
+                select id, callback_status, callback_error, callback_run_id,
+                       callback_completed_at
+                from agent_runs
+                where id in ('parent_conflated', 'parent_valid')
+                order by id
+                """
+            )
+        }
+        version = conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone()
+
+    assert rows["parent_conflated"] == ("pending", None, None, None)
+    assert rows["parent_valid"] == (
+        "sent",
+        "legacy error",
+        "callback_child",
+        now,
+    )
+    assert version == (HEAD_REVISION,)
 
 
 def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:

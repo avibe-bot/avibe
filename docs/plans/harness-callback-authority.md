@@ -84,16 +84,19 @@ objects and lets an unstarted queue entry satisfy callback delivery.
 
 1. Remove explicit child-delivery substitution from the shared callback
    drainer and its store API.
-2. Keep the existing terminal-result selection and exactly-once callback
+2. Re-arm persisted parent callbacks whose recorded callback Run is actually
+   an explicit agent-authored child, then let the normal drainer settle them.
+3. Keep the existing terminal-result selection and exactly-once callback
    identity from #919 and #923.
-3. Add consuming SQLite-backed tests through the real message dispatcher and
+4. Add consuming SQLite-backed tests through the real message dispatcher and
    callback drainer for:
    - intermediate preamble, tool boundary, intentional silent terminal;
    - intermediate preamble followed by a full terminal result;
    - separately directed full message while the callback target is busy; and
    - callback idempotency and non-user Harness identity.
-4. Allocate `MESSAGE-DELIVERY-008`. PR #1104 currently owns
-   `MESSAGE-DELIVERY-007`; `HFR-430` is already allocated on master.
+5. Allocate `MESSAGE-DELIVERY-008` as contract-level partial coverage. PR
+   #1104 currently owns `MESSAGE-DELIVERY-007`; `HFR-430` is already allocated
+   on master.
 
 ## Scope
 

@@ -102,10 +102,11 @@ No visible wrapper text is added. Intermediate output remains in the ledger and
 the originating Session; it does not enqueue callback work. After the parent Run
 reaches its one idempotent terminal transition, callback policy enqueues exactly
 one turn containing the terminal `result_text`. Callback turns are deduplicated
-by Run lineage. An explicit child Agent Run delivered to the callback Session
-satisfies that policy, so the automatic fallback does not echo the same report.
-Parent `callback_status` stays pending while the parent Run is active and settles
-once against that single delivery.
+by Run lineage. An explicit child Agent Run delivered to the callback Session is
+a separate durable object with its own queue position, lineage, and callback
+policy; it never satisfies or inherits the parent's automatic callback. Parent
+`callback_status` stays pending while the parent Run is active and settles once
+against the callback Run created only from the parent's terminal result.
 
 If a Run fails or is canceled after recording partial outputs, its callback
 Session receives one terminal failure/cancellation Message. A successful Run
