@@ -1293,6 +1293,17 @@ class SQLiteSessionsService:
                             same_agent_identity = (
                                 imported_agent_id is not None and existing_agent_id == imported_agent_id
                             )
+                            same_agent_name = (
+                                imported_agent_name is not None
+                                and existing_agent_name is not None
+                                and _normalize_agent_name_key(existing_agent_name)
+                                == _normalize_agent_name_key(imported_agent_name)
+                            )
+                            imported_variant_matches_existing_agent = (
+                                existing_agent_name is not None
+                                and _normalize_agent_name_key(imported_variant)
+                                == _normalize_agent_name_key(existing_agent_name)
+                            )
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
                             variant_conflicts = (
                                 not same_variant
@@ -1315,7 +1326,14 @@ class SQLiteSessionsService:
                                 )
                                 skip_mapping = True
                                 break
-                            identity_conflicts = False
+                            identity_conflicts = (
+                                existing_identity_is_durable
+                                and imported_backend == "unknown"
+                                and imported_agent_id is None
+                                and imported_agent_name is None
+                                and (existing_agent_id is not None or existing_agent_name is not None)
+                                and not imported_variant_matches_existing_agent
+                            )
                             if existing_identity_is_durable and imported_agent_id is not None and existing_agent_id not in {
                                 None,
                                 imported_agent_id,
@@ -1324,6 +1342,8 @@ class SQLiteSessionsService:
                             if (
                                 existing_identity_is_durable
                                 and imported_agent_name is not None
+                                and not same_agent_identity
+                                and not same_agent_name
                                 and existing_agent_name not in {
                                     None,
                                     imported_agent_name,
@@ -1344,6 +1364,8 @@ class SQLiteSessionsService:
                                 )
                                 skip_mapping = True
                                 break
+                            backfills_agent_id = imported_agent_id is not None and existing_agent_id is None
+                            backfills_agent_name = imported_agent_name is not None and existing_agent_name is None
                             update_values: dict[str, Any] = {"updated_at": now}
                             if not existing_is_owned:
                                 update_values["agent_variant"] = imported_variant
@@ -1366,9 +1388,9 @@ class SQLiteSessionsService:
                                 update_values["agent_name"] = imported_agent_name
                             if sentinel_variant_compatible and existing_variant != imported_variant:
                                 update_values["agent_variant"] = imported_variant
-                            if imported_agent_id is not None and existing_agent_id is None:
+                            if backfills_agent_id:
                                 update_values["agent_id"] = imported_agent_id
-                            if imported_agent_name is not None and existing_agent_name is None:
+                            if backfills_agent_name:
                                 update_values["agent_name"] = imported_agent_name
                             if len(update_values) <= 1:
                                 break
@@ -1377,7 +1399,12 @@ class SQLiteSessionsService:
                                 .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
                                 .where(agent_sessions.c.status != "archived")
                             )
-                            if not existing_is_owned or sentinel_variant_compatible:
+                            if (
+                                not existing_is_owned
+                                or sentinel_variant_compatible
+                                or backfills_agent_id
+                                or backfills_agent_name
+                            ):
                                 update_stmt = update_stmt.where(
                                     func.coalesce(agent_sessions.c.agent_backend, "") == observed_backend
                                 ).where(func.coalesce(agent_sessions.c.agent_variant, "") == observed_variant)
@@ -1388,11 +1415,11 @@ class SQLiteSessionsService:
                                     func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name
                                 )
                             else:
-                                if imported_agent_id is not None and existing_agent_id is None:
+                                if backfills_agent_id:
                                     update_stmt = update_stmt.where(
                                         func.coalesce(agent_sessions.c.agent_id, "") == observed_agent_id
                                     )
-                                if imported_agent_name is not None and existing_agent_name is None:
+                                if backfills_agent_name:
                                     update_stmt = update_stmt.where(
                                         func.coalesce(agent_sessions.c.agent_name, "") == observed_agent_name
                                     )
@@ -1792,10 +1819,14 @@ def _is_sentinel_variant(agent_variant: str) -> bool:
     return str(agent_variant or "").strip() in {"", "default"}
 
 
+def _normalize_agent_name_key(agent_name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", str(agent_name or "").strip().lower()).strip("-_")
+
+
 def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
     """Resolve a legacy mapping name through built-ins and the Vibe Agent catalog."""
     requested = str(agent_name or "").strip()
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", requested.lower()).strip("-_")
+    normalized = _normalize_agent_name_key(requested)
     if normalized:
         catalog_agent = conn.execute(
             select(agents.c.id, agents.c.name, agents.c.backend)
