@@ -383,7 +383,25 @@ class CodexAgent(BaseAgent):
                 backend=self.name,
                 diagnostic=diagnostic,
             )
-        except (ConnectionError, TimeoutError) as exc:
+        except ConnectionError as exc:
+            diagnostic = str(exc)
+            if diagnostic in {
+                "Codex app-server transport is not available",
+                "Codex app-server stdin is not available",
+            }:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="runtime_unavailable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except TimeoutError as exc:
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="acknowledgement_ambiguous",
@@ -391,6 +409,7 @@ class CodexAgent(BaseAgent):
                 diagnostic=str(exc),
             )
 
+        self._touch_transport_activity(cwd)
         response_turn_id = str(response.get("turnId") or "").strip()
         if response_turn_id != request.expected_native_turn_id:
             return steer_result(

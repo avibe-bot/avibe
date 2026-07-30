@@ -49,6 +49,7 @@ from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
+_STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 
 
 def _task_is_stopping(task: asyncio.Task) -> bool:
@@ -59,6 +60,9 @@ def _task_is_stopping(task: asyncio.Task) -> bool:
 @dataclass
 class _OpenCodeSteerState:
     task: asyncio.Task
+    base_session_id: str
+    target_session_id: str
+    logical_turn_id: str
     native_session_id: str
     directory: str
     agent: Optional[str]
@@ -69,6 +73,7 @@ class _OpenCodeSteerState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
+    restored: bool = False
 
     @property
     def native_turn_id(self) -> str:
@@ -155,6 +160,14 @@ def _raw_settings_key_from_session_key(session_key: str) -> str:
     return str(session_key or "")
 
 
+def _target_agent_session_id(request: AgentRequest) -> str:
+    payload = request.context.platform_specific or {}
+    target = payload.get("agent_session_target") if isinstance(payload, dict) else None
+    if isinstance(target, dict) and target.get("id"):
+        return str(target["id"])
+    return str(payload.get("agent_session_id") or "") if isinstance(payload, dict) else ""
+
+
 class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     """OpenCode Server API integration via HTTP."""
 
@@ -172,8 +185,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         self._active_requests: Dict[str, asyncio.Task] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
+        self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
 
     async def _get_server(self) -> OpenCodeServerManager:
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            restored_server = self._restored_poll_servers.get(current_task)
+            if restored_server is not None:
+                return restored_server
         return await self._client_manager.get_server()
 
     async def prepare_runtime_restart(self) -> None:
@@ -515,6 +534,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 raise RuntimeError("OpenCode runner task is unavailable")
             steer_state = _OpenCodeSteerState(
                 task=current_task,
+                base_session_id=request.base_session_id,
+                target_session_id=_target_agent_session_id(request),
+                logical_turn_id=str(
+                    (request.context.platform_specific or {}).get("turn_token") or ""
+                ),
                 native_session_id=session_id,
                 directory=request.working_path,
                 agent=agent_to_use,
@@ -539,6 +563,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
             processing_indicator = self.controller.processing_indicator.snapshot_request(request)
+            if steer_state.target_session_id and steer_state.logical_turn_id:
+                processing_indicator[_STEERING_SNAPSHOT_KEY] = {
+                    "target_session_id": steer_state.target_session_id,
+                    "logical_turn_id": steer_state.logical_turn_id,
+                    "agent": steer_state.agent,
+                }
             launch_identity = persisted_launch_identity(model_hub_launch)
             if launch_identity is not None:
                 processing_indicator["model_hub_launch"] = launch_identity
@@ -644,11 +674,27 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if run_registered:
                 await server.mark_run_inactive(session_id)
 
+    def additional_steer_targets(self, session_id: str) -> list[ActiveSteerTarget]:
+        """Expose restored poll owners that did not pass through AgentService."""
+
+        targets: list[ActiveSteerTarget] = []
+        for state in list(self._steering_states.values()):
+            if not state.restored or state.target_session_id != session_id or not state.logical_turn_id:
+                continue
+            targets.append(
+                ActiveSteerTarget(
+                    runtime_key=state.base_session_id,
+                    logical_turn_id=state.logical_turn_id,
+                    context=None,
+                    agent_request=None,
+                    agent=self,
+                )
+            )
+        return targets
+
     def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
         active_request = target.agent_request
-        if active_request is None:
-            return None
-        base_session_id = active_request.base_session_id
+        base_session_id = active_request.base_session_id if active_request is not None else target.runtime_key
         task = self._active_requests.get(base_session_id)
         state = self._steering_states.get(base_session_id)
         if (
@@ -667,10 +713,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         target: ActiveSteerTarget,
     ) -> SteerResult:
         active_request = target.agent_request
-        if active_request is None:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_primary_request", backend=self.name)
-
-        base_session_id = active_request.base_session_id
+        base_session_id = active_request.base_session_id if active_request is not None else target.runtime_key
         task = self._active_requests.get(base_session_id)
         request_session = self._session_manager.get_request_session(base_session_id)
         state = self._steering_states.get(base_session_id)
@@ -987,9 +1030,45 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server = await self._get_server()
         await server.mark_run_active(poll_info.opencode_session_id)
         current_task = asyncio.current_task()
+        steer_state = None
+        steering_snapshot = (
+            poll_info.processing_indicator.get(_STEERING_SNAPSHOT_KEY)
+            if isinstance(poll_info.processing_indicator, dict)
+            else None
+        )
+        if current_task is not None and isinstance(steering_snapshot, dict):
+            target_session_id = str(steering_snapshot.get("target_session_id") or "")
+            logical_turn_id = str(steering_snapshot.get("logical_turn_id") or "")
+            if target_session_id and logical_turn_id:
+                steer_state = _OpenCodeSteerState(
+                    task=current_task,
+                    base_session_id=poll_info.base_session_id,
+                    target_session_id=target_session_id,
+                    logical_turn_id=logical_turn_id,
+                    native_session_id=poll_info.opencode_session_id,
+                    directory=poll_info.working_path,
+                    agent=steering_snapshot.get("agent"),
+                    model=poll_info.model_dict,
+                    reasoning_effort=poll_info.reasoning_effort,
+                    system=None,
+                    baseline_message_ids=set(poll_info.baseline_message_ids),
+                    restored=True,
+                )
+                self._steering_states[poll_info.base_session_id] = steer_state
+                self._restored_poll_servers[current_task] = _SteeringAwareOpenCodeServer(
+                    server,
+                    steer_state,
+                )
         try:
             await self._poll_loop.run_restored_poll_loop(poll_info)
         finally:
+            if current_task is not None:
+                self._restored_poll_servers.pop(current_task, None)
+            if steer_state is not None:
+                async with steer_state.lock:
+                    steer_state.closing = True
+                if self._steering_states.get(poll_info.base_session_id) is steer_state:
+                    self._steering_states.pop(poll_info.base_session_id, None)
             await server.mark_run_inactive(poll_info.opencode_session_id)
             if self._active_requests.get(poll_info.base_session_id) is current_task:
                 self._active_requests.pop(poll_info.base_session_id, None)

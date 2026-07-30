@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_sessions import ActivePollInfo  # noqa: E402
+from core.services.agent_steering import SteerOutcome, SteerRequest, active_steer_identity, steer_active_turn  # noqa: E402
 from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
 
 
@@ -42,6 +44,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     status_writes: list[tuple[str, str]] = []
     removed: list[str] = []
     request_sessions: list[tuple[str, str, str, str]] = []
+    prompt_calls: list[dict] = []
 
     class _Server:
         async def list_messages(self, session_id, directory):
@@ -55,6 +58,12 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
         async def mark_run_inactive(self, session_id):
             return None
 
+        async def get_session_status(self, session_id, directory):
+            return {"type": "busy"}
+
+        async def prompt_async(self, **kwargs):
+            prompt_calls.append(kwargs)
+
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
             return None
@@ -63,12 +72,19 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
             return None
 
     class _SessionManager:
+        def __init__(self):
+            self.request_sessions = {}
+
         def set_request_session(self, *args):
             request_sessions.append(args)
+            self.request_sessions[args[0]] = args[1:]
             return None
 
+        def get_request_session(self, base_session_id):
+            return self.request_sessions.get(base_session_id)
+
         def pop_request_session(self, *args):
-            return None
+            return self.request_sessions.pop(args[0], None)
 
     class _Sessions:
         def get_all_active_polls(self):
@@ -94,14 +110,87 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     agent._poll_loop = _PollLoop()
     agent._session_manager = _SessionManager()
     agent._active_requests = {}
+    agent._steering_states = {}
+    agent._restored_poll_servers = {}
 
     server = _Server()
+    agent._client_manager = SimpleNamespace(_server_manager=server)
 
     async def _get_server():
         return server
 
     agent._get_server = _get_server
+    agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
+    agent._test_prompt_calls = prompt_calls
     return agent, status_writes, removed, request_sessions
+
+
+def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.model_dict = {"providerID": "openai", "modelID": "gpt-5"}
+    poll.reasoning_effort = "high"
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "logical-restored",
+            "agent": "build",
+        },
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            poll_started.set()
+            await release_poll.wait()
+
+        async def remove_restored_ack(self, poll_info):
+            return None
+
+    agent._poll_loop = _HeldPollLoop()
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await poll_started.wait()
+        identity = active_steer_identity(
+            agent.controller,
+            "opencode",
+            "ses_wb",
+            expected_logical_turn_id="logical-restored",
+        )
+        assert identity is not None
+        receipt = await steer_active_turn(
+            agent.controller,
+            "opencode",
+            SteerRequest(
+                target_session_id="ses_wb",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                text="补充：`keep exact`",
+            ),
+        )
+        release_poll.set()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored, receipt
+
+    restored, receipt = asyncio.run(_run())
+
+    assert restored == 1
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    assert agent._test_prompt_calls == [
+        {
+            "session_id": "oc-1",
+            "directory": "/tmp/work",
+            "text": "补充：`keep exact`",
+            "agent": "build",
+            "model": {"providerID": "openai", "modelID": "gpt-5"},
+            "reasoning_effort": "high",
+            "system": None,
+            "tools": {"question": False},
+        }
+    ]
 
 
 def test_restored_avibe_poll_marks_session_running():

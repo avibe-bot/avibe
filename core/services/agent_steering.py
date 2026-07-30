@@ -77,7 +77,7 @@ def _active_targets(controller: Any, backend: str, session_id: str) -> list[Acti
     service = getattr(controller, "agent_service", None)
     gates = getattr(service, "_turn_gates", None)
     if not isinstance(gates, dict):
-        return []
+        gates = {}
 
     matches: list[ActiveSteerTarget] = []
     for runtime_key, gate in list(gates.items()):
@@ -111,6 +111,14 @@ def _active_targets(controller: Any, backend: str, session_id: str) -> list[Acti
             )
         )
 
+    backend_agent = getattr(service, "agents", {}).get(backend)
+    additional_targets = getattr(backend_agent, "additional_steer_targets", None)
+    if callable(additional_targets):
+        for target in additional_targets(session_id):
+            if isinstance(target, ActiveSteerTarget) and all(
+                target.runtime_key != existing.runtime_key for existing in matches
+            ):
+                matches.append(target)
     return matches
 
 

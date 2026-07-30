@@ -88,6 +88,15 @@ class _ClaudeClient:
             raise self.error
 
 
+class _ClaudeSessionHandler:
+    def __init__(self, runtime_key: str) -> None:
+        self.active_sessions = {runtime_key}
+        self.activity_touches: list[str] = []
+
+    def touch_session_activity(self, runtime_key: str) -> None:
+        self.activity_touches.append(runtime_key)
+
+
 class _OpenCodeSessionManager:
     def __init__(self, base_session_id: str, native_session_id: str, cwd: str) -> None:
         self.base_session_id = base_session_id
@@ -229,6 +238,7 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
             )
         ]
         assert len(agent._turn_registry.active_turns) == 1
+        assert primary.working_path in agent._transport_last_activity
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
@@ -260,6 +270,7 @@ async def test_shared_gate_remains_steerable_after_dispatch_task_returns() -> No
     [
         (RuntimeError("Codex RPC error: activeTurnNotSteerable"), SteerOutcome.REFUSED),
         (RuntimeError("Codex RPC error: no active turn to steer"), SteerOutcome.NOT_ACTIVE),
+        (ConnectionError("Codex app-server transport is not available"), SteerOutcome.REFUSED),
         (TimeoutError("turn/steer timed out"), SteerOutcome.UNKNOWN),
         (ConnectionError("Codex app-server stdout closed"), SteerOutcome.UNKNOWN),
     ],
@@ -313,7 +324,7 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
     agent = object.__new__(ClaudeAgent)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
-    agent.session_handler = SimpleNamespace(active_sessions={"runtime-key"})
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
     primary_requests = [primary]
     agent._pending_requests = {"runtime-key": primary_requests}
     controller = _controller_with_active_gate(agent, primary, gate_task)
@@ -329,6 +340,7 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         assert agent.receiver_tasks == {"runtime-key": receiver_task}
         assert agent._pending_requests["runtime-key"] is primary_requests
         assert agent._pending_requests["runtime-key"] == [primary]
+        assert agent.session_handler.activity_touches == ["runtime-key"]
         assert not gate_task.done()
         assert not receiver_task.done()
     finally:
@@ -356,7 +368,7 @@ async def test_claude_maps_query_failures_at_the_write_boundary(
     agent = object.__new__(ClaudeAgent)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
-    agent.session_handler = SimpleNamespace(active_sessions={"runtime-key"})
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
     agent._pending_requests = {"runtime-key": [primary]}
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
@@ -379,7 +391,7 @@ async def test_claude_rejects_stale_receiver_generation_and_unavailable_runtime(
     agent = object.__new__(ClaudeAgent)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
-    agent.session_handler = SimpleNamespace(active_sessions={"runtime-key"})
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
     agent._pending_requests = {"runtime-key": [primary]}
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
@@ -407,6 +419,9 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
     agent._steering_states = {
         primary.base_session_id: _OpenCodeSteerState(
             task=task,
+            base_session_id=primary.base_session_id,
+            target_session_id="avibe-session",
+            logical_turn_id="logical-turn",
             native_session_id="opencode-session",
             directory=primary.working_path,
             agent="build",

@@ -610,6 +610,9 @@ class ClaudeAgent(BaseAgent):
                 diagnostic=diagnostic,
             )
 
+        touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)
+        if callable(touch_session_activity):
+            touch_session_activity(composite_key)
         if (
             self.claude_sessions.get(composite_key) is not client
             or self.receiver_tasks.get(composite_key) is not receiver_task
