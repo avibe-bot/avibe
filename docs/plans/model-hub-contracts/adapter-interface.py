@@ -1,4 +1,8 @@
-"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.3 (2026-07-30 14:40 +08:00).
+"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.4 (2026-07-30 15:36 +08:00).
+
+v1.4 changelog (ref-keyed cleanup convergence):
+- ``cleanup_orphaned_oauth_material`` treats an absent credential ref as an
+  already-converged cleanup, making journal replay idempotent across crashes.
 
 v1.3 changelog (owner-approved channel class pass):
 - ``OAuthFlowState.channel`` makes Hub and native CLI success semantics explicit:
@@ -235,9 +239,13 @@ class EngineAdapter(Protocol):
 
         Return true only after the running-engine auth-file delete (when an
         engine is running), the local auth-file delete, and ref revocation are
-        all confirmed. Return false on any partial failure and retain the ref
-        for a later retry. The handle must never be destroyed while material
-        may remain behind it.
+        all confirmed, or when ``credential_ref`` no longer resolves. Absence
+        is convergence, not a lenient fallback: this operation's ordering
+        invariant revokes the ref only after both auth-file deletions are
+        confirmed, so an absent ref proves that no material remains behind it.
+        A never-created ref satisfies the same postcondition vacuously. Return
+        false on any partial failure and retain the ref for a later retry. The
+        handle must never be destroyed while material may remain behind it.
         """
         ...
 
