@@ -4,7 +4,9 @@ const deferRemoteAuthRedirect = vi.hoisted(() => vi.fn());
 
 vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
 
-import { apiFetch } from './apiFetch';
+import {
+  apiFetch,
+} from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -15,6 +17,7 @@ describe('apiFetch remote auth recovery', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -44,5 +47,74 @@ describe('apiFetch remote auth recovery', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(deferRemoteAuthRedirect).not.toHaveBeenCalled();
+  });
+
+  it('honors the request signal while a shared CSRF request is pending', async () => {
+    let resolveCsrf!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL) =>
+        new Promise<Response>((resolve) => {
+          expect(input).toBe('/api/csrf-token');
+          resolveCsrf = resolve;
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const request = apiFetch('/api/asr/transcribe', {
+      method: 'POST',
+      signal: controller.signal,
+    });
+
+    controller.abort(new DOMException('transcription timed out', 'TimeoutError'));
+
+    await expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Let the shared mint settle so it cannot leak into later tests.
+    resolveCsrf(Response.json({ csrf_token: 'token' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it('does not impose the voice deadline on callers without a signal', async () => {
+    vi.useFakeTimers();
+    let resolveCsrf!: (response: Response) => void;
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(
+        () => new Promise<Response>((resolve) => {
+          resolveCsrf = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = apiFetch('/api/settings', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveCsrf(Response.json({ csrf_token: 'token' }));
+    await expect(request).resolves.toMatchObject({ status: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(Response.json({ text: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const stalled = apiFetch('/api/asr/transcribe', {
+      method: 'POST',
+      signal: controller.signal,
+    });
+    const stalledResult = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    controller.abort(new DOMException('transcription timed out', 'TimeoutError'));
+
+    await stalledResult;
+    await expect(apiFetch('/api/asr/transcribe', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

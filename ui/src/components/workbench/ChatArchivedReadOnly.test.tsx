@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { ToastProvider } from '../../context/ToastContext';
+import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow } from './ChatPage';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -32,7 +34,9 @@ void i18n.use(initReactI18next).init({
 const render = (ui: ReactElement) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </ToastProvider>
     </I18nextProvider>,
   );
 
@@ -339,6 +343,12 @@ describe('a disabled composer has no live-turn controls', () => {
     // And the textarea is inert (the plain path honours ``disabled`` since r2).
     expect(markup).toContain('<textarea');
     expect(markup).toContain('disabled=""');
+  });
+
+  it('keeps only an active recording Stop control available after archiving', () => {
+    expect(isVoiceControlDisabled(true, true, false)).toBe(false);
+    expect(isVoiceControlDisabled(true, false, false)).toBe(true);
+    expect(isVoiceControlDisabled(true, true, true)).toBe(true);
   });
 
   // The busy branch's sibling "send to queue" button needs no case of its own: it
