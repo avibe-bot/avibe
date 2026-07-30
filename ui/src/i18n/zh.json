@@ -1073,6 +1073,9 @@
     "oauth": {
       "binding_failed": "该账号已被另一来源使用"
     },
+    "probe": {
+      "native_cli_unavailable": "用不上 CLI 的登录"
+    },
     "source": {
       "cooldown": {
         "network": "网络不通",

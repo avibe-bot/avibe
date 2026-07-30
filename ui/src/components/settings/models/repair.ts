@@ -172,6 +172,15 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  * A null `latencyMs` is not a missing measurement, it is the answer for a head
  * the Hub does not carry the request for: the caller says 「可用」 without a
  * number rather than printing a zero it did not measure.
+ *
+ * One copy constraint the key names badly: `models.probe.native_cli_unavailable`
+ * is NOT 「you are not signed in」. `_default_native_cli_ready` returns false when
+ * an ANTHROPIC_/OPENAI_ key or base-url overrides the CLI's own sign-in, when a
+ * codex login is genuinely absent, AND for every backend that has no native
+ * channel at all. The first case is the common one, and there the sign-in is
+ * perfectly valid — so the string states that the sign-in cannot be used and
+ * instructs nothing, the same rule that stopped `oauth_expired` from claiming a
+ * wall-clock expiry it cannot prove.
  */
 export type DryRunOutcome =
   | { kind: 'ok'; sourceName: string; latencyMs: number | null }

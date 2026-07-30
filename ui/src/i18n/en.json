@@ -1073,6 +1073,9 @@
     "oauth": {
       "binding_failed": "That account is already used by another source"
     },
+    "probe": {
+      "native_cli_unavailable": "Can't use the CLI's sign-in"
+    },
     "source": {
       "cooldown": {
         "network": "Network unreachable",
