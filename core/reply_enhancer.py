@@ -25,9 +25,52 @@ from typing import List, Tuple
 from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.common.html_re import HTML_TAG_RE
+from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
+from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
+from markdown_it.rules_inline.state_inline import StateInline
 
 logger = logging.getLogger(__name__)
-_MARKDOWN = MarkdownIt("commonmark")
+_BLOCK_MARKDOWN = MarkdownIt("commonmark")
+_INLINE_MARKDOWN = MarkdownIt("commonmark")
+_INLINE_CODE_RANGES_KEY = "avibe_inline_code_ranges"
+_INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
+
+
+def _track_inline_code(state: StateInline, silent: bool) -> bool:
+    """Record source ranges accepted by the CommonMark backtick rule."""
+    start = state.pos
+    token_count = len(state.tokens)
+    matched = _commonmark_backtick(state, silent)
+    if (
+        matched
+        and not silent
+        and any(token.type == "code_inline" for token in state.tokens[token_count:])
+    ):
+        state.env.setdefault(_INLINE_CODE_RANGES_KEY, []).append(
+            (start, state.pos)
+        )
+    return matched
+
+
+def _skip_inline_angle_token(state: StateInline, silent: bool) -> bool:
+    """Skip a prevalidated raw-HTML or autolink token."""
+    token_end = state.env.get(_INLINE_ANGLE_RANGES_KEY, {}).get(state.pos)
+    if token_end is None or token_end > state.posMax:
+        return False
+    if not silent:
+        state.pending += state.src[state.pos:token_end]
+    state.pos = token_end
+    return True
+
+
+_INLINE_MARKDOWN.inline.ruler.disable(["autolink", "html_inline"])
+_INLINE_MARKDOWN.inline.ruler.before(
+    "backticks",
+    "avibe_angle_token",
+    _skip_inline_angle_token,
+)
+_INLINE_MARKDOWN.inline.ruler.at("backticks", _track_inline_code)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -123,12 +166,12 @@ _SILENT_OPEN_RE = re.compile(r"<silent\b[^>]*>", re.IGNORECASE)
 _SILENT_CLOSE_RE = re.compile(r"</silent\s*>", re.IGNORECASE)
 _RAW_HTML_OPEN_TAG_RE = re.compile(
     r"""<[A-Za-z][A-Za-z0-9-]*"""
-    r"""(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"""
-    r"""(?:[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*"""
-    r"""[ \t]*/?>"""
+    r"""(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"""
+    r"""(?:\s*=\s*(?:[^"'=<>`\x00-\x20]+|'[^']*'|"[^"]*"))?)*"""
+    r"""\s*/?>"""
 )
 _RAW_HTML_CLOSE_TAG_RE = re.compile(
-    r"</[A-Za-z][A-Za-z0-9-]*[ \t]*>"
+    r"</[A-Za-z][A-Za-z0-9-]*\s*>"
 )
 
 # Dynamic secret-ask markers: ``$<openAiKey>`` (case-preserving shell name). Matched only
@@ -283,11 +326,13 @@ def _extract_secret_requests(text: str) -> List[SecretRequest]:
 
 def _mask_markdown_code(text: str) -> str:
     """Blank Markdown code regions without changing string offsets."""
-    block_ranges = _block_code_ranges(text)
+    if not any(marker in text for marker in ("`", "~~~", "    ", "\t")):
+        return text
+    block_ranges, inline_source_ranges = _markdown_block_ranges(text)
     ranges = sorted(
         [
             *block_ranges,
-            *_inline_code_ranges(text, block_ranges),
+            *_inline_code_ranges(text, inline_source_ranges),
         ]
     )
     if not ranges:
@@ -316,35 +361,46 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
-def _block_code_ranges(text: str) -> List[Tuple[int, int]]:
-    """Return CommonMark fenced and indented code block ranges."""
+def _markdown_block_ranges(
+    text: str,
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """Return code-block ranges and source ranges eligible for inline parsing."""
     line_offsets = [0]
     line_offsets.extend(
         match.end() for match in re.finditer(r"\r\n|\r|\n", text)
     )
-    ranges: List[Tuple[int, int]] = []
-    for token in _MARKDOWN.parse(text):
-        if token.type not in {"fence", "code_block"} or token.map is None:
+    code_ranges: List[Tuple[int, int]] = []
+    inline_ranges: List[Tuple[int, int]] = []
+    for token in _BLOCK_MARKDOWN.parse(text):
+        if token.map is None:
             continue
         start_line, end_line = token.map
         start = line_offsets[start_line]
         end = line_offsets[end_line] if end_line < len(line_offsets) else len(text)
-        ranges.append((start, end))
-    return ranges
+        if token.type in {"fence", "code_block"}:
+            code_ranges.append((start, end))
+        elif token.type == "inline":
+            inline_ranges.append((start, end))
+        elif (
+            token.type == "html_block"
+            and _has_unclosed_special_html_opener(token.content)
+        ):
+            # A malformed special opener must not hide a later explicit
+            # backtick example from the control-directive scanner.
+            inline_ranges.append((start, end))
+    return code_ranges, inline_ranges
 
 
 def _inline_code_ranges(
     text: str,
-    block_ranges: List[Tuple[int, int]],
+    inline_source_ranges: List[Tuple[int, int]],
 ) -> List[Tuple[int, int]]:
-    """Return inline code spans outside fenced and indented code blocks."""
+    """Return inline code spans from CommonMark inline-capable blocks."""
     ranges: List[Tuple[int, int]] = []
-    segment_start = 0
-    for block_start, block_end in block_ranges:
-        ranges.extend(_inline_code_ranges_in_segment(text, segment_start, block_start))
-        segment_start = block_end
-    ranges.extend(_inline_code_ranges_in_segment(text, segment_start, len(text)))
-
+    for source_start, source_end in inline_source_ranges:
+        ranges.extend(
+            _inline_code_ranges_in_segment(text, source_start, source_end)
+        )
     return ranges
 
 
@@ -353,179 +409,144 @@ def _inline_code_ranges_in_segment(
     start: int,
     end: int,
 ) -> List[Tuple[int, int]]:
-    """Pair inline backtick runs without crossing line/block boundaries."""
-    ranges: List[Tuple[int, int]] = []
-    line_start = start
-    while line_start < end:
-        line_end = line_start
-        while line_end < end and text[line_end] not in {"\r", "\n"}:
-            line_end += 1
-        ranges.extend(_inline_code_ranges_in_line(text, line_start, line_end))
-        if line_end < end and text[line_end : line_end + 2] == "\r\n":
-            line_start = line_end + 2
-        else:
-            line_start = line_end + 1
-    return ranges
+    """Return CommonMark inline-code ranges in one non-block-code segment."""
+    if start >= end:
+        return []
+    segment = text[start:end]
+    env: dict = {
+        _INLINE_ANGLE_RANGES_KEY: dict(_inline_angle_token_ranges(segment)),
+    }
+    _INLINE_MARKDOWN.inline.parse(
+        segment,
+        _INLINE_MARKDOWN,
+        env,
+        [],
+    )
+    return [
+        (start + range_start, start + range_end)
+        for range_start, range_end in env.get(_INLINE_CODE_RANGES_KEY, [])
+    ]
 
 
-def _inline_code_ranges_in_line(
-    text: str,
-    start: int,
-    end: int,
-) -> List[Tuple[int, int]]:
-    """Pair inline backtick runs in one linear pass over a single line."""
-    runs: List[Tuple[int, int, int, bool]] = []
-    html_ranges = _raw_html_ranges_in_line(text, start, end)
-    cursor = start
-    while cursor < end:
-        if text[cursor] != "`":
-            cursor += 1
-            continue
-        run_end = cursor + 1
-        while run_end < end and text[run_end] == "`":
-            run_end += 1
-        runs.append(
-            (
-                cursor,
-                run_end,
-                run_end - cursor,
-                _is_backslash_escaped(text, cursor),
-            )
-        )
-        cursor = run_end
-
-    next_closing: List[int | None] = [None] * len(runs)
-    next_by_length: dict[int, int] = {}
-    for index in range(len(runs) - 1, -1, -1):
-        _, _, length, escaped = runs[index]
-        opening_length = length - 1 if escaped else length
-        if opening_length:
-            next_closing[index] = next_by_length.get(opening_length)
-        next_by_length[length] = index
-
-    ranges: List[Tuple[int, int]] = []
-    index = 0
-    html_index = 0
-    while index < len(runs):
-        opening_start, _, _, escaped = runs[index]
-        if escaped:
-            opening_start += 1
-        while (
-            html_index < len(html_ranges)
-            and html_ranges[html_index][1] <= opening_start
-        ):
-            html_index += 1
-        inside_html = (
-            html_index < len(html_ranges)
-            and html_ranges[html_index][0] <= opening_start < html_ranges[html_index][1]
-        )
-        if (
-            opening_start == runs[index][1]
-            or inside_html
-        ):
-            index += 1
-            continue
-        closing_index = next_closing[index]
-        if closing_index is None:
-            index += 1
-            continue
-        ranges.append((opening_start, runs[closing_index][1]))
-        index = closing_index + 1
-    return ranges
-
-
-def _raw_html_ranges_in_line(
-    text: str,
-    start: int,
-    end: int,
-) -> List[Tuple[int, int]]:
-    """Return raw inline HTML tokens before code-span interpretation."""
+def _inline_angle_token_ranges(text: str) -> List[Tuple[int, int]]:
+    """Return raw-HTML and autolink ranges without repeated suffix scans."""
     ranges: List[Tuple[int, int]] = []
     terminators = {
-        "-->": _substring_positions(text, start, end, "-->"),
-        "?>": _substring_positions(text, start, end, "?>"),
-        "]]>": _substring_positions(text, start, end, "]]>"),
-        ">": _substring_positions(text, start, end, ">"),
+        "-->": _substring_positions(text, "-->"),
+        "?>": _substring_positions(text, "?>"),
+        "]]>": _substring_positions(text, "]]>"),
+        ">": _substring_positions(text, ">"),
     }
-    cursor = start
-    while cursor < end:
-        cursor = text.find("<", cursor, end)
-        if cursor < 0:
-            break
-
-        token_end: int | None = None
-        tag = _RAW_HTML_OPEN_TAG_RE.match(text, cursor, end)
-        closing_tag = _RAW_HTML_CLOSE_TAG_RE.match(text, cursor, end)
-        if tag is not None or closing_tag is not None:
-            token_end = max(
-                match.end()
-                for match in (tag, closing_tag)
-                if match is not None
-            )
-        else:
-            special = _raw_html_special_end(text, cursor, end, terminators)
-            if special is not None:
-                token_end = special
+    cursor = 0
+    while (start := text.find("<", cursor)) >= 0:
+        token_end = _autolink_end(text, start, terminators[">"])
         if token_end is None:
-            cursor += 1
+            token_end = _raw_html_end(text, start, terminators)
+        if token_end is None:
+            cursor = start + 1
             continue
-        ranges.append((cursor, token_end))
+        ranges.append((start, token_end))
         cursor = token_end
     return ranges
 
 
-def _substring_positions(
-    text: str,
-    start: int,
-    end: int,
-    needle: str,
-) -> List[int]:
+def _substring_positions(text: str, needle: str) -> List[int]:
     """Return delimiter positions in one forward pass."""
     positions: List[int] = []
-    cursor = start
-    while (position := text.find(needle, cursor, end)) >= 0:
+    cursor = 0
+    while (position := text.find(needle, cursor)) >= 0:
         positions.append(position)
         cursor = position + len(needle)
     return positions
 
 
-def _raw_html_special_end(
+def _next_position(positions: List[int], minimum: int) -> int | None:
+    """Return the first indexed delimiter at or after *minimum*."""
+    index = bisect_left(positions, minimum)
+    return positions[index] if index < len(positions) else None
+
+
+def _autolink_end(
     text: str,
     start: int,
-    end: int,
+    closing_angles: List[int],
+) -> int | None:
+    """Return the end of a valid CommonMark URI or email autolink."""
+    closing = _next_position(closing_angles, start + 1)
+    if closing is None or text.find("<", start + 1, closing) >= 0:
+        return None
+    value = text[start + 1:closing]
+    if AUTOLINK_RE.match(value):
+        normalized = _INLINE_MARKDOWN.normalizeLink(value)
+    elif EMAIL_RE.match(value):
+        normalized = _INLINE_MARKDOWN.normalizeLink("mailto:" + value)
+    else:
+        return None
+    return closing + 1 if _INLINE_MARKDOWN.validateLink(normalized) else None
+
+
+def _raw_html_end(
+    text: str,
+    start: int,
     terminators: dict[str, List[int]],
 ) -> int | None:
-    """Return a special raw HTML token end using pre-indexed terminators."""
-    candidates: List[Tuple[str, str]] = []
-    if text.startswith("<!--", start):
-        candidates.append(("<!--", "-->"))
-    if text.startswith("<?", start):
-        candidates.append(("<?", "?>"))
-    if text.startswith("<![CDATA[", start):
-        candidates.append(("<![CDATA[", "]]>"))
-    if (
-        start + 2 < end
+    """Return the end of a valid CommonMark inline raw-HTML token."""
+    tag = _RAW_HTML_OPEN_TAG_RE.match(text, start)
+    closing_tag = _RAW_HTML_CLOSE_TAG_RE.match(text, start)
+    tag_ends = [
+        match.end()
+        for match in (tag, closing_tag)
+        if match is not None
+    ]
+    if tag_ends:
+        return max(tag_ends)
+
+    closer = None
+    if text.startswith("<!-->", start):
+        closer = start + 5
+    elif text.startswith("<!--->", start):
+        closer = start + 6
+    elif text.startswith("<!--", start):
+        position = _next_position(terminators["-->"], start + 4)
+        closer = position + 3 if position is not None else None
+    elif text.startswith("<?", start):
+        position = _next_position(terminators["?>"], start + 2)
+        closer = position + 2 if position is not None else None
+    elif text.startswith("<![CDATA[", start):
+        position = _next_position(terminators["]]>"], start + 9)
+        closer = position + 3 if position is not None else None
+    elif (
+        start + 2 < len(text)
         and text.startswith("<!", start)
-        and "A" <= text[start + 2] <= "Z"
+        and text[start + 2].isalpha()
     ):
-        candidates.append(("<!", ">"))
+        position = _next_position(terminators[">"], start + 3)
+        closer = position + 1 if position is not None else None
 
-    for opener, closer in candidates:
-        positions = terminators[closer]
-        index = bisect_left(positions, start + len(opener))
-        if index < len(positions):
-            return positions[index] + len(closer)
-    return None
+    if closer is None:
+        return None
+    match = HTML_TAG_RE.match(text[start:closer])
+    return closer if match is not None and match.end() == closer - start else None
 
 
-def _is_backslash_escaped(text: str, index: int) -> bool:
-    """Return whether the character at *index* has an odd backslash prefix."""
-    backslashes = 0
-    cursor = index - 1
-    while cursor >= 0 and text[cursor] == "\\":
-        backslashes += 1
-        cursor -= 1
-    return bool(backslashes % 2)
+def _has_unclosed_special_html_opener(text: str) -> bool:
+    """Return whether an HTML block starts with an unterminated special token."""
+    if not (
+        text.startswith(("<!--", "<?", "<![CDATA["))
+        or (
+            len(text) > 2
+            and text.startswith("<!")
+            and text[2].isalpha()
+        )
+    ):
+        return False
+    terminators = {
+        "-->": _substring_positions(text, "-->"),
+        "?>": _substring_positions(text, "?>"),
+        "]]>": _substring_positions(text, "]]>"),
+        ">": _substring_positions(text, ">"),
+    }
+    return _raw_html_end(text, 0, terminators) is None
 
 
 def _extract_buttons(text: str) -> Tuple[List[QuickReplyButton], str]:

@@ -426,25 +426,17 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
-    def test_silent_parser_rejects_non_one_list_interrupting_paragraph(self):
+    def test_silent_parser_preserves_inline_code_after_non_one_list_text(self):
         text = (
             "Paragraph\n"
             "10. Not a list interruption\n"
             "    ```text\n"
-            "    <silent>remove outside code</silent>\n"
-            "    ```\n"
-            "Tail remains."
-        )
-        expected = (
-            "Paragraph\n"
-            "10. Not a list interruption\n"
-            "    ```text\n"
-            "    \n"
+            "    <silent>paragraph code literal</silent>\n"
             "    ```\n"
             "Tail remains."
         )
 
-        self.assertEqual(strip_silent_blocks(text), expected)
+        self.assertEqual(strip_silent_blocks(text), text)
 
     def test_silent_parser_rejects_empty_list_interrupting_paragraph(self):
         text = (
@@ -515,19 +507,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
-    def test_silent_parser_keeps_orphan_setext_marker_as_paragraph(self):
+    def test_silent_parser_preserves_inline_code_after_orphan_setext_marker(self):
         text = (
             "===\n"
             "10. item\n"
             "    ```text\n"
-            "    <silent>remove outside code</silent>\n"
+            "    <silent>paragraph code literal</silent>\n"
             "    ```"
         )
 
-        self.assertEqual(
-            strip_silent_blocks(text),
-            "===\n10. item\n    ```text\n    \n    ```",
-        )
+        self.assertEqual(strip_silent_blocks(text), text)
 
     def test_silent_parser_keeps_invalid_fence_line_in_paragraph_state(self):
         text = (
@@ -617,6 +606,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strip_silent_blocks(partial_escape), partial_escape)
         self.assertEqual(strip_silent_blocks(escaped_closer), escaped_closer)
 
+    def test_silent_parser_preserves_multiline_inline_code_span(self):
+        text = "`foo\n<silent>multiline literal</silent>\nbar`\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
     def test_silent_parser_ignores_backticks_inside_raw_html_tags(self):
         text = '<a title="`">x</a> <silent>remove me</silent> `tail'
 
@@ -627,6 +621,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     def test_silent_parser_rejects_invalid_raw_html_tag_grammar(self):
         text = '<a? title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_honors_escape_before_raw_html_candidate(self):
+        text = r'\<a title="`"> [literal](file:///tmp/secret.txt) `'
 
         reply = process_reply(text)
 
@@ -651,6 +653,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             strip_silent_blocks(text),
             '`prefix <a title="`">  `tail`',
+        )
+
+    def test_silent_parser_ignores_backticks_inside_uri_autolinks(self):
+        text = (
+            "<https://example.com/`> "
+            "<silent>remove outside code</silent> "
+            "`tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "<https://example.com/`>  `tail",
         )
 
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
