@@ -21,7 +21,13 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
 import { createLatestAsyncAuthority } from './asyncLifetime';
-import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, type EventFeed } from './eventFeed';
+import {
+  emptyFeed,
+  feedAfterHeadRead,
+  feedAfterTailRead,
+  feedTailCursor,
+  type EventFeed,
+} from './eventFeed';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
@@ -163,8 +169,10 @@ export const SettingsModelsPage: React.FC = () => {
         setSources(s);
         setAgents(a);
         // The first page is a tail read as much as a head one: it reaches the end
-        // of the feed exactly when it comes back short.
-        setFeed(feedAfterTailRead(emptyFeed, e, EVENT_PAGE));
+        // of the feed exactly when it comes back short, and its cursor is `null`
+        // because it asked for the top. Applied to `prev` rather than to
+        // `emptyFeed` so the same 「still the feed I asked about?」 rule covers it.
+        setFeed((prev) => feedAfterTailRead(prev, e, EVENT_PAGE, null));
         setRuntime(r);
         setLoading(false);
       })
@@ -195,7 +203,7 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refreshAuthority, showToast, t]);
 
   const loadOlderEvents = React.useCallback(async () => {
-    const oldest = feed.events[feed.events.length - 1]?.id;
+    const oldest = feedTailCursor(feed);
     if (!oldest) return;
     setLoadingEvents(true);
     try {
@@ -205,13 +213,17 @@ export const SettingsModelsPage: React.FC = () => {
       // we page from the tail, so an overlapping row is normal, not a bug. Same
       // owner as the mount read, because reaching the end is the same question
       // there; the head re-read has its own because merging is not always right.
-      setFeed((prev) => feedAfterTailRead(prev, page, EVENT_PAGE));
+      //
+      // The cursor goes back in with the page: this request is a question about
+      // the rows below `oldest`, and a head re-read that REPLACED the feed while
+      // it was in flight left it about a feed that is no longer on screen.
+      setFeed((prev) => feedAfterTailRead(prev, page, EVENT_PAGE, oldest));
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setLoadingEvents(false);
     }
-  }, [feed.events, showToast, t]);
+  }, [feed, showToast, t]);
 
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);

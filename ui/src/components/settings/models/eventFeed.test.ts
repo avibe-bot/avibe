@@ -9,6 +9,12 @@
 // And the follow-on: the rows and 「is there anything older」 are one fact. Moving
 // only the rows is how the replace branch left 加载更早 claiming an end it had just
 // discarded, over history that certainly still existed.
+//
+// And its own follow-on, one interleaving further out: that replacement can happen
+// while a tail read is in flight, and a tail page is only about the feed it was
+// asked of. Merged into the replacement it splices two ends together with the
+// middle missing — and unlike a replacement, unrecoverably, because paging goes on
+// from the old cursor.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -18,6 +24,7 @@ import {
   emptyFeed,
   feedAfterHeadRead,
   feedAfterTailRead,
+  feedTailCursor,
   headReadGapped,
   mergeEventFeed,
   type EventFeed,
@@ -122,30 +129,72 @@ describe('feedAfterHeadRead — what the post-write refresh leaves on screen', (
   });
 });
 
+describe('feedTailCursor — the row a tail read continues from', () => {
+  it('is the last row on screen', () => {
+    expect(feedTailCursor(onScreen([ev('c'), ev('b'), ev('a')]))).toBe('a');
+  });
+
+  it('is null for a feed with no tail yet, which is what reading the top is', () => {
+    expect(feedTailCursor(emptyFeed)).toBeNull();
+  });
+});
+
 describe('feedAfterTailRead — 加载更早, and the first page at mount', () => {
   it('appends the older page and reads the end off a short one', () => {
     const held = onScreen([ev('c'), ev('b')], false);
-    const next = feedAfterTailRead(held, [ev('b'), ev('a')], 20);
+    const next = feedAfterTailRead(held, [ev('b'), ev('a')], 20, 'b');
     expect(ids(next.events)).toEqual(['c', 'b', 'a']);
     expect(next.exhausted).toBe(true);
   });
 
   it('keeps paging open on a full page', () => {
-    expect(feedAfterTailRead(onScreen([ev('b')], true), [ev('a')], 1).exhausted).toBe(false);
+    expect(feedAfterTailRead(onScreen([ev('b')], true), [ev('a')], 1, 'b').exhausted).toBe(false);
   });
 
   it('reads the mount page as the tail it also is', () => {
     // Same owner as 加载更早 deliberately: reaching the end is the same question,
-    // and a hand-rolled second copy is how the two drifted apart.
-    const first = feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 20);
+    // and a hand-rolled second copy is how the two drifted apart. Its cursor is
+    // null because it asked for the top, which is what an empty feed's tail is.
+    const first = feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 20, null);
     expect(ids(first.events)).toEqual(['b', 'a']);
     expect(first.exhausted).toBe(true);
-    expect(feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 2).exhausted).toBe(false);
+    expect(feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 2, null).exhausted).toBe(false);
   });
 
   it('starts from a feed with nothing to page back to', () => {
     expect(emptyFeed.events).toEqual([]);
     expect(emptyFeed.exhausted).toBe(true);
+  });
+
+  it('DROPS a page whose cursor is no longer the feed it was asked of', () => {
+    // The interleaving: 加载更早 requested the rows below 'b', and while it was in
+    // flight a mutation refresh found the feed gapped and replaced it. Appending
+    // here would put ['b','a'] straight under ['z','y'] and lose the middle for
+    // good — the next 加载更早 carries on below 'a' and never comes back for it.
+    const replaced = onScreen([ev('z'), ev('y')], false);
+    expect(feedAfterTailRead(replaced, [ev('b'), ev('a')], 20, 'b')).toBe(replaced);
+  });
+
+  it('drops both halves, not just the rows', () => {
+    // A page that may not speak for the rows may not speak for 「nothing older」:
+    // a short stale page setting exhaustion would hide 加载更早 over the very rows
+    // the replacement still needs it to reach.
+    const replaced = onScreen([ev('z')], false);
+    expect(feedAfterTailRead(replaced, [], 20, 'b').exhausted).toBe(false);
+  });
+
+  it('drops a mount page that lands after rows are already on screen', () => {
+    // Same rule, the other cursor: `null` means 「from the top」, and a feed with a
+    // tail is not the feed that question was about.
+    const held = onScreen([ev('c'), ev('b')], false);
+    expect(feedAfterTailRead(held, [ev('q')], 20, null)).toBe(held);
+  });
+
+  it('accepts a page whose cursor still holds after the feed grew at the HEAD', () => {
+    // Growing at the head does not move the tail, so the page still attaches — the
+    // ordinary case, and the reason this checks the cursor rather than identity.
+    const grown = onScreen([ev('d'), ev('c'), ev('b')], false);
+    expect(ids(feedAfterTailRead(grown, [ev('a')], 20, 'b').events)).toEqual(['d', 'c', 'b', 'a']);
   });
 });
 
@@ -173,8 +222,8 @@ describe('the page reads the feed through this owner', () => {
   it('moves rows and end-of-feed together, through the owners', () => {
     // One state, so no transition can move the rows and leave the flag behind.
     expect(page).toMatch(/const \[feed, setFeed\] = React\.useState<EventFeed>\(emptyFeed\)/);
-    expect(page).toMatch(/setFeed\(feedAfterTailRead\(emptyFeed, e, EVENT_PAGE\)\)/);
-    expect(page).toMatch(/setFeed\(\(prev\) => feedAfterTailRead\(prev, page, EVENT_PAGE\)\)/);
+    expect(page).toMatch(/setFeed\(\(prev\) => feedAfterTailRead\(prev, e, EVENT_PAGE, null\)\)/);
+    expect(page).toMatch(/setFeed\(\(prev\) => feedAfterTailRead\(prev, page, EVENT_PAGE, oldest\)\)/);
     // Nothing left that could set one half on its own.
     expect(page).not.toMatch(/setEventsExhausted|setEvents\(/);
     // And no hand-rolled dedupe or page-length test outside the owners.
@@ -185,6 +234,11 @@ describe('the page reads the feed through this owner', () => {
   it('reads 加载更早 off the same feed it renders', () => {
     expect(page).toMatch(/hasMore=\{!feed\.exhausted\}/);
     expect(page).toMatch(/events=\{feed\.events\}/);
-    expect(page).toMatch(/const oldest = feed\.events\[feed\.events\.length - 1\]\?\.id/);
+    // Through the owner, and the SAME cursor is handed back to the merge — the
+    // request and the answer have to be about one row for the check to mean
+    // anything, which a second hand-rolled read of the tail would not guarantee.
+    expect(page).toMatch(/const oldest = feedTailCursor\(feed\)/);
+    expect(page).toMatch(/modelsApi\.listEvents\(EVENT_PAGE, oldest\)/);
+    expect(page).not.toMatch(/feed\.events\[feed\.events\.length - 1\]/);
   });
 });

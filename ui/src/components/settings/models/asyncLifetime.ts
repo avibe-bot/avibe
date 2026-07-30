@@ -1,7 +1,7 @@
 // Async ownership rules extracted from the Models components so interleavings can
 // be exercised directly: which request may land, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
-import type { AgentMenu, AgentSupply, OAuthFlow } from './types';
+import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
 /**
@@ -103,6 +103,17 @@ export type FlowView = { flow: OAuthFlow | null; errorKey: string | null; settle
 
 export const initialFlowView: FlowView = { flow: null, errorKey: null, settled: false };
 
+/**
+ * The states in which the SERVER has reported a flow finished — one list, because
+ * two places asking 「is this over?」 with two enumerations is how they drift.
+ *
+ * `timeout` is deliberately absent: it is the dialog's own verdict about a flow
+ * the server still considers live, which is why it arrives as a `tick` and not as
+ * a state at all.
+ */
+export const flowStateTerminal = (state: OAuthFlowState): boolean =>
+  state === 'success' || state === 'failed' || state === 'cancelled';
+
 export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; action: FlowAction } => {
   if (event.kind === 'reset') return { view: { ...initialFlowView }, action: 'continue' };
   // Nothing gets to change a finished flow — checked before the event is read, so
@@ -128,8 +139,10 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   const flow = event.flow;
   if (flow.state === 'success') return { view: { flow, errorKey: null, settled: true }, action: 'succeed' };
   // `settled` means terminal, not successful: a failed flow is just as finished,
-  // and a later arrival has just as little business reopening it.
-  if (flow.state === 'failed' || flow.state === 'cancelled') {
+  // and a later arrival has just as little business reopening it. Which states
+  // those are is `flowStateTerminal`'s to say — success has already returned, so
+  // this is「terminal」and not a second, driftable list of the unsuccessful ones.
+  if (flowStateTerminal(flow.state)) {
     return {
       view: {
         flow,
@@ -144,20 +157,35 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
 
 /**
  * Whether a START response has to be re-read through the status route before it
- * may settle the dialog.
+ * may settle the dialog — which EVERY terminal start does.
  *
  * `POST …/reauth` REUSES a live pending flow — it only opens a new one once the
- * old one failed or was cancelled — so a start can come back already `success`,
- * and the start envelope carries the flow alone. Everything the dialog then has
- * to show (which source was repaired, whether that cleared the blocker, what it
- * stranded) exists only on the status/submit response. Latching the start would
- * settle the terminal on the one arrival that cannot answer the question, and
- * `flowStep` then correctly ignores the status read that could.
+ * old one failed or was cancelled — so a start can come back already terminal,
+ * and the start envelope carries the flow alone.
  *
- * A start that comes back `failed`/`cancelled` is not in this case: its
- * `error_key` IS the whole answer, so it latches like any other terminal arrival.
+ * This used to ask whether that envelope was RICH ENOUGH: a success needs the
+ * `{source, recovered, interrupted_pairs}` tail only status carries, while a
+ * failure's `error_key` is the whole message, so a failure could latch. But
+ * 「enough to DISPLAY」 is not 「enough to SETTLE」. Settling stops the poll — the
+ * next tick exits on the terminal latch — and `oauth_start` hands back the
+ * adapter's flow without materializing it. The materialization lives one route
+ * over: `oauth_status` → `_materialize_completed_oauth`, which is what runs
+ * `_fail_closed_hub_reauth` on an unsuccessful hub terminal, strips the discovered
+ * models and persists the source as 需处理. Latch a failed start and none of it
+ * happens: the dialog explains a failure while the row behind it still draws
+ * healthy and still supplies the ● 当前 it no longer can, the binding stays
+ * pending, and the missing write only lands when the user eventually closes the
+ * dialog and `oauth_cancel` performs it as a side effect of cancelling.
+ *
+ * So this does not try to know WHICH terminals owe server-side work — that is a
+ * fact about the server (`_is_hub_unsuccessful_terminal` is `hub` ×
+ * `{failed, cancelled}`, and a create's orphan cleanup keys off the retained
+ * material) and a guard over the envelope may not decide it. Every terminal start
+ * is read through the one route entitled to report a terminal; the dialog shows
+ * whatever that answers, and `terminalArrivalMovedRows` then re-reads the rows.
+ * A non-terminal start needs nothing: it is polled, as it always was.
  */
-export const startNeedsStatusRead = (flow: OAuthFlow): boolean => flow.state === 'success';
+export const startNeedsStatusRead = (flow: OAuthFlow): boolean => flowStateTerminal(flow.state);
 
 export type FlowAuthority = {
   current: () => FlowView;

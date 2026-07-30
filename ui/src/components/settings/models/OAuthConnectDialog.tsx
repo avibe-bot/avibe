@@ -360,9 +360,11 @@ export const OAuthConnectDialog: React.FC<{
           });
           return;
         }
-        // A reused pending flow can arrive already finished. Read its status
-        // instead of latching it (`startNeedsStatusRead`), so the terminal lands
-        // through `settle` with the repair tail the start envelope does not carry.
+        // A reused pending flow can arrive already finished — in ANY terminal
+        // state. Read its status instead of latching it (`startNeedsStatusRead`),
+        // so the terminal lands through `settle`: `oauth_start` does not
+        // materialize, and the status route is where a success grows its repair
+        // tail and an unsuccessful hub reauth gets failed closed.
         if (startNeedsStatusRead(started)) {
           await poll(started.flow_id);
           return;

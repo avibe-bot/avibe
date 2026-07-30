@@ -22,6 +22,16 @@ export type EventFeed = {
 export const emptyFeed: EventFeed = { events: [], exhausted: true };
 
 /**
+ * The row a tail read of this feed continues from — `/events?before=…` — or `null`
+ * for a feed with no tail yet, which is what reading from the top is.
+ *
+ * Exported because the CALLER has to pass back the cursor it requested with, and
+ * a cursor derived any other way is not the one the answer is about.
+ */
+export const feedTailCursor = (feed: EventFeed): string | null =>
+  feed.events[feed.events.length - 1]?.id ?? null;
+
+/**
  * One list from two pages of the same feed, in the order given, without repeats.
  *
  * ORDER IS POSITIONAL and has to be: `id` is `evt_<uuid4hex>`, so sorting by it
@@ -98,12 +108,30 @@ export const feedAfterHeadRead = (onScreen: EventFeed, headPage: ResolutionEvent
  *
  * `pageSize` is passed rather than baked in because the page owns that constant;
  * a short page is the only evidence either read has that there is nothing older.
+ *
+ * `requestedAfter` is the cursor the page was FETCHED with, and a page whose
+ * cursor is no longer this feed's tail is dropped whole. A tail page is not 「the
+ * older rows」 — it is 「the rows below THIS one」, so it only means anything about a
+ * feed that still ends there. Merging one that does not is the hole this exists to
+ * prevent: while 加载更早 is in flight, a head re-read can find the feed gapped and
+ * REPLACE it, and appending the old tail's page under the new head splices the two
+ * ends of a feed together with everything between them missing — and worse than
+ * the head-replacement case, unrecoverably so, because the next 加载更早 then pages
+ * on from that old cursor and never comes back for the middle.
+ *
+ * Dropped means dropped, both halves: a page that may not speak for the rows may
+ * not speak for「nothing older」either. The user is left where the replacement put
+ * them, with 加载更早 still offered, and pressing it reads from the new tail.
  */
 export const feedAfterTailRead = (
   onScreen: EventFeed,
   tailPage: ResolutionEvent[],
   pageSize: number,
-): EventFeed => ({
-  events: mergeEventFeed(onScreen.events, tailPage),
-  exhausted: tailPage.length < pageSize,
-});
+  requestedAfter: string | null,
+): EventFeed =>
+  feedTailCursor(onScreen) !== requestedAfter
+    ? onScreen
+    : {
+        events: mergeEventFeed(onScreen.events, tailPage),
+        exhausted: tailPage.length < pageSize,
+      };

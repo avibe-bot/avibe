@@ -50,6 +50,7 @@ import {
   createFlowAuthority,
   createLatestAsyncAuthority,
   flowLetGo,
+  flowStateTerminal,
   flowStep,
   initialSeedState,
   isDone,
@@ -359,16 +360,59 @@ describe('startNeedsStatusRead — a start response that is already terminal', (
     expect(startNeedsStatusRead(flow('success'))).toBe(true);
   });
 
-  it('latches a terminal failure where it lands', () => {
-    // The other terminals need no second call: their `error_key` IS the answer,
-    // and a status read of a cancelled flow adds nothing to show.
-    expect(startNeedsStatusRead(flow('failed'))).toBe(false);
-    expect(startNeedsStatusRead(flow('cancelled'))).toBe(false);
+  it('sends an already-FAILED start there too', () => {
+    // The finding: this used to latch, because a failure's `error_key` is the whole
+    // message — enough to DISPLAY, which is not enough to SETTLE. Settling stops
+    // the poll at its next tick, and `oauth_start` never materializes: it is
+    // `oauth_status` → `_materialize_completed_oauth` that runs
+    // `_fail_closed_hub_reauth`, strips the discovered models and saves the source
+    // as 需处理. Latched, the dialog explained a failure over a row still drawn
+    // healthy and a binding still pending, until the user's eventual close made
+    // `oauth_cancel` do the write as a side effect.
+    expect(startNeedsStatusRead(flow('failed'))).toBe(true);
+    expect(startNeedsStatusRead(flow('cancelled'))).toBe(true);
+  });
+
+  it('asks 「is it terminal」 and nothing about which terminal', () => {
+    // WHICH terminals owe server-side work is a fact about the server
+    // (`_is_hub_unsuccessful_terminal` is hub × {failed, cancelled}) and a guard
+    // over the envelope may not decide it. So this is exactly `flowStateTerminal`
+    // — one list, so the two cannot drift into disagreeing.
+    for (const state of ['success', 'failed', 'cancelled'] as const)
+      expect(startNeedsStatusRead(flow(state))).toBe(flowStateTerminal(state));
+    for (const state of ['starting', 'awaiting_action', 'verifying'] as const)
+      expect(startNeedsStatusRead(flow(state))).toBe(flowStateTerminal(state));
   });
 
   it('leaves a running start to the poll it already schedules', () => {
     expect(startNeedsStatusRead(flow('awaiting_action'))).toBe(false);
     expect(startNeedsStatusRead(flow('verifying'))).toBe(false);
+  });
+});
+
+describe('flowStateTerminal — one list of the states the server calls finished', () => {
+  it('counts every state a flow can be reported finished in', () => {
+    expect(flowStateTerminal('success')).toBe(true);
+    expect(flowStateTerminal('failed')).toBe(true);
+    expect(flowStateTerminal('cancelled')).toBe(true);
+  });
+
+  it('does not count a flow still running', () => {
+    expect(flowStateTerminal('starting')).toBe(false);
+    expect(flowStateTerminal('awaiting_action')).toBe(false);
+    expect(flowStateTerminal('verifying')).toBe(false);
+  });
+
+  it('is the list flowStep latches on, not a second copy of it', () => {
+    // Two enumerations of 「finished」 in one file is how they drift; the dialog's
+    // 「read this through status」 and the reducer's 「nothing may reopen this」 have
+    // to be the same set or one of them is wrong about a state the other handles.
+    const source = readFileSync(join(__dirname, 'asyncLifetime.ts'), 'utf8');
+    expect(source).toMatch(/if \(flowStateTerminal\(flow\.state\)\) \{/);
+    expect(source).toMatch(/startNeedsStatusRead = \(flow: OAuthFlow\): boolean =>\s*flowStateTerminal\(flow\.state\)/);
+    // `timeout` is the dialog's OWN verdict about a flow the server still holds
+    // live, which is why it arrives as a tick and is not in this list.
+    expect(flowStateTerminal('starting')).toBe(false);
   });
 });
 
