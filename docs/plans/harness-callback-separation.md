@@ -15,23 +15,20 @@ child as if it were the parent's already-delivered callback.
 
 ## Live Evidence
 
-The affected Sessions are:
-
-- PM `sese8exsy8pnn`, Claude native Session
-  `c9dca24f-14ed-41f6-83cb-dea22afb98f3`
-- lane `sesggz7s4xuhz`, Codex native Session
-  `019fadff-b0c7-76a3-b84d-04d9c224053e`
+The affected runtime roles were a Claude-backed coordinator Session and a
+Codex-backed implementation-lane Session. The exact local Session, Run,
+Message, and backend-native identifiers were verified during diagnosis but are
+intentionally omitted from this public plan.
 
 ### Incident A
 
-- Parent Run `c18fd5efe6e0` targeted the PM, finished `succeeded` with
-  `result_text=""`, and recorded silent terminal Message
-  `msg_00657ca71f29f90d085879c`.
-- Intermediate PM Message `msg_00657ca710f9b286589d6f0` remained correctly
-  stored as `author=agent`, `type=assistant`, `source=agent`.
-- The PM explicitly queued full ruling Run `8b3237fa20ed` to the lane. It had
-  `started_at=NULL`, but the parent was marked `callback_status=sent` with
-  `callback_run_id=8b3237fa20ed`.
+- The parent escalation Run targeted the coordinator, finished `succeeded`
+  with `result_text=""`, and recorded an intentional silent terminal Message.
+- The intermediate coordinator Message remained correctly stored as
+  `author=agent`, `type=assistant`, `source=agent`.
+- The coordinator explicitly queued a full ruling Run to the lane. It had
+  `started_at=NULL`, but the parent was marked `callback_status=sent` with that
+  directed Run as its `callback_run_id`.
 - The lane did not receive that intermediate Message through callback
   delivery. Its native Codex transcript shows it querying the PM Session at
   `2026-07-30T02:04:41Z`, then querying the exact intermediate Message at
@@ -39,13 +36,11 @@ The affected Sessions are:
 
 ### Incident B
 
-- Run `e78503ad0e6b` was created with `--no-callback`, so both
+- The parent escalation Run was created with `--no-callback`, so both
   `callback_session_id` and `callback_run_id` are null.
-- Intermediate PM Message `msg_00657cbef19fcadf59c6692` remained in the PM
-  Session, followed by silent terminal Message
-  `msg_00657cbefb91a4fb73fc539`.
-- Full directed ruling Run `fd73893b6c41` remained queued with
-  `started_at=NULL`.
+- The intermediate coordinator Message remained in its target Session,
+  followed by an intentional silent terminal Message.
+- The full directed ruling Run remained queued with `started_at=NULL`.
 - The lane's native transcript shows direct `vibe data query` calls at
   `2026-07-30T03:49:32Z` and `03:49:36Z` reading the PM Session and the exact
   intermediate row before it described the ruling as truncated.
