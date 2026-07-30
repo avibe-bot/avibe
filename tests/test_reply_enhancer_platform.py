@@ -484,6 +484,25 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), expected)
 
+    def test_silent_parser_uses_nested_list_indented_code_threshold(self):
+        text = (
+            "- outer\n"
+            "  - middle\n"
+            "    - inner\n"
+            "\n"
+            "        <silent>remove inner list content</silent>"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "- outer\n  - middle\n    - inner",
+        )
+
+    def test_silent_parser_preserves_alternating_container_indented_code(self):
+        text = "- >     <silent>alternating indented literal</silent>"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
     def test_silent_parser_resets_paragraph_state_after_heading(self):
         text = (
             "# Heading\n"
@@ -509,6 +528,31 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             strip_silent_blocks(text),
             "===\n10. item\n    ```text\n    \n    ```",
         )
+
+    def test_silent_parser_keeps_invalid_fence_line_in_paragraph_state(self):
+        text = (
+            "``` foo`bar\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>remove outside code</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "``` foo`bar\n10. item\n    ```text\n    \n    ```",
+        )
+
+    def test_silent_parser_allows_list_after_link_reference_definition(self):
+        text = (
+            "[ref]: /url\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>link definition literal</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
 
     def test_silent_parser_stops_unclosed_fence_at_container_boundary(self):
         text = (
@@ -589,6 +633,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.files, [])
 
+    def test_silent_parser_rejects_attributes_on_raw_html_closing_tags(self):
+        text = '</a title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
     def test_silent_parser_parses_html_as_text_inside_open_code_span(self):
         text = (
             '`prefix <a title="`"> '
@@ -645,6 +697,27 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), expected)
 
+    def test_silent_parser_does_not_mask_indented_content_in_raw_html_block(self):
+        text = (
+            "<pre>\n"
+            "\n"
+            "    <silent>remove real directive</silent>\n"
+            "</pre>"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "<pre>\n\n    \n</pre>")
+
+    def test_silent_parser_ignores_fences_inside_html_comment_blocks(self):
+        text = (
+            "<!--\n"
+            "```\n"
+            "-->\n"
+            "<silent>remove real directive</silent>\n"
+            "```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "<!--\n```\n-->\n\n```")
+
     def test_process_reply_keeps_fence_newline_before_quick_replies(self):
         text = "```text\nexample\n```\n---\n[Yes] | [No]"
 
@@ -664,6 +737,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
     def test_silent_parser_handles_many_malformed_html_prefixes_linearly(self):
         text = "<a" * 8_000 + " `<silent>literal</silent>`"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_handles_many_malformed_html_comments_linearly(self):
+        text = "<!--" * 8_000 + " `<silent>literal</silent>`"
 
         self.assertEqual(strip_silent_blocks(text), text)
 
