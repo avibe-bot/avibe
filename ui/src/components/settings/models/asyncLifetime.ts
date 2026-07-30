@@ -162,6 +162,15 @@ export const startNeedsStatusRead = (flow: OAuthFlow): boolean => flow.state ===
 export type FlowAuthority = {
   current: () => FlowView;
   transition: (event: FlowEvent) => ReturnType<typeof flowStep>;
+  /**
+   * WHAT this journey is for: the source id a re-auth is repairing, or `null` for
+   * a create, which has no source yet.
+   *
+   * Carried on the authority because the authority is the journey's identity, and
+   * `flowLetGo` has to ask about the identity of a journey that is not the one
+   * asking — see there for the only question it answers.
+   */
+  subject: string | null;
 };
 
 /**
@@ -169,7 +178,10 @@ export type FlowAuthority = {
  * that may land a new one. Keeping only `flow` at the landing site would let a
  * caller silently drop `settled` and reopen an already terminal flow.
  */
-export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthority => {
+export const createFlowAuthority = (
+  land: (view: FlowView) => void,
+  subject: string | null,
+): FlowAuthority => {
   let current: FlowView = { ...initialFlowView };
 
   return {
@@ -180,6 +192,7 @@ export const createFlowAuthority = (land: (view: FlowView) => void): FlowAuthori
       land(current);
       return step;
     },
+    subject,
   };
 };
 
@@ -228,30 +241,54 @@ export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
 export const pollFailureSettles = (submitOutstanding: boolean): boolean => !submitOutstanding;
 
 /**
+ * Whether a journey may walk away from the flow it opened without cancelling it —
+ * i.e. whether SOMEONE ELSE can still be handed that exact flow.
+ *
+ * Three facts have to agree, and each answers a different question:
+ *
+ * 1. Ownership — 「is it still mine to cancel?」 `POST …/reauth` REUSES a live
+ *    pending flow, so a teardown that cancels after ownership moved does not clean
+ *    up after itself: it ends the login the user is watching in the dialog that
+ *    replaced it. The answer therefore depends on WHEN a path asks. The effect's
+ *    own cleanup asks at the instant ownership transfers and still holds it, while
+ *    a start whose dialog closed mid-request asks after that same cleanup already
+ *    released it. Identical call, right in one place and wrong in the other.
+ * 2. The route — 「could it EVER have become someone else's?」 `oauth_start` mints a
+ *    fresh pending source id on every call and never looks for a pending flow, so
+ *    a create's flow belongs to the one journey that opened it. Ownership alone
+ *    cannot say this, which is why `routeReuses` is asked separately: with the ref
+ *    released, 「nobody owns it」 and 「a successor is about to」 are indistinguishable
+ *    from here, and on a create there is no successor coming for it at all.
+ * 3. The successor's SUBJECT — 「could this particular one be handed my flow?」
+ *    `pending_reauth(source_id)` filters on `binding.source_id`, so the handover is
+ *    keyed by SOURCE while ownership of this ref is global to the dialog. Close a
+ *    pending re-auth for source A, open one for source B before A's start returns,
+ *    and A finds a live owner that can never adopt its flow: withholding the cancel
+ *    there leaves A's authorization running until it expires. So the route being
+ *    reusable is a claim about a class of successors, not about whoever happens to
+ *    hold the ref.
+ *
+ * A `null` owner is let go whenever the route reuses, and deliberately: nobody
+ * holds it now, but the user's next start for the same source will be handed it,
+ * and what is left behind meanwhile is a pending login the server itself times out.
+ * That is the one case where no subject exists to compare, and the conservative
+ * direction is not cancelling a flow a successor may adopt.
+ */
+export const flowLetGo = (
+  journey: FlowAuthority,
+  owner: FlowAuthority | null,
+  routeReuses: boolean,
+): boolean =>
+  owner !== journey &&
+  routeReuses &&
+  (owner === null || owner.subject === journey.subject);
+
+/**
  * Hands back the flow a journey opened, and is the ONLY authorization for a
  * teardown cancel.
  *
- * Cancelling is conditional on still owning the flow, because `POST …/reauth`
- * REUSES a live pending flow: the next journey for the same source is handed the
- * SAME flow id. A teardown that cancels after ownership moved therefore does not
- * clean up after itself — it ends the login the user is watching in the dialog
- * that replaced it. So the answer depends on WHEN a path asks: the effect's own
- * cleanup asks at the instant ownership transfers and still holds it, while a
- * start whose dialog closed mid-request asks after that same cleanup already
- * released it. Identical call, right in one place and wrong in the other. `null`
- * ownership is let-go too, and deliberately: a replacement's start can be in
- * flight this very moment, and 「nobody owns it」 is indistinguishable from
- * 「a successor is about to」 from here. What gets left behind is a pending login
- * the server itself times out, and that the next start adopts.
- *
- * All of which is true only of a flow a successor CAN be handed, which is why
- * `reusable` is asked separately rather than read off the ownership: `oauth_start`
- * mints a fresh pending source id on every call and never looks for a pending
- * flow, so a create's flow belongs to the one journey that opened it. There, an
- * absent owner is not a handoff in progress — it is nobody, and letting go leaves
- * an authorization and its registry binding live until the server expires them.
- * Ownership answers 「is it still mine to cancel?」; `reusable` answers 「could it
- * ever have become someone else's?」, and only the second one is about the route.
+ * Whether the cancel is authorized is `flowLetGo`'s call — see there for the three
+ * separate facts that have to agree before a journey may walk away from a flow.
  *
  * Rereading is unconditional, and this function is not given the flow so that no
  * caller can argue otherwise from it. `POST /oauth/cancel` is not always a
@@ -275,7 +312,7 @@ export const releaseFlow = async (
     reusable: boolean;
   },
 ): Promise<void> => {
-  if (ops.cancel && (owner === journey || !ops.reusable)) {
+  if (ops.cancel && !flowLetGo(journey, owner, ops.reusable)) {
     try {
       await ops.cancel();
     } catch {

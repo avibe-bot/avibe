@@ -4,6 +4,24 @@
 import type { ResolutionEvent } from './types';
 
 /**
+ * 最近切换 as the page knows it: the rows, and whether its far end has been seen.
+ *
+ * One value rather than two pieces of state because every transition moves both,
+ * and the one that moved only the rows is the bug this type exists to make
+ * unwriteable: a head read that REPLACES a gapped feed throws away the tail the
+ * exhaustion flag was a claim about, and 加载更早 then offers no way back to rows
+ * that certainly still exist.
+ */
+export type EventFeed = {
+  events: ResolutionEvent[];
+  /** Whether the TAIL has been reached, i.e. 加载更早 has nothing left to fetch. */
+  exhausted: boolean;
+};
+
+/** Before anything has been read: no rows, and nothing to page back to yet. */
+export const emptyFeed: EventFeed = { events: [], exhausted: true };
+
+/**
  * One list from two pages of the same feed, in the order given, without repeats.
  *
  * ORDER IS POSITIONAL and has to be: `id` is `evt_<uuid4hex>`, so sorting by it
@@ -57,9 +75,35 @@ export const headReadGapped = (
  * Replacing costs the user their 加载更早 rows, which is the honest price: those
  * rows are still reachable by paging, while a spliced feed is unreachable by any
  * action because nothing about it looks wrong.
+ *
+ * Which is only true if paging can still reach them, and that is why `exhausted`
+ * is part of the answer. Merging leaves it alone — the tail is still on screen, so
+ * a claim about the tail still holds, and this read was of the head. Replacing
+ * clears it: the rows it discarded are older than everything it kept and they
+ * exist by construction (disjoint pages mean a page-plus landed in between), so
+ * 「there is nothing older」 is exactly what stopped being true. If the log has
+ * since evicted them, the next 加载更早 comes back short and sets it again.
  */
-export const feedAfterHeadRead = (
-  onScreen: ResolutionEvent[],
-  headPage: ResolutionEvent[],
-): ResolutionEvent[] =>
-  headReadGapped(headPage, onScreen) ? headPage : mergeEventFeed(headPage, onScreen);
+export const feedAfterHeadRead = (onScreen: EventFeed, headPage: ResolutionEvent[]): EventFeed =>
+  headReadGapped(headPage, onScreen.events)
+    ? { events: headPage, exhausted: false }
+    : {
+        events: mergeEventFeed(headPage, onScreen.events),
+        exhausted: onScreen.exhausted,
+      };
+
+/**
+ * The feed after a read from the TAIL end — 加载更早, and the first page at mount,
+ * which is a tail read too: it reaches the end exactly when it comes back short.
+ *
+ * `pageSize` is passed rather than baked in because the page owns that constant;
+ * a short page is the only evidence either read has that there is nothing older.
+ */
+export const feedAfterTailRead = (
+  onScreen: EventFeed,
+  tailPage: ResolutionEvent[],
+  pageSize: number,
+): EventFeed => ({
+  events: mergeEventFeed(onScreen.events, tailPage),
+  exhausted: tailPage.length < pageSize,
+});

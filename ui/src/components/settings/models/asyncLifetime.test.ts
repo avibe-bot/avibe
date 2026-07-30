@@ -25,7 +25,10 @@
 //   4. cancel-after-handoff. The dialog closes while its start is still in flight
 //      and a replacement opens; the server's pending-flow reuse hands the
 //      replacement THAT SAME flow. The first journey's cleanup then cancels the
-//      login the user is watching in the dialog that replaced it.
+//      login the user is watching in the dialog that replaced it. Its mirror image
+//      is the same close-then-reopen for a DIFFERENT row: the reuse is keyed by
+//      source id while ownership of the dialog's ref is not, so withholding the
+//      cancel there abandons an authorization no successor can ever adopt.
 //
 //   5. poll-error-during-submit. The 2s status read fails at the moment the paste
 //      submit it raced commits. Latching the READER's error settles the view, so
@@ -46,6 +49,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createFlowAuthority,
   createLatestAsyncAuthority,
+  flowLetGo,
   flowStep,
   initialSeedState,
   isDone,
@@ -248,7 +252,7 @@ describe('flowStep', () => {
 
 describe('flow authority', () => {
   it('ignores a poll flow_not_found that lands after success settled', () => {
-    const authority = createFlowAuthority(() => {});
+    const authority = createFlowAuthority(() => {}, null);
 
     authority.transition({ kind: 'response', flow: flow('verifying') });
     authority.transition({ kind: 'response', flow: flow('success') });
@@ -266,7 +270,7 @@ describe('flow authority', () => {
   });
 
   it('ignores a paste rejection that lands after success settled', () => {
-    const authority = createFlowAuthority(() => {});
+    const authority = createFlowAuthority(() => {}, null);
 
     authority.transition({ kind: 'response', flow: flow('awaiting_action') });
     authority.transition({ kind: 'response', flow: flow('success') });
@@ -285,7 +289,7 @@ describe('flow authority', () => {
 
   it('keeps the deadline terminal when a paste success resolves afterward', () => {
     const landed: FlowView[] = [];
-    const authority = createFlowAuthority((view) => landed.push(view));
+    const authority = createFlowAuthority((view) => landed.push(view), null);
     let connected = 0;
 
     authority.transition({ kind: 'response', flow: flow('success') });
@@ -324,7 +328,7 @@ describe('pollFailureSettles — who speaks for a journey whose submit is outsta
   it('shows what latching one costs: the success right behind it is ignored', () => {
     // Interleaving 5 as a sequence. `flowStep` is right to ignore the second
     // arrival — the fix is upstream, at which arrival is allowed to be a verdict.
-    const authority = createFlowAuthority(() => {});
+    const authority = createFlowAuthority(() => {}, null);
 
     authority.transition({ kind: 'response', flow: flow('awaiting_action') });
     authority.transition({ kind: 'error', errorKey: 'settings.models.oauth.error.generic' });
@@ -417,7 +421,8 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     const log: string[] = [];
     return {
       log,
-      journey: createFlowAuthority(() => {}),
+      // Re-authing source A: the journey whose flow a successor can be handed.
+      journey: createFlowAuthority(() => {}, 'src_a'),
       // `reusable` defaults to the reauth journey, which is the one the ownership
       // rule was written for; the create cases below say so explicitly.
       ops: (cancel: (() => Promise<unknown>) | null, reusable = true) => ({
@@ -454,15 +459,41 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
 
   it('lets go once a newer journey owns the source flow', async () => {
     // Interleaving 4. `POST …/reauth` reuses a live pending flow, so the
-    // replacement dialog is polling THIS flow id. Cancelling it here ends a login
-    // the user is watching — and the reread is still owed, because the start this
-    // journey made had already committed the irreversible half.
+    // replacement dialog FOR THE SAME ROW is polling THIS flow id. Cancelling it
+    // here ends a login the user is watching — and the reread is still owed,
+    // because the start this journey made had already committed the irreversible
+    // half.
     const { log, journey, ops } = teardown();
-    const successor = createFlowAuthority(() => {});
+    const successor = createFlowAuthority(() => {}, 'src_a');
 
     await releaseFlow(journey, successor, ops(() => Promise.resolve()));
 
     expect(log).toEqual(['reread']);
+  });
+
+  it('CANCELS when the successor is re-authing a different row', async () => {
+    // `pending_reauth(source_id)` filters on `binding.source_id`, so the handover
+    // is keyed by SOURCE while ownership of the dialog's ref is global. Close a
+    // pending re-auth for A, open one for B before A's start returns, and A finds
+    // a live owner that can never be handed its flow: letting go there leaves A's
+    // authorization running until it expires.
+    const { log, journey, ops } = teardown();
+    const otherRow = createFlowAuthority(() => {}, 'src_b');
+
+    await releaseFlow(journey, otherRow, ops(() => Promise.resolve()));
+
+    expect(log).toEqual(['cancel', 'reread']);
+  });
+
+  it('CANCELS when the successor is a create, which adopts nothing', async () => {
+    // The same rule with the successor on the other route: a create has no source
+    // yet, so it is not the journey `pending_reauth` would hand this flow to.
+    const { log, journey, ops } = teardown();
+    const create = createFlowAuthority(() => {}, null);
+
+    await releaseFlow(journey, create, ops(() => Promise.resolve()));
+
+    expect(log).toEqual(['cancel', 'reread']);
   });
 
   it('lets go when nobody owns the flow yet', async () => {
@@ -492,9 +523,27 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
     // 「could it ever have become someone else's?」. Only a `false` second answer
     // makes the first one moot.
     const { log, journey, ops } = teardown();
-    const successor = createFlowAuthority(() => {});
+    const successor = createFlowAuthority(() => {}, 'src_a');
     await releaseFlow(journey, successor, ops(() => Promise.resolve(), true));
     expect(log).toEqual(['reread']);
+  });
+
+  it('keeps the three questions independent', async () => {
+    // Stated on `flowLetGo` directly so none of them can be folded into another:
+    // ownership (「still mine?」), the route (「could it EVER move?」) and the
+    // successor's subject (「could THIS one be handed it?」).
+    const mine = createFlowAuthority(() => {}, 'src_a');
+    const sameRow = createFlowAuthority(() => {}, 'src_a');
+    const otherRow = createFlowAuthority(() => {}, 'src_b');
+
+    expect(flowLetGo(mine, mine, true)).toBe(false); // still mine
+    expect(flowLetGo(mine, sameRow, false)).toBe(false); // route never hands it over
+    expect(flowLetGo(mine, otherRow, true)).toBe(false); // successor cannot adopt it
+    expect(flowLetGo(mine, sameRow, true)).toBe(true); // all three agree
+    // No owner: no subject to compare, and the conservative direction is not
+    // killing a flow the user's next start for this row would be handed.
+    expect(flowLetGo(mine, null, true)).toBe(true);
+    expect(flowLetGo(mine, null, false)).toBe(false);
   });
 
   it('takes the journey each teardown is releasing from the dialog', () => {
@@ -507,6 +556,9 @@ describe('releaseFlow — what a teardown does with the flow it opened', () => {
 
     expect(releases.length).toBe(2);
     expect(declared.length).toBe(releases.length);
+    // And the authority carries the row it is for, which is what makes the
+    // successor's subject answerable at all.
+    expect(dialog).toMatch(/createFlowAuthority\(setView, reauthId\)/);
   });
 
   it('still rereads when there was no flow to release', async () => {

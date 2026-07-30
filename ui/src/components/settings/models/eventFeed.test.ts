@@ -5,12 +5,23 @@
 // while the line explaining that change stayed invisible until a full reload. The
 // post-write refresh now re-reads the head — which is only safe if it cannot throw
 // away the rows 加载更早 已经 paged in, and cannot splice a hole into the sequence.
+//
+// And the follow-on: the rows and 「is there anything older」 are one fact. Moving
+// only the rows is how the replace branch left 加载更早 claiming an end it had just
+// discarded, over history that certainly still existed.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { feedAfterHeadRead, headReadGapped, mergeEventFeed } from './eventFeed';
+import {
+  emptyFeed,
+  feedAfterHeadRead,
+  feedAfterTailRead,
+  headReadGapped,
+  mergeEventFeed,
+  type EventFeed,
+} from './eventFeed';
 import type { ResolutionEvent } from './types';
 
 /** A feed row: only `id` matters to the merge, and only identity to the rest. */
@@ -18,6 +29,12 @@ const ev = (id: string): ResolutionEvent =>
   ({ id, ts: '2026-07-30T10:00:00Z', agent: 'claude', kind: 'cooldown' }) as ResolutionEvent;
 
 const ids = (events: ResolutionEvent[]) => events.map((e) => e.id);
+
+/** On-screen feed with the tail already reached, unless said otherwise. */
+const onScreen = (rows: ResolutionEvent[], exhausted = true): EventFeed => ({
+  events: rows,
+  exhausted,
+});
 
 describe('mergeEventFeed — one list from two pages of the same feed', () => {
   it('keeps the given order and drops the overlap', () => {
@@ -71,18 +88,64 @@ describe('headReadGapped — whether the two pages still touch', () => {
 
 describe('feedAfterHeadRead — what the post-write refresh leaves on screen', () => {
   it('merges the new rows in front of the paged-in tail', () => {
-    const onScreen = [ev('c'), ev('b'), ev('a')];
-    expect(ids(feedAfterHeadRead(onScreen, [ev('d'), ev('c')]))).toEqual(['d', 'c', 'b', 'a']);
+    const held = onScreen([ev('c'), ev('b'), ev('a')]);
+    expect(ids(feedAfterHeadRead(held, [ev('d'), ev('c')]).events)).toEqual(['d', 'c', 'b', 'a']);
   });
 
   it('replaces rather than splices when the pages no longer touch', () => {
     // The paged rows are still reachable by paging; a spliced feed is reachable by
     // nothing, because no row in it looks wrong.
-    expect(ids(feedAfterHeadRead([ev('c'), ev('b')], [ev('z'), ev('y')]))).toEqual(['z', 'y']);
+    const held = onScreen([ev('c'), ev('b')]);
+    expect(ids(feedAfterHeadRead(held, [ev('z'), ev('y')]).events)).toEqual(['z', 'y']);
   });
 
   it('holds the screen when the head read came back empty', () => {
-    expect(ids(feedAfterHeadRead([ev('b'), ev('a')], []))).toEqual(['b', 'a']);
+    expect(ids(feedAfterHeadRead(onScreen([ev('b'), ev('a')]), []).events)).toEqual(['b', 'a']);
+  });
+
+  it('keeps a merge from touching exhaustion, in either state', () => {
+    // A claim about the TAIL, and the tail is still on screen after a merge.
+    expect(feedAfterHeadRead(onScreen([ev('b'), ev('a')], true), [ev('c'), ev('b')]).exhausted).toBe(
+      true,
+    );
+    expect(
+      feedAfterHeadRead(onScreen([ev('b'), ev('a')], false), [ev('c'), ev('b')]).exhausted,
+    ).toBe(false);
+  });
+
+  it('CLEARS exhaustion when it replaces a gapped feed', () => {
+    // The regression: 加载更早 disappeared over rows that certainly still exist,
+    // because the flag outlived the list it was a claim about. Disjoint pages mean
+    // a page-plus landed in between, so the discarded rows are older than
+    // everything kept — 「nothing older」 is precisely what stopped being true.
+    expect(feedAfterHeadRead(onScreen([ev('c'), ev('b')], true), [ev('z')]).exhausted).toBe(false);
+  });
+});
+
+describe('feedAfterTailRead — 加载更早, and the first page at mount', () => {
+  it('appends the older page and reads the end off a short one', () => {
+    const held = onScreen([ev('c'), ev('b')], false);
+    const next = feedAfterTailRead(held, [ev('b'), ev('a')], 20);
+    expect(ids(next.events)).toEqual(['c', 'b', 'a']);
+    expect(next.exhausted).toBe(true);
+  });
+
+  it('keeps paging open on a full page', () => {
+    expect(feedAfterTailRead(onScreen([ev('b')], true), [ev('a')], 1).exhausted).toBe(false);
+  });
+
+  it('reads the mount page as the tail it also is', () => {
+    // Same owner as 加载更早 deliberately: reaching the end is the same question,
+    // and a hand-rolled second copy is how the two drifted apart.
+    const first = feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 20);
+    expect(ids(first.events)).toEqual(['b', 'a']);
+    expect(first.exhausted).toBe(true);
+    expect(feedAfterTailRead(emptyFeed, [ev('b'), ev('a')], 2).exhausted).toBe(false);
+  });
+
+  it('starts from a feed with nothing to page back to', () => {
+    expect(emptyFeed.events).toEqual([]);
+    expect(emptyFeed.exhausted).toBe(true);
   });
 });
 
@@ -93,23 +156,35 @@ describe('the page reads the feed through this owner', () => {
     // The whole point: the refresh every mutation site already calls is what has
     // to move the feed, not a probe-only twin bolted onto one call site.
     expect(page).toMatch(/refreshAuthority\.run\([\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
-    expect(page).toMatch(/setEvents\(\(prev\) => feedAfterHeadRead\(prev, headEvents\)\)/);
+    expect(page).toMatch(/if \(headEvents\) setFeed\(\(prev\) => feedAfterHeadRead\(prev, headEvents\)\)/);
   });
 
-  it('merges both directions through one function', () => {
-    expect(page).toMatch(/setEvents\(\(prev\) => mergeEventFeed\(prev, page\)\)/);
-    // No hand-rolled dedupe left behind to drift from the owner.
+  it('lets the ancillary feed read fail without losing the rows', () => {
+    // A slow or broken /events must not veto the supply refresh: joined bare into
+    // the same Promise.all, one failing leg left repaired sources and the ● 当前
+    // the user just moved on screen as they were before the mutation.
+    expect(page).toMatch(/modelsApi\.listEvents\(EVENT_PAGE\)\.catch\(\(\) => null\)/);
+    expect(page).toMatch(/createLatestAsyncAuthority<\[Source\[\], AgentSupply\[\], ResolutionEvent\[\] \| null\]>/);
+    // Sources and agents are NOT tolerated the same way — they are what this
+    // refresh is for, and the caller's toast is what reports them failing.
+    expect(page).not.toMatch(/modelsApi\.list(Sources|Agents)\(\)\.catch/);
+  });
+
+  it('moves rows and end-of-feed together, through the owners', () => {
+    // One state, so no transition can move the rows and leave the flag behind.
+    expect(page).toMatch(/const \[feed, setFeed\] = React\.useState<EventFeed>\(emptyFeed\)/);
+    expect(page).toMatch(/setFeed\(feedAfterTailRead\(emptyFeed, e, EVENT_PAGE\)\)/);
+    expect(page).toMatch(/setFeed\(\(prev\) => feedAfterTailRead\(prev, page, EVENT_PAGE\)\)/);
+    // Nothing left that could set one half on its own.
+    expect(page).not.toMatch(/setEventsExhausted|setEvents\(/);
+    // And no hand-rolled dedupe or page-length test outside the owners.
     expect(page).not.toMatch(/new Set\(prev\.map/);
+    expect(page).not.toMatch(/\.length < EVENT_PAGE/);
   });
 
-  it('leaves tail exhaustion out of a head read', () => {
-    // `eventsExhausted` is a fact about the far end; a head page cannot speak for
-    // it, and recomputing it there would strand 加载更早.
-    const start = page.indexOf('createLatestAsyncAuthority<');
-    // Bounded by the authority's own landing callback: the mount read that follows
-    // it DOES set exhaustion, legitimately, from a first page that is the tail too.
-    const lander = page.slice(start, page.indexOf('React.useEffect(', start));
-    expect(lander).toContain('feedAfterHeadRead');
-    expect(lander).not.toContain('setEventsExhausted');
+  it('reads 加载更早 off the same feed it renders', () => {
+    expect(page).toMatch(/hasMore=\{!feed\.exhausted\}/);
+    expect(page).toMatch(/events=\{feed\.events\}/);
+    expect(page).toMatch(/const oldest = feed\.events\[feed\.events\.length - 1\]\?\.id/);
   });
 });

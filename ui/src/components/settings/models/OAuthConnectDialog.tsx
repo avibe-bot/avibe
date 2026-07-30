@@ -178,7 +178,11 @@ export const OAuthConnectDialog: React.FC<{
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       pollTimer = null;
     };
-    const authority = createFlowAuthority(setView);
+    // The subject travels with the authority because `flowLetGo` asks about the
+    // identity of whichever journey holds the ref, and the server's handover is
+    // keyed by source: a successor re-authing a DIFFERENT row cannot be handed
+    // this flow, so it may not stand in for one that could.
+    const authority = createFlowAuthority(setView, reauthId);
     flowAuthorityRef.current = authority;
     const transition = authority.transition;
 
@@ -333,13 +337,15 @@ export const OAuthConnectDialog: React.FC<{
           // Through `releaseFlow`, which decides whether this journey may still
           // cancel: by the time we resume, our own cleanup has already released
           // the ref, so a replacement dialog may own the source's flow — and on a
-          // reauth it would own THIS one, since `POST …/reauth` hands a successor
-          // the live pending flow. `oauth_start` never does: it mints a fresh
-          // pending source id per call, so a create's flow has no successor to
-          // protect and the released ref means nobody is coming for it. Which is
-          // the difference `reusable` carries, because ownership alone cannot: the
-          // two are indistinguishable at this line. The refetch happens either
-          // way, and only after the call settles.
+          // reauth FOR THE SAME ROW it would own THIS one, since `POST …/reauth`
+          // hands such a successor the live pending flow. `oauth_start` never
+          // does: it mints a fresh pending source id per call, so a create's flow
+          // has no successor to protect and the released ref means nobody is
+          // coming for it. Which is the difference `reusable` carries, because
+          // ownership alone cannot: the two are indistinguishable at this line.
+          // Whether the successor is the right ROW is the authority's subject to
+          // say — see `flowLetGo`. The refetch happens either way, and only after
+          // the call settles.
           await releaseFlow(authority, flowAuthorityRef.current, {
             cancel: () => modelsApi.cancelOAuth(started.flow_id),
             reusable: isReauth,

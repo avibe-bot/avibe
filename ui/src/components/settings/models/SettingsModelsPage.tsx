@@ -21,7 +21,7 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
 import { createLatestAsyncAuthority } from './asyncLifetime';
-import { feedAfterHeadRead, mergeEventFeed } from './eventFeed';
+import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, type EventFeed } from './eventFeed';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
@@ -86,10 +86,9 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [sources, setSources] = React.useState<Source[]>([]);
   const [agents, setAgents] = React.useState<AgentSupply[]>([]);
-  const [events, setEvents] = React.useState<ResolutionEvent[]>([]);
-  // A short page is the end of the feed — the only end-of-list signal the
-  // endpoint gives (there is no total).
-  const [eventsExhausted, setEventsExhausted] = React.useState(true);
+  // Rows and end-of-feed as ONE value: every read moves both, and the transition
+  // that moved only the rows is what made 加载更早 lie. `EventFeed` owns the rules.
+  const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -130,17 +129,22 @@ export const SettingsModelsPage: React.FC = () => {
   // the user is about to see. Fetched only at mount, the row changed and the line
   // explaining it appeared nowhere until the page was reloaded — the explanation
   // arriving later than the thing it explains.
+  // It rides along as an ANCILLARY leg, though — `null` when that one read failed.
+  // The feed explains the rows; it is not the rows. Letting it reject the whole
+  // `Promise.all` would mean a slow or broken `/events` holds back the repaired
+  // source state and the ● 当前 the user just changed, which is the opposite of
+  // this refresh's job. A feed left one write behind is not wrong, only not newer,
+  // and the next mutation or reload catches it up.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[]]>(
+    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null]>(
       ([nextSources, nextAgents, headEvents]) => {
         if (!aliveRef.current) return;
         setSources(nextSources);
         setAgents(nextAgents);
         // Merged, not replaced: 加载更早 pages tail-ward, and a head re-read must
-        // not silently drop the rows it never asked for. `eventsExhausted` is left
-        // alone on purpose — it is a fact about the TAIL, and this read is of the
-        // head. See `feedAfterHeadRead` for the one case merging is wrong.
-        setEvents((prev) => feedAfterHeadRead(prev, headEvents));
+        // not silently drop the rows it never asked for. See `feedAfterHeadRead`
+        // for the one case merging is wrong, and for what that costs 加载更早.
+        if (headEvents) setFeed((prev) => feedAfterHeadRead(prev, headEvents));
       },
     ),
   );
@@ -158,8 +162,9 @@ export const SettingsModelsPage: React.FC = () => {
         if (cancelled) return;
         setSources(s);
         setAgents(a);
-        setEvents(e);
-        setEventsExhausted(e.length < EVENT_PAGE);
+        // The first page is a tail read as much as a head one: it reaches the end
+        // of the feed exactly when it comes back short.
+        setFeed(feedAfterTailRead(emptyFeed, e, EVENT_PAGE));
         setRuntime(r);
         setLoading(false);
       })
@@ -176,7 +181,11 @@ export const SettingsModelsPage: React.FC = () => {
   const refreshSourcesAgents = React.useCallback(async () => {
     try {
       await refreshAuthority.run(() =>
-        Promise.all([modelsApi.listSources(), modelsApi.listAgents(), modelsApi.listEvents(EVENT_PAGE)]),
+        Promise.all([
+          modelsApi.listSources(),
+          modelsApi.listAgents(),
+          modelsApi.listEvents(EVENT_PAGE).catch(() => null),
+        ]),
       );
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
@@ -186,7 +195,7 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refreshAuthority, showToast, t]);
 
   const loadOlderEvents = React.useCallback(async () => {
-    const oldest = events[events.length - 1]?.id;
+    const oldest = feed.events[feed.events.length - 1]?.id;
     if (!oldest) return;
     setLoadingEvents(true);
     try {
@@ -194,16 +203,15 @@ export const SettingsModelsPage: React.FC = () => {
       if (!aliveRef.current) return;
       // Merged by id rather than concatenated: the feed grows at the head while
       // we page from the tail, so an overlapping row is normal, not a bug. Same
-      // owner as the head re-read, with the argument order stating which end this
-      // page belongs to.
-      setEvents((prev) => mergeEventFeed(prev, page));
-      setEventsExhausted(page.length < EVENT_PAGE);
+      // owner as the mount read, because reaching the end is the same question
+      // there; the head re-read has its own because merging is not always right.
+      setFeed((prev) => feedAfterTailRead(prev, page, EVENT_PAGE));
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setLoadingEvents(false);
     }
-  }, [events, showToast, t]);
+  }, [feed.events, showToast, t]);
 
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
@@ -271,9 +279,9 @@ export const SettingsModelsPage: React.FC = () => {
             connectingBackend={connecting}
           />
           <RecentSwitchesCard
-            events={events}
+            events={feed.events}
             sources={sources}
-            hasMore={!eventsExhausted}
+            hasMore={!feed.exhausted}
             loadingMore={loadingEvents}
             onLoadMore={() => void loadOlderEvents()}
           />
