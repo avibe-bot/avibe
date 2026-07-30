@@ -1659,6 +1659,9 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     # App is a minimal shell that renders the router — no hardcoded nav/route table.
     app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "<RouterView" in app_tsx
+    assert "bg-background" in app_tsx
+    assert "text-foreground" in app_tsx
+    assert "ThemeProvider" not in app_tsx
     assert "navItems" not in app_tsx
     assert "activeLocale" not in app_tsx
 
@@ -1673,6 +1676,9 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     styles = (page_dir / "src" / "styles.css").read_text(encoding="utf-8")
     assert styles.splitlines()[0].strip() == '@import "tailwindcss";'
     assert '@import "@avibe/show-ui/theme.css";' in styles
+    assert "background: var(--background)" in styles
+    assert "color: var(--foreground)" in styles
+    assert "--avs-" not in styles
 
 
 def test_existing_single_page_workspace_is_preserved(monkeypatch, tmp_path):
