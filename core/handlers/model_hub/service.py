@@ -1313,6 +1313,48 @@ class ModelHubService:
             return config
         raise ModelHubError("engine_down", status=503)
 
+    async def _materialize_failed_hub_flow(
+        self,
+        binding: OAuthFlowBinding,
+        flow: OAuthFlowState,
+        *,
+        config: ModelHubConfig | None = None,
+    ) -> ModelHubConfig | None:
+        if binding.intent == "reauth":
+            return await self._materialize_failed_hub_reauth(
+                binding,
+                flow,
+                config=config,
+            )
+        if (
+            flow.retained_material_disposition
+            == RetainedMaterialDisposition.FLOW_SOURCE_REF
+        ):
+            if (
+                binding.source_id is None
+                or flow.retained_credential_ref is None
+            ):
+                raise ModelHubError("engine_down", status=503)
+            await self._rollback_credential(
+                binding.source_id,
+                flow.retained_credential_ref,
+            )
+            return config
+        if (
+            flow.retained_material_disposition
+            == RetainedMaterialDisposition.ORPHAN_REF
+        ):
+            if (
+                binding.source_id is None
+                or flow.retained_credential_ref is None
+            ):
+                raise ModelHubError("engine_down", status=503)
+            await self._cleanup_orphaned_hub_material(
+                binding.source_id,
+                flow.retained_credential_ref,
+            )
+        return config
+
     async def _materialize_completed_oauth(
         self,
         flow_id: str,
@@ -1322,12 +1364,11 @@ class ModelHubService:
         if flow.state != "success":
             if (
                 flow.state == "failed"
-                and binding.intent == "reauth"
                 and binding.channel == "hub"
                 and binding.source_id is not None
             ):
                 async with self._mutation_lock:
-                    await self._materialize_failed_hub_reauth(
+                    await self._materialize_failed_hub_flow(
                         binding,
                         flow,
                     )
@@ -2978,7 +3019,6 @@ class ModelHubService:
             self._raise_if_flow_expired(flow_id, flow)
             if flow.state == "success" or (
                 flow.state == "failed"
-                and binding.intent == "reauth"
                 and binding.channel == "hub"
             ):
                 terminal = (binding, flow)
@@ -2987,14 +3027,41 @@ class ModelHubService:
                     self._oauth_adapter(binding.channel).cancel_oauth(flow_id),
                     flow_id=flow_id,
                 )
-                self.oauth_flows.forget(flow_id)
+                cancelled = await self._oauth_status(
+                    flow_id,
+                    binding.channel,
+                )
+                if (
+                    cancelled.state == "success"
+                    or (
+                        binding.channel == "hub"
+                        and (
+                            cancelled.state == "failed"
+                            or (
+                                binding.intent == "reauth"
+                                and cancelled.state == "cancelled"
+                            )
+                        )
+                    )
+                ):
+                    terminal = (binding, cancelled)
+                else:
+                    self.oauth_flows.forget(flow_id)
         if terminal is not None:
-            await self._materialize_completed_oauth(
-                flow_id,
-                terminal[0],
-                terminal[1],
-            )
-            if terminal[1].state == "failed":
+            binding, flow = terminal
+            if flow.state == "cancelled":
+                async with self._mutation_lock:
+                    await self._materialize_failed_hub_reauth(
+                        binding,
+                        flow,
+                    )
+            else:
+                await self._materialize_completed_oauth(
+                    flow_id,
+                    binding,
+                    flow,
+                )
+            if flow.state != "success":
                 async with self._mutation_lock:
                     try:
                         self.oauth_flows.forget(flow_id)

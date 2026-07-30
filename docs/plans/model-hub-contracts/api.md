@@ -357,6 +357,12 @@ differently only if all invariants remain true:
    source like the irreversible case but touches no refs: no handle can be named
    safely, so loud re-auth is the convergent remedy.
 
+   A failed create flow has no prior `Source` to mark `needs_action`.
+   `flow_source_ref` is durably revoked by its retained ref, `orphan_ref` uses
+   the cleanup retry above, and `none` / `foreign_source_ref` / `unknown` touch
+   no refs; the producer can emit both known-ref and unknown create failures
+   because intent is a service concern outside the adapter seam.
+
    The consumer does not infer this partition by comparing refs. Hub success pins
    `flow_source_ref` and equality of `credential_ref` and
    `retained_credential_ref`. Native CLI success pins `credential_ref: null`,
