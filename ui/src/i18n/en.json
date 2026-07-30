@@ -2919,6 +2919,9 @@
     "showPage": {
       "open": "Visualize",
       "backToChat": "Back to chat",
+      "launchMenu": "Open Show Page",
+      "newWindow": "New window",
+      "newLink": "New link",
       "annotate": {
         "toggle": "Annotate",
         "smart": "Smart",

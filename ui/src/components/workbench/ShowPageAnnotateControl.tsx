@@ -55,11 +55,14 @@ interface ShowPageAnnotateControlProps {
   onDisable: () => void;
   onSetMode: (mode: AnnotationMode) => void;
   /**
-   * Mobile popover open/close. The popover floats over the Show Page iframe, so
-   * ChatPage makes the iframe inert while it is open (an outside tap inside the
-   * iframe never reaches us) — same pattern as the share control.
+   * Popover open/close for mobile chat and compact window chrome. The owner
+   * shields its iframe while open so an outside tap can dismiss the popover.
    */
   onPopoverOpenChange?: (open: boolean) => void;
+  /** Keep a single icon trigger at every viewport size (window title bars). */
+  compact?: boolean;
+  /** Associate portalled popover focus with its owning app window. */
+  ownerWindowId?: string;
 }
 
 export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = ({
@@ -68,6 +71,8 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   onDisable,
   onSetMode,
   onPopoverOpenChange,
+  compact = false,
+  ownerWindowId,
 }) => {
   const { t } = useTranslation();
   const ready = state !== null;
@@ -121,9 +126,9 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
     return (
       <Button
         type="button"
-        variant="outline"
+        variant={compact ? 'ghost' : 'outline'}
         size="icon"
-        className="size-7 shrink-0"
+        className={clsx(compact ? 'size-6 shrink-0 border-0 shadow-none' : 'size-7 shrink-0')}
         disabled
         aria-label={t('chat.showPage.annotate.unavailable')}
         title={t('chat.showPage.annotate.unavailable')}
@@ -136,76 +141,84 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   return (
     <>
       {/* Desktop ≥ md: collapsed icon button ⇄ mint pill (toggle + segments). */}
-      <div className="hidden items-center md:flex">
-        {enabled ? (
-          <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-[0_0_16px_-6px_rgba(91,255,160,0.5)]">
-            <button
+      {!compact && (
+        <div className="hidden items-center md:flex">
+          {enabled ? (
+            <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-[0_0_16px_-6px_rgba(91,255,160,0.5)]">
+              <button
+                type="button"
+                onClick={onDisable}
+                aria-label={offLabel}
+                title={offLabel}
+                aria-pressed
+                className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:brightness-110"
+              >
+                <MessageSquarePlus className="size-3.5" />
+              </button>
+              <div
+                role="radiogroup"
+                aria-label={t('chat.showPage.annotate.modeTitle')}
+                className="flex items-center gap-0.5"
+              >
+                {MODES.map(({ id, icon: Icon, labelKey }) => {
+                  const active = mode === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => onSetMode(id)}
+                      className={clsx(
+                        'flex h-6 items-center gap-1 rounded-[5px] px-2 text-[12px] transition-colors',
+                        active
+                          ? 'bg-mint-soft font-bold text-mint'
+                          : 'font-medium text-muted hover:text-foreground',
+                      )}
+                    >
+                      <Icon className="size-3.5" />
+                      {t(labelKey)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <Button
               type="button"
-              onClick={onDisable}
-              aria-label={offLabel}
-              title={offLabel}
-              aria-pressed
-              className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:brightness-110"
+              variant="outline"
+              size="icon"
+              className="size-7 shrink-0"
+              onClick={() => onEnable()}
+              aria-label={toggleLabel}
+              title={toggleLabel}
             >
               <MessageSquarePlus className="size-3.5" />
-            </button>
-            <div
-              role="radiogroup"
-              aria-label={t('chat.showPage.annotate.modeTitle')}
-              className="flex items-center gap-0.5"
-            >
-              {MODES.map(({ id, icon: Icon, labelKey }) => {
-                const active = mode === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    onClick={() => onSetMode(id)}
-                    className={clsx(
-                      'flex h-6 items-center gap-1 rounded-[5px] px-2 text-[12px] transition-colors',
-                      active ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
-                    )}
-                  >
-                    <Icon className="size-3.5" />
-                    {t(labelKey)}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="size-7 shrink-0"
-            onClick={() => onEnable()}
-            aria-label={toggleLabel}
-            title={toggleLabel}
-          >
-            <MessageSquarePlus className="size-3.5" />
-          </Button>
-        )}
-      </div>
+            </Button>
+          )}
+        </div>
+      )}
 
-      {/* Mobile < md: single button that enables + opens a mode-picker popover. */}
-      <div className="md:hidden">
+      {/* Mobile and compact window chrome: one trigger + mode-picker popover. */}
+      <div className={clsx(!compact && 'md:hidden')}>
         <Popover open={popoverOpen} onOpenChange={handlePopoverOpenChange}>
           <PopoverTrigger asChild>
             <Button
               type="button"
-              variant={enabled ? 'default' : 'outline'}
+              variant={enabled ? 'default' : compact ? 'ghost' : 'outline'}
               size="icon"
-              className="size-7 shrink-0"
+              className={clsx(compact ? 'size-6 shrink-0 rounded-md' : 'size-7 shrink-0')}
               aria-label={toggleLabel}
               title={toggleLabel}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="w-64 p-1.5">
+          <PopoverContent
+            align="end"
+            className="w-64 p-1.5"
+            data-window-owner-id={ownerWindowId}
+          >
             <div className="flex items-center justify-between px-2 pb-1.5 pt-1">
               <span className="text-[13px] font-medium text-foreground">{t('chat.showPage.annotate.modeTitle')}</span>
               <span className="text-[11px] text-muted">{t('chat.showPage.annotate.rememberHint')}</span>

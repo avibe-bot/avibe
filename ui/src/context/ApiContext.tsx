@@ -577,6 +577,7 @@ export type ApiContextType = {
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
   getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
+  getSessionResult: (sessionId: string) => Promise<WorkbenchSessionReadResult>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
@@ -780,6 +781,11 @@ export type WorkbenchSession = {
   updated_at: string;
   last_active_at: string | null;
   metadata: Record<string, unknown>;
+};
+
+export type WorkbenchSessionReadResult = {
+  status: number;
+  session: WorkbenchSession | null;
 };
 
 export type WorkbenchSessionCreate = {
@@ -2748,6 +2754,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       params?.cache === false
         ? getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
         : getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError }),
+    getSessionResult: async (sessionId) => {
+      const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      const payload = await res.json().catch(() => null);
+      return {
+        status: res.status,
+        session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
+      };
+    },
     getSessionBootstrap: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
     updateSession: async (sessionId, payload) => {
