@@ -120,22 +120,26 @@ class _SteeringAwareOpenCodeServer:
             async with self._state.lock:
                 messages = await self._server.list_messages(session_id, directory)
                 awaiting = self._state.awaiting_after_message_ids
-                if awaiting is not None and self._message_ids(messages).issubset(awaiting):
-                    wait_for_insert = True
-                else:
-                    self._state.awaiting_after_message_ids = None
-                    if self._is_final_assistant_snapshot(messages):
-                        try:
-                            status = await self._server.get_session_status(session_id, directory)
-                        except Exception:
-                            return messages
+                unchanged_since_insert = (
+                    awaiting is not None and self._message_ids(messages).issubset(awaiting)
+                )
+                final_snapshot = self._is_final_assistant_snapshot(messages)
+                if unchanged_since_insert or final_snapshot:
+                    try:
+                        status = await self._server.get_session_status(session_id, directory)
+                    except Exception:
+                        wait_for_insert = True
+                    else:
                         if status is not None and status.get("type") in {"busy", "retry"}:
                             wait_for_insert = True
                         else:
-                            self._state.closing = True
+                            self._state.awaiting_after_message_ids = None
+                            if final_snapshot:
+                                self._state.closing = True
                             return messages
-                    else:
-                        return messages
+                else:
+                    self._state.awaiting_after_message_ids = None
+                    return messages
             if wait_for_insert:
                 await asyncio.sleep(0.1)
 
@@ -568,6 +572,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     "target_session_id": steer_state.target_session_id,
                     "logical_turn_id": steer_state.logical_turn_id,
                     "agent": steer_state.agent,
+                    "system": steer_state.system,
                 }
             launch_identity = persisted_launch_identity(model_hub_launch)
             if launch_identity is not None:
@@ -971,17 +976,40 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             has_in_progress = False
             last_assistant_finish = None
-            for message in messages:
+            last_completed_assistant_index = -1
+            for index, message in enumerate(messages):
                 info = message.get("info", {})
                 if info.get("role") != "assistant":
                     continue
                 time_info = info.get("time") or {}
                 if not time_info.get("completed"):
                     has_in_progress = True
-                    break
+                    continue
+                last_completed_assistant_index = index
                 last_assistant_finish = info.get("finish")
 
-            session_still_active = has_in_progress or last_assistant_finish == "tool-calls"
+            baseline_message_ids = set(poll_info.baseline_message_ids)
+            has_post_assistant_user = any(
+                index > last_completed_assistant_index
+                and message.get("info", {}).get("role") == "user"
+                and message.get("info", {}).get("id") not in baseline_message_ids
+                for index, message in enumerate(messages)
+            )
+            try:
+                native_status = await server.get_session_status(
+                    poll_info.opencode_session_id,
+                    poll_info.working_path,
+                )
+            except Exception as err:
+                logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
+                native_status = None
+
+            session_still_active = (
+                (native_status is not None and native_status.get("type") in {"busy", "retry"})
+                or has_in_progress
+                or last_assistant_finish == "tool-calls"
+                or has_post_assistant_user
+            )
             if not session_still_active:
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
                 await self._poll_loop.remove_restored_ack(poll_info)
@@ -1047,10 +1075,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     logical_turn_id=logical_turn_id,
                     native_session_id=poll_info.opencode_session_id,
                     directory=poll_info.working_path,
-                    agent=steering_snapshot.get("agent"),
+                    agent=(
+                        steering_snapshot.get("agent")
+                        if isinstance(steering_snapshot.get("agent"), str)
+                        else None
+                    ),
                     model=poll_info.model_dict,
                     reasoning_effort=poll_info.reasoning_effort,
-                    system=None,
+                    system=(
+                        steering_snapshot.get("system")
+                        if isinstance(steering_snapshot.get("system"), str)
+                        else None
+                    ),
                     baseline_message_ids=set(poll_info.baseline_message_ids),
                     restored=True,
                 )

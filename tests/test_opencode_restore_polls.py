@@ -47,10 +47,14 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     prompt_calls: list[dict] = []
 
     class _Server:
+        def __init__(self):
+            self.messages = [{"info": {"role": "assistant", "time": {}}}]
+            self.status = {"type": "busy"}
+
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
             # so the poll is restored (not pruned as stale).
-            return [{"info": {"role": "assistant", "time": {}}}]
+            return list(self.messages)
 
         async def mark_run_active(self, session_id):
             return None
@@ -59,7 +63,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
             return None
 
         async def get_session_status(self, session_id, directory):
-            return {"type": "busy"}
+            return self.status
 
         async def prompt_async(self, **kwargs):
             prompt_calls.append(kwargs)
@@ -122,6 +126,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     agent._get_server = _get_server
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
     agent._test_prompt_calls = prompt_calls
+    agent._test_server = server
     return agent, status_writes, removed, request_sessions
 
 
@@ -135,6 +140,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "target_session_id": "ses_wb",
             "logical_turn_id": "logical-restored",
             "agent": "build",
+            "system": "restored system prompt",
         },
     }
     agent, _, _, _ = _build_agent({"oc-1": poll})
@@ -187,10 +193,50 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "agent": "build",
             "model": {"providerID": "openai", "modelID": "gpt-5"},
             "reasoning_effort": "high",
-            "system": None,
+            "system": "restored system prompt",
             "tools": {"question": False},
         }
     ]
+
+
+def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.baseline_message_ids = ["old-message"]
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.messages = [
+        {
+            "info": {
+                "id": "primary-assistant",
+                "role": "assistant",
+                "time": {"completed": 1},
+                "finish": "stop",
+            }
+        },
+        {"info": {"id": "steer-user", "role": "user", "time": {}}, "parts": []},
+    ]
+    agent._test_server.status = {"type": "idle"}
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            poll_started.set()
+            await release_poll.wait()
+
+        async def remove_restored_ack(self, poll_info):
+            return None
+
+    agent._poll_loop = _HeldPollLoop()
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await poll_started.wait()
+        release_poll.set()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert removed == []
 
 
 def test_restored_avibe_poll_marks_session_running():

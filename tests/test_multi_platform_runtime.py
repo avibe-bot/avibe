@@ -677,6 +677,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 
 def test_opencode_prompt_disables_question_tool_for_all_platforms():
     calls = []
+    active_polls = []
 
     class _Server:
         async def ensure_running(self):
@@ -732,6 +733,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            active_polls.append(kwargs)
             return None
 
         def remove_active_poll(self, session_id):
@@ -798,7 +800,10 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 user_id="u",
                 channel_id="c",
                 platform="slack",
-                platform_specific={"agent_session_id": "ses_test"},
+                platform_specific={
+                    "agent_session_id": "ses_test",
+                    "turn_token": "logical-turn",
+                },
             ),
             message="hello",
             user_message="hello",
@@ -815,6 +820,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+    steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
+    assert steering_snapshot["system"] == calls[0]["system"]
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

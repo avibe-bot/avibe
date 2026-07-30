@@ -114,6 +114,8 @@ class _OpenCodeServer:
         list_error: Exception | None = None,
         messages: list[dict] | None = None,
         status: dict | None = None,
+        status_error: Exception | None = None,
+        status_responses: list[dict | None] | None = None,
     ) -> None:
         self.error = error
         self.list_error = list_error
@@ -121,6 +123,8 @@ class _OpenCodeServer:
             {"info": {"id": "primary-user", "role": "user"}, "parts": []},
         ]
         self.status = status or {"type": "busy"}
+        self.status_error = status_error
+        self.status_responses = list(status_responses or [])
         self.list_calls = 0
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple] = []
@@ -143,6 +147,10 @@ class _OpenCodeServer:
         return list(self.messages)
 
     async def get_session_status(self, session_id: str, directory: str) -> dict | None:
+        if self.status_error is not None:
+            raise self.status_error
+        if self.status_responses:
+            return self.status_responses.pop(0)
         return self.status
 
     async def abort_session(self, *args) -> bool:
@@ -541,6 +549,86 @@ async def test_opencode_refuses_after_poll_owner_claims_terminal_result() -> Non
         assert server.prompt_calls == []
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_ambiguous_write_reconciles_unchanged_messages_when_idle() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        error=TimeoutError("response timed out"),
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status_responses=[{"type": "busy"}, {"type": "idle"}],
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+        assert messages[-1]["info"]["id"] == "primary-assistant"
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_poll_keeps_owner_until_failed_status_probe_recovers() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "primary-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "done"}],
+            }
+        ],
+        status={"type": "idle"},
+        status_error=ConnectionError("status unavailable"),
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = asyncio.create_task(
+        poll_server.list_messages("opencode-session", primary.working_path)
+    )
+    try:
+        while server.list_calls < 2:
+            await asyncio.sleep(0.05)
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.status_error = None
+        messages = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert messages[-1]["info"]["id"] == "primary-assistant"
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(poll_task, gate_task)
 
 
 @pytest.mark.anyio
