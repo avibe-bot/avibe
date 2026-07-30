@@ -33,5 +33,7 @@ describe('ShowPageAnnotateControl compact presentation', () => {
 
     expect(html.match(/<button/g)).toHaveLength(1);
     expect(html).toContain('aria-label="Annotate"');
+    expect(html).toContain('text-muted');
+    expect(html).toContain('hover:text-foreground');
   });
 });

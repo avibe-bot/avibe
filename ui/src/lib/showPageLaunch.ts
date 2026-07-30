@@ -11,10 +11,10 @@ export function isShowPageWindowDrop(start: ViewportPoint, current: ViewportPoin
   return current.y - start.y >= SHOW_PAGE_WINDOW_DRAG_THRESHOLD_PX;
 }
 
-/** Put the new window's title bar just above and left of the release point. */
+/** Use the release point as the new window's origin, bounded by the viewport edge. */
 export function showPageWindowOrigin(point: ViewportPoint): ViewportPoint {
   return {
-    x: Math.max(8, Math.round(point.x - 36)),
-    y: Math.max(8, Math.round(point.y - 14)),
+    x: Math.max(8, Math.round(point.x)),
+    y: Math.max(8, Math.round(point.y)),
   };
 }

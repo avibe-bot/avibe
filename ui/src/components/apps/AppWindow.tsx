@@ -312,6 +312,7 @@ export const AppWindow: React.FC<{
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}
+              className="flex size-6 shrink-0 items-center justify-center"
             >
               <ShowPageAnnotateControl
                 compact

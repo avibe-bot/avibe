@@ -27,8 +27,8 @@ describe('isShowPageWindowDrop', () => {
 });
 
 describe('showPageWindowOrigin', () => {
-  it('anchors the title bar near the pointer and keeps it on-screen', () => {
-    expect(showPageWindowOrigin({ x: 420, y: 260 })).toEqual({ x: 384, y: 246 });
+  it('anchors the title bar at the pointer and keeps it on-screen', () => {
+    expect(showPageWindowOrigin({ x: 420, y: 260 })).toEqual({ x: 420, y: 260 });
     expect(showPageWindowOrigin({ x: 4, y: 3 })).toEqual({ x: 8, y: 8 });
   });
 });
