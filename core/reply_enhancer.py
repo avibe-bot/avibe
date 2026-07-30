@@ -271,15 +271,23 @@ def _extract_secret_requests(text: str) -> List[SecretRequest]:
 def _mask_markdown_code(text: str) -> str:
     """Blank Markdown code regions without changing string offsets."""
     fenced_ranges = _fenced_code_ranges(text)
-    ranges = sorted([*fenced_ranges, *_inline_code_ranges(text, fenced_ranges)])
+    ranges = sorted(
+        [
+            *fenced_ranges,
+            *_indented_code_ranges(text, fenced_ranges),
+            *_inline_code_ranges(text, fenced_ranges),
+        ]
+    )
     if not ranges:
         return text
 
     parts: List[str] = []
     cursor = 0
     for start, end in ranges:
+        if start < cursor:
+            continue
         parts.append(text[cursor:start])
-        parts.append(" " * (end - start))
+        parts.append(re.sub(r"[^\r\n]", " ", text[start:end]))
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts)
@@ -299,7 +307,7 @@ def _remove_ranges(text: str, ranges: List[Tuple[int, int]]) -> str:
 def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
     """Return CommonMark-style backtick and tilde fence ranges."""
     ranges: List[Tuple[int, int]] = []
-    active: Tuple[int, str, int, int, int | None] | None = None
+    active: Tuple[int, str, int, Tuple[int, ...], int | None] | None = None
     list_quote_depth: int | None = None
     list_indents: List[int] = []
     paragraph_open = False
@@ -321,8 +329,12 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
             )
             active = _new_fence_state(offset, delimiter)
         else:
-            start, marker, opening_length, quote_depth, list_indent = active
-            if _line_leaves_fence_container(content, quote_depth, list_indent):
+            start, marker, opening_length, quote_minimums, list_indent = active
+            if _line_leaves_fence_container(
+                content,
+                quote_minimums,
+                list_indent,
+            ):
                 ranges.append((start, offset))
                 (
                     delimiter,
@@ -337,7 +349,11 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
                 )
                 active = _new_fence_state(offset, delimiter)
             else:
-                closing = _closing_fence_delimiter(content, quote_depth, list_indent)
+                closing = _closing_fence_delimiter(
+                    content,
+                    quote_minimums,
+                    list_indent,
+                )
                 if closing is None:
                     offset += len(line)
                     continue
@@ -358,16 +374,16 @@ def _fenced_code_ranges(text: str) -> List[Tuple[int, int]]:
 
 def _new_fence_state(
     offset: int,
-    delimiter: Tuple[str, int, str, int, int | None] | None,
-) -> Tuple[int, str, int, int, int | None] | None:
+    delimiter: Tuple[str, int, str, Tuple[int, ...], int | None] | None,
+) -> Tuple[int, str, int, Tuple[int, ...], int | None] | None:
     """Build active fence state when an eligible delimiter is an opener."""
     if delimiter is None:
         return None
-    marker, length, remainder, quote_depth, list_indent = delimiter
+    marker, length, remainder, quote_minimums, list_indent = delimiter
     # A backtick fence cannot contain another backtick in its info string.
     if marker == "`" and "`" in remainder:
         return None
-    return offset, marker, length, quote_depth, list_indent
+    return offset, marker, length, quote_minimums, list_indent
 
 
 def _opening_fence_delimiter(
@@ -376,13 +392,14 @@ def _opening_fence_delimiter(
     prior_list_indents: List[int],
     paragraph_open: bool,
 ) -> Tuple[
-    Tuple[str, int, str, int, int | None] | None,
+    Tuple[str, int, str, Tuple[int, ...], int | None] | None,
     int,
     List[int],
     bool,
 ]:
     """Parse a fence opener while carrying list context across lines."""
     quote_depth, prefix_end = _quote_prefix(line)
+    quote_minimums = (0,) * quote_depth
     list_indents = (
         list(prior_list_indents)
         if prior_quote_depth == quote_depth
@@ -404,6 +421,7 @@ def _opening_fence_delimiter(
         marker = _list_marker(line, cursor)
         if marker is None:
             if list_indents and cursor < len(line) and line[cursor] == ">":
+                quote_minimums += (list_indents[-1],)
                 quote_depth += 1
                 cursor += 1
                 if cursor < len(line) and line[cursor] in {" ", "\t"}:
@@ -460,7 +478,7 @@ def _opening_fence_delimiter(
             list_indents,
             False
             if saw_list_marker or indented_code
-            else _line_opens_paragraph(line[cursor:]),
+            else _line_opens_paragraph(line[cursor:], paragraph_open),
         )
 
     minimum_column = (
@@ -483,7 +501,7 @@ def _opening_fence_delimiter(
         else (list_indents[-1] if list_indents else None)
     )
     return (
-        (marker, length, remainder, quote_depth, list_indent),
+        (marker, length, remainder, quote_minimums, list_indent),
         quote_depth,
         list_indents,
         False,
@@ -492,11 +510,11 @@ def _opening_fence_delimiter(
 
 def _closing_fence_delimiter(
     line: str,
-    quote_depth: int,
+    quote_minimums: Tuple[int, ...],
     list_indent: int | None,
 ) -> Tuple[str, int, str] | None:
     """Parse a closing fence that remains inside the opening container."""
-    prefix_end = _required_quote_prefix(line, quote_depth)
+    prefix_end = _required_quote_prefix(line, quote_minimums)
     if prefix_end is None:
         return None
 
@@ -541,15 +559,27 @@ def _quote_prefix(line: str) -> Tuple[int, int]:
             cursor += 1
 
 
-def _required_quote_prefix(line: str, quote_depth: int) -> int | None:
+def _required_quote_prefix(
+    line: str,
+    quote_minimums: Tuple[int, ...],
+) -> int | None:
     """Consume exactly the quote container depth established by an opener."""
     cursor = 0
-    for _ in range(quote_depth):
+    for minimum_indent in quote_minimums:
         spaces = 0
-        while cursor < len(line) and line[cursor] == " " and spaces < 4:
+        while (
+            cursor < len(line)
+            and line[cursor] == " "
+            and spaces < minimum_indent + 4
+        ):
             cursor += 1
             spaces += 1
-        if spaces > 3 or cursor == len(line) or line[cursor] != ">":
+        if (
+            spaces < minimum_indent
+            or spaces > minimum_indent + 3
+            or cursor == len(line)
+            or line[cursor] != ">"
+        ):
             return None
         cursor += 1
         if cursor < len(line) and line[cursor] in {" ", "\t"}:
@@ -590,13 +620,16 @@ def _consume_indentation(
 
 def _line_leaves_fence_container(
     line: str,
-    quote_depth: int,
+    quote_minimums: Tuple[int, ...],
     list_indent: int | None,
 ) -> bool:
     """Return whether a nonblank line exits the opening fence container."""
     if not line.strip():
-        return quote_depth > 0 and _required_quote_prefix(line, quote_depth) is None
-    prefix_end = _required_quote_prefix(line, quote_depth)
+        return bool(quote_minimums) and _required_quote_prefix(
+            line,
+            quote_minimums,
+        ) is None
+    prefix_end = _required_quote_prefix(line, quote_minimums)
     if prefix_end is None:
         return True
     if list_indent is None:
@@ -604,6 +637,60 @@ def _line_leaves_fence_container(
 
     _, indent = _consume_indentation(line, prefix_end, 0)
     return indent < list_indent
+
+
+def _indented_code_ranges(
+    text: str,
+    fenced_ranges: List[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
+    """Return top-level four-column indented code block ranges."""
+    ranges: List[Tuple[int, int]] = []
+    active_start: int | None = None
+    paragraph_open = False
+    fence_index = 0
+    offset = 0
+
+    for line in text.splitlines(keepends=True):
+        while (
+            fence_index < len(fenced_ranges)
+            and fenced_ranges[fence_index][1] <= offset
+        ):
+            fence_index += 1
+        in_fence = (
+            fence_index < len(fenced_ranges)
+            and fenced_ranges[fence_index][0] <= offset < fenced_ranges[fence_index][1]
+        )
+        if in_fence:
+            if active_start is not None:
+                ranges.append((active_start, offset))
+                active_start = None
+            paragraph_open = False
+            offset += len(line)
+            continue
+
+        content = line.rstrip("\r\n")
+        if not content.strip():
+            paragraph_open = False
+            offset += len(line)
+            continue
+
+        _, indent = _consume_indentation(content, 0, 0)
+        if indent >= 4 and (active_start is not None or not paragraph_open):
+            if active_start is None:
+                active_start = offset
+            paragraph_open = False
+            offset += len(line)
+            continue
+
+        if active_start is not None:
+            ranges.append((active_start, offset))
+            active_start = None
+        paragraph_open = _line_opens_paragraph(content, paragraph_open)
+        offset += len(line)
+
+    if active_start is not None:
+        ranges.append((active_start, len(text)))
+    return ranges
 
 
 def _inline_code_ranges(
@@ -648,13 +735,9 @@ def _inline_code_ranges_in_line(
 ) -> List[Tuple[int, int]]:
     """Pair inline backtick runs in one linear pass over a single line."""
     runs: List[Tuple[int, int, int, bool]] = []
+    html_ranges = _raw_html_ranges_in_line(text, start, end)
     cursor = start
     while cursor < end:
-        if text[cursor] == "<":
-            html_end = _raw_html_token_end(text, cursor, end)
-            if html_end is not None:
-                cursor = html_end
-                continue
         if text[cursor] != "`":
             cursor += 1
             continue
@@ -682,11 +765,24 @@ def _inline_code_ranges_in_line(
 
     ranges: List[Tuple[int, int]] = []
     index = 0
+    html_index = 0
     while index < len(runs):
         opening_start, _, _, escaped = runs[index]
         if escaped:
             opening_start += 1
-        if opening_start == runs[index][1]:
+        while (
+            html_index < len(html_ranges)
+            and html_ranges[html_index][1] <= opening_start
+        ):
+            html_index += 1
+        inside_html = (
+            html_index < len(html_ranges)
+            and html_ranges[html_index][0] <= opening_start < html_ranges[html_index][1]
+        )
+        if (
+            opening_start == runs[index][1]
+            or inside_html
+        ):
             index += 1
             continue
         closing_index = next_closing[index]
@@ -722,12 +818,35 @@ def _raw_html_token_end(text: str, start: int, end: int) -> int | None:
     return None
 
 
-def _line_opens_paragraph(content: str) -> bool:
+def _raw_html_ranges_in_line(
+    text: str,
+    start: int,
+    end: int,
+) -> List[Tuple[int, int]]:
+    """Return raw inline HTML tokens before code-span interpretation."""
+    ranges: List[Tuple[int, int]] = []
+    cursor = start
+    while cursor < end:
+        if text[cursor] != "<":
+            cursor += 1
+            continue
+        token_end = _raw_html_token_end(text, cursor, end)
+        if token_end is None:
+            cursor += 1
+            continue
+        ranges.append((cursor, token_end))
+        cursor = token_end
+    return ranges
+
+
+def _line_opens_paragraph(content: str, prior_paragraph_open: bool) -> bool:
     """Return whether a non-container Markdown line starts paragraph text."""
     stripped = content.lstrip(" \t")
     if re.match(r"#{1,6}(?:[ \t]+|$)", stripped):
         return False
-    if re.fullmatch(r"(?:={3,}|-{3,})[ \t]*", stripped):
+    if prior_paragraph_open and re.fullmatch(r"={3,}[ \t]*", stripped):
+        return False
+    if re.fullmatch(r"-{3,}[ \t]*", stripped):
         return False
     compact = re.sub(r"[ \t]", "", stripped)
     if len(compact) >= 3 and len(set(compact)) == 1 and compact[0] in {"*", "-", "_"}:

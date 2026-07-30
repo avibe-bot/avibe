@@ -396,6 +396,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(strip_silent_blocks(text), text)
 
+    def test_silent_parser_enforces_list_indent_before_nested_quote(self):
+        text = (
+            "- > ```text\n"
+            "> <silent>remove outside code</silent>\n"
+            "> ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "- > ```text\n> \n> ```")
+
     def test_silent_parser_tracks_alternating_quote_and_list_containers(self):
         text = (
             "> - > - ```text\n"
@@ -457,6 +466,20 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_keeps_orphan_setext_marker_as_paragraph(self):
+        text = (
+            "===\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>remove outside code</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "===\n10. item\n    ```text\n    \n    ```",
+        )
 
     def test_silent_parser_stops_unclosed_fence_at_container_boundary(self):
         text = (
@@ -529,6 +552,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             '<a title="`">x</a>  `tail',
         )
 
+    def test_silent_parser_parses_html_as_text_inside_open_code_span(self):
+        text = (
+            '`prefix <a title="`"> '
+            "<silent>remove outside code</silent> "
+            "`tail`"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            '`prefix <a title="`">  `tail`',
+        )
+
     def test_silent_parser_handles_many_unmatched_backtick_runs(self):
         unmatched_runs = " ".join("`" * length for length in range(2, 502))
         text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
@@ -549,6 +584,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(strip_silent_blocks(text), "> ```text\n\n> \n> ```")
+
+    def test_silent_parser_preserves_indented_code_literal(self):
+        text = "Example:\n\n    <silent>indented literal</silent>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_process_reply_keeps_fence_newline_before_quick_replies(self):
+        text = "```text\nexample\n```\n---\n[Yes] | [No]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, "```text\nexample\n```")
+        self.assertEqual([button.text for button in reply.buttons], ["Yes", "No"])
 
     def test_silent_parser_removes_many_control_blocks_in_one_pass(self):
         blocks = "".join(
