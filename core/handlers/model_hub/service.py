@@ -2169,6 +2169,8 @@ class ModelHubService:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
     ) -> tuple[str, Optional[EventReason]]:
+        if decision.action == "surface":
+            return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
@@ -2335,7 +2337,10 @@ class ModelHubService:
         latency_ms: Optional[int] = elapsed_ms
         if not reachable:
             error_key, event_reason = self._probe_failure(outcome, decision)
-            if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
+            if error_key in {
+                "models.source.cooldown.network",
+                "models.source.cooldown.timeout",
+            }:
                 latency_ms = None
             if event_reason in {
                 "quota_exhausted",
@@ -2400,13 +2405,13 @@ class ModelHubService:
         record = self.provenance.get(normalized)
         if record is not None:
             return record
+        mode = self.provenance.get_mode(normalized)
         backend = self._known_turn_backend(normalized)
-        if backend is None:
+        if backend is None and mode is None:
             raise ModelHubError("turn_not_found", status=404)
-        config = self.store.load()
         detail = (
             "models.provenance.direct_mode"
-            if backend in config.agents and config.agents[backend].mode == "direct"
+            if mode == "direct"
             else "models.provenance.attribution_ambiguous"
         )
         raise ModelHubError(

@@ -936,7 +936,22 @@ class SessionTurnManager:
         if not turn_id or not callable(settle):
             return
         try:
-            settle(turn_id, settled_by=settled_by, ts=_utc_now_iso())
+            from modules.agents.model_hub import launch_for_context
+
+            launch = launch_for_context(context)
+            mode = (
+                "direct"
+                if launch is not None and launch.channel == "direct"
+                else "hub"
+                if launch is not None
+                else None
+            )
+            settle(
+                turn_id,
+                settled_by=settled_by,
+                ts=_utc_now_iso(),
+                mode=mode,
+            )
         except Exception:
             logger.warning(
                 "Model Hub provenance settlement failed for turn=%s",

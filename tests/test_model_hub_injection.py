@@ -233,6 +233,59 @@ def test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn(tmp_path: P
     assert kinds == ["cooldown", "switch", "recover"]
 
 
+def test_native_failure_is_forwarded_to_turn_correlation(
+    tmp_path: Path,
+) -> None:
+    native = _source(
+        "src_native01",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[native], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    correlation = Mock()
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(correlation=correlation),
+        native_cli_ready=lambda _backend: True,
+    )
+    context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_native_failure"}
+    )
+    bind_launch(
+        context,
+        ModelHubLaunch(
+            backend="codex",
+            channel="native_cli",
+            requested_model="gpt-5",
+            target_model="gpt-5",
+            runtime_model="gpt-5",
+            source_id=native.id,
+        ),
+    )
+
+    assert (
+        asyncio.run(
+            router.record_native_failure(
+                context,
+                "usage quota exceeded",
+            )
+        )
+        is True
+    )
+    correlation.fail_native_attempt.assert_called_once_with(
+        "turn_native_failure",
+        reason="quota_exhausted",
+    )
+
+
 def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
     first = _source(
         "src_hub1001",
@@ -459,6 +512,47 @@ def test_prelaunch_supply_failure_copy_is_shared_across_backends(
 
     assert str(exc_info.value) == (
         "模型 missing-model 没有已启用的来源。请前往 Models 配置。"
+    )
+
+
+def test_prelaunch_blocker_details_are_localized(
+    tmp_path: Path,
+) -> None:
+    blocked = _source(
+        "src_blocked01",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    blocked.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.oauth_expired",
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[blocked], agents=_agents()),
+        LaunchAdapter({blocked.id: "route-blocked"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(service),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                "codex",
+                "gpt-5",
+            )
+        )
+
+    assert "凭证已过期" in str(exc_info.value)
+    assert "models.source.needs_action.oauth_expired" not in str(
+        exc_info.value
     )
 
 

@@ -46,6 +46,18 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
+_SOURCE_DETAIL_EVENT_REASONS = {
+    "models.source.cooldown.quota_exhausted": "quota_exhausted",
+    "models.source.cooldown.rate_limited": "rate_limited",
+    "models.source.cooldown.server_error": "server_error",
+    "models.source.cooldown.network": "network",
+    "models.source.cooldown.timeout": "network",
+    "models.source.needs_action.oauth_expired": "credential_expired",
+    "models.source.needs_action.credential_revoked": "credential_revoked",
+    "models.source.needs_action.balance_exhausted": "balance_exhausted",
+    "models.source.needs_action.account_banned": "account_banned",
+    "models.source.error.unclassified": "unclassified_error",
+}
 
 
 @dataclass(frozen=True)
@@ -218,6 +230,24 @@ def _localized_launch_error(
         or "en"
     )
     key = str(failure.get("copy_key") or "interrupted")
+    raw_blockers = failure.get("blockers")
+    if isinstance(raw_blockers, list):
+        rendered_blockers = []
+        for blocker in raw_blockers:
+            if not isinstance(blocker, Mapping):
+                continue
+            source = str(blocker.get("source") or "")
+            detail_key = str(blocker.get("detail_key") or "")
+            reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
+            detail = (
+                i18n_t(f"modelHub.events.reason.{reason}", language)
+                if reason is not None
+                else str(blocker.get("status") or "")
+            )
+            rendered_blockers.append(f"{source}: {detail}")
+        blockers = ", ".join(rendered_blockers)
+    else:
+        blockers = str(raw_blockers or "")
     return ModelHubError(
         error.code,
         status=error.status,
@@ -228,7 +258,7 @@ def _localized_launch_error(
             backend=backend,
             source=failure.get("source") or "",
             retry_at=failure.get("retry_at") or "",
-            blockers=failure.get("blockers") or "",
+            blockers=blockers,
         ),
         supply_state=error.supply_state,
     )
@@ -643,7 +673,7 @@ class ModelHubRuntimeRouter:
     def _launch_failure(
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         model = resolution.requested_model or resolution.target_model
         if resolution.supply_status == "waiting":
             cooling = [
@@ -662,10 +692,14 @@ class ModelHubRuntimeRouter:
                 "retry_at": recovery,
             }
         if resolution.matching_sources:
-            blockers = ", ".join(
-                f"{source.display_name}: {source.state.detail_key or source.state.status}"
+            blockers = [
+                {
+                    "source": source.display_name,
+                    "status": source.state.status,
+                    "detail_key": source.state.detail_key,
+                }
                 for source in resolution.matching_sources
-            )
+            ]
             return {
                 "copy_key": "interrupted",
                 "model": model,
@@ -731,8 +765,11 @@ class ModelHubRuntimeRouter:
         *,
         settled_by: Optional[str],
         ts: str,
+        mode: Optional[Literal["direct", "hub"]] = None,
     ) -> None:
         if self.turn_gateway is not None:
+            if mode is not None:
+                self.turn_gateway.correlation.note_turn_mode(turn_id, mode)
             self.turn_gateway.correlation.settle(
                 turn_id,
                 settled_by=settled_by,
@@ -888,6 +925,18 @@ class ModelHubRuntimeRouter:
             decision = ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
         else:
             return False
+        if launch.channel == "native_cli" and self.turn_gateway is not None:
+            turn_id = str(
+                (getattr(context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            assert decision.reason is not None
+            self.turn_gateway.correlation.fail_native_attempt(
+                turn_id,
+                reason=decision.reason,
+            )
         config = self.service.store.load()
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:

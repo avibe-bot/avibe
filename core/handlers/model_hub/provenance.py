@@ -20,12 +20,13 @@ from core.run_settlement import (
 )
 
 from .adapter import RawCallOutcome
-from .classification import ResolutionDecision
+from .classification import ResolutionDecision, ResolutionReason
 
 
 BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
+TurnMode = Literal["direct", "hub"]
 ScopeKey = tuple[BackendName, str]
 
 
@@ -89,22 +90,27 @@ class BoundedProvenanceStore:
 
     def __init__(self, path: Path, *, max_entries: int = 500):
         self.path = path
+        self.mode_path = path.with_name(f"{path.stem}_modes{path.suffix}")
         self.max_entries = max_entries
         self._lock = threading.RLock()
 
-    def _read(self) -> list[dict]:
-        if not self.path.exists():
+    @staticmethod
+    def _read_path(path: Path) -> list[dict]:
+        if not path.exists():
             return []
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
         if not isinstance(payload, list):
             return []
         return [item for item in payload if isinstance(item, dict)]
 
-    def _write(self, records: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def _read(self) -> list[dict]:
+        return self._read_path(self.path)
+
+    def _write_path(self, path: Path, records: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps(
             records[-self.max_entries :],
             ensure_ascii=False,
@@ -113,7 +119,7 @@ class BoundedProvenanceStore:
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
-            dir=self.path.parent,
+            dir=path.parent,
             delete=False,
         ) as tmp:
             tmp.write(content)
@@ -121,7 +127,10 @@ class BoundedProvenanceStore:
             os.fsync(tmp.fileno())
             temporary_path = tmp.name
         os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, self.path)
+        os.replace(temporary_path, path)
+
+    def _write(self, records: list[dict]) -> None:
+        self._write_path(self.path, records)
 
     def put(self, record: dict) -> None:
         turn_id = str(record.get("turn_id") or "")
@@ -146,6 +155,34 @@ class BoundedProvenanceStore:
                 ),
                 None,
             )
+
+    def put_mode(self, turn_id: str, mode: TurnMode) -> None:
+        """Persist the turn-time mode separately from provenance records."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            raise ValueError("turn_id is required")
+        with self._lock:
+            records = [
+                item
+                for item in self._read_path(self.mode_path)
+                if str(item.get("turn_id") or "") != normalized
+            ]
+            records.append({"turn_id": normalized, "mode": mode})
+            self._write_path(self.mode_path, records)
+
+    def get_mode(self, turn_id: str) -> Optional[TurnMode]:
+        with self._lock:
+            record = next(
+                (
+                    item
+                    for item in reversed(self._read_path(self.mode_path))
+                    if item.get("turn_id") == turn_id
+                ),
+                None,
+            )
+        mode = record.get("mode") if record is not None else None
+        return mode if mode in {"direct", "hub"} else None
 
 
 class TurnCorrelationRegistry:
@@ -398,6 +435,36 @@ class TurnCorrelationRegistry:
                 channel=channel,
                 via_mapping=observed_via_mapping,
             )
+
+    def fail_native_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        reason: ResolutionReason,
+    ) -> None:
+        """Convert an observed native terminal failure into a failed attempt."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            trace = self._traces.get(normalized)
+            if (
+                trace is None
+                or trace.pending_attempt is None
+                or trace.pending_attempt.channel != "native_cli"
+            ):
+                return
+            identity = trace.pending_attempt
+            trace.pending_attempt = None
+            trace.served = None
+            trace.terminal_error = None
+            trace.failed_attempts.append(
+                {**identity.payload(), "reason": reason}
+            )
+
+    def note_turn_mode(self, turn_id: str, mode: TurnMode) -> None:
+        self.store.put_mode(turn_id, mode)
 
     def finish_attempt(
         self,

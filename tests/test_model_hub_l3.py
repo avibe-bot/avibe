@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
@@ -43,6 +43,7 @@ from core.run_settlement import (
 )
 from core.services.dispatch import TurnDispatchOutcome
 from core.session_turns import SessionTurnManager
+from modules.agents.model_hub import ModelHubLaunch, bind_launch
 
 
 CONTRACTS = Path(__file__).parents[1] / "docs" / "plans" / "model-hub-contracts"
@@ -349,6 +350,47 @@ def test_gateway_model_outside_prepared_turn_fails_closed(
     assert store.get("turn_expected") is None
 
 
+def test_native_terminal_failure_is_not_recorded_as_served(
+    tmp_path: Path,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "native-failure.json")
+    registry = TurnCorrelationRegistry(store)
+    registry.begin_native_attempt(
+        backend="codex",
+        process_scope="/repo",
+        turn_id="turn_native_failure",
+        requested_model_id="shared-model",
+        source_id="src_primary01",
+        resolved_model_id="shared-model",
+        via_mapping=False,
+    )
+
+    registry.fail_native_attempt(
+        "turn_native_failure",
+        reason="quota_exhausted",
+    )
+    registry.settle(
+        "turn_native_failure",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get("turn_native_failure")
+    assert record is not None
+    assert record["outcome"] == "exhausted"
+    assert record["served"] is None
+    assert record["failed_attempts"] == [
+        {
+            "source_id": "src_primary01",
+            "resolved_model_id": "shared-model",
+            "channel": "native_cli",
+            "via_mapping": False,
+            "reason": "quota_exhausted",
+        }
+    ]
+    _assert_valid("turn-provenance.schema.json", record)
+
+
 def test_fsm_drop_overrides_a_completed_gateway_attempt(tmp_path: Path) -> None:
     store = BoundedProvenanceStore(tmp_path / "provenance.json")
     registry = TurnCorrelationRegistry(store)
@@ -437,7 +479,7 @@ def test_fsm_cancel_drop_and_control_classification(tmp_path: Path) -> None:
         store = BoundedProvenanceStore(tmp_path / f"{turn_id}.json")
         registry = TurnCorrelationRegistry(store)
         runtime = SimpleNamespace(
-            settle_turn=lambda value, *, settled_by, ts: registry.settle(
+            settle_turn=lambda value, *, settled_by, ts, mode=None: registry.settle(
                 value,
                 settled_by=settled_by,
                 ts=ts,
@@ -516,6 +558,34 @@ def test_fsm_cancel_drop_and_control_classification(tmp_path: Path) -> None:
         _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_fsm_settlement_persists_the_turn_time_mode() -> None:
+    runtime = SimpleNamespace(settle_turn=Mock())
+    manager = SessionTurnManager(
+        SimpleNamespace(model_hub_runtime=runtime)
+    )
+    context = SimpleNamespace(
+        platform_specific={"turn_token": "turn_direct"}
+    )
+    bind_launch(
+        context,
+        ModelHubLaunch(
+            backend="codex",
+            channel="direct",
+            requested_model="gpt-5",
+            target_model="gpt-5",
+            runtime_model="gpt-5",
+        ),
+    )
+
+    manager._settle_model_hub_turn(
+        context,
+        SETTLED_BY_TERMINAL_RESULT,
+    )
+
+    runtime.settle_turn.assert_called_once()
+    assert runtime.settle_turn.call_args.kwargs["mode"] == "direct"
+
+
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
     tmp_path: Path,
 ) -> None:
@@ -523,7 +593,7 @@ def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
         store = BoundedProvenanceStore(tmp_path / "concurrency.json")
         registry = TurnCorrelationRegistry(store)
         runtime = SimpleNamespace(
-            settle_turn=lambda value, *, settled_by, ts: registry.settle(
+            settle_turn=lambda value, *, settled_by, ts, mode=None: registry.settle(
                 value,
                 settled_by=settled_by,
                 ts=ts,
@@ -702,6 +772,30 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         == "error"
     )
     _assert_valid("probe-result.schema.json", unclassified)
+
+    request_error_service = _service(
+        tmp_path / "request-error",
+        sources=[_source("src_primary01", "Primary")],
+        outcomes=[
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=400,
+                code="invalid_parameter",
+            )
+        ],
+    )
+    request_error = asyncio.run(
+        request_error_service.probe_agent("claude", "shared-model")
+    )
+    assert request_error["reachable"] is False
+    assert isinstance(request_error["latency_ms"], int)
+    assert request_error["error"] == "models.source.error.unclassified"
+    assert (
+        request_error_service.store.load().sources[0].state.status
+        == "standby"
+    )
+    assert request_error_service.events.list(limit=10) == []
+    _assert_valid("probe-result.schema.json", request_error)
 
 
 def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
@@ -1011,13 +1105,15 @@ def test_provenance_absence_codes_are_distinguishable(
         ),
     )
 
-    service.store.config.agents["codex"].mode = "direct"
+    service.provenance.put_mode("turn_direct", "direct")
+    service.provenance.put_mode("turn_ambiguous", "hub")
+    service.store.config.agents["codex"].mode = "hub"
     with pytest.raises(ModelHubError) as direct:
         service.get_turn_provenance("turn_direct")
     assert direct.value.code == "provenance_unavailable"
     assert direct.value.detail == "models.provenance.direct_mode"
 
-    service.store.config.agents["codex"].mode = "hub"
+    service.store.config.agents["codex"].mode = "direct"
     with pytest.raises(ModelHubError) as ambiguous:
         service.get_turn_provenance("turn_ambiguous")
     assert ambiguous.value.code == "provenance_unavailable"

@@ -125,8 +125,9 @@ coarse record, or attribution-grain field is written.
 ## Read-Time Absence
 
 `GET /api/models/turns/<turn_id>/provenance` reads an exact record first. If no
-record exists, it derives whether the turn is known by querying the Workbench
-session store's persisted output metadata for that `turn_id`:
+record exists, it derives whether the turn is known from the Workbench session
+store's persisted output metadata and reads a bounded turn-mode marker captured
+from the bound launch at FSM settlement:
 
 - known Direct turn: `provenance_unavailable` /
   `models.provenance.direct_mode`;
@@ -135,7 +136,12 @@ session store's persisted output metadata for that `turn_id`:
   `models.provenance.attribution_ambiguous`;
 - unknown id: `turn_not_found`.
 
-The distinction is live and derived. No absence marker is persisted.
+The mode marker contains only `turn_id` and the turn-time `direct` / `hub` mode;
+it is stored separately from v3 provenance records and never carries an attempt
+identity. A known turn without a marker fails closed as
+`attribution_ambiguous`. The read path never infers historical mode from mutable
+current agent configuration. IM and CLI paths have no FSM turn id and write
+neither a marker nor a provenance record.
 
 ## Pre-Launch Supply Failure Copy
 
@@ -153,7 +159,9 @@ point, so Claude, Codex, and OpenCode inherit the same typed failure copy:
 
 Successful fallback remains silent. Structural causes use
 `no_enabled_source`, `no_eligible_source`, or `model_unsupported`; user-facing
-text is selected through `vibe/i18n`.
+text is selected through `vibe/i18n`. Persisted blocker detail keys are mapped
+to the same closed ResolutionEvent reason vocabulary and translated before
+interpolation; raw i18n keys never appear in launch copy.
 
 ## Verification
 
@@ -171,6 +179,8 @@ The acceptance suite contains separate fixtures for:
   every matching attempt `via_mapping: true`; an unexpected request model
   makes the record absent;
 - user Stop, dropped connection, and successful control settlements;
+- native CLI terminal failures classified before settlement, so a failed turn
+  cannot be recorded as served;
 - Direct, ambiguous-known, and unknown provenance route absences;
 - source chain order and model-scoped supply state;
 - probe usable-completion and latency partition;
