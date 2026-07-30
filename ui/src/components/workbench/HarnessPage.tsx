@@ -1507,17 +1507,21 @@ interface RunDetailProps {
   run: HarnessRun;
 }
 
-const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
+  const title = runRowTitle(run, typeLabel);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-start gap-2">
         <span className="mt-0.5">
           <RunStatusIcon status={run.status} />
         </span>
-        <span className="min-w-0 flex-1 text-[13px] font-semibold text-foreground">
-          {runRowTitle(run, typeLabel)}
+        <span
+          className="line-clamp-2 min-w-0 flex-1 break-words text-[13px] font-semibold text-foreground"
+          title={title}
+        >
+          {title}
         </span>
         <span
           className={clsx(
