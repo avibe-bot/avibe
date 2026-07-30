@@ -97,12 +97,22 @@ describe('adoptionVerdict — the creation dialogs (AdoptionNote, AddApiKeyDialo
     expect(verdict).toEqual({ kind: 'partly_skipped', backends: ['codex'] });
   });
 
-  it('still reports adopted_none when everyone skipped', () => {
-    // Nobody adopted it: the remedy is the same 「go add it somewhere」 line, and
-    // splitting that into a second sentence would say less, not more.
+  it('names the orders when nobody adopted it and the server said who left it out', () => {
+    // Not a corner case: this is the normal shape of an install where every eligible
+    // backend keeps a hand-picked order, and it is the case `skipped_by` was added
+    // for. The remedy matches `adopted_none`, and the difference is the whole value —
+    // 「go add it somewhere」 vs. 「go add it in these two」.
     expect(adoptionVerdict([], [{ backend: 'codex', reason: 'custom_order' }])).toEqual({
-      kind: 'adopted_none',
+      kind: 'skipped_all',
+      backends: ['codex'],
     });
+  });
+
+  it('stays at adopted_none when an empty adopter list is all the server sent', () => {
+    // Nothing to name, from either direction: no complement at all, and a complement
+    // that is itself empty (nothing eligible was left out either).
+    expect(adoptionVerdict([], null)).toEqual({ kind: 'adopted_none' });
+    expect(adoptionVerdict([], [])).toEqual({ kind: 'adopted_none' });
   });
 });
 

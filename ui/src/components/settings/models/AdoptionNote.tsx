@@ -33,10 +33,21 @@ export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] | null; skippedBy?:
   const backendName = (backend: string) =>
     t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
 
-  if (verdict.kind === 'adopted_none') {
+  if (verdict.kind === 'adopted_none' || verdict.kind === 'skipped_all') {
     // Not an error — the source exists and is healthy. It is a pointer to the one
-    // action that makes it serve traffic, on the page the user is already on.
-    return <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.adoption.none')}</p>;
+    // action that makes it serve traffic, on the page the user is already on. And
+    // it points AT the orders whenever the server named them: 「nobody took it」 and
+    // 「these hand-picked orders left it out」 want the same edit in two very
+    // different amounts of hunting.
+    return (
+      <p className="text-[12px] leading-relaxed text-muted">
+        {verdict.kind === 'skipped_all'
+          ? t('settings.models.adoption.noneSkipped', {
+              skipped: verdict.backends.map(backendName).join(' · '),
+            })
+          : t('settings.models.adoption.none')}
+      </p>
+    );
   }
 
   // Position order, not response order: 「第 1 位」 before 「第 3 位」 reads as a

@@ -100,12 +100,13 @@ const Chip: React.FC<{ chip: ChainChip }> = ({ chip }) => (
         next failover will skip this position too.
 
         Muted dot = the same skip for a reason nobody can act on from this page: the
-        source is healthy, its CLI just is not installed on this machine. A second
-        HUE on the one dot, not a second dot — a position is stepped over for one
-        reason at a time, and 10px of chip has no room to argue. Which is also why
-        neither dot carries its own label: the gold one is named by the source row's
-        state chip and the muted one by 「本机不可用」 in the order drawer, the two
-        places the user goes to do something about it. */}
+        source is healthy and on the route, this process just cannot sign the
+        backend's CLI in with it. A second HUE on the one dot, not a second dot — a
+        position is stepped over for one reason at a time, and 10px of chip has no
+        room to argue. Which is also why neither dot carries its own label: the gold
+        one is named by the source row's state chip and the muted one by
+        `order.nativeUnavailable` in the order drawer, the two places the user goes
+        to do something about it. */}
     {(chip.unhealthy || chip.unavailable) && (
       <span
         className={cn('size-1 shrink-0 rounded-full sm:size-[5px]', chip.unhealthy ? 'bg-gold' : 'bg-muted')}

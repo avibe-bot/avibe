@@ -3,7 +3,7 @@
 // `isSourceEligible` mirror rather than moving it.
 import { describe, expect, it } from 'vitest';
 
-import { eligibilityOf, eligibleSources } from './eligibility';
+import { eligibilityOf, eligibleSources, offCurrentModelChain } from './eligibility';
 import type { AgentSupply, Source } from './types';
 
 const source = (id: string): Source => ({
@@ -57,6 +57,33 @@ describe('eligibilityOf', () => {
   // surface that would consume it is unreachable there.
   it('is ineligible for everything in Direct mode (AC-7)', () => {
     expect(eligibilityOf(agent(null), 'src_anything')).toEqual({ eligible: false, reasonKey: null });
+  });
+});
+
+describe('offCurrentModelChain', () => {
+  // A claim about the ROUTE, not about the source: the server builds it from the
+  // eligible sources carrying the selected model, before health or runnability
+  // narrows them. Only an explicit `false` is a claim; `null` (nothing selected) and
+  // an absent field are silence, and reading silence as exclusion would retract
+  // markers the chain strip has always been right to draw.
+  it('speaks only when the server says false', () => {
+    const a = agent({
+      policy: 'follow',
+      order: ['src_on', 'src_off', 'src_unknown'],
+      eligibility: [
+        { source_id: 'src_on', eligible: true, in_current_model_chain: true },
+        { source_id: 'src_off', eligible: true, in_current_model_chain: false },
+        { source_id: 'src_unknown', eligible: true, in_current_model_chain: null },
+      ],
+    });
+    expect(offCurrentModelChain(a, 'src_off')).toBe(true);
+    expect(offCurrentModelChain(a, 'src_on')).toBe(false);
+    expect(offCurrentModelChain(a, 'src_unknown')).toBe(false);
+  });
+
+  it('is silent for a row the payload never mentions, and in Direct mode', () => {
+    expect(offCurrentModelChain(agent({ policy: 'follow', order: ['src_a'] }), 'src_a')).toBe(false);
+    expect(offCurrentModelChain(agent(null), 'src_a')).toBe(false);
   });
 });
 

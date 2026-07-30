@@ -668,7 +668,7 @@
           "xai": "Grok"
         },
         "enabledNoneRunnable": "{{backend}} 已启用的来源当前都无法供给，下一个回合会因为没有供给而失败。修好下面的某一个，或者再启用一个。",
-        "nativeUnavailable": "{{backend}} CLI 本机不可用"
+        "nativeUnavailable": "本机无法使用 {{backend}} CLI 登录"
       },
       "billing": {
         "monthly": "包月",
@@ -853,6 +853,7 @@
         "enabled": "已自动加入 {{list}} 的来源顺序",
         "entry": "{{name}}（第 {{position}} 位）",
         "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
+        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用",
         "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 使用自定义顺序，未加入——到那里手动加进来才会被使用"
       },
       "menus": {

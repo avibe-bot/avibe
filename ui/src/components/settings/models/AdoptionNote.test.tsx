@@ -83,6 +83,17 @@ describe('AdoptionNote', () => {
     expect(body).toContain('自定义顺序');
   });
 
+  it('names them even when nobody adopted it at all', () => {
+    // `adopted_by: []` with a non-empty complement — every eligible backend keeps a
+    // hand-picked order. The generic 「还没有 Agent 启用它」 is true here but throws
+    // away the one thing the payload knows: which orders to go edit. And the adopted
+    // half must NOT appear: there is no list to name.
+    const body = text(render([], [{ backend: 'codex', reason: 'custom_order' }]));
+    expect(body).toContain('Codex');
+    expect(body).toContain('自定义顺序');
+    expect(body).not.toContain('已自动加入');
+  });
+
   it('says nothing at all when the creation reported no adoption result', () => {
     // OAuthConnectDialog's unreported-creation path. An absent result is not an empty
     // one: 「没有 Agent 启用它」 would be a claim, and this is ignorance. The component

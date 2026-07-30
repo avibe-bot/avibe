@@ -321,7 +321,10 @@ export const SettingsModelsPage: React.FC = () => {
           agents={agents}
           sources={sources}
           onClose={() => setOrderBackend(null)}
-          onSaved={() => void refreshSourcesAgents()}
+          // Returned, not discarded: the drawer keeps its own controls disabled
+          // until this read lands, so the hand-off to the menu drawer can never
+          // leave on an order the page has not caught up with.
+          onSaved={() => refreshSourcesAgents()}
           // 模型菜单与映射 hands off to the menu drawer: the two answer adjacent
           // questions (which sources, which models), and V6 02's footer is the only
           // way into the menu now that the row's action is 来源顺序. Withheld while

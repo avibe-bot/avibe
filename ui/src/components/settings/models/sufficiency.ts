@@ -32,10 +32,15 @@ import type { AdoptedBy, AgentBackend, AgentSupply, SkippedBy, Source } from './
  * `adopted_none` is the empty-membership case at either grain: no backend adopted the
  * source, or no source is enabled for the backend. It is deliberately distinct from
  * `nothing_runnable`, because the remedy is 「add one」 rather than 「fix one」.
+ *
+ * `skipped_all` is that same 「add one」 remedy with the orders NAMED. It is a separate
+ * member rather than a field on `adopted_none` because only one grain can ever reach
+ * it: `orderSufficiency` has no complement to read.
  */
 export type Sufficiency =
   | { kind: 'covered' }
   | { kind: 'partly_skipped'; backends: AgentBackend[] }
+  | { kind: 'skipped_all'; backends: AgentBackend[] }
   | { kind: 'nothing_runnable' }
   | { kind: 'adopted_none' }
   | { kind: 'indeterminate' };
@@ -43,19 +48,32 @@ export type Sufficiency =
 /**
  * Did the new source actually reach everyone it should have?
  *
- * Returns `adopted_none` | `partly_skipped` | `covered` | `indeterminate`.
+ * Returns `adopted_none` | `skipped_all` | `partly_skipped` | `covered` |
+ * `indeterminate`.
+ *
+ * `adopted_by.length` decides how much of the answer is good news, and NOTHING else:
+ * that array never says who was left out, at any length. So the complement is read on
+ * both sides of the branch. Zero adopters with a non-empty complement is not a corner
+ * case but the normal shape of an install where every eligible backend keeps a
+ * hand-picked order — the exact case the field was added for, and the one where
+ * naming the orders saves the most work. Deciding it from `adopted_by` alone would be
+ * this module's own header defect, an emptiness test standing in for an adequacy one.
  */
 export function adoptionVerdict(
   adoptedBy: readonly AdoptedBy[] | null | undefined,
   skippedBy?: readonly SkippedBy[] | null,
 ): Sufficiency {
   if (!adoptedBy) return { kind: 'indeterminate' };
-  // Empty is a closed fact — the server sent the list and nobody is on it.
-  if (adoptedBy.length === 0) return { kind: 'adopted_none' };
+  const skipped = skippedBy?.map((s) => s.backend) ?? [];
+  // Empty is a closed fact — the server sent the list and nobody is on it. What it
+  // is NOT is a reason to stop reading: 「nobody took it」 and 「these three orders
+  // left it out」 share one remedy and differ entirely in where to go do it.
+  if (adoptedBy.length === 0) {
+    return skipped.length > 0 ? { kind: 'skipped_all', backends: skipped } : { kind: 'adopted_none' };
+  }
   // Non-empty proves someone took it and nothing about who did not.
   if (!skippedBy) return { kind: 'indeterminate' };
-  if (skippedBy.length === 0) return { kind: 'covered' };
-  return { kind: 'partly_skipped', backends: skippedBy.map((s) => s.backend) };
+  return skipped.length === 0 ? { kind: 'covered' } : { kind: 'partly_skipped', backends: skipped };
 }
 
 /**
@@ -69,7 +87,7 @@ export function adoptionVerdict(
  * Two independent ways to be unable to serve, and the verdict needs BOTH: the
  * source's own health (`isUnhealthy`) and whether it can be launched here at all
  * (`processAvailabilityOf`). The second was the documented v4 caveat — a healthy
- * `native_cli` source whose CLI is not installed on this machine reports itself
+ * `native_cli` source this process cannot sign the CLI in with reports itself
  * perfectly able to serve — and it closed when `process_availability_reason` arrived
  * on `sources.eligibility` at exactly this grain, per (source, backend). `covered`
  * now means 「a source can be reached AND launched」; an agent whose payload omits

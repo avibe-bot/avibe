@@ -83,6 +83,12 @@ const directAgent = (): AgentSupply =>
 const cannotLaunch = (...ids: string[]) =>
   ids.map((id) => ({ source_id: id, eligible: true, process_availability_reason: 'native_cli_unavailable' as const }));
 
+/** The same verdict on a source the selected model does not come from at all.
+ *  `in_current_model_chain` is a claim about the ROUTE, built from the eligible
+ *  sources carrying the model BEFORE health or runnability narrows them. */
+const cannotLaunchOffRoute = (...ids: string[]) =>
+  cannotLaunch(...ids).map((e) => ({ ...e, in_current_model_chain: false }));
+
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
   manifest: { name: 'cliproxyapi', version: '1.0.0', source_sha: 'sha', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health, last_check: null },
@@ -194,6 +200,48 @@ describe('chainChips', () => {
     const agent = hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'] } });
     const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
     expect(chips.map((c) => c.unavailable)).toEqual([false, false]);
+  });
+
+  // The marker names a CAUSE for the failover, so it may only be spent on a
+  // position the failover was ever going to consider. This one does not carry the
+  // selected model: the resolver walks past it with the CLI signed in and the state
+  // green, and pointing at a remedy that changes nothing about the route is worse
+  // than pointing at nothing.
+  it('does not blame availability for a position the model never came from', () => {
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunchOffRoute('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', ACTIVE), source('src_b', ACTIVE)]);
+    expect(chips[0]).toMatchObject({ unavailable: false, unhealthy: false, tone: 'neutral' });
+  });
+
+  it('keeps the marker when the server claims nothing about the route', () => {
+    // `in_current_model_chain` is null with nothing selected and absent from a server
+    // that predates the field. Silence is not exclusion: with no selected model the
+    // order IS the route, so this position really was stepped over for this reason.
+    const agent = hubAgent({
+      selected_model_id: null,
+      sources: {
+        policy: 'follow',
+        order: ['src_a', 'src_b'],
+        eligibility: cannotLaunch('src_b').map((e) => ({ ...e, in_current_model_chain: null })),
+      },
+    });
+    const chips = chainChips(agent, [source('src_a', ACTIVE), nativeSource('src_b', ACTIVE)]);
+    expect(chips[1]).toMatchObject({ unavailable: true });
+  });
+
+  it('still dims an off-route source that is genuinely broken', () => {
+    // The gate is on the availability disjunct only. 「Cannot serve right now」 is
+    // true of the source wherever it sits, and its gold dot is an early warning
+    // about the next failover rather than a reading of this one's route.
+    const agent = hubAgent({
+      current: { model_id: 'claude-opus-4-6', source_id: 'src_b', channel: 'hub' },
+      sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: cannotLaunchOffRoute('src_a') },
+    });
+    const chips = chainChips(agent, [nativeSource('src_a', DEAD), source('src_b', ACTIVE)]);
+    expect(chips[0]).toMatchObject({ unhealthy: true, unavailable: false, tone: 'skipped' });
   });
 });
 

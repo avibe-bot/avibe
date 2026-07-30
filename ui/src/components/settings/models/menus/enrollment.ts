@@ -26,6 +26,17 @@ import { useCompactSourceLabel } from './sourceLabel';
  * are the same statement here: with no baseline every id looks new, and 「保存后
  * 自动加入了全部来源」 is the one sentence this must never produce. Both callers
  * only speak when the list is non-empty, so silence needs no second member.
+ *
+ * WHAT `before` HAS TO BE: the order the server held when this write began. It is
+ * the page's own Agent list, so a `sources.order` PUT that lands in the window
+ * between the page reading it and this write returning would show up in the diff
+ * and be reported as this write's doing. The one path that could reach that window
+ * is closed where it opens rather than compensated for here: 来源顺序's hand-off to
+ * these drawers is disabled until its own write has been read back
+ * (`SourceOrderDrawer.persist`), so the baseline handed over is never mid-write.
+ * The general case — any order write from outside this page's read cycle — is not
+ * client-answerable, and its fix is the mutation response naming its own appends
+ * (`enrolled_source_ids`), server-side and escalated rather than approximated here.
  */
 export function enrolledByCommit(
   before: Pick<AgentSupply, 'sources'>,

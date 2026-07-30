@@ -123,8 +123,9 @@ export const SourceOrderDrawer: React.FC<{
   agents: AgentSupply[];
   sources: Source[];
   onClose: () => void;
-  /** Re-read sources + agents: an order change moves ● 当前 on the page too. */
-  onSaved: () => void;
+  /** Re-read sources + agents: an order change moves ● 当前 on the page too.
+   *  Returning the read's promise lets `saving` span it — see `persist`. */
+  onSaved: () => void | Promise<void>;
   /** Desktop footer 模型菜单与映射 — hand off to this backend's menu drawer.
    *  Omitted while the menus are flagged off. */
   onOpenMenu?: () => void;
@@ -313,7 +314,15 @@ export const SourceOrderDrawer: React.FC<{
       saved.current = adopted;
       setPolicy(adopted.policy);
       setOrder(adopted.order);
-      onSaved();
+      // Stay `saving` until the page has RE-READ the order this write moved, not
+      // merely until the PUT returns. `saving` gates the hand-off to 模型菜单与映射,
+      // and the drawer it hands off to reads its enrollment baseline out of the
+      // page's Agent list — so a hand-off in the gap between 「the server has the new
+      // order」 and 「the page knows it」 would let the menu's own save echo an append
+      // THIS write made and report it as the menu's own. A failed re-read belongs to
+      // the page that made it and is not this write's to roll back: the server
+      // accepted the order either way.
+      await Promise.resolve(onSaved()).catch(() => {});
     } catch {
       saved.current = previous;
       setPolicy(previous.policy);
@@ -374,9 +383,21 @@ export const SourceOrderDrawer: React.FC<{
             )}
             {/* Desktop home for 模型菜单与映射 (V6 02's footer). The phone's home is
                 the row at the end of the list — M02 gives this footer to 恢复推荐
-                顺序 + 完成, and there is no width where the flow may be missing. */}
+                顺序 + 完成, and there is no width where the flow may be missing.
+
+                Disabled while an order write is unsettled, for the same reason as
+                the two 恢复推荐顺序 buttons and one more: the hand-off closes this
+                drawer and opens one whose enrollment notice is a diff against the
+                page's copy of this order. Leaving on the way out of an edit the page
+                has not read back is how that diff acquires someone else's append. */}
             {onOpenMenu && (
-              <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onOpenMenu}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="hidden sm:inline-flex"
+                onClick={onOpenMenu}
+                disabled={saving}
+              >
                 <List className="size-3.5" />
                 {t('settings.models.order.openMenu')}
               </Button>
@@ -505,6 +526,7 @@ export const SourceOrderDrawer: React.FC<{
             variant="outline"
             className="mt-1 h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold sm:hidden"
             onClick={onOpenMenu}
+            disabled={saving}
           >
             <span className="flex items-center gap-2">
               <List className="size-4" />
