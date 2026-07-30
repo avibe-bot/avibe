@@ -5,11 +5,43 @@ export type LocalFileLinkTarget = {
   endColumn?: number;
 };
 
-/** Windows drive paths are valid local destinations, not URL schemes.
+// Top-level route namespaces declared in App.tsx. These remain same-origin
+// browser links even though their leading slash also looks like a POSIX path.
+const APPLICATION_ROUTE_ROOTS = new Set([
+  '/setup',
+  '/inbox',
+  '/search',
+  '/agents',
+  '/skills',
+  '/harness',
+  '/vaults',
+  '/projects',
+  '/more',
+  '/apps',
+  '/chat',
+  '/admin',
+  '/dashboard',
+  '/groups',
+  '/channels',
+  '/users',
+  '/logs',
+  '/settings',
+  '/remote-access',
+  '/doctor',
+]);
+
+function isApplicationRouteHref(href: string): boolean {
+  const pathname = href.split(/[?#]/, 1)[0];
+  const nextSlash = pathname.indexOf('/', 1);
+  const root = nextSlash === -1 ? pathname : pathname.slice(0, nextSlash);
+  return APPLICATION_ROUTE_ROOTS.has(root);
+}
+
+/** Windows drive and UNC paths are valid local destinations, not URL schemes.
  * Accept encoded separators because Markdown destinations commonly escape
  * backslashes before the URL sanitizer sees them. */
 export function isAbsoluteWindowsFileHref(href: string): boolean {
-  return /^[A-Za-z]:(?:[\\/]|%(?:2f|5c))/i.test(href);
+  return /^[A-Za-z]:(?:[\\/]|%(?:2f|5c))/i.test(href) || /^(?:\\|%5c){2}/i.test(href);
 }
 
 function decodePath(path: string): string {
@@ -60,7 +92,8 @@ function joinWorkdir(workdir: string, relativePath: string): string {
  * suffixes are kept as an editor reveal target rather than part of the path.
  */
 export function resolveLocalFileLink(href: string, workdir?: string | null): LocalFileLinkTarget | null {
-  const absolutePosix = href.startsWith('/') && !href.startsWith('//') && href !== '/';
+  const absolutePosix =
+    href.startsWith('/') && !href.startsWith('//') && href !== '/' && !isApplicationRouteHref(href);
   const absoluteWindows = isAbsoluteWindowsFileHref(href);
   const relative = href.startsWith('./') && href !== './';
   if (!absolutePosix && !absoluteWindows && !relative) return null;

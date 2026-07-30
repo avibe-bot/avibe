@@ -53,6 +53,21 @@ describe('resolveLocalFileLink', () => {
     });
   });
 
+  it('recognizes raw and encoded absolute UNC destinations', () => {
+    expect(resolveLocalFileLink('\\\\server\\share\\app.py:42')).toEqual({
+      path: '\\\\server\\share\\app.py',
+      line: 42,
+      column: 0,
+      endColumn: 0,
+    });
+    expect(resolveLocalFileLink('%5C%5Cserver%5Cshare%5Capp.py:42:7')).toEqual({
+      path: '\\\\server\\share\\app.py',
+      line: 42,
+      column: 6,
+      endColumn: 6,
+    });
+  });
+
   it('decodes filenames only after identifying literal source suffixes', () => {
     expect(resolveLocalFileLink('/tmp/report%3A2026')).toEqual({
       path: '/tmp/report:2026',
@@ -71,5 +86,17 @@ describe('resolveLocalFileLink', () => {
     }
     expect(resolveLocalFileLink('./file.ts', null)).toBeNull();
     expect(resolveLocalFileLink('./file.ts', 'relative/workdir')).toBeNull();
+  });
+
+  it('leaves current application routes as same-origin browser links', () => {
+    for (const href of [
+      '/chat/session-123',
+      '/apps/files',
+      '/admin/settings/backends/codex',
+      '/settings/models?source=custom',
+      '/doctor/logs#latest',
+    ]) {
+      expect(resolveLocalFileLink(href, '/workspace')).toBeNull();
+    }
   });
 });

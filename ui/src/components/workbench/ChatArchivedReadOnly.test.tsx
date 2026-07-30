@@ -547,4 +547,29 @@ describe('agent-authored local file links', () => {
     expect(userMarkup).not.toContain('data-local-file-link');
     expect(userMarkup).not.toContain('href="C:/workspace/app.py:42"');
   });
+
+  it('opens UNC files locally while leaving Workbench routes as browser links', () => {
+    const props = {
+      session: session({ workdir: '\\\\server\\share' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const uncMessage = {
+      ...linkedMessage('agent'),
+      text: '[open source](%5C%5Cserver%5Cshare%5Capp.py:42)',
+    } as WorkbenchMessage;
+    const routeMessage = {
+      ...linkedMessage('agent'),
+      text: '[open files](/apps/files)',
+    } as WorkbenchMessage;
+
+    const uncMarkup = render(<MessageRow {...props} message={uncMessage} />);
+    expect(uncMarkup).toContain('data-local-file-link="true"');
+    expect(uncMarkup).toContain('href="%5C%5Cserver%5Cshare%5Capp.py:42"');
+
+    const routeMarkup = render(<MessageRow {...props} message={routeMessage} />);
+    expect(routeMarkup).not.toContain('data-local-file-link');
+    expect(routeMarkup).toContain('href="/apps/files"');
+    expect(routeMarkup).toContain('target="_blank"');
+  });
 });
