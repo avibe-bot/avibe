@@ -4751,8 +4751,19 @@ class SQLiteBackgroundTaskStore:
         # A NULL or empty column is VALID: an absent blob is not an unreadable one, and
         # ``json_valid(NULL)`` is NULL while ``json_valid('')`` is 0, both of which would
         # otherwise mark every metadata-free run unreadable.
-        readable = func.json_valid(
-            func.coalesce(func.nullif(agent_runs.c.metadata_json, ""), "{}")
+        #
+        # Valid is NOT enough: ``json_valid('[]')`` and ``json_valid('"value"')`` are 1,
+        # but the metadata SCHEMA — an object with keys — cannot be read out of a
+        # top-level array, string, number, boolean, or JSON null, so those rows are
+        # exactly as unclassifiable as a malformed blob and get the same treatment.
+        # The type check sits in a CASE branch BEHIND the validity check, deliberately:
+        # ``json_type`` on malformed input raises and would fail the whole statement —
+        # the very failure mode the ``json_valid`` guards exist to prevent (HFR-072) —
+        # and SQLite evaluates CASE branches lazily, so the invalid arm never reaches it.
+        _metadata_blob = func.coalesce(func.nullif(agent_runs.c.metadata_json, ""), "{}")
+        readable = case(
+            (func.json_valid(_metadata_blob) == 1, func.json_type(_metadata_blob) == "object"),
+            else_=literal(False),
         )
         recent = (
             select(

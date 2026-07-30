@@ -7154,10 +7154,10 @@ def test_a_malformed_history_row_reports_unknown_rather_than_a_verdict(
         )
         return run_id
 
-    def _break(run_id: str) -> None:
+    def _break(run_id: str, payload: str = "{broken") -> None:
         with sqlite.engine.begin() as conn:
             conn.execute(
-                sa_update(agent_runs).where(agent_runs.c.id == run_id).values(metadata_json="{broken")
+                sa_update(agent_runs).where(agent_runs.c.id == run_id).values(metadata_json=payload)
             )
 
     # 1. the NEWEST verdict is unreadable, so "the latest run failed" is unknowable.
@@ -7178,12 +7178,32 @@ def test_a_malformed_history_row_reports_unknown_rather_than_a_verdict(
     for index in range(1, 12):
         _run("task-aged-bad", index, "succeeded", 1 + index)
 
+    # 4. VALID JSON that is not an OBJECT is just as unreadable as malformed JSON:
+    #    ``json_valid('[]')`` is 1, so a validity-only readability signal admits the
+    #    row, ``INTERRUPT_REASON_SQL``'s extract degrades to NULL (passing
+    #    ``reason IS NULL``), and the badge answers confidently off a metadata
+    #    schema that cannot be read. Every non-object type SQLite's ``json_type``
+    #    can report at the top level is covered.
+    for suffix, payload in (
+        ("array", "[]"),
+        ("text", '"value"'),
+        ("number", "3"),
+        ("null", "null"),
+        ("boolean", "true"),
+    ):
+        _task(sqlite, f"task-{suffix}-bad")
+        _run(f"task-{suffix}-bad", 0, "succeeded", 1)
+        _break(_run(f"task-{suffix}-bad", 1, "failed", 2), payload)
+
+    non_object = tuple(
+        f"task-{suffix}-bad" for suffix in ("array", "text", "number", "null", "boolean")
+    )
     healths = sqlite.definition_health_batch(
-        ["task-newest-bad", "task-inner-bad", "task-aged-bad"],
+        ["task-newest-bad", "task-inner-bad", "task-aged-bad", *non_object],
         now="2026-07-29T00:00:00+00:00",
     )
 
-    for definition_id in ("task-newest-bad", "task-inner-bad"):
+    for definition_id in ("task-newest-bad", "task-inner-bad", *non_object):
         assert healths[definition_id]["health"] == "unknown", (
             f"{definition_id} has an unreadable row in its window and must report "
             f"unknown, not {healths[definition_id]['health']!r}"
