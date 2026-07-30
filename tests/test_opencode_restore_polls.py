@@ -37,7 +37,7 @@ def _make_poll(*, platform: str, base_session_id: str, opencode_session_id: str)
     )
 
 
-def _build_agent(active_polls: dict[str, ActivePollInfo]):
+def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en"):
     """Assemble an ``OpenCodeAgent`` with the minimal collaborators
     ``restore_active_polls`` touches, plus a controller that records
     ``set_agent_status`` writes."""
@@ -104,6 +104,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
         def __init__(self):
             from core.session_turns import SessionTurnManager
 
+            self.config = SimpleNamespace(language=language)
             # The restore path re-marks running via the turn owner, which delegates
             # to set_agent_status — wire a real manager so the full path is exercised.
             self.session_turns = SessionTurnManager(self)
@@ -284,7 +285,7 @@ def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:
 
 def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
-    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent, _, removed, _ = _build_agent({"oc-1": poll}, language="zh")
     agent._test_server.messages = [
         {"info": {"id": "primary-user", "role": "user", "time": {}}, "parts": []}
     ]
@@ -317,7 +318,12 @@ def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> Non
     assert removed == []
     assert reconciled_messages[-1]["info"]["error"] == {
         "name": "NativeSessionEndedBeforeResult",
-        "data": {"message": "OpenCode became idle before producing an assistant result"},
+        "data": {
+            "message": (
+                "OpenCode 已结束，但没有产出模型回复。Provider：(默认)；模型：(默认)；"
+                "推理强度：(默认)。这次运行里 OpenCode 没有暴露服务商错误。"
+            )
+        },
     }
 
 

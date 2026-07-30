@@ -80,6 +80,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_terminal_barriers: dict[str, list[str]] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._ambiguous_input_shutdowns: set[str] = set()
+        self._ambiguous_interrupts: set[str] = set()
         self._steering_closing: set[str] = set()
         self._steering_writers: set[str] = set()
         self._detached_activity_outputs: dict[str, list[SessionActivity]] = {}
@@ -556,6 +557,7 @@ class ClaudeAgent(BaseAgent):
             or composite_key not in active_sessions
             or composite_key in self._steering_closing_keys()
             or composite_key in self._ambiguous_input_shutdown_keys()
+            or composite_key in self._ambiguous_interrupt_keys()
         ):
             return None
         return f"claude:{composite_key}:{id(client)}:{id(receiver_task)}"
@@ -622,6 +624,9 @@ class ClaudeAgent(BaseAgent):
         input_shutdowns = getattr(self, "_ambiguous_input_shutdowns", None)
         if input_shutdowns is not None:
             input_shutdowns.discard(composite_key)
+        ambiguous_interrupts = getattr(self, "_ambiguous_interrupts", None)
+        if ambiguous_interrupts is not None:
+            ambiguous_interrupts.discard(composite_key)
         self._steering_closing_keys().discard(composite_key)
         self._steering_writer_keys().discard(composite_key)
 
@@ -690,6 +695,13 @@ class ClaudeAgent(BaseAgent):
             self._ambiguous_input_shutdowns = shutdowns
         return shutdowns
 
+    def _ambiguous_interrupt_keys(self) -> set[str]:
+        interrupts = getattr(self, "_ambiguous_interrupts", None)
+        if interrupts is None:
+            interrupts = set()
+            self._ambiguous_interrupts = interrupts
+        return interrupts
+
     async def _end_ambiguous_steering_input(
         self,
         composite_key: str,
@@ -725,6 +737,7 @@ class ClaudeAgent(BaseAgent):
                 or composite_key not in active_sessions
                 or composite_key in self._steering_closing_keys()
                 or composite_key in self._ambiguous_input_shutdown_keys()
+                or composite_key in self._ambiguous_interrupt_keys()
             ):
                 return steer_result(
                     SteerOutcome.REFUSED,
@@ -885,6 +898,7 @@ class ClaudeAgent(BaseAgent):
                 if (
                     self.claude_sessions.get(composite_key) is not client
                     or composite_key in self._steering_closing_keys()
+                    or composite_key in self._ambiguous_interrupt_keys()
                 ):
                     request.stop_failure_reason = "not_active"
                     return False
@@ -892,6 +906,8 @@ class ClaudeAgent(BaseAgent):
                 try:
                     await client.interrupt()
                 except Exception:
+                    self._steering_closing_keys().discard(composite_key)
+                    self._ambiguous_interrupt_keys().add(composite_key)
                     raise
                 # Claim the pending Result owner before releasing the lock. A
                 # terminal frame queued behind interrupt must not settle this

@@ -554,7 +554,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await agent.handle_stop(stop_request))
 
             self.assertEqual(stop_request.stop_failure_reason, "interrupt_failed")
-            self.assertIn(runtime_key, agent._steering_closing_keys())
+            self.assertNotIn(runtime_key, agent._steering_closing_keys())
+            self.assertIn(runtime_key, agent._ambiguous_interrupt_keys())
             self.assertIsNone(agent.steering_native_turn_id(target))
             self.assertEqual(agent._pending_requests[runtime_key], [pending_request])
             self.assertFalse(receiver_task.done())

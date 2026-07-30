@@ -89,6 +89,68 @@ def _build_agent(mark_idle_calls):
 
 
 class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_interrupt_stays_nonsteerable_while_result_settles(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-interrupt-unknown:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        result_ready = asyncio.Event()
+
+        class _Client:
+            async def interrupt(self):
+                raise TimeoutError("interrupt acknowledgement timed out")
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    await result_ready.wait()
+                    yield _ResultMessage()
+
+                return _iterate()
+
+        client = _Client()
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                client,
+                "session-interrupt-unknown",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        agent.claude_sessions[composite_key] = client
+        agent.receiver_tasks[composite_key] = receiver_task
+        agent.session_handler.active_sessions = {composite_key}
+        target = ActiveSteerTarget(
+            runtime_key=composite_key,
+            logical_turn_id="logical-turn",
+            context=context,
+            agent_request=primary_request,
+            agent=agent,
+        )
+        stop_request = SimpleNamespace(
+            context=context,
+            composite_session_id=composite_key,
+            stop_failure_reason=None,
+        )
+
+        self.assertFalse(await agent.handle_stop(stop_request))
+        self.assertIn(composite_key, agent._ambiguous_interrupt_keys())
+        self.assertIsNone(agent.steering_native_turn_id(target))
+
+        result_ready.set()
+        await receiver_task
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertFalse(agent._has_pending_requests(composite_key))
+        self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
+
     async def test_successful_steer_supersedes_a_concurrent_primary_result(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)

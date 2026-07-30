@@ -1078,6 +1078,52 @@ async def test_opencode_insert_reconciliation_survives_visible_user_until_idle()
 
 
 @pytest.mark.anyio
+async def test_opencode_requires_final_assistant_after_inserted_user() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+
+    class _RacingOpenCodeServer(_OpenCodeServer):
+        async def prompt_async(self, **kwargs) -> None:
+            self.prompt_calls.append(kwargs)
+            self.messages.extend(
+                [
+                    {
+                        "info": {
+                            "id": "raced-primary-assistant",
+                            "role": "assistant",
+                            "time": {"completed": 1},
+                            "finish": "stop",
+                        },
+                        "parts": [{"type": "text", "text": "primary"}],
+                    },
+                    {
+                        "info": {"id": "steer-user", "role": "user"},
+                        "parts": [{"type": "text", "text": kwargs["text"]}],
+                    },
+                ]
+            )
+
+    server = _RacingOpenCodeServer(status={"type": "busy"})
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    state = agent._steering_states[primary.base_session_id]
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        server.status = {"type": "idle"}
+
+        messages = await poll_server.list_messages("opencode-session", primary.working_path)
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert messages[-1]["info"]["error"]["name"] == "NativeSessionEndedBeforeResult"
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_poll_keeps_owner_until_failed_status_probe_recovers() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
