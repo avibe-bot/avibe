@@ -170,6 +170,7 @@ def _migrate_pseudo_messages(bind) -> None:
         )
     ).mappings()
     latest_drafts: dict[str, sa.RowMapping] = {}
+    seen_queued_sessions: set[str] = set()
     for row in rows:
         kind = str(row["type"])
         session_id = str(row["session_id"] or "")
@@ -224,6 +225,38 @@ def _migrate_pseudo_messages(bind) -> None:
         }[kind]
         if session_status != "active":
             state = "retired"
+        if (
+            kind == "queued"
+            and session_status == "active"
+            and session_id not in seen_queued_sessions
+        ):
+            seen_queued_sessions.add(session_id)
+            provenance = metadata.get("scheduled_provenance")
+            provenance_spec = (
+                provenance.get("platform_specific")
+                if isinstance(provenance, dict)
+                else None
+            )
+            owned_agent_run = str(row["native_message_id"] or "").startswith(
+                "agent_run:"
+            ) or (
+                isinstance(provenance_spec, dict)
+                and provenance_spec.get("task_trigger_kind") == "agent_run"
+            )
+            if not owned_agent_run:
+                # Legacy startup resumed only an Agent-Run-owned queue head.
+                # Keep an ordinary head held so upgrade cannot dispatch it.
+                bind.execute(
+                    sa.text(
+                        "update agent_sessions set queue_hold_state = 'held', "
+                        "queue_hold_version = queue_hold_version + 1, "
+                        "queue_held_at = :held_at where id = :session_id"
+                    ),
+                    {
+                        "held_at": row["updated_at"] or row["created_at"],
+                        "session_id": session_id,
+                    },
+                )
         history = {
             "version": 1,
             "events": [
@@ -713,7 +746,19 @@ def downgrade() -> None:
         sa.text("select count(*) from session_turns where state <> 'terminal'")
     ).scalar_one()
     held = bind.execute(
-        sa.text("select count(*) from agent_sessions where queue_hold_state = 'held'")
+        sa.text(
+            "select count(*) from agent_sessions sessions "
+            "where sessions.queue_hold_state = 'held' and not exists ("
+            "select 1 from message_deliveries deliveries "
+            "where deliveries.session_id = sessions.id "
+            "and deliveries.message_id is null "
+            "and deliveries.state in ('queued','retired') "
+            "and json_valid(deliveries.delivery_history_json) = 1 "
+            "and json_array_length(json_extract(deliveries.delivery_history_json, '$.events')) = 1 "
+            "and json_extract(deliveries.delivery_history_json, '$.events[0].kind') = 'migration' "
+            "and json_extract(deliveries.delivery_history_json, '$.events[0].legacy_type') = 'queued'"
+            ")"
+        )
     ).scalar_one()
     if unsafe or live_turns or held:
         raise RuntimeError(

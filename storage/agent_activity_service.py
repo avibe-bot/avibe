@@ -9,14 +9,16 @@ A *turn* is bounded by transcript markers rather than an id: it ends at the
 agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
 when the user starts a new turn without one, is reported as ``interrupted``.
 Grouping is chronological because ``messages`` carries no ``turn_id`` (only
-``agent_events`` does). Both tables persist WHOLE-SECOND ``...Z`` ``created_at``,
-which cannot order same-second rows — but both also mint ids with a MICROSECOND
-clock prefix (``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
+``agent_events`` does). Message/event rows persist whole-second ``created_at``,
+but both also mint ids with a MICROSECOND clock prefix
+(``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
 that decoded microsecond, recovering the true emission order ACROSS tables (a fast
 turn's tool call before its same-second terminal; one turn's terminal before the
-next turn's same-second opener). A phase tiebreak (turn-start < activity <
-terminal) only applies when the microsecond can't be decoded (format drift), and
-the whole-second ``created_at`` still bounds the event scan.
+next turn's same-second opener). Durable Turn terminals retain their own
+subsecond timestamp because they do not have a clock-bearing id. A phase
+tiebreak (turn-start < activity < terminal) only applies when the microsecond
+can't be decoded (format drift), and the whole-second ``created_at`` still
+bounds the event scan.
 
 Each group is keyed by the id of its first activity row (stable across summary
 and detail reads). ``anchor_message_id`` is the transcript message the chip
@@ -34,7 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
@@ -269,7 +271,10 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         .where(session_turns.c.session_id == session_id)
         .where(session_turns.c.state == "terminal")
         .where(session_turns.c.terminal_at.is_not(None))
-        .order_by(session_turns.c.terminal_at.desc(), session_turns.c.id.desc())
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
         .limit(MESSAGE_SCAN_LIMIT)
     ).mappings():
         terminal_ts = _parse_ts(turn["terminal_at"])

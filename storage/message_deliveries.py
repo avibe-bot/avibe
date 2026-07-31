@@ -33,6 +33,12 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def terminal_now_iso() -> str:
+    """Preserve the terminal's true order after same-second native activity."""
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def new_turn_id() -> str:
     return f"trn_{uuid.uuid4().hex}"
 
@@ -759,7 +765,7 @@ def terminalize_turn(
             "settled_by": settled_by,
             "terminal_evidence_kind": evidence_kind,
             "terminal_evidence_json": _canonical_json(evidence or {}),
-            "terminal_at": utc_now_iso(),
+            "terminal_at": terminal_now_iso(),
         },
     )
     return {"changed": settled is not None, "turn": settled or turn}

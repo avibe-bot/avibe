@@ -15,6 +15,7 @@ from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.session_turns import DeliveryRequest, SessionTurnManager, Turn
 from modules.im import MessageContext
 from storage import message_deliveries as delivery_store
+from storage import messages_service
 from storage import workbench_sessions_service
 from storage.db import create_sqlite_engine
 from storage.models import (
@@ -36,6 +37,7 @@ class _Controller:
     def __init__(self) -> None:
         self.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
         self.agent_service = SimpleNamespace(agents={}, _turn_gates={})
+        self.config = SimpleNamespace(language="en")
         self.statuses: list[tuple[str, str]] = []
 
     @staticmethod
@@ -48,6 +50,10 @@ class _Controller:
 
     def set_agent_status(self, session_id: str, status: str) -> None:
         self.statuses.append((session_id, status))
+
+    @staticmethod
+    def _get_session_key(context: MessageContext) -> str:
+        return f"avibe::{(context.platform_specific or {}).get('agent_session_id')}"
 
 
 def _context(session_id: str = "ses_fsm") -> MessageContext:
@@ -1121,3 +1127,75 @@ def test_archive_retires_unstarted_successor_without_creating_message(managers) 
     assert row["state"] == "retired"
     assert successor["terminal_outcome"] == "not_written"
     assert message is None
+
+
+@pytest.mark.anyio
+async def test_terminal_commit_publishes_replyless_inbox_settlement(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            messages.insert().values(
+                id="msg_prior_result",
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="agent",
+                type="result",
+                source="agent",
+                content_text="prior answer",
+                content_json="{}",
+                metadata_json="{}",
+                created_at="2026-07-31T23:59:00Z",
+                updated_at="2026-07-31T23:59:00Z",
+            )
+        )
+    turn_id, context = await _activate(manager, text="silent request")
+    done = asyncio.Event()
+    manager.register_turn_sink(
+        manager.controller._get_session_key(context),
+        on_chunk=manager._noop_chunk,
+        done_event=done,
+        turn_token=turn_id,
+        context=context,
+    )
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "core.inbox_events.bus.publish",
+        lambda event, payload: published.append((event, payload)),
+    )
+
+    manager.on_terminal_result(context, is_error=False)
+    done.set()
+    for _ in range(4):
+        await asyncio.sleep(0)
+
+    updates = [payload for event, payload in published if event == "inbox.session.updated"]
+    assert updates
+    assert updates[-1]["session_id"] == "ses_fsm"
+    assert updates[-1]["replied"] is False
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, turn_id)["state"] == "terminal"
+
+
+@pytest.mark.anyio
+async def test_agent_initiated_continuation_materializes_in_configured_language(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.language = "zh"
+    context = _context()
+
+    assert manager.register_agent_initiated_turn(context) is True
+    with engine.connect() as conn:
+        row = messages_service.get_message(conn, str(context.message_id))
+    assert row is not None
+    assert row["text"] == "Agent 主动发起的续接"
+
+    sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+    assert sink is not None
+    sink["done_event"].set()
+    for _ in range(4):
+        await asyncio.sleep(0)

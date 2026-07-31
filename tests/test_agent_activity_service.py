@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -574,6 +576,80 @@ def test_silent_completion_marks_turn_done(isolated_state):
     assert g["anchor_position"] == "after"
     assert g["open"] is False
     assert g["steps"] == 2
+
+
+def test_replyless_terminal_keeps_subsecond_order_after_last_activity(isolated_state):
+    """A Turn terminal is emitted after its final tool event, even in one second."""
+
+    engine = create_sqlite_engine()
+    sid = "ses_precise_terminal"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        turn_id = "trn_precise_terminal"
+        attempt_id = "atm_precise_terminal"
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_precise_terminal",
+            session_id=sid,
+            priority="p3",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="watch fired",
+            ),
+            dispatch_text="watch fired",
+            current_attempt_id=attempt_id,
+            current_attempt_kind="start",
+            current_target_turn_id=turn_id,
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=sid,
+            initial_delivery_id="msg_precise_terminal",
+            state="starting",
+            backend="codex",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="msg_precise_terminal",
+            expected_attempt_id=attempt_id,
+            accepted_turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        ) is not None
+        emitted_micros = int(time.time() * 1_000_000)
+        emitted_at = datetime.fromtimestamp(
+            emitted_micros / 1_000_000,
+            timezone.utc,
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid=f"evt_{emitted_micros:015x}deadbeef",
+            created_at=emitted_at,
+            text="final tool call",
+        )
+        terminal = message_deliveries.terminalize_turn(
+            conn,
+            turn_id,
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="test_replyless_completion",
+        )
+
+    terminal_at = str(terminal["turn"]["terminal_at"])
+    assert "." in terminal_at and terminal_at.endswith("Z")
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+    assert len(groups) == 1
+    assert groups[0]["status"] == "done"
+    assert groups[0]["steps"] == 1
 
 
 def test_midturn_notify_does_not_split_or_close_a_turn(isolated_state):

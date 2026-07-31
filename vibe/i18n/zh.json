@@ -20,6 +20,7 @@
     }
   },
   "harness": {
+    "agentInitiatedContinuation": "Agent 主动发起的续接",
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",

@@ -248,26 +248,6 @@ def _trace_ids_from_context(context: MessageContext) -> tuple[Optional[str], Opt
     return turn_id, run_id
 
 
-def persist_silent_completion_marker(context: MessageContext) -> None:
-    """Refresh Inbox after a silent Turn terminal snapshot is committed."""
-    session_id = (context.platform_specific or {}).get("agent_session_id")
-    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
-    if context.platform != "avibe" or not session_id or suppress_delivery:
-        return
-    engine = get_cached_sqlite_engine()
-    with engine.connect() as conn:
-        inbox_row = messages_service.get_inbox_session(conn, session_id)
-    if inbox_row is not None:
-        # Same ``inbox.session.updated`` event a visible reply publishes — but NOT
-        # ``message.new`` (no transcript bubble) and NOT web-push (not a notifiable reply).
-        try:
-            from core.inbox_events import bus
-
-            bus.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("persist_silent_completion_marker: inbox publish failed", exc_info=True)
-
-
 def persist_agent_message(
     context: MessageContext,
     canonical_type: str,

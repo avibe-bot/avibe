@@ -2207,6 +2207,8 @@ class SessionTurnManager:
                     }
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
+        if result.get("changed"):
+            self._publish_terminal_inbox_update(session_id)
         return result
 
     def _settle_durable_prewrite_failure(
@@ -2396,6 +2398,28 @@ class SessionTurnManager:
                 bus.publish("inbox.session.updated", inbox_row)
         except Exception:
             logger.exception("accepted Delivery publish failed for %s", delivery_id)
+
+    def _publish_terminal_inbox_update(self, session_id: str) -> None:
+        """Publish the Inbox projection only after terminal ownership commits."""
+
+        try:
+            with self._sqlite_engine().connect() as conn:
+                inbox_row = messages_service.get_inbox_session(
+                    conn,
+                    session_id,
+                    platform="avibe",
+                )
+            if inbox_row is None:
+                return
+            from core.inbox_events import bus
+
+            bus.publish("inbox.session.updated", inbox_row)
+        except Exception:
+            logger.debug(
+                "terminal Inbox projection failed for Session=%s",
+                session_id,
+                exc_info=True,
+            )
 
     def on_native_start(
         self,
@@ -3720,9 +3744,19 @@ class SessionTurnManager:
                     if session_row["status"] != "active":
                         return False
                     delivery_id = delivery_store.new_delivery_id()
+                    language_getter = getattr(self.controller, "_get_lang", None)
+                    language = (
+                        language_getter()
+                        if callable(language_getter)
+                        else getattr(
+                            getattr(self.controller, "config", None),
+                            "language",
+                            "en",
+                        )
+                    )
                     trigger_text = str(
                         payload.get("agent_initiated_trigger_text")
-                        or "Agent-initiated continuation"
+                        or i18n_t("harness.agentInitiatedContinuation", language)
                     )
                     delivery_store.insert_delivery(
                         conn,

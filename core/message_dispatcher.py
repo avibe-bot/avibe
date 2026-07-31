@@ -23,7 +23,6 @@ from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, Deli
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
-    persist_silent_completion_marker,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -1511,26 +1510,6 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
-                    if level != "silent" and not is_error:
-                        # A CLEAN silent completion — ``level='normal'`` with an
-                        # empty/``<silent>``-stripped body (we're already inside the
-                        # ``level=='silent' or not text.strip()`` branch, so here the
-                        # body is empty). Persist an INVISIBLE ``silent`` terminal
-                        # marker; without it the activity grouping sees "activity rows +
-                        # no terminal" and misreads a legal completion as interrupted.
-                        #
-                        # This must NOT fire for ``level='silent'``: the user-stop paths
-                        # (codex/claude/opencode) emit a terminal ``result`` with
-                        # ``level='silent'`` and ``is_error=False`` — a stop legitimately
-                        # stays ``interrupted``, so ``not is_error`` is the wrong gate.
-                        # Backend failures also arrive ``level='silent'`` (after a
-                        # visible notify), and are excluded here too. Background
-                        # sessions still keep this local terminal marker; visibility
-                        # suppresses outward delivery, not durable history.
-                        try:
-                            persist_silent_completion_marker(context)
-                        except Exception:
-                            logger.exception("emit_agent_message: silent completion marker failed")
                 return None
             finally:
                 if mutates_turn_lifecycle:

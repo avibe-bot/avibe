@@ -39,6 +39,19 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _timestamp_key(value: Any, row_id: Any) -> tuple[datetime, str]:
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        instant = datetime.fromisoformat(text)
+    except ValueError:
+        instant = datetime.min.replace(tzinfo=timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc), str(row_id or "")
+
+
 def _new_message_id() -> str:
     """Time-sortable message id.
 
@@ -914,7 +927,10 @@ def list_inbox_sessions(
             session_turns.c.session_id == agent_sessions.c.id,
             session_turns.c.state == "terminal",
         )
-        .order_by(session_turns.c.terminal_at.desc(), session_turns.c.id.desc())
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
         .limit(1)
         .scalar_subquery()
     )
@@ -924,7 +940,10 @@ def list_inbox_sessions(
             session_turns.c.session_id == agent_sessions.c.id,
             session_turns.c.state == "terminal",
         )
-        .order_by(session_turns.c.terminal_at.desc(), session_turns.c.id.desc())
+        .order_by(
+            func.julianday(session_turns.c.terminal_at).desc(),
+            session_turns.c.id.desc(),
+        )
         .limit(1)
         .scalar_subquery()
     )
@@ -1048,15 +1067,14 @@ def list_inbox_sessions(
         ]
         terminal_at, terminal_id = max(
             (candidate for candidate in terminal_candidates if candidate[0] is not None),
+            key=lambda candidate: _timestamp_key(candidate[0], candidate[1]),
             default=(None, None),
         )
         awaiting_reply = bool(
             last_input_at is not None
             and terminal_at is not None
-            and (
-                last_input_at > terminal_at
-                or (last_input_at == terminal_at and (last_input_id or "") > (terminal_id or ""))
-            )
+            and _timestamp_key(last_input_at, last_input_id)
+            > _timestamp_key(terminal_at, terminal_id)
         )
         sessions.append(
             {

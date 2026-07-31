@@ -175,6 +175,7 @@ def test_legacy_queue_authority_symbols_have_no_production_call_sites() -> None:
         "messages_service.clear_pending",
         "messages_service.delete_queued",
         "messages_service.remove_queued",
+        "persist_silent_completion_marker",
     }
     offenders: list[str] = []
     for root_name in ("core", "modules", "storage", "vibe"):

@@ -154,6 +154,9 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         delivery = conn.execute(
             "select state, dispatch_text, snapshot_json from message_deliveries where id = 'msg_fsm'"
         ).fetchone()
+        hold_state = conn.execute(
+            "select queue_hold_state from agent_sessions where id = 'ses_fsm'"
+        ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert {"session_turns", "message_deliveries"}.issubset(tables)
     assert {
@@ -177,7 +180,21 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert existing is None
     assert delivery[0:2] == ("queued", "hello")
     assert json.loads(delivery[2])["content_text"] == "hello"
+    assert hold_state == ("held",)
     assert version == (HEAD_REVISION,)
+
+    from storage import message_deliveries
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert message_deliveries.queued_session_ids_without_live_turns(conn) == []
+            assert message_deliveries.queued_session_ids_without_live_turns(
+                conn,
+                include_held=True,
+            ) == ["ses_fsm"]
+    finally:
+        engine.dispose()
 
     command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
     with sqlite3.connect(db_path) as conn:
