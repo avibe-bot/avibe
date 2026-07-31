@@ -1827,6 +1827,53 @@ def test_archive_retires_durable_owners_before_clearing_queue(managers) -> None:
     assert all(row["state"] == "terminal" for row in turns)
 
 
+def test_claimed_start_rechecks_archive_before_backend_dispatch(managers) -> None:
+    from storage.workbench_sessions_service import archive_session
+
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, _active_context = await _activate(manager)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="must not dispatch after archive",
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        assert manager._terminalize_durable_turn(turn_id, "completed")["changed"]
+        with engine.begin() as conn:
+            conn.execute(
+                session_deliveries.update()
+                .where(session_deliveries.c.id == queued.delivery_id)
+                .values(target_turn_id=turn_id)
+            )
+
+        def archive_while_building_context(_session_id):
+            with engine.begin() as conn:
+                archive_session(conn, "ses_fsm")
+            return _context()
+
+        manager._delivery_context = archive_while_building_context
+        manager._run = AsyncMock()
+        started = await manager.drain_delivery_queue("ses_fsm")
+        return queued, started
+
+    queued, started = asyncio.run(run())
+    assert started is False
+    manager._run.assert_not_awaited()
+    with engine.connect() as conn:
+        session_status = conn.execute(
+            select(agent_sessions.c.status).where(agent_sessions.c.id == "ses_fsm")
+        ).scalar_one()
+        delivery = delivery_store.get_delivery(conn, str(queued.delivery_id))
+    assert session_status == "archived"
+    assert delivery is not None
+    assert delivery["state"] == "completed"
+
+
 def test_native_start_binding_failure_stays_in_reconciliation_boundary(
     managers,
     monkeypatch,
@@ -1911,6 +1958,60 @@ def test_restart_retires_ownerless_legacy_turn_and_ignores_late_terminal(
     assert active is None
 
 
+def test_ownerless_recovery_resumes_oldest_combined_fifo_head(managers) -> None:
+    manager, restored, engine, _engine_b, _starts = managers
+    dispatched: list[str] = []
+    with engine.begin() as conn:
+        delivery_store.insert_turn(
+            conn,
+            turn_id="trn_ownerless",
+            session_id="ses_fsm",
+            state="active",
+            backend="codex",
+        )
+        legacy = messages_service.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="older legacy row",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == legacy["id"])
+            .values(created_at="0001-01-01T00:00:00Z")
+        )
+
+    async def run():
+        durable = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="newer durable row",
+            ),
+            context=_context(),
+        )
+        assert durable.state == "queued"
+
+        async def capture_run(_session_id, _context_value, text, **_kwargs):
+            dispatched.append(text)
+
+        restored._run = capture_run
+        restored._active_identity = lambda *_args: None
+        await restored.recover_durable_delivery_state("ses_fsm")
+        return durable
+
+    durable = asyncio.run(run())
+    assert dispatched == ["older legacy row"]
+    with engine.connect() as conn:
+        ownerless = delivery_store.get_turn(conn, "trn_ownerless")
+        queued = delivery_store.get_delivery(conn, str(durable.delivery_id))
+    assert ownerless is not None
+    assert ownerless["state"] == "terminal"
+    assert ownerless["terminal_outcome"] == "ownerless_legacy_restart"
+    assert queued is not None
+    assert queued["state"] == "queued"
+
+
 def test_terminal_reconciliation_waits_for_release_and_contains_write_failure(
     managers,
     monkeypatch,
@@ -1941,6 +2042,32 @@ def test_terminal_reconciliation_waits_for_release_and_contains_write_failure(
         assert manager.controller.statuses[-1] == ("ses_fsm", "idle")
 
     asyncio.run(run())
+
+
+def test_runtime_release_cannot_override_sink_terminal_outcome(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        done = asyncio.Event()
+        sink = {"done_event": done, "turn_token": turn_id}
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        manager.controller.get_turn_sink = lambda _session_key: sink
+        manager.on_terminal_result(context, is_error=False)
+        sink["settled_by"] = "terminal_result"
+        done.set()
+
+        manager.on_native_terminal(context, outcome="terminal")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return turn_id
+
+    turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "completed"
 
 
 def test_stop_terminal_result_preserves_canceled_turn_and_accepted_receipt(

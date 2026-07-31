@@ -2044,6 +2044,21 @@ class SessionTurnManager:
             if successor_id:
                 await self._start_persisted_turn(successor_id)
             return False
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            latest = delivery_store.get_turn(conn, turn_id)
+            session_status = conn.execute(
+                select(agent_sessions.c.status).where(
+                    agent_sessions.c.id == str(turn["session_id"])
+                )
+            ).scalar_one_or_none()
+            if (
+                latest is None
+                or latest["state"] != "starting"
+                or latest.get("start_attempt_id") != attempt_id
+                or session_status != "active"
+            ):
+                return False
         try:
             resolved.message_id = str(message["id"])
             dispatch_text = (delivery or {}).get("dispatch_text")
@@ -2325,6 +2340,24 @@ class SessionTurnManager:
             return None
         if not self._durable_schema_available():
             return None
+        if outcome == "terminal":
+            get_sink = getattr(self.controller, "get_turn_sink", None)
+            get_key = getattr(self.controller, "_get_session_key", None)
+            if callable(get_sink) and callable(get_key):
+                try:
+                    sink = get_sink(get_key(context))
+                except Exception:
+                    logger.debug("failed to inspect native terminal Turn sink", exc_info=True)
+                else:
+                    if (
+                        isinstance(sink, dict)
+                        and sink.get("done_event") is not None
+                        and str(sink.get("turn_token") or "") == logical_turn_id
+                    ):
+                        # The result hook captured this exact sink before output
+                        # delivery. Its waiter owns the authoritative completed /
+                        # failed / canceled outcome after sink settlement.
+                        return None
         session_id: str | None = None
         changed = False
         with self._sqlite_engine().begin() as conn:
@@ -2452,7 +2485,7 @@ class SessionTurnManager:
         for target_session, turn_id in pending_interrupts:
             await self._run_pending_interrupt(target_session, turn_id)
         for target_session in sorted(retired_ownerless):
-            await self.drain_delivery_queue(target_session)
+            await self._resume_post_terminal(target_session)
         for turn_id in dispatchable:
             if await self._start_persisted_turn(turn_id):
                 with self._sqlite_engine().connect() as conn:
