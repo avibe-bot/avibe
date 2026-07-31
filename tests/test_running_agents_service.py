@@ -691,6 +691,37 @@ def test_end_claude_interrupts_disconnects_and_reaps_subprocess(monkeypatch):
     assert reap.called and res["process_killed"] is True and res["pid"] == 4321
 
 
+def test_end_claude_routes_registered_adapter_teardown(monkeypatch):
+    interrupt = _AsyncFlag()
+    cleanup = _AsyncFlag()
+    end_runtime = _AsyncFlag(ret=True)
+    client = types.SimpleNamespace(interrupt=interrupt, _fake_pid=4321)
+    session_handler = types.SimpleNamespace(
+        claude_sessions={"slack_1:/w": client},
+        cleanup_session=cleanup,
+    )
+    controller = _make_controller()
+    controller.session_handler = session_handler
+    controller.agent_service.agents["claude"] = types.SimpleNamespace(
+        end_runtime_session=end_runtime
+    )
+    reap = _AsyncFlag(ret=1)
+    monkeypatch.setattr("modules.agents.claude_process_reaper._reap_pid_set", reap)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            composite_key="slack_1:/w",
+        )
+    )
+
+    assert res["ok"] is True
+    assert end_runtime.called
+    assert not interrupt.called and not cleanup.called
+    assert reap.called and res["process_killed"] is True
+
+
 def test_end_claude_session_not_live():
     session_handler = types.SimpleNamespace(claude_sessions={}, cleanup_session=_AsyncFlag())
     controller = _make_controller()
