@@ -89,6 +89,7 @@ from storage.background import (
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+from storage.workbench_sessions_service import derive_backend_for_agent_name
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -519,6 +520,37 @@ class SessionTeardownResult:
     cancelled_count: int
     reconciled_count: int
     claimed_run_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class SessionLaneOwnership:
+    """Who owns a session's scheduler lane, and how confidently (HFR-327/HFR-328).
+
+    Two facts, kept apart because collapsing them is what made the first version of
+    End's ownership guard unsafe. ``run_ids`` is what a scheduler-lane cancel for
+    this session would actually reach; ``backends`` is the identity of those runs.
+
+    An empty ``backends`` is therefore AMBIGUOUS on its own, and a caller must read
+    it against ``run_ids``:
+
+    - ``run_ids`` empty — the lane holds nothing. There is no foreign work to
+      protect, so a cancel is a no-op on this lane and nothing is at risk.
+    - ``run_ids`` non-empty with ``backends`` empty — the lane IS held, and by
+      something whose identity cannot be established. Cancelling here is a coin
+      flip on somebody else's live turn.
+
+    Those two cases must reach different decisions, which is why the run ids are
+    reported at all rather than only the backend set.
+    """
+
+    run_ids: frozenset[str]
+    backends: frozenset[str]
+
+    @property
+    def is_held(self) -> bool:
+        """Whether a scheduler-lane cancel for this session would reach any run."""
+
+        return bool(self.run_ids)
 
 
 #: Durable definition-metadata key recording the last binding recovery, so a
@@ -1543,6 +1575,39 @@ class ScheduledTaskStore:
         return self._write_task(task, expect)
 
 
+def _agent_backend_for_name(
+    sqlite_backend: Optional[SQLiteBackgroundTaskStore], agent_name: Optional[str]
+) -> str:
+    """The backend an Agent NAME resolves to, or ``""`` when it names none (HFR-328).
+
+    A run's ``agent_backend`` is the identity every ownership decision downstream is
+    built on — End's scheduler-lane scoping (HFR-327) above all — and the name is the
+    one thing the scheduler paths always carry. ``derive_backend_for_agent_name`` is
+    the single existing answer to "which backend is this Agent", so the resolution is
+    borrowed rather than re-implemented; it matches ``agents.name`` exactly and
+    returns ``""`` for a blank, missing or unknown name.
+
+    Read-only and total: an unresolvable name, a store with no database (the file
+    backend shares a transaction with nothing) or any failure at all returns ``""``,
+    which leaves the column NULL. That is deliberate — a GUESSED backend is a wrong
+    identity, and a wrong identity is worse for every consumer than a missing one.
+    Enqueue must never fail because an ownership hint could not be computed.
+    """
+
+    cleaned = str(agent_name or "").strip()
+    if not cleaned or sqlite_backend is None:
+        return ""
+    engine = getattr(sqlite_backend, "engine", None)
+    if engine is None:
+        return ""
+    try:
+        with engine.connect() as conn:
+            return str(derive_backend_for_agent_name(conn, cleaned) or "").strip()
+    except Exception:
+        logger.debug("Could not resolve a backend for agent name %r", cleaned, exc_info=True)
+        return ""
+
+
 class TaskExecutionStore:
     def __init__(self, root: Optional[Path] = None):
         self.root = root or (paths.get_state_dir() / "task_requests")
@@ -1614,21 +1679,57 @@ class TaskExecutionStore:
                 continue
             path.replace(pending_path)
 
-    @staticmethod
-    def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
+    def queued_run_payload(self, request: TaskExecutionRequest) -> dict[str, Any]:
         """The ``agent_runs`` payload ``enqueue`` would write for *request*.
 
         Exposed so a caller that commits the outbox row inside ANOTHER transaction
         (HFR-269) writes exactly the row this store would have written, rather than a
         second, drifting copy of the same mapping.
+
+        "Exactly the row" now includes the ``agent_backend`` stamp (HFR-328), which is
+        why this is no longer a ``staticmethod``. These two — this and ``enqueue`` —
+        are the only doors to a durable run row, so stamping at BOTH is what makes
+        "an enqueued run names its backend" an invariant of the store rather than a
+        property of whichever builder the caller happened to use. Already-stamped
+        requests cost nothing here: the fill returns early on a non-blank backend.
         """
 
+        self._stamp_agent_backend(request)
         payload = request.to_dict()
         payload["status"] = "queued"
         payload["updated_at"] = request.created_at
         return payload
 
+    def _stamp_agent_backend(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+        """Fill a blank ``agent_backend`` from the request's ``agent_name`` (HFR-328).
+
+        THE DOOR IS THE RIGHT LAYER. ``agent_name`` is authoritative on the request
+        and ``agent_backend`` is derivable from it, so resolving here means every
+        enqueue path inherits the stamp — ``enqueue_task_run``,
+        ``enqueue_definition_run``, ``enqueue_hook_send``, the watch/hook builder and
+        any path added later — instead of ten callers each remembering to pass it.
+        Only two of the ten production call sites ever did; the rest wrote NULL, so
+        the column was empty for essentially the whole scheduler lane, and the
+        ownership checks reading it (HFR-327/HFR-328) could prove nothing.
+
+        NEVER OVERWRITES. A caller that passed a backend resolved its own dispatch
+        target — ``enqueue_agent_run`` from the callback and CLI paths do exactly
+        that — and that answer is closer to the truth than a name lookup. This only
+        fills the gap.
+
+        Mutates the request rather than copying it so the object the caller keeps
+        holding names the same backend as the row that gets written.
+        """
+
+        if str(getattr(request, "agent_backend", "") or "").strip():
+            return request
+        backend = _agent_backend_for_name(self._sqlite, getattr(request, "agent_name", None))
+        if backend:
+            request.agent_backend = backend
+        return request
+
     def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+        self._stamp_agent_backend(request)
         if self._sqlite is not None:
             self._sqlite.enqueue_run(self.queued_run_payload(request))
             return request
@@ -1770,24 +1871,31 @@ class TaskExecutionStore:
         For the caller that must make the outbox row durable inside someone else's
         transaction (HFR-269): the request is composed here, so its shape cannot drift
         from ``enqueue_hook_send``, and becomes durable only where that caller commits.
+
+        Stamped here and not only in ``enqueue`` for exactly that reason (HFR-328):
+        the watch path commits this request through ``queued_run_payload`` inside its
+        own cycle transaction and never calls ``enqueue``, so a stamp applied only at
+        the queue door would miss every watch run.
         """
 
-        return TaskExecutionRequest(
-            id=uuid4().hex[:12],
-            request_type=run_type,
-            task_id=definition_id,
-            session_key=session_key,
-            session_id=session_id,
-            post_to=post_to,
-            deliver_key=deliver_key,
-            prompt=prompt,
-            message=prompt,
-            source_kind=source_kind,
-            source_actor=source_actor,
-            parent_run_id=parent_run_id,
-            agent_name=agent_name,
-            session_policy=session_policy,
-            metadata=dict(metadata or {}),
+        return self._stamp_agent_backend(
+            TaskExecutionRequest(
+                id=uuid4().hex[:12],
+                request_type=run_type,
+                task_id=definition_id,
+                session_key=session_key,
+                session_id=session_id,
+                post_to=post_to,
+                deliver_key=deliver_key,
+                prompt=prompt,
+                message=prompt,
+                source_kind=source_kind,
+                source_actor=source_actor,
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                session_policy=session_policy,
+                metadata=dict(metadata or {}),
+            )
         )
 
     def enqueue_agent_run(
@@ -3035,8 +3143,9 @@ class ScheduledTaskService:
             )
             return False
 
-    def session_lane_backends(self, session_id: str) -> set[str]:
-        """Backends of the runs a scheduler-lane cancel for ``session_id`` would reach.
+    def session_lane_ownership(self, session_id: str) -> SessionLaneOwnership:
+        """Who holds ``session_id``'s scheduler lane, for callers deciding whether to
+        cancel it.
 
         The identity End needs to decide whether that cancel is even ITS business
         (HFR-327). Mirrors the two paths :meth:`cancel_session_executions` actually
@@ -3053,18 +3162,27 @@ class ScheduledTaskService:
         stamped at enqueue from the resolved dispatch target, which is exactly "the
         backend this in-flight run actually went to".
 
-        Only NON-EMPTY backends are reported, and the column is nullable, so an empty
-        result means "unresolvable" and never "no backend". A caller must treat that
-        as "cannot prove a mismatch" and keep its unconditional behaviour; anything
-        else would silently withdraw the cancel from every enqueue path that leaves
-        the column blank.
+        A BLANK COLUMN IS RESOLVED, NOT SURRENDERED TO (HFR-328). The stamp is only
+        as old as HFR-328, so legacy rows — and any run whose enqueue path could not
+        resolve a backend — still carry NULL. For those the run's ``agent_name`` is
+        asked the same question the stamp asks, through the same resolver, so a lane
+        held by a nameable Agent stays provable instead of degrading into the
+        unprovable case. Only a SUCCESSFUL resolution counts: a name no Agents row
+        claims contributes nothing, because a guessed identity would be worse than an
+        absent one.
+
+        The returned ``run_ids`` are what separates "the lane is empty" from "the lane
+        is held by something unidentifiable" — see :class:`SessionLaneOwnership`. The
+        old ``session_lane_backends`` returned only the backend set and could not tell
+        those apart, which is precisely how its caller ended up cancelling healthy
+        foreign work.
 
         Read-only: it cancels nothing, claims nothing and takes no lock.
         """
 
         resolved = str(session_id or "").strip()
         if not resolved:
-            return set()
+            return SessionLaneOwnership(frozenset(), frozenset())
         run_ids: list[str] = []
         lock_key = self._session_lock_cache.get(resolved)
         if lock_key is not None:
@@ -3085,9 +3203,15 @@ class ScheduledTaskService:
             if not run:
                 continue
             backend = str(run.get("agent_backend") or "").strip()
+            if not backend:
+                # Legacy / unstamped row: the name is the only identity left, and it
+                # answers the same question the enqueue stamp asks (HFR-328).
+                backend = _agent_backend_for_name(
+                    self.request_store.sqlite_backend, run.get("agent_name")
+                )
             if backend:
                 backends.add(backend)
-        return backends
+        return SessionLaneOwnership(frozenset(run_ids), frozenset(backends))
 
     async def cancel_session_executions(
         self,

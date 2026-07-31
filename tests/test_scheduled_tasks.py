@@ -1100,6 +1100,103 @@ def test_request_store_enqueue_claim_and_complete(tmp_path: Path) -> None:
     assert not (store.processing_dir / f"{request.id}.json").exists()
 
 
+def test_definition_run_enqueue_stamps_the_agent_backend(tmp_path: Path, monkeypatch) -> None:
+    """HFR-328: an enqueued run must record WHICH backend it was dispatched to.
+
+    ``agent_runs.agent_backend`` is the only durable statement of the backend a run
+    actually went to, and it is what End's scheduler-lane ownership check (HFR-327)
+    reads to decide whether the lane it is about to cancel is its own business. Every
+    scheduled path passed ``agent_name`` and never a backend, so the column was NULL
+    for EVERY ordinary scheduled/definition/hook run — which left that check unable to
+    prove anything about the most common lane owner there is, and it fell back to
+    cancelling. Fixing the guard alone would only trade a wrong cancel for a wrong
+    refusal; the column has to carry the fact.
+
+    The name is authoritative and resolves to exactly one Agents-table backend, so it
+    is resolved once, at the door, where every enqueue path inherits it. An
+    unresolvable name stays NULL on purpose: a guessed backend would be a WRONG
+    identity, which is worse for the ownership check than a missing one.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.ensure_builtin_default_agents(["codex"])
+    finally:
+        agent_store.close()
+
+    store = TaskExecutionStore()
+
+    definition_run = store.enqueue_definition_run(
+        definition_id="task-1",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="slack::channel::C123",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="run the nightly report",
+        agent_name="codex",
+        session_policy=None,
+    )
+    row = store.get_run(definition_run.id)
+    assert row is not None
+    assert row["agent_backend"] == "codex"
+    # The returned request agrees with the row it just wrote, so a caller that keeps
+    # reading the request sees the same identity the reconciler will.
+    assert definition_run.agent_backend == "codex"
+
+    # The hook/watch shape is built by ``build_hook_send`` and committed by somebody
+    # else's transaction (HFR-269), so it must be stamped at BUILD time, not only in
+    # ``enqueue``.
+    hook_run = store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="watch fired",
+        agent_name="codex",
+    )
+    assert (store.get_run(hook_run.id) or {})["agent_backend"] == "codex"
+    assert store.build_hook_send(
+        session_key="slack::channel::C123", prompt="unqueued", agent_name="codex"
+    ).agent_backend == "codex"
+    # ``enqueue`` and ``queued_run_payload`` are the only two doors to a durable run
+    # row, so the stamp has to be an invariant of the STORE and not of whichever
+    # builder a caller reached for. This is the door the atomic watch commit uses.
+    assert (
+        store.queued_run_payload(
+            TaskExecutionRequest(id="hfr328", request_type="watch", agent_name="codex")
+        )["agent_backend"]
+        == "codex"
+    )
+
+    # No Agents row claims this name, so there is nothing to resolve and nothing is
+    # invented.
+    unknown = store.enqueue_definition_run(
+        definition_id="task-2",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="slack::channel::C123",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="run the other report",
+        agent_name="a-name-no-agents-row-claims",
+        session_policy=None,
+    )
+    assert not ((store.get_run(unknown.id) or {}).get("agent_backend") or "")
+
+    # An explicit backend from the caller is never second-guessed.
+    pinned = store.enqueue_agent_run(
+        message="pinned by its caller",
+        agent_name="codex",
+        agent_backend="claude",
+        session_key="slack::channel::C123",
+    )
+    assert (store.get_run(pinned.id) or {})["agent_backend"] == "claude"
+
+
 def test_request_store_file_backend_reload_detects_queue_changes(tmp_path: Path) -> None:
     root = tmp_path / "task_requests"
     reader = TaskExecutionStore(root)

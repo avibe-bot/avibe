@@ -230,6 +230,10 @@ In `end_running_agent`, in order:
    where a scheduler-lane execution acquires the session after the read (rev 2
    left this lane uncovered because `_stop_active_agent` only reaches the
    manager). The manager turn is deliberately left untouched here.
+   Round-7 carve-out (HFR-328): unconditional in STATE, but scoped by provable
+   backend ownership of the lane — when ownership cannot be proven the cancel is
+   refused, because a wrongly killed foreign turn is unrecoverable while an
+   unsettled run is swept.
 2. **Manager lane:** the existing user-facing stop path unchanged
    (`_stop_active_agent` → `SessionTurnManager.cancel` /
    `command_handler.handle_stop`) — it already records `SETTLED_BY_STOPPED`

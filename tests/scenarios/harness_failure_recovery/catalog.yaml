@@ -3078,7 +3078,7 @@ scenarios:
     # cancelled the healthy Claude execution and its reconcile then settled the live
     # row canceled, which settle_run_terminal (queued|running) can never take back.
     # DECISIVE IDENTITY: the LANE OWNER'S RUN ROW, agent_runs.agent_backend, exposed by
-    # the new read-only ScheduledTaskService.session_lane_backends(session_id). It
+    # the new read-only ScheduledTaskService.session_lane_ownership(session_id). It
     # mirrors both paths the cancel actually reaches (the session lock owner and every
     # create_per_run execution that reserved the session), so it describes the real
     # blast radius. It is stamped at enqueue from the RESOLVED DISPATCH TARGET, i.e.
@@ -3093,9 +3093,12 @@ scenarios:
     # carries a session_id -- exactly the stale-row case -- so the check must happen
     # against the lane's runs.
     # SKIP ONLY ON A POSITIVE MISMATCH. Unknown clicked backend, unresolvable session
-    # id, absent service, or a lane whose runs carry no backend (the column is nullable)
-    # all keep the unconditional cancel, so the idle-state race that call closes stays
-    # closed. On a mismatch the cancel AND its claim are skipped together, leaving
+    # id, or an absent service all keep the unconditional cancel, so the idle-state
+    # race that call closes stays closed.
+    # SUPERSEDED IN PART BY HFR-328: this entry also listed "a lane whose runs carry no
+    # backend (the column is nullable)" as a keep-cancelling case. Round 7 showed that
+    # was the NORM rather than an edge, and it now REFUSES. See HFR-328.
+    # On a mismatch the cancel AND its claim are skipped together, leaving
     # claimed_run_ids empty -- both reconcile sites already no-op on an empty set
     # (session_teardown.reconcile_session_runs returns before touching the store, and
     # ScheduledTaskService.reconcile_session_teardown guards the same way). End still
@@ -3106,8 +3109,61 @@ scenarios:
     # staleness sweep while a wrongly terminalized live one is not.
     # Companions carrying this same id:
     # tests/test_running_agents_service.py::test_end_still_cancels_the_scheduler_lane_when_the_backend_matches
-    # tests/test_running_agents_service.py::test_end_cancels_the_scheduler_lane_when_the_owning_backend_is_unknown
+    # The third companion, test_end_cancels_the_scheduler_lane_when_the_owning_backend_is_unknown,
+    # was INVERTED and renamed by HFR-328; it now pins refusal.
     test: tests/test_running_agents_service.py::test_end_of_stale_backend_row_does_not_cancel_the_sessions_new_backend_execution
+  - id: HFR-328
+    name: End proves scheduler-lane ownership before cancelling it
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # PR2 review round 7, refuting HFR-327's fail-open branch. HFR-327 skipped the
+    # scheduler-lane cancel only on a POSITIVE backend mismatch and treated a lane whose
+    # runs carried no agent_backend as "proves nothing, keep cancelling". That rested on
+    # a blank column being a rare nullable-column edge. It was not: it was the NORM.
+    # ROOT CAUSE: TaskExecutionStore.enqueue_task_run / enqueue_definition_run /
+    # enqueue_hook_send all passed agent_name and never agent_backend, even though the
+    # underlying row accepts it. Eight of the ten production enqueue sites (scheduler
+    # fire, vibe task run, vibe hook send, watch cycles via build_hook_send, and the
+    # internal fan-out between them) therefore wrote NULL; only enqueue_agent_run from
+    # the session callback and vibe agent run ever stamped it. So EVERY ordinary
+    # scheduled/definition/watch/hook run had a NULL backend, session_lane_ownership
+    # returned no backends, the guard fail-opened, and End of a stale row still
+    # cancelled and terminalized the session's healthy newer-backend execution -- the
+    # exact outcome HFR-327 was written to prevent, for the common case.
+    # THREE LAYERS, root cause first:
+    # 1. STAMP AT THE DOOR. TaskExecutionStore._stamp_agent_backend resolves agent_name
+    #    -> backend via storage.workbench_sessions_service.derive_backend_for_agent_name
+    #    (matches agents.name exactly) and fills a BLANK agent_backend. It is called
+    #    from BOTH doors to a durable run row -- enqueue() and queued_run_payload(),
+    #    the HFR-269 escape hatch the watch path commits through inside its own cycle
+    #    transaction -- plus build_hook_send() so the request object a caller keeps
+    #    holding names the same backend as the row. Stamping at both doors makes "an
+    #    enqueued run names its backend" an invariant of the store rather than a
+    #    property of whichever builder the caller used. An explicit caller backend is
+    #    never overwritten: it named a resolved dispatch target, which beats a lookup.
+    # 2. RESOLVE AT LOOKUP. session_lane_ownership resolves a blank agent_backend from
+    #    the run's agent_name through the same resolver, so legacy rows enqueued before
+    #    the stamp stay provable.
+    # 3. FAIL CLOSED. A lane that is HELD but names no owning backend now REFUSES the
+    #    cancel and its claim, and logs a warning naming the session and the reason.
+    # NO GUESSING AT ANY LAYER: an unresolvable name leaves NULL rather than inventing a
+    # backend, because a wrong identity is worse for every consumer than a missing one.
+    # HELD vs EMPTY IS THE LOAD-BEARING DISTINCTION, and why session_lane_backends grew
+    # into session_lane_ownership (run_ids + backends). An EMPTY lane still cancels: no
+    # foreign run is at risk, and that call is also how End's active branch learns the
+    # manager-lane ownership it must reconcile, so refusing there would break HFR-107's
+    # settlement while protecting nobody. Only a lane that is held by unidentifiable
+    # work refuses.
+    # WHY REFUSING IS THE SAFE DIRECTION: the two errors are not symmetric. A run left
+    # running is recovered by sweep_stale_runs and restart recovery; a healthy foreign
+    # turn cancelled and settled canceled is a write settle_run_terminal (queued|running)
+    # can never take back. The idle-state race stays open only for rows whose ownership
+    # cannot be proven at all -- which layer 1 makes rare.
+    # Companion carrying this same id (the enqueue-stamp root cause):
+    # tests/test_scheduled_tasks.py::test_definition_run_enqueue_stamps_the_agent_backend
+    test: tests/test_running_agents_service.py::test_end_refuses_to_cancel_an_unprovable_scheduler_lane
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

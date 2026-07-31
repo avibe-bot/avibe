@@ -1374,13 +1374,24 @@ def _settlement_service(tmp_path):
 
 
 def _running_harness_run(
-    request_store, *, session_id: str, message: str, agent_backend: str | None = None
+    request_store,
+    *,
+    session_id: str,
+    message: str,
+    agent_backend: str | None = None,
+    agent_name: str = "codex",
 ) -> str:
     """A running ``agent_runs`` row on ``session_id``.
 
     ``agent_backend`` is the column the run carries from its DISPATCH target, so it
     names the backend the run actually went to. Left unset by default because most
     callers here predate HFR-327 and exercise the unresolvable-identity path.
+
+    ``agent_name`` matters since HFR-328: a blank ``agent_backend`` is now resolved
+    from the name at enqueue, so a row is only genuinely unresolvable when NO Agents
+    row claims its name. These temp-home tests seed no Agents rows at all, so every
+    name here resolves to nothing; the HFR-328 caller passes an explicitly
+    unclaimable one rather than relying on that.
     """
 
     from sqlalchemy import update
@@ -1391,7 +1402,7 @@ def _running_harness_run(
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
         message=message,
-        agent_name="codex",
+        agent_name=agent_name,
         agent_backend=agent_backend,
     )
     engine = create_sqlite_engine()
@@ -1620,7 +1631,9 @@ def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
     assert request_store.settle_without_result(run_id, terminal_status="succeeded") == "succeeded"
 
 
-def _end_with_scheduler_lane_owner(tmp_path, *, lane_backend, clicked_backend):
+def _end_with_scheduler_lane_owner(
+    tmp_path, *, lane_backend, clicked_backend, lane_agent_name="codex"
+):
     """End a codex row on a session whose scheduler lane is held by ``lane_backend``.
 
     Returns ``(result, task_cancelled, run_status, cleared)``. The lane owner is a
@@ -1635,6 +1648,7 @@ def _end_with_scheduler_lane_owner(tmp_path, *, lane_backend, clicked_backend):
         session_id="chat-1",
         message="a live execution holding this session's scheduler lane",
         agent_backend=lane_backend,
+        agent_name=lane_agent_name,
     )
 
     cleared = {}
@@ -1745,19 +1759,50 @@ def test_end_still_cancels_the_scheduler_lane_when_the_backend_matches(tmp_path,
     assert cleared.get("clr") == "codex-base"
 
 
-def test_end_cancels_the_scheduler_lane_when_the_owning_backend_is_unknown(tmp_path, monkeypatch):
-    """HFR-327 companion: an unresolvable identity keeps today's behaviour.
+def test_end_refuses_to_cancel_an_unprovable_scheduler_lane(tmp_path, monkeypatch):
+    """HFR-328, inverting the HFR-327 companion: unprovable ownership REFUSES.
 
-    ``agent_runs.agent_backend`` is nullable and some enqueue paths leave it empty. A
-    blank column proves nothing, and refusing to cancel on a guess would reopen the
-    idle-state race for every one of those runs, so the guard skips only on a POSITIVE
-    mismatch.
+    THIS TEST PINNED THE OPPOSITE IN ROUND 6. HFR-327 shipped its scoping fail-OPEN:
+    a lane whose runs carried no backend "proves nothing", so End cancelled it
+    anyway, and this test asserted that as the intended behaviour. Round 7 refuted
+    the premise it rested on. A blank ``agent_runs.agent_backend`` was not a rare
+    nullable-column edge case — it was the NORM for the entire scheduler lane.
+    ``enqueue_task_run`` / ``enqueue_definition_run`` / ``enqueue_hook_send`` all
+    passed ``agent_name`` and never a backend, so every ordinary scheduled,
+    definition, watch and hook run left the column NULL. The guard therefore
+    fail-opened on precisely the runs it was written to protect, and HFR-327's fix
+    was a no-op for the common case: End of a stale row still cancelled and
+    terminalized the session's healthy newer-backend execution.
+
+    So the fix has two halves and this test pins the second. HFR-328 stamps the
+    backend at enqueue (``test_definition_run_enqueue_stamps_the_agent_backend``),
+    which makes a resolvable lane the normal case; what remains unresolvable is a
+    legacy row or a name no Agents row claims — genuinely rare. For those the guard
+    now REFUSES, because the two failures are not symmetric: an unsettled run is
+    recovered by the staleness sweep and restart recovery, while a healthy foreign
+    turn killed mid-flight is unrecoverable and settled ``canceled`` by a write its
+    real result can never take back. The idle-state race stays open only for rows
+    whose ownership cannot be proven at all.
+
+    A lane with NO runs is a different answer and keeps the unconditional call: there
+    is no foreign work to protect, and the call is still how End's active branch
+    learns the manager-lane ownership it must reconcile (HFR-107).
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    res, cancelled, _status, _cleared = _end_with_scheduler_lane_owner(
-        tmp_path, lane_backend=None, clicked_backend="codex"
+    res, cancelled, status, cleared = _end_with_scheduler_lane_owner(
+        tmp_path,
+        lane_backend=None,
+        clicked_backend="codex",
+        # No Agents row claims this name, so the enqueue stamp resolves nothing and
+        # the row reaches End with a genuinely blank backend.
+        lane_agent_name="a-name-no-agents-row-claims",
     )
 
     assert res["ok"] is True
-    assert cancelled is True
+    # The unprovable execution was left alone...
+    assert cancelled is False
+    assert status == "running"
+    # ...and End still completed and tore down the clicked row's own runtime.
+    assert cleared.get("clr") == "codex-base"
+    assert cleared.get("treg") == "codex-base"

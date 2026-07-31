@@ -832,14 +832,36 @@ def _scheduler_lane_is_this_rows_business(
     teardown_session_id: str,
     backend: Optional[str],
 ) -> bool:
-    """Whether End may cancel ``teardown_session_id``'s scheduler lane (HFR-327).
+    """Whether End may cancel ``teardown_session_id``'s scheduler lane (HFR-327/328).
 
-    ``False`` ONLY when the lane is provably somebody else's: every backend the
-    cancel would reach is known, and none of them is the clicked row's. Everything
-    else answers ``True`` — an unknown clicked backend, a session id we could not
-    resolve, a service that cannot report, a lane whose runs carry no backend. None
-    of those PROVES a mismatch, and refusing to cancel on a guess would reopen the
-    idle-state race the unconditional call exists to close.
+    ``True`` requires the cancel to be PROVABLY harmless or provably ours; a lane
+    held by work whose owner cannot be established answers ``False``.
+
+    - the lane holds nothing -> ``True``. There is no foreign run to protect, so the
+      call is a no-op on this lane, and it is still how End's active branch learns the
+      manager-lane ownership it has to reconcile (HFR-107). Refusing here would break
+      a settlement while protecting nobody.
+    - the lane is held and the clicked backend is among its owners -> ``True``. The
+      unconditional cancel, and the idle-state race it closes, are untouched.
+    - the lane is held and every owner is known and none is the clicked backend ->
+      ``False``. The original mismatch case (HFR-327).
+    - the lane is held and NO owner can be identified -> ``False`` (HFR-328).
+
+    THAT LAST CASE USED TO ANSWER ``True``, on the reasoning that a blank
+    ``agent_runs.agent_backend`` "proves nothing" and refusing on a guess would
+    reopen the race. The premise was wrong: no scheduler enqueue path stamped the
+    column, so unidentifiable was the NORMAL state of the lane and the guard
+    fail-opened on exactly the runs it existed to protect. HFR-328 stamps the backend
+    at enqueue and resolves blank legacy rows by name at lookup, which makes an
+    unidentifiable lane genuinely rare — and for what remains, the two errors are not
+    symmetric. A run left ``running`` is recovered by the staleness sweep and restart
+    recovery; a healthy foreign turn cancelled and settled ``canceled`` is a write its
+    real result can never take back. So the race is left open for unprovable rows
+    rather than paid for with somebody else's live turn.
+
+    An unknown clicked backend, an unresolvable session id, or a service that cannot
+    report still answer ``True``: those are failures to ask the question, not answers
+    to it, and none of them is evidence that a foreign lane is at risk.
 
     Note ``_teardown_session_id`` only narrows by backend on its fallback path: when
     the Running-tab row carries a ``session_id`` it is returned verbatim, which is
@@ -852,21 +874,34 @@ def _scheduler_lane_is_this_rows_business(
     if not clicked or not resolved:
         return True
     service = getattr(controller, "scheduled_task_service", None)
-    reader = getattr(service, "session_lane_backends", None)
+    reader = getattr(service, "session_lane_ownership", None)
     if not callable(reader):
         return True
     try:
-        lane_backends = reader(resolved)
+        ownership = reader(resolved)
     except Exception:
         logger.warning(
-            "End: could not resolve the scheduler-lane backend for session %s; "
+            "End: could not read the scheduler-lane ownership for session %s; "
             "cancelling unconditionally",
             resolved,
             exc_info=True,
         )
         return True
-    if not lane_backends or clicked in lane_backends:
+    if not ownership.is_held:
         return True
+    lane_backends = set(ownership.backends)
+    if clicked in lane_backends:
+        return True
+    if not lane_backends:
+        logger.warning(
+            "End: refusing the scheduler-lane cancel for session %s — %d run(s) hold "
+            "its lane and none names an owning backend, so the %s row being ended "
+            "cannot be shown to own them; leaving them for the staleness sweep",
+            resolved,
+            len(ownership.run_ids),
+            clicked,
+        )
+        return False
     logger.info(
         "End: skipping the scheduler-lane cancel for session %s — its lane is owned by "
         "%s, not the %s row being ended",
@@ -1328,14 +1363,19 @@ async def end_running_agent(
     # HFR-324 fixed only the reconcile half of this shape (manager ids no longer
     # ride into the claim). The cancel half reaches whatever the lock owner names.
     #
-    # SKIP ONLY ON A POSITIVE MISMATCH. An unknown clicked backend or an
-    # unresolvable lane identity proves nothing, so both keep the unconditional
-    # behaviour and the race stays closed. On a mismatch the whole call is skipped —
-    # cancel AND claim — which leaves ``claimed_run_ids`` empty, and both reconcile
-    # sites are already no-ops on an empty set (``reconcile_session_runs`` returns
-    # before touching the store). End still runs its normal state branch and tears
-    # down the clicked row's own runtime; it simply stops speaking for a lane that
-    # is not its own.
+    # CANCEL ONLY WHAT THIS ROW CAN BE SHOWN TO OWN (HFR-328). A positive mismatch
+    # skips, and so does a lane that is HELD but names no owning backend at all —
+    # round 7 found that the second case was not the rare nullable-column edge the
+    # first version assumed but the normal state of the scheduler lane, so treating
+    # it as permission to cancel made the scoping a no-op for the common case. An
+    # EMPTY lane still cancels: there is nothing foreign to protect, and this call is
+    # how the active branch below learns its manager-lane ownership.
+    #
+    # When it skips, the whole call is skipped — cancel AND claim — which leaves
+    # ``claimed_run_ids`` empty, and both reconcile sites are already no-ops on an
+    # empty set (``reconcile_session_runs`` returns before touching the store). End
+    # still runs its normal state branch and tears down the clicked row's own
+    # runtime; it simply stops speaking for a lane that is not provably its own.
     scheduler_lane = SchedulerLaneCancellation(frozenset(), frozenset())
     if _scheduler_lane_is_this_rows_business(controller, teardown_session_id, backend):
         scheduler_lane = await cancel_session_scheduler_lane(
