@@ -5997,6 +5997,60 @@ def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -
     assert sqlite.owed_failure_notice("run-cb-binding")["state"] == "sent"
 
 
+def test_failed_callback_owns_notice_when_successful_parent_has_no_fallback(
+    tmp_path: Path,
+) -> None:
+    """A callback delivery failure stays visible when its parent did not fail."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _callback_session(sqlite)
+    parent = requests.enqueue_agent_run(
+        message="produce a successful result",
+        session_id="ses-callback-target",
+    )
+    claimed_parent = requests.claim(parent.id)
+    assert claimed_parent is not None
+    parent_result = sqlite.record_run_output(
+        parent.id,
+        output_id="terminal",
+        text="result ready",
+        terminal_status="succeeded",
+    )
+    assert parent_result["terminal_transition"]
+    assert sqlite.owed_failure_notice(parent.id) is None
+
+    callback = requests.enqueue_agent_run(
+        message="deliver the successful result",
+        source_kind="callback",
+        parent_run_id=parent.id,
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(parent.id, status="sent", callback_run_id=callback.id)
+    claimed_callback = requests.claim(callback.id)
+    assert claimed_callback is not None
+    callback_result = sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="callback delivery failed",
+        terminal_status="failed",
+        error="callback delivery failed",
+    )
+    assert callback_result["terminal_transition"]
+    assert sqlite.owed_failure_notice(callback.id)["state"] == "pending"
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == [callback.id]
+    assert sqlite.owed_failure_notice(callback.id)["state"] == "sent"
+
+
 def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
     tmp_path: Path,
 ) -> None:

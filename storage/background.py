@@ -1155,7 +1155,6 @@ def _owed_failure_notice_for_transition(
     run_id: str,
     *,
     status: Any,
-    source_kind: Any,
     metadata: dict[str, Any],
     now: str,
 ) -> Optional[dict[str, Any]]:
@@ -1172,11 +1171,6 @@ def _owed_failure_notice_for_transition(
     """
 
     if normalize_run_status(status) != "failed":
-        return None
-    if str(source_kind or "").strip() == "callback":
-        # A callback child is the parent's primary delivery attempt. Its failure
-        # releases the parent's already-durable fallback; a second child-owned
-        # notice would report the delivery mechanism and duplicate the real failure.
         return None
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
@@ -1237,12 +1231,35 @@ def _owed_failure_notice_for_transition(
     }
 
 
+def _callback_parent_owns_failure_notice(
+    conn: Any,
+    *,
+    source_kind: Any,
+    parent_run_id: Any,
+) -> bool:
+    """Whether a callback child's parent already owns the user-visible notice."""
+
+    if str(source_kind or "").strip() != "callback":
+        return False
+    parent_id = str(parent_run_id or "").strip()
+    if not parent_id:
+        return False
+    raw_metadata = conn.execute(
+        select(agent_runs.c.metadata_json).where(agent_runs.c.id == parent_id).limit(1)
+    ).scalar_one_or_none()
+    metadata = _json_loads(raw_metadata, {})
+    notice = metadata.get(OWED_FAILURE_NOTICE_KEY) if isinstance(metadata, dict) else None
+    return isinstance(notice, dict) and bool(str(notice.get("state") or "").strip())
+
+
 def _merge_owed_failure_notice(
     values: dict[str, Any],
     *,
+    conn: Any,
     run_id: str,
     status: Any,
     source_kind: Any,
+    parent_run_id: Any,
     row_metadata_json: Any,
     extra_metadata: Optional[dict[str, Any]] = None,
     now: str,
@@ -1294,13 +1311,18 @@ def _merge_owed_failure_notice(
         merged = decoded
     if extra_metadata:
         merged.update(extra_metadata)
-    notice = _owed_failure_notice_for_transition(
-        run_id,
-        status=status,
+    notice = None
+    if not _callback_parent_owns_failure_notice(
+        conn,
         source_kind=source_kind,
-        metadata=merged,
-        now=now,
-    )
+        parent_run_id=parent_run_id,
+    ):
+        notice = _owed_failure_notice_for_transition(
+            run_id,
+            status=status,
+            metadata=merged,
+            now=now,
+        )
     if notice is None and not extra_metadata:
         return
     if notice is not None:
@@ -1560,7 +1582,7 @@ def _cancel_aware_terminal_status(
 
 
 def _coalesced_terminal_write(
-    row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
+    conn: Any, row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
 ) -> Optional[tuple[dict[str, Any], list[Any]]]:
     """The values and the CAS predicates one coalesced run's settlement needs.
 
@@ -1600,9 +1622,11 @@ def _coalesced_terminal_write(
         predicates = [agent_runs.c.status.in_(nonterminal), cancel_not_requested()]
     _merge_owed_failure_notice(
         values,
+        conn=conn,
         run_id=run_id,
         status=values["status"],
         source_kind=row["source_kind"],
+        parent_run_id=row["parent_run_id"],
         row_metadata_json=row["metadata_json"],
         now=now,
     )
@@ -1646,7 +1670,9 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
         for final_attempt in (False, True):
             if row is None:
                 break
-            plan = _coalesced_terminal_write(row, run_id=run_id, ok=ok, error=error, now=now)
+            plan = _coalesced_terminal_write(
+                conn, row, run_id=run_id, ok=ok, error=error, now=now
+            )
             if plan is None:
                 break
             values, predicates = plan
@@ -3361,9 +3387,11 @@ class SQLiteBackgroundTaskStore:
                     }
                     _merge_owed_failure_notice(
                         terminal_values,
+                        conn=conn,
                         run_id=run_id,
                         status=status,
                         source_kind=terminal_row["source_kind"],
+                        parent_run_id=terminal_row["parent_run_id"],
                         row_metadata_json=terminal_row["metadata_json"],
                         now=now,
                     )
@@ -3544,9 +3572,11 @@ class SQLiteBackgroundTaskStore:
                     values["result_text"] = str(result_text)
                 _merge_owed_failure_notice(
                     values,
+                    conn=conn,
                     run_id=run_id,
                     status=status,
                     source_kind=row["source_kind"],
+                    parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
                     extra_metadata=metadata or None,
                     now=now,
@@ -3692,9 +3722,11 @@ class SQLiteBackgroundTaskStore:
                     values["result_text"] = str(deferred_result_text)
                 _merge_owed_failure_notice(
                     values,
+                    conn=conn,
                     run_id=run_id,
                     status=status,
                     source_kind=row["source_kind"],
+                    parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
                     now=now,
                 )
