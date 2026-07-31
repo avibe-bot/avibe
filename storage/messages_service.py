@@ -942,6 +942,9 @@ def clear_queued(conn: Connection, session_id: str) -> int:
     queued prompt can later be flushed into a now-terminal session (on natural
     turn completion or via send-now) — unlike ``delete_queued``, which claims a
     specific id segment during a flush. Returns the number removed."""
+    from storage.session_deliveries import retire_session_for_archive
+
+    retire_session_for_archive(conn, session_id)
     result = conn.execute(
         delete(messages)
         .where(messages.c.session_id == session_id)

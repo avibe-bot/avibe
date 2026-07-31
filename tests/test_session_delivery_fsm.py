@@ -1522,3 +1522,166 @@ def test_restart_consumes_pending_p0_after_native_evidence_rebind(managers) -> N
     assert owner["state"] == "waiting_terminal"
     assert owner["receipt_outcome"] == "accepted"
     restored.controller.command_handler.handle_stop.assert_awaited_once()
+
+
+def test_empty_p1_promotes_fifo_with_persisted_dispatch_text(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        message = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="transcript projection",
+        )
+
+    async def run():
+        await _activate(manager)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                message_id=str(message["id"]),
+                content="attachment-enriched FIFO text",
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+        promoted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1"),
+            context=_context(),
+        )
+        return promoted
+
+    promoted = asyncio.run(run())
+    assert promoted.state == "attached"
+    request = manager._steer.await_args.args[1]
+    assert request.text == "attachment-enriched FIFO text"
+
+
+def test_archive_retires_durable_owners_before_clearing_queue(managers) -> None:
+    from storage.workbench_sessions_service import archive_session
+
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def admit():
+        await _activate(manager)
+        return await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="unsent"),
+            context=_context(),
+        )
+
+    queued = asyncio.run(admit())
+    assert queued.state == "queued"
+    with engine.begin() as conn:
+        archive_session(conn, "ses_fsm")
+    with engine.connect() as conn:
+        queued_message = messages_service.get_message(
+            conn,
+            str(queued.message_id),
+            session_id="ses_fsm",
+        )
+        deliveries = list(
+            conn.execute(
+                select(session_deliveries).where(session_deliveries.c.session_id == "ses_fsm")
+            ).mappings()
+        )
+        turns = list(
+            conn.execute(
+                select(session_turns).where(session_turns.c.session_id == "ses_fsm")
+            ).mappings()
+        )
+    assert queued_message is None
+    assert deliveries
+    assert all(row["state"] == "completed" for row in deliveries)
+    assert all(row["message_id"] is None for row in deliveries)
+    assert turns
+    assert all(row["state"] == "terminal" for row in turns)
+
+
+def test_native_start_binding_failure_stays_in_reconciliation_boundary(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def hold_start(_turn_id, *, context=None):
+        return False
+
+    manager._start_persisted_turn = hold_start
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="native accepted"),
+            context=_context(),
+        )
+    )
+    assert admitted.turn_id
+    context = _context()
+    context.platform_specific["turn_token"] = str(admitted.turn_id)
+    manager._active_identity = lambda _backend, _session, logical: (
+        logical,
+        "native-written",
+    )
+
+    def unavailable_bind(*_args, **_kwargs):
+        raise RuntimeError("ownership database unavailable")
+
+    monkeypatch.setattr(delivery_store, "bind_native_start", unavailable_bind)
+    assert (
+        manager.on_native_start(
+            context,
+            backend="codex",
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-turn",
+        )
+        is None
+    )
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert turn is not None
+    assert turn["state"] == "starting"
+    assert turn["native_turn_id"] is None
+
+
+def test_restart_retires_ownerless_legacy_turn_and_ignores_late_terminal(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, restored, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    release = asyncio.Event()
+
+    async def blocked_legacy_dispatch(*_args, **_kwargs):
+        await release.wait()
+        return SimpleNamespace(settled_by="terminal_result")
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        blocked_legacy_dispatch,
+    )
+
+    async def run():
+        await manager._run("ses_fsm", _context(), "legacy public turn")
+        await asyncio.sleep(0)
+        with engine.connect() as conn:
+            owner = delivery_store.active_turn(conn, "ses_fsm")
+            assert owner is not None
+            assert not delivery_store.turn_has_delivery_owner(conn, str(owner["id"]))
+        restored._active_identity = lambda *_args: None
+        await restored.recover_durable_delivery_state("ses_fsm")
+        release.set()
+        await manager.in_flight["ses_fsm"].task
+        return str(owner["id"])
+
+    turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+        active = delivery_store.active_turn(conn, "ses_fsm")
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "ownerless_legacy_restart"
+    assert active is None

@@ -547,6 +547,84 @@ def pending_interrupt_for_turn(conn: Connection, turn_id: str) -> dict[str, Any]
     )
 
 
+def turn_has_delivery_owner(conn: Connection, turn_id: str) -> bool:
+    return (
+        conn.execute(
+            select(session_deliveries.c.id)
+            .where(
+                (session_deliveries.c.target_turn_id == turn_id)
+                | (session_deliveries.c.successor_turn_id == turn_id)
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+
+def retire_session_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
+    """Retire durable owners before archive removes unsent Message rows."""
+
+    retired_deliveries = 0
+    deliveries = list(
+        conn.execute(
+            select(session_deliveries)
+            .where(session_deliveries.c.session_id == session_id)
+            .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
+        ).mappings()
+    )
+    for raw in deliveries:
+        delivery = dict(raw)
+        values: dict[str, Any] = {
+            "state": "completed",
+            "message_id": None,
+            "target_turn_id": None,
+            "successor_turn_id": None,
+        }
+        if delivery.get("receipt_outcome") is None:
+            values["receipt_outcome"] = "archived"
+        if (
+            cas_delivery(
+                conn,
+                str(delivery["id"]),
+                expected_version=int(delivery["version"]),
+                expected_states=(str(delivery["state"]),),
+                values=values,
+            )
+            is None
+        ):
+            raise RuntimeError("archive delivery retirement lost ownership")
+        retired_deliveries += 1
+
+    retired_turns = 0
+    turns = list(
+        conn.execute(
+            select(session_turns)
+            .where(session_turns.c.session_id == session_id)
+            .where(session_turns.c.state != "terminal")
+            .order_by(session_turns.c.created_at, session_turns.c.id)
+        ).mappings()
+    )
+    for raw in turns:
+        turn = dict(raw)
+        if (
+            cas_turn(
+                conn,
+                str(turn["id"]),
+                expected_version=int(turn["version"]),
+                expected_states=(str(turn["state"]),),
+                values={
+                    "state": "terminal",
+                    "terminal_outcome": "archived",
+                    "terminal_at": utc_now_iso(),
+                },
+            )
+            is None
+        ):
+            raise RuntimeError("archive Turn retirement lost ownership")
+        retired_turns += 1
+    return {"deliveries": retired_deliveries, "turns": retired_turns}
+
+
 def delivery_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:
     return _one(
         conn,

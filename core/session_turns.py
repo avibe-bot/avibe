@@ -1409,6 +1409,7 @@ class SessionTurnManager:
         turn_id: str | None = None
         attempt_id: str | None = None
         native_id: str | None = None
+        steer_text: str | None = None
         steer_backend = backend
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -1473,6 +1474,7 @@ class SessionTurnManager:
                     raise RuntimeError("FIFO head steering CAS lost after writer reservation")
                 state = "steering"
                 message_id = str(current_head.get("message_id") or "") or None
+                steer_text = current_head.get("dispatch_text")
             else:
                 return DeliveryResult(
                     delivery_id,
@@ -1484,16 +1486,18 @@ class SessionTurnManager:
         if state == "starting" and turn_id:
             await self._start_persisted_turn(turn_id, context=context)
         elif state == "steering" and turn_id and attempt_id and native_id:
-            message = str(observed_head.get("message_id") or "")
-            with self._sqlite_engine().connect() as conn:
-                row = messages_service.get_message(conn, message, session_id=session_id)
+            if steer_text is None:
+                message = str(observed_head.get("message_id") or "")
+                with self._sqlite_engine().connect() as conn:
+                    row = messages_service.get_message(conn, message, session_id=session_id)
+                steer_text = str((row or {}).get("text") or "")
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=str((row or {}).get("text") or ""),
+                    text=steer_text,
                 ),
             )
             return await self._finish_steer(delivery_id, receipt, context=context)
@@ -2072,25 +2076,32 @@ class SessionTurnManager:
             return
         if not self._durable_schema_available():
             return
-        identity = self._active_identity(backend, session_id, logical_turn_id)
-        native_turn_id = identity[1] if identity and identity[0] == logical_turn_id else None
-        with self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
-            turn = delivery_store.get_turn(conn, logical_turn_id)
-            if turn is None or turn["session_id"] != session_id:
-                return
-            bound = delivery_store.bind_native_start(
-                conn,
+        try:
+            identity = self._active_identity(backend, session_id, logical_turn_id)
+            native_turn_id = identity[1] if identity and identity[0] == logical_turn_id else None
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                turn = delivery_store.get_turn(conn, logical_turn_id)
+                if turn is None or turn["session_id"] != session_id:
+                    return
+                bound = delivery_store.bind_native_start(
+                    conn,
+                    logical_turn_id,
+                    expected_version=int(turn["version"]),
+                    runtime_key=runtime_key,
+                    runtime_turn_id=runtime_turn_id,
+                    native_turn_id=native_turn_id,
+                )
+                has_pending_interrupt = bool(
+                    bound is not None
+                    and delivery_store.pending_interrupt_for_turn(conn, logical_turn_id)
+                )
+        except Exception:
+            logger.exception(
+                "durable native start binding deferred to reconciliation for Turn=%s",
                 logical_turn_id,
-                expected_version=int(turn["version"]),
-                runtime_key=runtime_key,
-                runtime_turn_id=runtime_turn_id,
-                native_turn_id=native_turn_id,
             )
-            has_pending_interrupt = bool(
-                bound is not None
-                and delivery_store.pending_interrupt_for_turn(conn, logical_turn_id)
-            )
+            return None
         if has_pending_interrupt:
             return asyncio.create_task(
                 self._run_pending_interrupt(session_id, logical_turn_id),
@@ -2183,6 +2194,7 @@ class SessionTurnManager:
         dispatchable: list[str] = []
         pending_interrupts: list[tuple[str, str]] = []
         recovered: list[str] = []
+        retired_ownerless: set[str] = set()
         for turn in turns:
             turn_id = str(turn["id"])
             target_session = str(turn["session_id"])
@@ -2210,6 +2222,22 @@ class SessionTurnManager:
                         if delivery_store.pending_interrupt_for_turn(conn, turn_id):
                             pending_interrupts.append((target_session, turn_id))
                     continue
+                if not delivery_store.turn_has_delivery_owner(conn, turn_id):
+                    retired = delivery_store.cas_turn(
+                        conn,
+                        turn_id,
+                        expected_version=int(latest["version"]),
+                        expected_states=(str(latest["state"]),),
+                        values={
+                            "state": "terminal",
+                            "terminal_outcome": "ownerless_legacy_restart",
+                            "terminal_at": _utc_now_iso(),
+                        },
+                    )
+                    if retired is None:
+                        raise RuntimeError("ownerless legacy Turn retirement lost ownership")
+                    retired_ownerless.add(target_session)
+                    continue
                 if latest["state"] == "starting" and latest.get("start_attempt_id") is None:
                     dispatchable.append(turn_id)
                     continue
@@ -2236,6 +2264,8 @@ class SessionTurnManager:
 
         for target_session, turn_id in pending_interrupts:
             await self._run_pending_interrupt(target_session, turn_id)
+        for target_session in sorted(retired_ownerless):
+            await self.drain_delivery_queue(target_session)
         for turn_id in dispatchable:
             if await self._start_persisted_turn(turn_id):
                 with self._sqlite_engine().connect() as conn:
