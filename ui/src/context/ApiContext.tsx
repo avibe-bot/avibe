@@ -552,6 +552,8 @@ export type ApiContextType = {
       display_name?: string;
       folder_path?: string;
       agent_backend?: string | null;
+      agent_id?: string | null;
+      expected_agent_id?: string | null;
       agent_name?: string | null;
       agent_variant?: string | null;
       model?: string | null;
@@ -734,6 +736,7 @@ export type ApiContextType = {
 // absent field) means "no project default" → fall back to the global default.
 export type ProjectDefaultAgent = {
   agent_backend: string | null;
+  agent_id: string | null;
   agent_name: string | null;
   agent_variant: string | null;
   model: string | null;

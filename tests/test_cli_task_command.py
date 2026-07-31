@@ -3147,6 +3147,72 @@ def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Pat
     assert "agent_name" not in json.loads(row[2])["routing"]
 
 
+def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-08-01T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=None,
+                agent_name=original.name,
+                agent_backend=original.backend,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        captured_scope = cli._resolve_scope_routing_target("slack::channel::C123")
+
+    assert captured_scope == cli._ScopeRoutingTarget(original.name, original.id)
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._resolve_scope_routing_target",
+            return_value=captured_scope,
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id=None,
+            session_key="slack::channel::C123",
+            help_command="vibe task add --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
+
+
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
     tmp_path: Path,
 ) -> None:

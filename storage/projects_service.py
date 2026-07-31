@@ -104,6 +104,27 @@ _UNSET: Any = object()
 # project inherit it; see ``workbench_sessions_service.create_session``.
 _DEFAULT_AGENT_FIELDS = ("agent_name", "agent_variant", "model", "reasoning_effort")
 
+
+class StaleProjectAgentBindingError(ValueError):
+    """The project route changed after the caller loaded it."""
+
+    code = "project_agent_conflict"
+
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        expected_agent_id: str | None,
+        current_agent_id: str | None,
+    ) -> None:
+        super().__init__(self.code)
+        self.details = {
+            "project_id": project_id,
+            "expected_agent_id": expected_agent_id,
+            "current_agent_id": current_agent_id,
+        }
+
+
 # Single source of truth for the columns every project payload reads, so
 # ``list_projects`` and ``_project_payload`` can never select different shapes.
 _PROJECT_COLUMNS = (
@@ -116,6 +137,7 @@ _PROJECT_COLUMNS = (
     scope_settings.c.enabled,
     scope_settings.c.workdir,
     scope_settings.c.agent_name,
+    agents.c.id.label("agent_id"),
     agents.c.backend.label("agent_backend"),
     scope_settings.c.agent_variant,
     scope_settings.c.model,
@@ -133,6 +155,7 @@ def _default_agent_from_row(row: Any) -> Optional[dict[str, Any]]:
     if not agent_name:
         return None
     payload = {field: row[field] for field in _DEFAULT_AGENT_FIELDS}
+    payload["agent_id"] = row["agent_id"]
     payload["agent_backend"] = row["agent_backend"]
     return payload
 
@@ -296,6 +319,8 @@ def update_project(
     *,
     display_name: Optional[str] = None,
     folder_path: Optional[str] = None,
+    agent_id: Any = _UNSET,
+    expected_agent_id: Any = _UNSET,
     agent_name: Any = _UNSET,
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
@@ -314,9 +339,24 @@ def update_project(
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
         raise LookupError(f"Project not found: {project_id}")
-    current_agent_name = conn.execute(
-        select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
-    ).scalar_one_or_none()
+    current_agent = conn.execute(
+        select(scope_settings.c.agent_name, agents.c.id.label("agent_id"))
+        .select_from(
+            scope_settings.outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+        )
+        .where(scope_settings.c.scope_id == scope_id)
+    ).mappings().first()
+    current_agent_name = current_agent["agent_name"] if current_agent is not None else None
+    current_agent_id = current_agent["agent_id"] if current_agent is not None else None
+
+    if expected_agent_id is not _UNSET:
+        cleaned_expected_id = str(expected_agent_id or "").strip() or None
+        if cleaned_expected_id != current_agent_id:
+            raise StaleProjectAgentBindingError(
+                project_id=project_id,
+                expected_agent_id=cleaned_expected_id,
+                current_agent_id=current_agent_id,
+            )
 
     now = _utc_now_iso()
     if display_name is not None:
@@ -333,7 +373,22 @@ def update_project(
     settings_values: dict[str, Any] = {}
     if folder_path is not None:
         settings_values["workdir"] = str(_resolve_folder(folder_path))
-    if agent_name is not _UNSET:
+    if agent_id is not _UNSET and str(agent_id or "").strip():
+        cleaned_agent_id = str(agent_id).strip()
+        selected_agent = conn.execute(
+            select(agents.c.id, agents.c.name, agents.c.enabled, agents.c.archived_at)
+            .where(agents.c.id == cleaned_agent_id)
+            .limit(1)
+        ).mappings().first()
+        if selected_agent is None:
+            raise ValueError(f"Agent is unavailable: {cleaned_agent_id}")
+        preserves_current_identity = cleaned_agent_id == current_agent_id
+        if not preserves_current_identity and (
+            not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None
+        ):
+            raise ValueError(f"Agent is unavailable: {selected_agent['name']}")
+        agent_name = selected_agent["name"]
+    elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
         if requested_agent is not None and requested_agent != current_agent_name:
             from core.vibe_agents import normalize_agent_name

@@ -167,6 +167,7 @@ def reserve_agent_session(
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
     require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a new ``agent_sessions`` row keyed by an IM-style scope.
 
@@ -189,6 +190,7 @@ def reserve_agent_session(
             visibility=visibility,
             metadata=metadata,
             require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()
@@ -207,6 +209,7 @@ def reserve_standalone_agent_session(
     metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
     require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> Optional[str]:
     """Reserve a background-capable session with no Scope."""
 
@@ -223,6 +226,7 @@ def reserve_standalone_agent_session(
             visibility=visibility,
             metadata=metadata,
             require_enabled_agent=require_enabled_agent,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
     finally:
         service.close()

@@ -1178,6 +1178,7 @@ class ScheduledTaskStore:
         expect: DefinitionWriteExpectation,
         *,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
@@ -1198,6 +1199,7 @@ class ScheduledTaskStore:
                 task.to_dict(),
                 expect=expect,
                 expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
         except Exception:
             self._reload_after_lost_write(task.id)
@@ -1236,6 +1238,7 @@ class ScheduledTaskStore:
         task: ScheduledTask,
         *,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         """Create or adopt a whole task row (unguarded: the payload is not a re-read).
 
@@ -1255,7 +1258,11 @@ class ScheduledTaskStore:
                 self._sqlite.upsert_scheduled_task(
                     task.to_dict(),
                     expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
                 )
+                if expected_reference_agent_id is not None:
+                    self.load()
+                    return self._tasks[task.id]
                 return task
             self._save()
         except Exception:
@@ -1281,6 +1288,7 @@ class ScheduledTaskStore:
         timezone_name: str,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -1302,6 +1310,7 @@ class ScheduledTaskStore:
         return self.upsert_task(
             task,
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def remove_task(self, task_id: str) -> bool:
@@ -1358,6 +1367,7 @@ class ScheduledTaskStore:
         update_cwd: bool = False,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
@@ -1387,12 +1397,16 @@ class ScheduledTaskStore:
             task,
             expect,
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         ):
             # The edit did NOT land, and its payload would have restored the Session
             # binding, enabled state and reclaim snapshot the teardown just changed.
             # Raising is the contract: ``cmd_task_update`` prints an error and exits
             # non-zero instead of echoing a task the database never accepted.
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
+        if expected_reference_agent_id is not None:
+            self.load()
+            return self._tasks[task_id]
         return task
 
     def record_binding_recovery(
@@ -1588,12 +1602,19 @@ class TaskExecutionStore:
         request: TaskExecutionRequest,
         *,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         if self._sqlite is not None:
             self._sqlite.enqueue_run(
                 self.queued_run_payload(request),
                 expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            if expected_reference_agent_id is not None:
+                stored = self._sqlite.get_run(request.id)
+                if stored is not None:
+                    request.agent_id = stored.get("agent_id")
+                    request.agent_name = stored.get("agent_name")
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1709,6 +1730,8 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
             self.build_hook_send(
@@ -1718,6 +1741,7 @@ class TaskExecutionStore:
                 post_to=post_to,
                 deliver_key=deliver_key,
                 agent_name=agent_name,
+                agent_id=agent_id,
                 session_policy=session_policy,
                 run_type=run_type,
                 definition_id=definition_id,
@@ -1727,6 +1751,7 @@ class TaskExecutionStore:
                 metadata=metadata,
             ),
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def build_hook_send(
@@ -1738,6 +1763,7 @@ class TaskExecutionStore:
         post_to: Optional[str] = None,
         deliver_key: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         session_policy: Optional[str] = None,
         run_type: str = "hook_send",
         definition_id: Optional[str] = None,
@@ -1767,6 +1793,7 @@ class TaskExecutionStore:
             source_actor=source_actor,
             parent_run_id=parent_run_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             session_policy=session_policy,
             metadata=dict(metadata or {}),
         )

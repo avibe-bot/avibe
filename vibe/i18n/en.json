@@ -161,6 +161,14 @@
     }
   },
   "error": {
+    "settingsConflict": {
+      "message": "Agent routing changed while these settings were open.",
+      "hint": "Reload the settings and apply your change again."
+    },
+    "projectAgentConflict": {
+      "message": "The project's Agent changed while Project Settings was open.",
+      "hint": "Reload Project Settings and apply your change again."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",

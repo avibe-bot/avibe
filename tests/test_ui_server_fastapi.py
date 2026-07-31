@@ -1,5 +1,6 @@
 import gzip
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,13 +116,19 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted_scopes == [("telegram", "-1001", "42")]
 
 
-def test_scope_settings_routes_report_stale_agent_binding_conflicts(monkeypatch):
+def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
+    from core.services import settings as settings_service
     from storage.settings_service import StaleScopeAgentBindingError
     from vibe import api
 
     def stale(*_args, **_kwargs):
-        raise StaleScopeAgentBindingError("Agent binding changed while settings were open")
+        raise StaleScopeAgentBindingError(scope_id="slack::channel::C1")
 
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
     monkeypatch.setattr(api, "save_settings", stale)
     monkeypatch.setattr(api, "save_thread_settings", stale)
     monkeypatch.setattr(api, "save_users", stale)
@@ -143,11 +150,13 @@ def test_scope_settings_routes_report_stale_agent_binding_conflicts(monkeypatch)
         assert response.get_json() == {
             "ok": False,
             "code": "settings_conflict",
-            "message": "Agent binding changed while settings were open",
+            "message": "这些设置打开后，Agent 路由已发生变化。",
             "error": {
                 "code": "settings_conflict",
-                "message": "Agent binding changed while settings were open",
+                "message": "这些设置打开后，Agent 路由已发生变化。",
             },
+            "hint": "请重新加载设置后再次修改。",
+            "details": {"scope_id": "slack::channel::C1"},
         }
 
 
@@ -1230,6 +1239,66 @@ def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_
     finally:
         store.close()
         engine.dispose()
+
+
+def test_project_patch_forwards_stable_agent_ids_and_localizes_conflicts(monkeypatch):
+    from core.services import settings as settings_service
+    from storage import projects_service
+
+    captured: dict[str, object] = {}
+
+    def stale(_conn, project_id, **kwargs):
+        captured.update({"project_id": project_id, **kwargs})
+        raise projects_service.StaleProjectAgentBindingError(
+            project_id=project_id,
+            expected_agent_id="agent-original",
+            current_agent_id="agent-replacement",
+        )
+
+    monkeypatch.setattr(projects_service, "update_project", stale)
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/projects/proj-stale",
+        json={
+            "agent_id": "agent-original",
+            "expected_agent_id": "agent-original",
+            "agent_name": "pm",
+            "model": "updated-model",
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert captured == {
+        "project_id": "proj-stale",
+        "display_name": None,
+        "folder_path": None,
+        "agent_id": "agent-original",
+        "expected_agent_id": "agent-original",
+        "agent_name": "pm",
+        "model": "updated-model",
+    }
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "code": "project_agent_conflict",
+        "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+        "error": {
+            "code": "project_agent_conflict",
+            "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+        },
+        "hint": "请重新加载项目设置后再次修改。",
+        "details": {
+            "project_id": "proj-stale",
+            "expected_agent_id": "agent-original",
+            "current_agent_id": "agent-replacement",
+        },
+    }
 
 
 def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, tmp_path):

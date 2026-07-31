@@ -101,13 +101,16 @@ import {
 // ``in_flight:true``; only an idle reading (past the post-send grace) clears it.
 const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
 
-function sessionAgentDisplayName(
-  session: Pick<WorkbenchSession, 'agent_name'>,
+export function sessionAgentDisplayName(
+  session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
   agents: VibeAgentBrief[],
 ): string | null {
   const agentName = session.agent_name?.trim() || null;
   if (!agentName) return null;
-  return agents.find((agent) => agent.name === agentName)?.display_name?.trim() || agentName;
+  const agent =
+    (session.agent_id ? agents.find((candidate) => candidate.id === session.agent_id) : undefined) ??
+    agents.find((candidate) => candidate.name === agentName);
+  return agent?.display_name?.trim() || agentName;
 }
 
 // Grace window after we optimistically set ``working`` from a local send before

@@ -76,7 +76,7 @@ from storage.background import (
     compute_next_run_at,
     normalize_run_status,
 )
-from storage.models import scope_settings, scopes
+from storage.models import agents, scope_settings, scopes
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -2457,37 +2457,56 @@ def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
 
 class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
+    agent_id: Optional[str]
 
 
 class _AgentTargetResolution(NamedTuple):
     agent: Optional[VibeAgent]
     requires_enabled_write_guard: bool
+    preserves_existing_reference: bool = False
+
+
+def _agent_write_guard_ids(
+    resolution: _AgentTargetResolution,
+) -> tuple[Optional[str], Optional[str]]:
+    agent = resolution.agent
+    if agent is None:
+        return None, None
+    if resolution.requires_enabled_write_guard:
+        return agent.id, None
+    if getattr(resolution, "preserves_existing_reference", False):
+        return None, agent.id
+    return None, None
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
-        return _ScopeRoutingTarget(None)
+        return _ScopeRoutingTarget(None, None)
     try:
         parsed = parse_scope_id(session_key)
     except ValueError:
         try:
             parsed = parse_session_key(session_key)
         except ValueError:
-            return _ScopeRoutingTarget(None)
+            return _ScopeRoutingTarget(None, None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(scope_settings.c.agent_name)
+                select(scope_settings.c.agent_name, agents.c.id.label("agent_id"))
+                .select_from(
+                    scope_settings.outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+                )
                 .where(scope_settings.c.scope_id == scope_id)
                 .limit(1)
             ).first()
             if row is None:
-                return _ScopeRoutingTarget(None)
+                return _ScopeRoutingTarget(None, None)
             agent_name = str(row.agent_name).strip() if row.agent_name else None
-            return _ScopeRoutingTarget(agent_name)
+            agent_id = str(row.agent_id).strip() if row.agent_id else None
+            return _ScopeRoutingTarget(agent_name, agent_id)
     finally:
         engine.dispose()
 
@@ -2544,17 +2563,27 @@ def _resolve_agent_target(
             return _AgentTargetResolution(
                 session_agent or requested,
                 requested is not None and not existing_agent_reference,
+                requested is None or existing_agent_reference,
             )
 
         if requested is not None:
-            return _AgentTargetResolution(requested, not existing_agent_reference)
+            return _AgentTargetResolution(
+                requested,
+                not existing_agent_reference,
+                existing_agent_reference,
+            )
 
         if session_key:
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
                 return _AgentTargetResolution(
-                    store.require_reference(scope_target.agent_name),
+                    (
+                        store.require_reference_by_id(scope_target.agent_id)
+                        if scope_target.agent_id
+                        else store.require_reference(scope_target.agent_name)
+                    ),
                     False,
+                    True,
                 )
 
         default_agent = store.get_default_agent()
@@ -2583,17 +2612,22 @@ def _resolve_agent_for_target(
 def _resolve_agent_for_session_reservation(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
-    scope_target = _ScopeRoutingTarget(None)
+    scope_target = _ScopeRoutingTarget(None, None)
     if not resolved_agent_name:
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
 
     store = _agent_store()
     try:
+        if agent_id:
+            return store.require_reference_by_id(agent_id)
+        if scope_target.agent_id:
+            return store.require_reference_by_id(scope_target.agent_id)
         if resolved_agent_name:
             return store.require_reference(resolved_agent_name)
         return store.get_default_agent()
@@ -2956,18 +2990,18 @@ def cmd_task_add(args):
         )
         agent = agent_resolution.agent
         agent_name = agent.name if agent else None
-        expected_enabled_agent_id = (
-            agent.id
-            if agent is not None and agent_resolution.requires_enabled_write_guard
-            else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
         )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key or "",
                 workdir=cwd,
                 help_command="vibe task add --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
             reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
@@ -3020,6 +3054,7 @@ def cmd_task_add(args):
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
                 expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
         else:
             try:
@@ -3048,6 +3083,7 @@ def cmd_task_add(args):
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
                 expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -3434,21 +3470,20 @@ def cmd_task_update(args):
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
-        expected_enabled_agent_id = (
-            agent_resolution.agent.id
-            if agent_resolution.agent is not None
-            and agent_resolution.requires_enabled_write_guard
-            else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
         )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
                 workdir=cwd,
                 help_command="vibe task update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
             reserved_session_id = session_id
             session_key = ""
@@ -3527,6 +3562,7 @@ def cmd_task_update(args):
             timezone_name=timezone_name,
             metadata=metadata,
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -3626,11 +3662,18 @@ def cmd_hook_send(args):
             deliver_key=args.deliver_key,
             prompt=message,
             agent_name=agent.name if agent else None,
+            agent_id=agent.id if agent else None,
             run_type="agent_run",
             source_kind="cli",
             expected_enabled_agent_id=(
                 agent.id
                 if agent is not None and agent_resolution.requires_enabled_write_guard
+                else None
+            ),
+            expected_reference_agent_id=(
+                agent.id
+                if agent is not None
+                and getattr(agent_resolution, "preserves_existing_reference", False)
                 else None
             ),
         )
@@ -4717,10 +4760,12 @@ def _reserve_forked_cli_session(
 def _reserve_definition_session(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
     workdir: Optional[str] = None,
     require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> str:
     from core.services import sessions as sessions_service
 
@@ -4730,6 +4775,7 @@ def _reserve_definition_session(
         target = _parse_validated_session_key(deliver_key, help_command=help_command)
     agent = _resolve_agent_for_session_reservation(
         agent_name=agent_name,
+        agent_id=agent_id,
         deliver_key=deliver_key,
         help_command=help_command,
     )
@@ -4753,6 +4799,7 @@ def _reserve_definition_session(
         workdir=workdir,
         visibility="foreground",
         require_enabled_agent=require_enabled_agent,
+        expected_reference_agent_id=expected_reference_agent_id,
     )
     if not session_id:
         raise TaskCliError(
@@ -8606,10 +8653,8 @@ def cmd_watch_add(args):
         )
         agent = agent_resolution.agent
         agent_name = agent.name if agent else None
-        expected_enabled_agent_id = (
-            agent.id
-            if agent is not None and agent_resolution.requires_enabled_write_guard
-            else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
         )
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         session_workdir = (
@@ -8626,10 +8671,12 @@ def cmd_watch_add(args):
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key or "",
                 workdir=session_workdir,
                 help_command="vibe watch add --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
             reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
@@ -8680,6 +8727,7 @@ def cmd_watch_add(args):
             session_policy=session_policy,
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
         reserved_session_id = None
         runtime_store = _watch_runtime_store()
@@ -9023,21 +9071,20 @@ def cmd_watch_update(args):
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
-        expected_enabled_agent_id = (
-            agent_resolution.agent.id
-            if agent_resolution.agent is not None
-            and agent_resolution.requires_enabled_write_guard
-            else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
         )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
                 workdir=session_workdir,
                 help_command="vibe watch update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
             reserved_session_id = session_id
             session_key = ""
@@ -9108,6 +9155,7 @@ def cmd_watch_update(args):
             args.watch_id,
             **changes,
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
         reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)

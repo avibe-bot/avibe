@@ -37,7 +37,11 @@ _MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
 
 
 class StaleScopeAgentBindingError(ValueError):
-    pass
+    code = "settings_conflict"
+
+    def __init__(self, *, scope_id: str) -> None:
+        super().__init__(self.code)
+        self.scope_id = scope_id
 
 
 class ScopeAgentUnavailableError(ValueError):
@@ -260,9 +264,7 @@ class SQLiteSettingsService:
             return item.routing
         if item.routing.agent_name == expected:
             return replace(item.routing, agent_name=current)
-        raise StaleScopeAgentBindingError(
-            f"Agent binding changed while settings were open: {scope_id}"
-        )
+        raise StaleScopeAgentBindingError(scope_id=scope_id)
 
     @staticmethod
     def _require_enabled_agent_binding(conn: Connection, agent_name: str | None) -> str | None:

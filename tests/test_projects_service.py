@@ -29,11 +29,13 @@ def engine():
     return create_sqlite_engine()
 
 
-def _ensure_agent(name: str, backend: str) -> None:
+def _ensure_agent(name: str, backend: str) -> str:
     store = VibeAgentStore()
     try:
-        if store.get(name) is None:
-            store.create(name=name, backend=backend)
+        agent = store.get(name)
+        if agent is None:
+            agent = store.create(name=name, backend=backend)
+        return agent.id
     finally:
         store.close()
 
@@ -263,7 +265,7 @@ def test_new_project_has_no_default_agent(engine, tmp_path):
 
 
 def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
-    _ensure_agent("claude", "claude")
+    agent_id = _ensure_agent("claude", "claude")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
@@ -277,6 +279,7 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
             reasoning_effort="high",
         )
     assert updated["default_agent"] == {
+        "agent_id": agent_id,
         "agent_backend": "claude",
         "agent_name": "claude",
         "agent_variant": "claude",
@@ -397,6 +400,63 @@ def test_project_agent_save_serializes_with_archive_and_rejects_stale_route(engi
         assert stored_name == archived.archived_name
     finally:
         competitor.close()
+
+
+def test_project_agent_save_uses_stable_id_when_the_public_name_is_reused(engine, tmp_path):
+    original_id = _ensure_agent("pm", "claude")
+    _ensure_agent("zz-fallback", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        projects_service.update_project(conn, created["id"], agent_name="pm")
+
+    store = VibeAgentStore(Path(str(engine.url.database)))
+    try:
+        archived = store.archive("pm")
+        assert archived is not None
+        replacement = store.create(name="pm", backend="codex")
+
+        with engine.begin() as conn:
+            preserved = projects_service.update_project(
+                conn,
+                created["id"],
+                agent_id=original_id,
+                expected_agent_id=original_id,
+                agent_name="pm",
+                model="updated-model",
+            )
+        assert preserved["default_agent"]["agent_id"] == original_id
+        assert preserved["default_agent"]["agent_name"] == archived.archived_name
+        assert preserved["default_agent"]["model"] == "updated-model"
+
+        with engine.begin() as conn:
+            rebound = projects_service.update_project(
+                conn,
+                created["id"],
+                agent_id=replacement.id,
+                expected_agent_id=original_id,
+                agent_name=replacement.name,
+            )
+        assert rebound["default_agent"]["agent_id"] == replacement.id
+        assert rebound["default_agent"]["agent_name"] == replacement.name
+
+        with engine.begin() as conn:
+            with pytest.raises(projects_service.StaleProjectAgentBindingError) as exc:
+                projects_service.update_project(
+                    conn,
+                    created["id"],
+                    agent_id=original_id,
+                    expected_agent_id=original_id,
+                    agent_name="pm",
+                )
+        assert exc.value.details == {
+            "project_id": created["id"],
+            "expected_agent_id": original_id,
+            "current_agent_id": replacement.id,
+        }
+    finally:
+        store.close()
 
 
 def test_rename_leaves_default_agent_untouched(engine, tmp_path):

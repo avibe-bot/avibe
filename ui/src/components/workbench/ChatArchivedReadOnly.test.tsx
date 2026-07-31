@@ -11,7 +11,7 @@ import { selectApiErrorFields } from '../../context/ApiContext';
 import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ToastProvider } from '../../context/ToastContext';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
-import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
+import { ChatHeaderBar, MessageRow, ThinkingBubble, sessionAgentDisplayName } from './ChatPage';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
@@ -224,6 +224,13 @@ describe('read-only transcript withdraws session writes', () => {
 });
 
 describe('archived Agent display names', () => {
+  it('keeps the display name when a mounted catalog still has the pre-archive name', () => {
+    const staleCatalogAgent = { ...archivedPm, name: 'pm' };
+    const archivedSession = session({ agent_id: archivedPm.id, agent_name: archivedPm.name });
+
+    expect(sessionAgentDisplayName(archivedSession, [staleCatalogAgent])).toBe('pm');
+  });
+
   it('uses the catalog display name in thinking and transcript bubbles', () => {
     const archivedSession = session({ agent_name: archivedPm.name });
     const displayName = archivedPm.display_name;

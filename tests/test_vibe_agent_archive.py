@@ -466,6 +466,97 @@ def test_direct_write_rejects_a_new_agent_that_reuses_the_selected_name(tmp_path
         agent_store.close()
 
 
+@pytest.mark.parametrize("write_kind", ["scheduled", "watch", "run", "session"])
+def test_existing_reference_writes_canonicalize_by_stable_agent_id(
+    tmp_path, write_kind: str
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        _create_archive_fallback(agent_store)
+        original = agent_store.create(name="pm", backend="claude")
+        archived = agent_store.archive(original.name)
+        assert archived is not None
+        replacement = agent_store.create(name="pm", backend="codex")
+
+        if write_kind == "scheduled":
+            background.upsert_scheduled_task(
+                {
+                    "id": "scheduled_reference",
+                    "agent_name": replacement.name,
+                    "prompt": "continue",
+                    "schedule_type": "at",
+                    "run_at": NOW,
+                    "timezone": "UTC",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                },
+                expected_reference_agent_id=original.id,
+            )
+            with background.engine.connect() as conn:
+                stored_name = conn.execute(
+                    select(run_definitions.c.agent_name).where(
+                        run_definitions.c.id == "scheduled_reference"
+                    )
+                ).scalar_one()
+            assert stored_name == archived.archived_name
+        elif write_kind == "watch":
+            background.upsert_watch(
+                {
+                    "id": "watch_reference",
+                    "agent_name": replacement.name,
+                    "command": ["true"],
+                    "mode": "once",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                },
+                expected_reference_agent_id=original.id,
+            )
+            with background.engine.connect() as conn:
+                stored_name = conn.execute(
+                    select(run_definitions.c.agent_name).where(
+                        run_definitions.c.id == "watch_reference"
+                    )
+                ).scalar_one()
+            assert stored_name == archived.archived_name
+        elif write_kind == "run":
+            background.enqueue_run(
+                {
+                    "id": "run_reference",
+                    "agent_name": replacement.name,
+                    "request_type": "agent_run",
+                    "status": "queued",
+                    "message": "continue",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                },
+                expected_reference_agent_id=original.id,
+            )
+            stored = background.get_run("run_reference")
+            assert stored is not None
+            assert stored["agent_id"] == original.id
+            assert stored["agent_name"] == archived.archived_name
+        else:
+            session_id = sessions.reserve_standalone_agent_session(
+                agent_backend=replacement.backend,
+                session_anchor="reference",
+                agent_id=original.id,
+                agent_name=replacement.name,
+                expected_reference_agent_id=original.id,
+            )
+            stored = sessions.get_agent_session_by_id(session_id)
+            assert stored is not None
+            assert stored["agent_id"] == original.id
+            assert stored["agent_name"] == archived.archived_name
+            assert stored["agent_backend"] == original.backend
+    finally:
+        sessions.close()
+        background.close()
+        agent_store.close()
+
+
 def test_claim_refresh_normalizes_a_legacy_run_name_before_pinning_identity(tmp_path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = VibeAgentStore(db_path)

@@ -78,6 +78,28 @@ def _require_enabled_agent_identity(
         )
 
 
+def _require_agent_reference_identity(
+    conn: Connection,
+    *,
+    expected_agent_id: str | None,
+) -> dict[str, str]:
+    cleaned_id = str(expected_agent_id or "").strip()
+    if not cleaned_id:
+        raise ValueError("an Agent identity is required for this session reference")
+    row = conn.execute(
+        select(agents.c.id, agents.c.name, agents.c.backend)
+        .where(agents.c.id == cleaned_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        raise ValueError(f"agent reference '{cleaned_id}' no longer exists")
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
+
+
 def _catalog_agent_name_value(agent_id: str | None, fallback_name: str) -> Any:
     """Resolve an Agent's current routing name in the statement that persists it."""
 
@@ -263,6 +285,7 @@ class SQLiteSessionsService:
         visibility: str = "foreground",
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
@@ -274,6 +297,15 @@ class SQLiteSessionsService:
                     agent_id=agent_id,
                     agent_name=agent_name,
                 )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
@@ -308,6 +340,7 @@ class SQLiteSessionsService:
         visibility: str = "background",
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
@@ -320,6 +353,15 @@ class SQLiteSessionsService:
                     agent_id=agent_id,
                     agent_name=agent_name,
                 )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:

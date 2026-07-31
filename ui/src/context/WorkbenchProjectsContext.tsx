@@ -62,7 +62,11 @@ export interface WorkbenchProjectsTree {
    *  shared cache so the sidebar + Projects page reflect it. Pass an all-null
    *  route to clear the default back to the global default. Throws on failure
    *  (the apiFetch layer already surfaced a toast) so the dialog can react. */
-  setProjectDefaultAgent: (projectId: string, route: ProjectDefaultAgent) => Promise<void>;
+  setProjectDefaultAgent: (
+    projectId: string,
+    route: ProjectDefaultAgent,
+    expectedAgentId: string | null,
+  ) => Promise<void>;
   archiveProject: (projectId: string) => Promise<void>;
   /** Throws on failure so the row's inline editor can fall back; patches title on success. */
   renameSession: (projectId: string, sessionId: string, title: string) => Promise<void>;
@@ -583,11 +587,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const setProjectDefaultAgent = useCallback(
-    async (projectId: string, route: ProjectDefaultAgent) => {
+    async (projectId: string, route: ProjectDefaultAgent, expectedAgentId: string | null) => {
       // Always send the full 5-field route: a complete set is coherent whether
       // the user picked an agent (all set) or cleared it (all null → default
       // dropped). Let failures propagate — apiFetch already toasted.
       const updated = await api.updateProject(projectId, {
+        agent_id: route.agent_id,
+        expected_agent_id: expectedAgentId,
         agent_name: route.agent_name,
         agent_variant: route.agent_variant,
         model: route.model,

@@ -4082,6 +4082,34 @@ def _coded_error_response(code: str, message: str, status: int, **extra: Any):
     )
 
 
+def _settings_conflict_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.settingsConflict"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang),
+        409,
+        hint=t(f"{key}.hint", lang),
+        details={"scope_id": exc.scope_id},
+    )
+
+
+def _project_agent_conflict_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.projectAgentConflict"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang),
+        409,
+        hint=t(f"{key}.hint", lang),
+        details=exc.details,
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
@@ -5024,7 +5052,7 @@ def settings_post():
     try:
         return jsonify(api.save_settings(payload))
     except StaleScopeAgentBindingError as exc:
-        return _coded_error_response("settings_conflict", str(exc), 409)
+        return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
         return _coded_error_response("agent_unavailable", str(exc), 400)
 
@@ -5040,7 +5068,7 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
         try:
             return api.save_thread_settings(payload if isinstance(payload, dict) else {})
         except StaleScopeAgentBindingError as exc:
-            return _coded_error_response("settings_conflict", str(exc), 409)
+            return _settings_conflict_response(exc)
         except ScopeAgentUnavailableError as exc:
             return _coded_error_response("agent_unavailable", str(exc), 400)
 
@@ -5910,7 +5938,14 @@ def projects_update(project_id: str):
     # (see ``projects_service.update_project`` and its ``_UNSET`` sentinel).
     agent_kwargs = {
         field: payload[field]
-        for field in ("agent_name", "agent_variant", "model", "reasoning_effort")
+        for field in (
+            "agent_id",
+            "expected_agent_id",
+            "agent_name",
+            "agent_variant",
+            "model",
+            "reasoning_effort",
+        )
         if field in payload
     }
     if display_name is None and folder_path is None and not agent_kwargs:
@@ -5925,6 +5960,8 @@ def projects_update(project_id: str):
                 folder_path=folder_path,
                 **agent_kwargs,
             )
+    except projects_service.StaleProjectAgentBindingError as err:
+        return _project_agent_conflict_response(err)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except (FileNotFoundError, NotADirectoryError, ValueError) as err:
@@ -9050,7 +9087,7 @@ def users_post():
     try:
         return jsonify(api.save_users(payload))
     except StaleScopeAgentBindingError as exc:
-        return _coded_error_response("settings_conflict", str(exc), 409)
+        return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
         return _coded_error_response("agent_unavailable", str(exc), 400)
 

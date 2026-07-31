@@ -60,6 +60,7 @@ export const ProjectSettingsDialog: React.FC<{
     // absent field keeps its stored value.
     const merged: ProjectDefaultAgent = {
       agent_backend: null,
+      agent_id: 'agent_id' in patch ? patch.agent_id ?? null : current?.agent_id ?? null,
       agent_name: 'agent_name' in patch ? patch.agent_name ?? null : current?.agent_name ?? null,
       agent_variant: 'agent_variant' in patch ? patch.agent_variant ?? null : current?.agent_variant ?? null,
       model: 'model' in patch ? patch.model ?? null : current?.model ?? null,
@@ -67,7 +68,7 @@ export const ProjectSettingsDialog: React.FC<{
         'reasoning_effort' in patch ? patch.reasoning_effort ?? null : current?.reasoning_effort ?? null,
     };
     try {
-      await setProjectDefaultAgent(project.id, merged);
+      await setProjectDefaultAgent(project.id, merged, current?.agent_id ?? null);
     } catch {
       // apiFetch already surfaced the error toast; keep the dialog open.
     }

@@ -95,6 +95,26 @@ def _require_enabled_agent_identity(
         raise ValueError(f"agent '{name}' was archived, disabled, renamed, or replaced before the write")
 
 
+def _require_agent_reference_identity(
+    conn: Any,
+    *,
+    expected_agent_id: Optional[str],
+) -> dict[str, str]:
+    """Resolve an existing durable Agent reference by ID inside its write."""
+
+    agent_id = str(expected_agent_id or "").strip()
+    if not agent_id:
+        raise ValueError("an Agent identity is required for this reference write")
+    row = conn.execute(
+        select(agents.c.id, agents.c.name)
+        .where(agents.c.id == agent_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        raise ValueError(f"agent reference '{agent_id}' no longer exists")
+    return {"id": str(row["id"]), "name": str(row["name"])}
+
+
 def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict[str, str]]:
     """Resolve legacy spelling to the catalog's canonical durable identity."""
 
@@ -2306,6 +2326,7 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -2320,6 +2341,7 @@ class SQLiteBackgroundTaskStore:
             expect=expect,
             definition_type="scheduled task",
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def upsert_scheduled_task_with_binding_notice(
@@ -2470,6 +2492,7 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole watch row. ``False`` means the write was REFUSED.
 
@@ -2483,6 +2506,7 @@ class SQLiteBackgroundTaskStore:
             expect=expect,
             definition_type="watch",
             expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def _upsert_definition(
@@ -2492,17 +2516,25 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None,
         definition_type: str,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
         with self.engine.begin() as conn:
-            if expected_enabled_agent_id is not None:
+            if expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
                 reserve_write_lock(conn)
+            if expected_enabled_agent_id is not None:
                 _require_enabled_agent_identity(
                     conn,
                     agent_name=values.get("agent_name"),
                     expected_agent_id=expected_enabled_agent_id,
                 )
+            elif expected_reference_agent_id is not None:
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                values["agent_name"] = identity["name"]
             return upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type=definition_type
             )
@@ -2555,16 +2587,25 @@ class SQLiteBackgroundTaskStore:
         payload: dict[str, Any],
         *,
         expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> None:
         values = self._run_values(payload)
         with run_update_event_transaction(self.engine) as conn:
-            if expected_enabled_agent_id is not None:
+            if expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
                 reserve_write_lock(conn)
+            if expected_enabled_agent_id is not None:
                 _require_enabled_agent_identity(
                     conn,
                     agent_name=values.get("agent_name"),
                     expected_agent_id=expected_enabled_agent_id,
                 )
+            elif expected_reference_agent_id is not None:
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                values["agent_id"] = identity["id"]
+                values["agent_name"] = identity["name"]
             enqueue_run_in_connection(conn, values)
 
     def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Any]:
