@@ -291,6 +291,108 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
     assert silent_events == [("evt_existing_silent",)]
     assert collision == ("unrelated",)
 
+    from storage import agent_activity_service
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            groups = agent_activity_service.list_turn_groups(
+                conn,
+                session_id="ses_fsm_trace",
+            )["groups"]
+    finally:
+        engine.dispose()
+    assert [group["status"] for group in groups] == ["done"]
+    assert groups[0]["steps"] == 1
+
+
+def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260729_0042")
+    now = "2026-07-31T00:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values ('ses_pending', null, 'codex', 'codex', 'codex',
+                'pending', '/tmp', '', 'active', 'foreground', 0,
+                'idle', '{}', ?, ?, ?)
+            """,
+            (now, now, now),
+        )
+        conn.executemany(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, author_name,
+                source, content_text, content_json, metadata_json, created_at,
+                updated_at
+            ) values (?, null, 'ses_pending', 'avibe', ?, 'pending', ?, ?, ?,
+                json_object('text', ?), '{}', ?, ?)
+            """,
+            (
+                ("msg_pending_human", "user", None, "user", "human", "human", now, now),
+                (
+                    "msg_pending_harness",
+                    "harness",
+                    "watch",
+                    "harness",
+                    "scheduled",
+                    "scheduled",
+                    now,
+                    now,
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        human = conn.execute(
+            "select type, content_text from messages where id = 'msg_pending_human'"
+        ).fetchone()
+        human_delivery = conn.execute(
+            "select id from message_deliveries where id = 'msg_pending_human'"
+        ).fetchone()
+        harness_message = conn.execute(
+            "select id from messages where id = 'msg_pending_harness'"
+        ).fetchone()
+        harness_delivery = conn.execute(
+            "select state, current_attempt_id, delivery_history_json "
+            "from message_deliveries where id = 'msg_pending_harness'"
+        ).fetchone()
+    assert human == ("user", "human")
+    assert human_delivery is None
+    assert harness_message is None
+    assert harness_delivery is not None
+    assert harness_delivery[:2] == ("reserved", None)
+    assert json.loads(harness_delivery[2])["events"][0]["outcome"] == "awaiting_retry"
+    from storage import message_deliveries
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert message_deliveries.recoverable_reservations(conn, "ses_pending") == []
+    finally:
+        engine.dispose()
+
+    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "select id, type from messages where id in "
+            "('msg_pending_human', 'msg_pending_harness') order by id"
+        ).fetchall()
+    assert restored == [
+        ("msg_pending_harness", "pending"),
+        ("msg_pending_human", "user"),
+    ]
+
 
 def test_upgrade_keeps_historical_conflated_callback_rows_sent(
     tmp_path: Path,

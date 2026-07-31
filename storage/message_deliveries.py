@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import Select, and_, or_, select, update
+from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.models import (
@@ -30,7 +30,7 @@ CLAIMABLE_QUEUE_STATES = ("queued",)
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def new_turn_id() -> str:
@@ -777,6 +777,81 @@ def unresolved_deliveries(conn: Connection, session_id: str | None = None) -> li
     if session_id:
         query = query.where(message_deliveries.c.session_id == session_id)
     return [dict(row) for row in conn.execute(query.order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)).mappings()]
+
+
+def recoverable_reservations(
+    conn: Connection,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Reservations whose producer expects restart to complete admission.
+
+    Legacy Harness ``pending`` rows were deliberately retry-owned by their
+    originating event. Migration preserves that contract as a reservation, but
+    startup must not turn it into an autonomous dispatch.
+    """
+
+    query = select(message_deliveries).where(message_deliveries.c.state == "reserved")
+    if session_id:
+        query = query.where(message_deliveries.c.session_id == session_id)
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            query.order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
+        ).mappings()
+    ]
+    recoverable: list[dict[str, Any]] = []
+    for row in rows:
+        events = _history(row.get("delivery_history_json"))["events"]
+        migrated_retry = any(
+            isinstance(event, dict)
+            and event.get("kind") == "migration"
+            and event.get("legacy_type") == "pending"
+            and event.get("outcome") == "awaiting_retry"
+            for event in events
+        )
+        if not migrated_retry:
+            recoverable.append(row)
+    return recoverable
+
+
+def purge_session_graph(conn: Connection, session_id: str) -> None:
+    """Delete an explicitly hard-purged Session's deferred Delivery/Turn graph.
+
+    Normal queue removal and archive remain retire-only. This helper exists for
+    the pre-existing hard Session teardown path and refuses may-have-written work;
+    those owners must first pass through SessionTurnManager reconciliation.
+    """
+
+    nonterminal_turn = conn.execute(
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.state != "terminal")
+        .limit(1)
+    ).scalar_one_or_none()
+    ambiguous_delivery = conn.execute(
+        select(message_deliveries.c.id)
+        .where(message_deliveries.c.session_id == session_id)
+        .where(
+            message_deliveries.c.state.in_(
+                ("start_attempting", "steering", "reconciling_start", "reconciling_steer")
+            )
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if nonterminal_turn is not None or ambiguous_delivery is not None:
+        raise RuntimeError(
+            f"Session {session_id} still has unreconciled durable delivery ownership"
+        )
+    delivery_ids = select(message_deliveries.c.id).where(
+        message_deliveries.c.session_id == session_id
+    )
+    conn.execute(
+        update(show_session_events)
+        .where(show_session_events.c.delivery_id.in_(delivery_ids))
+        .values(delivery_id=None)
+    )
+    conn.execute(delete(session_turns).where(session_turns.c.session_id == session_id))
+    conn.execute(delete(message_deliveries).where(message_deliveries.c.session_id == session_id))
 
 
 def session_ids_with_live_turns(conn: Connection) -> set[str]:

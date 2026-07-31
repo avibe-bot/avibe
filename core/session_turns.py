@@ -2037,7 +2037,21 @@ class SessionTurnManager:
                     "reconciling_start",
                 }:
                     if outcome == "not_written":
-                        next_state = "queued" if session_status == "active" else "retired"
+                        owned_run_terminal = False
+                        run_id = delivery_store.owned_agent_run_id(initial)
+                        if run_id:
+                            run_status = conn.execute(
+                                select(agent_runs.c.status).where(agent_runs.c.id == run_id)
+                            ).scalar_one_or_none()
+                            owned_run_terminal = bool(
+                                run_status
+                                and normalize_run_status(run_status) not in {"queued", "running"}
+                            )
+                        next_state = (
+                            "queued"
+                            if session_status == "active" and not owned_run_terminal
+                            else "retired"
+                        )
                         definitive = delivery_store.record_definitive_attempt(
                             conn,
                             str(initial["id"]),
@@ -2631,22 +2645,7 @@ class SessionTurnManager:
         # after adapter restoration; its writer CAS makes concurrent recovery and
         # a late original dispatch idempotent.
         with self._sqlite_engine().connect() as conn:
-            reservation_query = select(delivery_store.message_deliveries).where(
-                delivery_store.message_deliveries.c.state == "reserved"
-            )
-            if session_id:
-                reservation_query = reservation_query.where(
-                    delivery_store.message_deliveries.c.session_id == session_id
-                )
-            reservations = [
-                dict(row)
-                for row in conn.execute(
-                    reservation_query.order_by(
-                        delivery_store.message_deliveries.c.submitted_at,
-                        delivery_store.message_deliveries.c.id,
-                    )
-                ).mappings()
-            ]
+            reservations = delivery_store.recoverable_reservations(conn, session_id)
         for reservation in reservations:
             target_session = str(reservation["session_id"])
             try:
@@ -3127,6 +3126,59 @@ class SessionTurnManager:
         try:
             with self._sqlite_engine().begin() as conn:
                 pending_input_count = len(delivery_store.list_queued(conn, session_id))
+                if not active and self._durable_schema_available():
+                    durable_turn = delivery_store.active_turn(conn, session_id)
+                    if durable_turn is not None:
+                        active = True
+                        native_turn_started = durable_turn["state"] == "active"
+                        backend = str(durable_turn.get("backend") or "").strip()
+                        initial = delivery_store.delivery_for_turn(
+                            conn,
+                            str(durable_turn["id"]),
+                        )
+                        record: dict[str, Any] = {}
+                        if initial is not None:
+                            record = delivery_store.delivery_payload(initial)
+                            if initial.get("message_id"):
+                                message = messages_service.get_message(
+                                    conn,
+                                    str(initial["message_id"]),
+                                    session_id=session_id,
+                                )
+                                if message is not None:
+                                    record = message
+                        metadata = record.get("metadata") or {}
+                        provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
+                        restored_spec = (
+                            provenance.get("platform_specific")
+                            if isinstance(provenance, dict)
+                            and isinstance(provenance.get("platform_specific"), dict)
+                            else {}
+                        )
+                        owner_run_ids = sorted(self._agent_run_ids_from_spec(restored_spec))
+                        native_message_id = str(record.get("native_message_id") or "")
+                        if native_message_id.startswith("agent_run:"):
+                            native_run_id = native_message_id.removeprefix("agent_run:")
+                            if native_run_id and native_run_id not in owner_run_ids:
+                                owner_run_ids.insert(0, native_run_id)
+                        owner_run_id = str(restored_spec.get("task_execution_id") or "").strip()
+                        if not owner_run_id and owner_run_ids:
+                            owner_run_id = owner_run_ids[0]
+                        owner = {
+                            "source": str(
+                                restored_spec.get("task_trigger_kind")
+                                or restored_spec.get("turn_source")
+                                or ("scheduled" if isinstance(provenance, dict) else "human")
+                            ),
+                            "acquired_at": durable_turn.get("started_at")
+                            or durable_turn.get("created_at"),
+                            "run_id": owner_run_id or None,
+                            "run_ids": owner_run_ids,
+                            "runtime_key": str(durable_turn.get("runtime_key") or "").strip()
+                            or None,
+                            "native_turn_started": native_turn_started,
+                            "backend_alive": None,
+                        }
                 try:
                     harness_activities = derive_session_harness_activities(conn, session_id)
                 except Exception:
@@ -3265,6 +3317,8 @@ class SessionTurnManager:
     async def cancel(self, session_id: str) -> dict:
         """Persist one empty-P0 control request against the exact active Turn."""
         turn = self.in_flight.get(session_id)
+        if not self._durable_schema_available():
+            return await self._cancel_legacy_turn(session_id, turn)
         with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
         if owner is None:
@@ -3288,6 +3342,58 @@ class SessionTurnManager:
             "session_id": session_id,
             "reason": result.reason,
         }
+
+    async def _cancel_legacy_turn(self, session_id: str, turn: Turn | None) -> dict:
+        """Keep non-Workbench/test runtimes on the existing in-memory Stop path."""
+        if turn is None:
+            return {"ok": False, "code": "not_in_flight", "session_id": session_id}
+        if turn.task.done():
+            return {"ok": True, "session_id": session_id, "status": "already_finished"}
+        turn.stop_no_flush = True
+        if turn.context.platform_specific is None:
+            turn.context.platform_specific = {}
+        turn.context.platform_specific["suppress_stop_no_active_notice"] = True
+        stopped = False
+        try:
+            stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
+        except Exception:
+            logger.exception("internal cancel: backend stop failed for session=%s", session_id)
+        if not stopped:
+            spec = getattr(turn.context, "platform_specific", None) or {}
+            reason = str(spec.get("stop_failure_reason") or "").strip()
+            if reason in {"not_active", "runtime_unavailable"}:
+                turn.task.cancel()
+                await asyncio.gather(turn.task, return_exceptions=True)
+                released_turn = self.in_flight.pop(session_id, None)
+                from core.inbox_events import bus
+
+                if released_turn is not None:
+                    bus.publish("turn.end", {"session_id": session_id})
+                if self.controller is not None:
+                    self.controller.set_agent_status(session_id, "idle")
+                backend = self._context_backend(turn.context)
+                deferred = self._deferred_restart_sessions.get(backend)
+                if deferred is not None:
+                    deferred.discard(session_id)
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "stale_released",
+                    "reason": reason,
+                }
+            turn.stop_no_flush = False
+            return {
+                "ok": False,
+                "code": "stop_failed",
+                "session_id": session_id,
+                "reason": reason or None,
+            }
+        backend = self._context_backend(turn.context)
+        deferred = self._deferred_restart_sessions.get(backend)
+        if deferred is not None:
+            deferred.discard(session_id)
+        turn.task.cancel()
+        return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
 
     @staticmethod
     def _clear_send_now_task(

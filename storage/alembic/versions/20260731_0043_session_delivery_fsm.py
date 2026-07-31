@@ -75,6 +75,18 @@ def _message_snapshot(row: sa.RowMapping) -> dict[str, object]:
     }
 
 
+def _pending_target_type(row: sa.RowMapping) -> str:
+    if (
+        row["author"] == "harness"
+        and row["source"] == "harness"
+        and row["author_name"] == "show_annotation"
+    ):
+        return "annotation"
+    if "harness" in {row["author"], row["source"]}:
+        return "harness"
+    return "user"
+
+
 def _metadata(value: object) -> dict[str, object]:
     try:
         parsed = json.loads(str(value or "{}"))
@@ -173,7 +185,30 @@ def _migrate_pseudo_messages(bind) -> None:
             # and remove the pseudo communication record.
             _migrate_legacy_trace(bind, {**dict(row), "type": "tool_call"})
             continue
+        session_status = bind.execute(
+            sa.text("select status from agent_sessions where id = :session_id"),
+            {"session_id": session_id},
+        ).scalar_one_or_none()
+        if session_status is None:
+            _migrate_legacy_trace(bind, {**dict(row), "type": "tool_call"})
+            continue
+        pending_target = _pending_target_type(row) if kind == "pending" else None
+        if kind == "pending" and pending_target == "user" and session_status == "active":
+            # Legacy Chat reservations were never retryable on startup: the old
+            # recovery contract made them visible without redispatch. Preserve that
+            # accepted history instead of manufacturing an unknowable native attempt.
+            bind.execute(
+                sa.text(
+                    "update messages set type = 'user', updated_at = :updated_at "
+                    "where id = :id and type = 'pending'"
+                ),
+                {"id": row["id"], "updated_at": row["updated_at"] or row["created_at"]},
+            )
+            continue
         snapshot = _message_snapshot(row)
+        if pending_target is not None:
+            snapshot["type"] = pending_target
+            snapshot["author"] = "harness"
         snapshot_json = _json(snapshot)
         metadata = _metadata(row["metadata_json"])
         dispatch_text = str(
@@ -184,10 +219,11 @@ def _migrate_pseudo_messages(bind) -> None:
         )
         state = {
             "queued": "queued",
-            "pending": "reconciling_start",
+            "pending": "reserved",
             "harness_dedupe": "retired",
         }[kind]
-        attempt_id = f"atm_migration_{row['id']}" if kind == "pending" else None
+        if session_status != "active":
+            state = "retired"
         history = {
             "version": 1,
             "events": [
@@ -196,7 +232,7 @@ def _migrate_pseudo_messages(bind) -> None:
                     "kind": "migration",
                     "revision": revision,
                     "legacy_type": kind,
-                    "outcome": "unknown" if kind == "pending" else "moved",
+                    "outcome": "awaiting_retry" if kind == "pending" else "moved",
                 }
             ],
         }
@@ -211,8 +247,8 @@ def _migrate_pseudo_messages(bind) -> None:
                 "updated_at, materialized_at, retired_at"
                 ") values ("
                 ":id, :session_id, null, 'p3', :state, :snapshot_json, :snapshot_sha256, "
-                ":dispatch_text, :dispatch_sha256, :dedupe_key, null, :attempt_id, "
-                ":attempt_kind, null, null, :receipt_outcome, :receipt_json, :attempt_opened_at, "
+                ":dispatch_text, :dispatch_sha256, :dedupe_key, null, null, "
+                "null, null, null, null, '{}', null, "
                 ":history_json, 1, :submitted_at, :updated_at, null, :retired_at)"
             ),
             {
@@ -228,11 +264,6 @@ def _migrate_pseudo_messages(bind) -> None:
                     if row["native_message_id"]
                     else None
                 ),
-                "attempt_id": attempt_id,
-                "attempt_kind": "start" if attempt_id else None,
-                "receipt_outcome": "unknown" if attempt_id else None,
-                "receipt_json": _json({"reason": "legacy_pending_may_have_written"}) if attempt_id else "{}",
-                "attempt_opened_at": row["created_at"] if attempt_id else None,
                 "history_json": _json(history),
                 "submitted_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -359,8 +390,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(state in ('start_attempting','reconciling_start') "
             "and current_attempt_id is not null and current_attempt_kind = 'start' "
-            "and (current_target_turn_id is not null "
-            "or (state = 'reconciling_start' and current_attempt_id like 'atm_migration_%'))) "
+            "and current_target_turn_id is not null) "
             "or (state in ('steering','reconciling_steer') "
             "and current_attempt_id is not null and current_attempt_kind = 'steer' "
             "and current_target_turn_id is not null and current_expected_native_turn_id is not null) "
@@ -670,8 +700,13 @@ def downgrade() -> None:
             "select count(*) from message_deliveries where not ("
             "message_id is null and json_valid(delivery_history_json) = 1 "
             "and json_array_length(json_extract(delivery_history_json, '$.events')) = 1 "
-            "and json_extract(delivery_history_json, '$.events[0].kind') = 'migration' "
-            "and json_extract(delivery_history_json, '$.events[0].legacy_type') <> 'pending')"
+            "and json_extract(delivery_history_json, '$.events[0].kind') = 'migration' and ("
+            "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'queued' "
+            "and state in ('queued','retired')) or "
+            "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'pending' "
+            "and state in ('reserved','retired')) or "
+            "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'harness_dedupe' "
+            "and state = 'retired')))"
         )
     ).scalar_one()
     live_turns = bind.execute(

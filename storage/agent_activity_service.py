@@ -3,7 +3,7 @@
 Composes the two persisted trace sources into per-turn groups:
 
 * interim ``assistant`` messages (``messages`` table, ``type='assistant'``), and
-* ``tool_call`` events (``agent_events`` table, ``event_type='tool_call'``).
+* activity and migrated terminal events from ``agent_events``.
 
 A *turn* is bounded by transcript markers rather than an id: it ends at the
 agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
@@ -178,7 +178,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     events = agent_events_service.list_session_events(
         conn,
         session_id=session_id,
-        event_types=("tool_call",),
+        event_types=("tool_call", "legacy_silent_terminal"),
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
@@ -229,6 +229,23 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         event_ts = _parse_ts(event.get("created_at"))
         event_sort = _emit_micros(event.get("id"), event_ts)
         if oldest_msg_sort is not None and event_sort < oldest_msg_sort:
+            continue
+        if event.get("event_type") == "legacy_silent_terminal":
+            items.append(
+                {
+                    "ts": event_ts,
+                    "sort": event_sort,
+                    "rank": _PHASE_RANK["terminal"],
+                    "created_at": event.get("created_at"),
+                    "kind": "terminal",
+                    "id": event.get("id"),
+                    "mtype": "legacy_silent_terminal",
+                    "row_kind": "turn_terminal",
+                    "text": None,
+                    "is_silent": True,
+                    "terminal_status": "done",
+                }
+            )
             continue
         items.append(
             {

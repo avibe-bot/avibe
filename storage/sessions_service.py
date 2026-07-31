@@ -47,6 +47,7 @@ from storage.session_reclaim import (
     reconcile_explicit_overrides,
 )
 from storage.settings_service import make_scope_id, upsert_scope
+from storage import message_deliveries as delivery_store
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -2034,20 +2035,29 @@ def _delete_agent_session_rows(
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
         # a superseded one the thread has already moved off.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
-        removed = bool(
+        claimed = bool(
             conn.execute(
-                agent_sessions.delete()
+                agent_sessions.update()
                 .where(agent_sessions.c.id == session_id)
                 .where(agent_sessions.c.id.in_(id_query))
+                .values(updated_at=agent_sessions.c.updated_at)
             ).rowcount
         )
-        if not removed:
+        if not claimed:
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",
                 session_id,
             )
             continue
+        delivery_store.purge_session_graph(conn, session_id)
+        removed = bool(
+            conn.execute(
+                agent_sessions.delete().where(agent_sessions.c.id == session_id)
+            ).rowcount
+        )
+        if not removed:
+            raise RuntimeError(f"claimed Session {session_id} disappeared during teardown")
         deleted += 1
     return deleted
 

@@ -649,8 +649,7 @@ message_deliveries = Table(
     CheckConstraint(
         "(state in ('start_attempting', 'reconciling_start') "
         "and current_attempt_id is not null and current_attempt_kind = 'start' "
-        "and (current_target_turn_id is not null "
-        "or (state = 'reconciling_start' and current_attempt_id like 'atm_migration_%'))) "
+        "and current_target_turn_id is not null) "
         "or (state in ('steering', 'reconciling_steer') "
         "and current_attempt_id is not null and current_attempt_kind = 'steer' "
         "and current_target_turn_id is not null "

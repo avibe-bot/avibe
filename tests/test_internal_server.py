@@ -2231,6 +2231,33 @@ def test_turn_state_reflects_in_flight():
     assert busy["backend"] == "opencode"
 
 
+def test_turn_state_projects_a_restored_durable_owner_without_in_flight(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="restored-turn-state",
+        backend="opencode",
+    )
+    app = internal_server.create_app(_build_controller_double())
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (await client.get(f"/internal/turn-state/{session['id']}")).json()
+
+    state = asyncio.run(_go())
+    assert state["in_flight"] is True
+    assert state["foreground"] == "running"
+    assert state["native_turn_started"] is True
+    assert state["backend"] == "opencode"
+    assert state["owner"]["runtime_key"] == f"runtime:{session['id']}"
+    assert state["owner"]["native_turn_started"] is True
+    assert turn_id
+
+
 def test_cancel_returns_404_when_session_not_in_flight(tmp_path, monkeypatch):
     from storage.importer import ensure_sqlite_state
 

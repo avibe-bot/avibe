@@ -17,7 +17,14 @@ from modules.im import MessageContext
 from storage import message_deliveries as delivery_store
 from storage import workbench_sessions_service
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, message_deliveries, messages, metadata, session_turns
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    message_deliveries,
+    messages,
+    metadata,
+    session_turns,
+)
 
 
 @pytest.fixture
@@ -684,6 +691,83 @@ def test_start_write_ambiguity_survives_restart_without_duplicate_dispatch(manag
     assert [text for _, text in starts] == ["once"]
     with engine.connect() as conn:
         assert conn.execute(select(messages.c.id)).all() == []
+
+
+def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    attempt_id = delivery_store.new_attempt_id()
+    run_id = "run-canceled-after-start-claim"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent",
+                status="canceled",
+                cancel_requested=1,
+                session_id="ses_fsm",
+                created_at=now,
+                completed_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="start_attempting",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="must not run",
+                native_message_id=f"agent_run:{run_id}",
+            ),
+            dispatch_text="must not run",
+            current_attempt_id=attempt_id,
+            current_attempt_kind="start",
+            current_target_turn_id=turn_id,
+        )
+        delivery_store.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            initial_delivery_id=delivery_id,
+            state="starting",
+            backend="codex",
+        )
+
+    assert asyncio.run(manager._start_persisted_turn(turn_id, context=_context())) is False
+    assert starts == []
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None and turn["terminal_outcome"] == "not_written"
+
+
+def test_materialized_message_uses_the_delivery_timestamp_format(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    _turn_id, _context_value = asyncio.run(_activate(manager, text="ordered input"))
+    with engine.connect() as conn:
+        delivery = conn.execute(
+            select(message_deliveries).where(
+                message_deliveries.c.dispatch_text == "ordered input"
+            )
+        ).mappings().one()
+        message = conn.execute(
+            select(messages).where(messages.c.id == delivery["id"])
+        ).mappings().one()
+    assert message["created_at"] == delivery["submitted_at"]
+    assert message["created_at"].endswith("Z")
+    assert "." not in message["created_at"]
 
 
 def test_two_restart_recoveries_claim_reserved_submission_once(managers) -> None:
