@@ -1654,8 +1654,21 @@ def test_recover_processing_drops_completed_requests(tmp_path: Path) -> None:
     assert not (store.pending_dir / f"{request.id}.json").exists()
 
 
-def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
-    """HFR-003: cancellation requeues the claim and releases its Session slot."""
+def test_drain_requests_terminalizes_cancelled_task_run(tmp_path: Path) -> None:
+    """HFR-003: cancellation terminalizes the claim and releases its Session slot.
+
+    This test used to assert the opposite — that the claim went back to
+    ``pending`` — which is the defect PR2 removes. Requeueing on the legacy file
+    backend has the same two faults it has on SQLite: the interrupted attempt is
+    never recorded anywhere, and the next start re-sends the same prompt.
+
+    The file store has no deferred-terminal lane and no guarded writer, so its
+    terminal path is ``complete(ok=False)``; the point of the test is that NO
+    backend is left on the old requeue behaviour, and that the cause travels with
+    the settlement. Nobody recorded a cause for this cancellation, so the generic
+    default applies: ``interrupted``, never the more specific ``evicted``.
+    """
+
     path = tmp_path / "scheduled_tasks.json"
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     store = ScheduledTaskStore(path)
@@ -1681,7 +1694,7 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     async def _exercise() -> None:
         # The drain now dispatches concurrently and returns immediately, so
         # the CancelledError surfaces on the spawned execution task rather
-        # than out of _drain_requests itself. Awaiting it lets the requeue
+        # than out of _drain_requests itself. Awaiting it lets the settlement
         # path (in _execute_claimed_request) run.
         await service._drain_requests()
         execution = service._inflight_executions.get(request.id)
@@ -1703,9 +1716,16 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     assert updated is not None
     assert updated.last_run_at is None
     assert updated.enabled is True
-    assert (request_store.pending_dir / f"{request.id}.json").exists()
+    # Terminal, and NOT waiting to fire the same prompt a second time.
+    assert not (request_store.pending_dir / f"{request.id}.json").exists()
     assert not (request_store.processing_dir / f"{request.id}.json").exists()
-    assert not (request_store.completed_dir / f"{request.id}.json").exists()
+    completed_path = request_store.completed_dir / f"{request.id}.json"
+    assert completed_path.exists()
+    completed = json.loads(completed_path.read_text(encoding="utf-8"))
+    assert completed["ok"] is False
+    assert completed["error"]
+    assert completed["completed_at"]
+    assert completed["metadata"]["interrupt_reason"] == "interrupted"
 
 
 def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatch, tmp_path) -> None:

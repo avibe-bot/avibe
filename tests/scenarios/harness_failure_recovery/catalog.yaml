@@ -29,12 +29,12 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_dead_accepted_owner_converges_run_session_and_persisted_fifo
   - id: HFR-003
-    name: canceled scheduler execution requeues its claimed Run
+    name: canceled scheduler execution terminalizes its claimed Run
     status: covered
     kind: cancellation
     layer: contract
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_drain_requests_requeues_cancelled_task_run
+    test: tests/test_scheduled_tasks.py::test_drain_requests_terminalizes_cancelled_task_run
   - id: HFR-004
     name: restart recovers held run queues without flushing user-owned queue heads
     status: covered

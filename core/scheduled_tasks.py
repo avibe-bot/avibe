@@ -42,7 +42,9 @@ from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_INTERRUPTED,
     SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_RESTARTED,
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
     SWEEP_I18N_KEYS,
@@ -1970,7 +1972,15 @@ class TaskExecutionStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> bool:
+        """Park a terminal intent (and the metadata it owes) on a run row.
+
+        ``False`` on the legacy file store, which has no deferred-terminal lane at
+        all — a caller that needs the row terminalized either way must fall back to
+        ``complete()`` there rather than read the ``False`` as "already settled".
+        """
+
         if self._sqlite is None:
             return False
         return self._sqlite.defer_run_terminal(
@@ -1978,6 +1988,7 @@ class TaskExecutionStore:
             terminal_status=terminal_status,
             error=error,
             result_text=result_text,
+            metadata=metadata,
         )
 
     def update_callback_status(
@@ -2456,6 +2467,15 @@ class ScheduledTaskService:
         # lets the sweep release a leaked lock without ever freeing one a live
         # execution still holds (see ``_release_leaked_session_locks``).
         self._session_lock_owners: Dict[str, str] = {}
+        # request/run id -> the settlement cause whoever cancelled that execution
+        # recorded, read back by ``_execute_claimed_request``'s cancellation handler.
+        #
+        # A side channel is needed because ``Task.cancel()`` carries no payload the
+        # cancelled coroutine can read, and the CAUSE cannot be inferred at the
+        # handler: eviction, shutdown and a user Stop all arrive as the same
+        # ``CancelledError``. Written BEFORE the cancel (see ``_cancel_execution``) so
+        # the handler can never observe the cancellation without its reason.
+        self._execution_cancel_causes: Dict[str, str] = {}
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
         self._pending_recovered_activity_terminals: list[Any] = []
@@ -2723,6 +2743,33 @@ class ScheduledTaskService:
         except RuntimeError:
             return None
 
+    def _cancel_execution(self, run_id: str, settled_by: str) -> bool:
+        """Cancel one in-flight execution with its settlement cause recorded first.
+
+        THE ONLY way to cancel an execution task in this service. A raw
+        ``task.cancel()`` on an ``_inflight_executions`` value reaches the same
+        handler with no cause recorded, so the run is terminalized under the generic
+        ``interrupted`` default and the real story — evicted, restarted, stopped — is
+        lost at the one point that knew it. Routing every site through here is what
+        makes the omission greppable rather than silent.
+
+        Order matters and is the same order ``SessionTurnManager.release_for_backend_refresh``
+        uses: record, THEN cancel. Cancelling first leaves a window in which the
+        handler can run against an empty map.
+
+        Returns whether an execution was actually found and cancelled. A cause is
+        recorded ONLY when there is a task to cancel — an entry written for an
+        execution that does not exist has no ``_on_execution_done`` coming to clear
+        it, and would later be read by an unrelated run that reused the id.
+        """
+
+        task = self._inflight_executions.get(run_id)
+        if task is None:
+            return False
+        self._execution_cancel_causes[run_id] = settled_by
+        task.cancel()
+        return True
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -2734,9 +2781,12 @@ class ScheduledTaskService:
         # outlives shutdown. The identity check is the only exemption it needs.
         if self._notice_drain_task and self._notice_drain_task is not current_task:
             self._notice_drain_task.cancel()
-        for task in list(self._inflight_executions.values()):
+        # The SERVICE is going away around these runs, which is a named settlement
+        # cause: each cancelled execution terminalizes itself ``restarted`` rather
+        # than falling through to the unexplained-cancellation default.
+        for request_id, task in list(self._inflight_executions.items()):
             if task is not current_task:
-                task.cancel()
+                self._cancel_execution(request_id, SETTLED_BY_RESTARTED)
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
@@ -2771,10 +2821,13 @@ class ScheduledTaskService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._notice_drain_task = None
-        # Cancel any in-flight executions so shutdown is clean. Cancellation is
-        # caught by ``_execute_claimed_request``, which requeues the run, so it
-        # is picked up again on the next start (and ``recover_processing`` on
-        # init backstops anything left ``running`` after a hard crash).
+        # ``_begin_stop`` already cancelled every in-flight execution as
+        # ``restarted``; await them so the terminal write each one owes has landed
+        # before this coroutine returns. Cancellation is caught by
+        # ``_execute_claimed_request``, which TERMINALIZES the run — it is not
+        # requeued and will not be re-dispatched on the next start, because
+        # re-sending a prompt the user already paid for is the worse of the two
+        # wrongs (and nothing here can tell how far the first attempt got).
         inflight = list(self._inflight_executions.values())
         for task in inflight:
             try:
@@ -2784,6 +2837,7 @@ class ScheduledTaskService:
         self._inflight_executions.clear()
         self._inflight_sessions.clear()
         self._session_lock_owners.clear()
+        self._execution_cancel_causes.clear()
 
     async def _watch_store(self) -> None:
         while self._running:
@@ -4834,6 +4888,10 @@ class ScheduledTaskService:
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
+        # The cause was consumed by the cancellation handler (or never read, if the
+        # execution finished on its own first). Either way it dies with the
+        # execution: a stale entry would be read by whatever run next carries this id.
+        self._execution_cancel_causes.pop(request_id, None)
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
             # Only if it is still OURS: a later execution may already have taken the
@@ -4842,8 +4900,8 @@ class ScheduledTaskService:
             if self._session_lock_owners.get(lock_key) == request_id:
                 self._session_lock_owners.pop(lock_key, None)
         self._drain_dirty = True
-        # ``_execute_claimed_request`` already records failures and requeues on
-        # cancellation; this only surfaces unexpected crashes in the wrapper.
+        # ``_execute_claimed_request`` already records failures and terminalizes the
+        # run on cancellation; this only surfaces unexpected crashes in the wrapper.
         if task.cancelled():
             return
         exc = task.exception()
@@ -4949,7 +5007,29 @@ class ScheduledTaskService:
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
-            self.request_store.requeue(request.id)
+            # TERMINALIZE, never requeue. Cancellation is how every run-blind
+            # teardown reaches a live execution — eviction, service shutdown, a
+            # supervisor reclaiming the session — and requeueing answers the wrong
+            # question. The RUN was interrupted mid-flight and nothing will ever
+            # write its terminal row, so putting the CLAIM back leaves the
+            # ``agent_runs`` row reading as live work forever while the next start
+            # re-sends a prompt whose first attempt may already have had effects.
+            #
+            # Applied to EVERY claimed request with no ``request_type`` inspection:
+            # the rule is "an interrupted claim owes a terminal row", which is a
+            # property of being claimed, not of any request type. Enumerating the
+            # types would mean a type added later silently inherits the old bug.
+            settled_by = (
+                self._execution_cancel_causes.get(request.id) or SETTLED_BY_INTERRUPTED
+            )
+            self._terminalize_cancelled_request(
+                request,
+                settled_by=settled_by,
+                coalesced_run_ids=coalesced_completion_ids,
+                task_id=task_id,
+                session_key=session_key,
+                session_id=session_id,
+            )
             should_complete = False
             raise
         except UnresolvableSessionTarget as exc:
@@ -5057,6 +5137,101 @@ class ScheduledTaskService:
                             "Failed to recover persisted Agent Run queue for session=%s",
                             session_id,
                         )
+
+    def _terminalize_cancelled_request(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        settled_by: str,
+        coalesced_run_ids: Sequence[str],
+        task_id: Optional[str],
+        session_key: Optional[str],
+        session_id: Optional[str],
+    ) -> None:
+        """Settle every run a cancelled execution owned, under the recorded cause.
+
+        THE SIBLINGS ARE NOT OPTIONAL. A coalesced Workbench turn holds one claim on
+        behalf of several ``agent_runs`` rows, so settling ``request.id`` alone
+        strands the rest mid-flight — the exact zombies this path exists to prevent,
+        multiplied by the fan-out.
+
+        Status and copy come only from the settlement tables (``core/run_settlement.py``);
+        this site contributes the CAUSE and nothing else. ``interrupt_reason`` follows
+        the same rule rather than being written unconditionally: a settlement the
+        tables map to ``canceled`` is a user's own decision (``stopped``), and
+        labelling a run the user stopped as "interrupted" would both misdescribe it
+        and hand it an interruption notice nobody is owed.
+
+        Writes through the DEFER/SETTLE pair, not ``settle_without_result``: a row an
+        Activity still owns must keep its intent parked until that lifecycle ends,
+        and the pair is also what carries the cause durably across the two statements
+        (see ``defer_run_terminal``). Never ``update_run_status`` — its UPDATE has no
+        status predicate and would clobber a concurrent ``vibe runs cancel``.
+
+        Failures are logged, never raised: this runs inside a ``CancelledError``
+        unwind, and letting a store error escape would replace the cancellation with
+        an unrelated exception and report the execution as crashed.
+        """
+
+        terminal_status = SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed")
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(
+                settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_INTERRUPTED]
+            )
+        )
+        metadata = (
+            {"interrupt_reason": settled_by} if terminal_status != "canceled" else None
+        )
+        run_ids: list[str] = []
+        for raw_run_id in (request.id, *coalesced_run_ids):
+            run_id = str(raw_run_id or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+        if not run_ids:
+            return
+        try:
+            if not self.request_store.supports_guarded_settlement():
+                # The legacy file store has no deferred-terminal lane and no guarded
+                # writer, so its only terminal path is ``complete()``. It is still a
+                # TERMINAL path — no backend is left on the old requeue behaviour —
+                # and it carries the same cause on the same statement. It settles the
+                # claim as a whole, which is all that store can express: coalesced
+                # fan-outs are a SQLite-only feature.
+                self.request_store.complete(
+                    request,
+                    ok=False,
+                    error=error_text,
+                    task_id=task_id,
+                    session_key=session_key,
+                    session_id=session_id,
+                    interrupt_reason=settled_by if metadata else None,
+                )
+                self._drain_dirty = True
+                return
+            for run_id in run_ids:
+                self.request_store.defer_run_terminal(
+                    run_id,
+                    terminal_status=terminal_status,
+                    error=error_text,
+                    metadata=metadata,
+                )
+                if self.request_store.settle_deferred_run(run_id):
+                    self._drain_dirty = True
+        except Exception:
+            logger.warning(
+                "Failed to terminalize cancelled request %s as %s",
+                request.id,
+                settled_by,
+                exc_info=True,
+            )
+            return
+        logger.warning(
+            "Claimed request %s was cancelled (%s); settled %s run(s) %s",
+            request.id,
+            settled_by,
+            terminal_status,
+            ", ".join(run_ids),
+        )
 
     async def _execute_task(
         self,

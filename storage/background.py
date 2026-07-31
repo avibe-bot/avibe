@@ -3668,9 +3668,22 @@ class SQLiteBackgroundTaskStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
-        """Remember a terminal intent and result while an Activity blocks it."""
+        """Remember a terminal intent and result while an Activity blocks it.
+
+        ``metadata`` is the run-metadata the eventual terminal write owes — today
+        ``interrupt_reason`` for a run terminalized out of band. It is REMEMBERED
+        HERE rather than written now, and that is the whole point: a defer and its
+        settlement are two statements, so a cause stamped by a third write could be
+        lost to a crash between them, and one stamped after the settlement would
+        arrive too late for ``_owed_failure_notice_for_transition`` to read (the
+        notice is never overwritten once stamped). Parked in
+        ``result_payload_json`` beside the other deferred fields, it survives the
+        gap and :meth:`settle_deferred_run` folds it into the SAME guarded UPDATE
+        that transitions the status.
+        """
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -3698,13 +3711,25 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text is not None
                 and result_payload.get("deferred_terminal_result_text") != deferred_result_text
             )
-            if not status_changed and not error_changed and not result_text_changed:
+            deferred_metadata = dict(metadata) if metadata else None
+            metadata_changed = bool(
+                deferred_metadata is not None
+                and result_payload.get("deferred_terminal_metadata") != deferred_metadata
+            )
+            if (
+                not status_changed
+                and not error_changed
+                and not result_text_changed
+                and not metadata_changed
+            ):
                 return False
             result_payload["deferred_terminal_status"] = normalized
             if error_changed:
                 result_payload["deferred_terminal_error"] = error_text
             if result_text_changed:
                 result_payload["deferred_terminal_result_text"] = deferred_result_text
+            if metadata_changed:
+                result_payload["deferred_terminal_metadata"] = deferred_metadata
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -3729,7 +3754,15 @@ class SQLiteBackgroundTaskStore:
         error: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
-        """Apply one stored terminal intent after owned Activities become terminal."""
+        """Apply one stored terminal intent after owned Activities become terminal.
+
+        Any metadata :meth:`defer_run_terminal` parked with the intent is popped
+        here and folded into the same guarded UPDATE, BEFORE the owed-notice
+        stamper reads the merged blob — so an ``interrupt_reason`` recorded at
+        defer time both survives a crash in the gap and reaches
+        ``_owed_failure_notice_for_transition`` in time to pick the interruption
+        lane rather than the ordinary-failure one.
+        """
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -3759,6 +3792,9 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text = result_payload.pop(
                     "deferred_terminal_result_text", None
                 )
+                deferred_metadata = result_payload.pop("deferred_terminal_metadata", None)
+                if not isinstance(deferred_metadata, dict) or not deferred_metadata:
+                    deferred_metadata = None
                 requested_status = (
                     _stronger_terminal_status(deferred_status, terminal_status)
                     if terminal_status
@@ -3784,6 +3820,7 @@ class SQLiteBackgroundTaskStore:
                     source_kind=row["source_kind"],
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
+                    extra_metadata=deferred_metadata,
                     now=now,
                 )
                 transition = conn.execute(
