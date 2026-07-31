@@ -139,6 +139,20 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "failed": "failed",
     "canceled": "canceled",
 }
+
+#: Raw ``agent_runs.status`` values that are NOT yet terminal — the rows something
+#: may still write, so a fork, an archive or a session teardown has to account for
+#: them rather than treat them as history.
+#:
+#: DERIVED from ``RUN_STATUS_ALIASES`` instead of retyped, because the raw column
+#: carries two spellings of each live state (``pending``/``queued``,
+#: ``processing``/``running``) and every hand-written copy of this tuple had to
+#: remember both. There were three copies; a live status added to the alias map now
+#: reaches all of them at once instead of leaving one caller silently reading a
+#: running run as finished.
+NON_TERMINAL_RUN_STATUSES: tuple[str, ...] = tuple(
+    status for status, canonical in RUN_STATUS_ALIASES.items() if canonical in {"queued", "running"}
+)
 _LIKE_ESCAPE = "\\"
 # What a task/watch is *doing*, which is not what ``enabled`` records.
 #
@@ -1105,6 +1119,10 @@ RUN_INTERRUPTION_REASONS = frozenset(
         "evicted",
         "restarted",
         "lifetime_timeout",
+        # The teardown lane's generic default: an execution cancelled with no cause
+        # recorded. Still one run ended from outside, so it belongs here and not in
+        # the per-fire failure population.
+        "interrupted",
         SWEEP_REASON_ORPHANED,
     }
 )

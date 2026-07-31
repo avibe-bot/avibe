@@ -43,6 +43,7 @@ from core.run_settlement import (
     DISPATCH_FAILURE_REASONS,
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     INTERRUPT_REASON_EVICTED,
+    INTERRUPT_REASON_INTERRUPTED,
     INTERRUPT_REASON_LIFETIME_TIMEOUT,
     INTERRUPT_REASON_RESTARTED,
     RUN_INTERRUPTION_REASONS,
@@ -236,6 +237,10 @@ NOTICE_REASON_I18N_KEYS: dict[str, str] = {
     INTERRUPT_REASON_EVICTED: "harness.notice.reason.evicted",
     INTERRUPT_REASON_RESTARTED: "harness.notice.reason.restarted",
     INTERRUPT_REASON_LIFETIME_TIMEOUT: "harness.notice.reason.lifetimeTimeout",
+    # Deliberately vaguer than its siblings, and honestly so: the cancellation was
+    # not attributed, so the label states what IS known instead of guessing at a
+    # session eviction or a restart the user can then go looking for.
+    INTERRUPT_REASON_INTERRUPTED: "harness.notice.reason.interrupted",
     # The sweep's "owner vanished" class, spelled as a literal exactly as
     # ``RUN_INTERRUPTION_REASONS`` does — the constant itself lives in the store, and
     # importing storage from core would invert the layering.

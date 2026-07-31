@@ -33,7 +33,6 @@ SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
     for message_type in types_with("activityRole")
     if spec_for(message_type)["activityRole"] in {"activity", "terminal"}
 }
-ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
 _FORK_ANCHOR_TYPES = tuple(
@@ -628,6 +627,10 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
 def _source_has_active_agent_run(conn: Any, source_session_id: str) -> bool:
     from sqlalchemy import select
 
+    # One definition of "not yet terminal", shared with the archive path: the raw
+    # column carries two spellings of each live state, and a fork that missed one
+    # would copy a session out from under a run still writing to it.
+    from storage.background import NON_TERMINAL_RUN_STATUSES
     from storage.models import agent_runs
 
     return (
@@ -635,7 +638,7 @@ def _source_has_active_agent_run(conn: Any, source_session_id: str) -> bool:
             select(agent_runs.c.id)
             .where(
                 agent_runs.c.session_id == source_session_id,
-                agent_runs.c.status.in_(ACTIVE_SOURCE_RUN_STATUSES),
+                agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES),
             )
             .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
             .limit(1)

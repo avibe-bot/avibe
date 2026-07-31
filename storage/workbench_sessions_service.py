@@ -30,6 +30,9 @@ from storage.agent_session_rows import (
     create_agent_session_row,
     new_session_id,
 )
+# The run-status vocabulary's home — archive and the fork guard share one
+# definition of "not yet terminal" instead of each retyping the four raw values.
+from storage.background import NON_TERMINAL_RUN_STATUSES
 from storage.db import escape_sql_like
 from storage.session_reclaim import (
     RECLAIM_DELETE,
@@ -48,8 +51,8 @@ from storage.models import (
     agents,
 )
 
-# Raw ``agent_runs.status`` values that are not yet terminal — archive cancels these.
-_ACTIVE_RUN_STATUSES = ("pending", "queued", "processing", "running")
+# Runs that never started, both raw spellings — archive discards these outright,
+# while the wider ``NON_TERMINAL_RUN_STATUSES`` above are cancelled.
 _PENDING_RUN_STATUSES = ("pending", "queued")
 
 
@@ -813,7 +816,7 @@ def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
             select(func.count())
             .select_from(agent_runs)
             .where(agent_runs.c.session_id == session_id)
-            .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
         ).scalar()
         or 0
     )
@@ -1002,7 +1005,7 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             .where(agent_runs.c.callback_session_id == session_id)
             .where(agent_runs.c.run_type == "agent_run")
             .where(agent_runs.c.callback_status == "pending")
-            .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
             .where(
                 or_(
                     agent_runs.c.session_id.is_(None),
@@ -1120,7 +1123,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
         conn.execute(
             update(agent_runs)
             .where(agent_runs.c.session_id == session_id)
-            .where(agent_runs.c.status.in_(_ACTIVE_RUN_STATUSES))
+            .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
             .values(cancel_requested=1, cancel_requested_at=now, updated_at=now)
         )
         conn.execute(

@@ -24,6 +24,7 @@ from core.failure_notices import (
     PER_FIRE_INTERRUPT_REASONS,
 )
 from core.run_settlement import (
+    INTERRUPT_REASON_INTERRUPTED,
     RUN_INTERRUPTION_REASONS,
     SETTLEMENT_I18N_KEYS,
     SWEEP_I18N_KEYS,
@@ -119,6 +120,23 @@ def test_session_archived_message_resolves_in_every_language() -> None:
 
 
 def test_notice_reason_i18n_map_covers_exactly_the_interruption_lane() -> None:
+    """HFR-124: the interrupted lane's labels, including the generic default.
+
+    The equality below is the drift guard; ``interrupted`` is named explicitly
+    because it is the lane's DEFAULT — the value an external cancellation with no
+    recorded cause settles as — so it is the one reason that can reach a user
+    without any code path having chosen it on purpose. Dropping it from either
+    side would leave every unattributed teardown rendering the localized generic
+    ("for a reason outside the run itself") instead of saying a cancellation
+    happened, or leak the wire value mid-sentence.
+    """
+
+    assert INTERRUPT_REASON_INTERRUPTED in RUN_INTERRUPTION_REASONS, (
+        "the generic teardown default belongs to the interrupted lane, not the "
+        "per-fire failure lane"
+    )
+    assert INTERRUPT_REASON_INTERRUPTED in NOTICE_REASON_I18N_KEYS
+
     # ``harness.notice.interrupted`` renders the reason INTO the sentence a user
     # reads, so an unmapped reason is a wire identifier leaking into product copy —
     # "was interrupted (backend_refresh)". Same drift guard as ``SWEEP_I18N_KEYS``

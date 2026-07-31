@@ -65,6 +65,31 @@ SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
 #: healthy process and does not.
 SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
 
+#: A session teardown retired the turn: the session an in-flight run was executing
+#: in was reclaimed — idle eviction, the stuck-active backstop, a transport the
+#: session can no longer be reached through. Nobody asked for this run to end and
+#: the definition is fine, so re-firing it is expected to work.
+SETTLED_BY_EVICTED: Final = "evicted"
+
+#: The SERVICE restarted around a run: ``ScheduledTaskService.stop()`` and the
+#: controller's backend shutdown cancel every in-flight execution on the way out.
+#:
+#: Distinct from ``backend_refresh``, which interrupts one backend's turns inside a
+#: process that keeps running, and from ``stopped``, which is a user's decision.
+SETTLED_BY_RESTARTED: Final = "restarted"
+
+#: The generic external-cancel default: this process's execution task was cancelled
+#: and NO cause was recorded by whoever cancelled it.
+#:
+#: Every teardown Avibe originates names its own cause, so reaching this value means
+#: the cancellation came from somewhere that did not (a supervisor, a loop shutdown,
+#: a caller added later that forgot). It must not silently borrow a more specific
+#: story: reporting an unexplained cancellation as ``evicted`` tells the user their
+#: session was reclaimed, which may simply be untrue. An infrastructure fault with an
+#: honest, unspecific explanation is the correct answer, so it settles ``failed`` and
+#: carries its own copy.
+SETTLED_BY_INTERRUPTED: Final = "interrupted"
+
 #: Settlements that mean "no terminal result will ever arrive for this run" — the
 #: ONLY ones a caller may terminalize a row from. Both settlement lanes test
 #: membership here rather than excluding ``SETTLED_BY_TERMINAL_RESULT``, so a new
@@ -75,6 +100,9 @@ SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
         SETTLED_BY_STOPPED,
         SETTLED_BY_REFUSED_CONCURRENT_TURN,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_EVICTED,
+        SETTLED_BY_RESTARTED,
+        SETTLED_BY_INTERRUPTED,
     }
 )
 
@@ -88,12 +116,15 @@ INTERRUPT_REASON_NO_TERMINAL_RESULT: Final = SETTLED_BY_NO_TERMINAL_RESULT
 INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
+INTERRUPT_REASON_EVICTED: Final = SETTLED_BY_EVICTED
+INTERRUPT_REASON_RESTARTED: Final = SETTLED_BY_RESTARTED
+INTERRUPT_REASON_INTERRUPTED: Final = SETTLED_BY_INTERRUPTED
 
-#: Reserved for ``docs/plans/harness-run-reliability.md`` (PR2 / PR4 / PR7). Named
-#: here now because the classification below has to be closed over them before
-#: they are written, or each PR would have to remember to widen it.
-INTERRUPT_REASON_EVICTED: Final = "evicted"
-INTERRUPT_REASON_RESTARTED: Final = "restarted"
+#: Still reserved for ``docs/plans/harness-run-reliability.md`` (PR4). Named here
+#: now because the classification below has to be closed over it before it is
+#: written, or that PR would have to remember to widen it. The eviction/restart
+#: pair above graduated to real settlement causes and are spelled once, in the
+#: settlement section, exactly like ``stopped``.
 INTERRUPT_REASON_LIFETIME_TIMEOUT: Final = "lifetime_timeout"
 
 #: The run could not be dispatched at all because the session it delivers to no
@@ -174,6 +205,11 @@ RUN_INTERRUPTION_REASONS: Final = frozenset(
         INTERRUPT_REASON_EVICTED,
         INTERRUPT_REASON_RESTARTED,
         INTERRUPT_REASON_LIFETIME_TIMEOUT,
+        # An unexplained external cancellation is still an out-of-band end to ONE
+        # run, at most once per run, and says nothing about the definition — the
+        # same shape as its named siblings, so it takes the same lane rather than
+        # counting against health and sharing the per-fire suppression streak.
+        INTERRUPT_REASON_INTERRUPTED,
         # The sweep's "owner vanished" class: a process restart by another name.
         "orphaned",
     }
@@ -193,6 +229,12 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
     SETTLED_BY_BACKEND_REFRESH: "harness.run.interrupted.backendRefresh",
+    SETTLED_BY_EVICTED: "harness.run.interrupted.evicted",
+    SETTLED_BY_RESTARTED: "harness.run.interrupted.restarted",
+    # The leaf repeats the family name because the cause IS "interrupted, cause
+    # unrecorded" — every sibling leaf is its own wire value and inventing a
+    # prettier name here would be the one key a reader cannot map back.
+    SETTLED_BY_INTERRUPTED: "harness.run.interrupted.interrupted",
 }
 
 
@@ -214,6 +256,13 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
     SETTLED_BY_BACKEND_REFRESH: "failed",
+    # Teardown causes. None of the three carries user intent about THIS run — an
+    # eviction reclaims a session, a restart takes the whole process down, and an
+    # unexplained cancellation is by definition unattributed — so ``canceled``
+    # would put words in the user's mouth. They stay ``failed`` and visible.
+    SETTLED_BY_EVICTED: "failed",
+    SETTLED_BY_RESTARTED: "failed",
+    SETTLED_BY_INTERRUPTED: "failed",
 }
 
 
