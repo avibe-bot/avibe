@@ -52,6 +52,7 @@ from storage.workbench_sessions_service import (
     list_sessions_page,
     reset_running_agent_status,
     require_enabled_agent_backend,
+    require_enabled_agent_identity,
     set_agent_status,
     touch_session,
     update_session,

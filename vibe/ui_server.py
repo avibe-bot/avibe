@@ -6325,6 +6325,8 @@ def sessions_create():
     payload = request.json or {}
     project_id = (payload.get("project_id") or "").strip()
     agent_backend = (payload.get("agent_backend") or "").strip()
+    agent_id = payload.get("agent_id")
+    agent_name = payload.get("agent_name")
     if not project_id:
         return jsonify({"error": "project_id is required"}), 400
     # When the caller doesn't pin a backend/agent (a plain "new chat"), leave
@@ -6343,17 +6345,21 @@ def sessions_create():
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
-            if payload.get("agent_name"):
-                workbench_sessions_service.require_enabled_agent_backend(
+            if agent_id or agent_name:
+                identity = workbench_sessions_service.require_enabled_agent_identity(
                     conn,
-                    str(payload["agent_name"]),
+                    agent_id=agent_id,
+                    agent_name=agent_name,
                 )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                agent_backend = identity["backend"]
             session = workbench_sessions_service.create_session(
                 conn,
                 scope_id=scope_id,
                 agent_backend=agent_backend,
-                agent_id=payload.get("agent_id"),
-                agent_name=payload.get("agent_name"),
+                agent_id=agent_id,
+                agent_name=agent_name,
                 agent_variant=payload.get("agent_variant"),
                 model=payload.get("model"),
                 reasoning_effort=payload.get("reasoning_effort"),
@@ -6778,13 +6784,16 @@ async def sessions_update(session_id: str):
             return _session_archived_response()
     should_check_backend_lock = "agent_backend" in updatable
     requested_backend = updatable.get("agent_backend")
-    if "agent_name" in updatable and "agent_backend" not in updatable:
+    identity_requested = "agent_id" in updatable or "agent_name" in updatable
+    if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
         try:
             with engine.connect() as conn:
-                requested_backend = workbench_sessions_service.require_enabled_agent_backend(
+                identity = workbench_sessions_service.require_enabled_agent_identity(
                     conn,
-                    str(updatable.get("agent_name") or ""),
+                    agent_id=updatable.get("agent_id"),
+                    agent_name=updatable.get("agent_name"),
                 )
+                requested_backend = identity["backend"]
             should_check_backend_lock = True
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
@@ -6821,11 +6830,16 @@ async def sessions_update(session_id: str):
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
-            if updatable.get("agent_name"):
-                workbench_sessions_service.require_enabled_agent_backend(
+            if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
+                identity = workbench_sessions_service.require_enabled_agent_identity(
                     conn,
-                    str(updatable["agent_name"]),
+                    agent_id=updatable.get("agent_id"),
+                    agent_name=updatable.get("agent_name"),
                 )
+                updatable["agent_id"] = identity["id"]
+                updatable["agent_name"] = identity["name"]
+                updatable["agent_backend"] = identity["backend"]
+                updatable.setdefault("agent_variant", identity["backend"])
             previous_session = (
                 workbench_sessions_service.get_session(conn, session_id)
                 if {"visibility", "scope_id"}.intersection(updatable)

@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import Connection, case, func, or_, select
+from sqlalchemy import Connection, and_, case, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -104,6 +104,23 @@ def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> 
 _BACKEND_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
+def _session_agent_display_label(row: Mapping[str, Any]) -> str | None:
+    agent_name = str(row["agent_name"] or "").strip()
+    catalog_name = str(row["catalog_agent_name"] or "").strip()
+    if row["catalog_agent_archived_at"]:
+        try:
+            metadata_json = json.loads(row["catalog_agent_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata_json = {}
+        archive = metadata_json.get("_avibe_archive") if isinstance(metadata_json, dict) else None
+        if isinstance(archive, dict):
+            original_name = str(archive.get("original_name") or "").strip()
+            if original_name:
+                return original_name
+    backend = str(row["agent_backend"] or "").strip()
+    return catalog_name or agent_name or _BACKEND_LABELS.get(backend, backend or None)
+
+
 def read_session_display_meta(
     session_ids: list[str], *, db_path: Path | None = None
 ) -> dict[str, dict[str, str | None]]:
@@ -127,10 +144,25 @@ def read_session_display_meta(
                         agent_sessions.c.title,
                         agent_sessions.c.agent_name,
                         agent_sessions.c.agent_backend,
+                        agents.c.name.label("catalog_agent_name"),
+                        agents.c.archived_at.label("catalog_agent_archived_at"),
+                        agents.c.metadata_json.label("catalog_agent_metadata_json"),
                         scopes.c.platform,
                     )
                     .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        agent_sessions
+                        .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        .join(
+                            agents,
+                            or_(
+                                agents.c.id == agent_sessions.c.agent_id,
+                                and_(
+                                    agent_sessions.c.agent_id.is_(None),
+                                    agents.c.name == agent_sessions.c.agent_name,
+                                ),
+                            ),
+                            isouter=True,
+                        )
                     )
                     .where(agent_sessions.c.id.in_(ids))
                 )
@@ -143,9 +175,7 @@ def read_session_display_meta(
     for row in rows:
         title = str(row["title"] or "").strip() or None
         platform = str(row["platform"] or "").strip() or None
-        agent_name = str(row["agent_name"] or "").strip()
-        backend = str(row["agent_backend"] or "").strip()
-        agent = agent_name or _BACKEND_LABELS.get(backend, backend or None)
+        agent = _session_agent_display_label(row)
         meta[str(row["id"])] = {"title": title, "platform": platform, "agent": agent}
     return meta
 

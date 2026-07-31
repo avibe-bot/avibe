@@ -507,9 +507,10 @@ def test_create_and_patch_session_reject_archived_agent(isolated_state, tmp_path
 
     store = VibeAgentStore()
     try:
-        store.create(name="retired-reviewer", backend="codex")
+        original = store.create(name="retired-reviewer", backend="codex")
         archived = store.archive("retired-reviewer")
         assert archived is not None
+        replacement = store.create(name="retired-reviewer", backend="codex")
     finally:
         store.close()
 
@@ -527,6 +528,18 @@ def test_create_and_patch_session_reject_archived_agent(isolated_state, tmp_path
     assert create_response.status_code == 404
     assert "not found or disabled" in create_response.get_json()["error"]
 
+    for invalid_identity in (
+        {"agent_id": original.id},
+        {"agent_id": original.id, "agent_name": replacement.name},
+    ):
+        create_response = client.post(
+            "/api/sessions",
+            json={"project_id": project["id"], **invalid_identity},
+            headers=headers,
+        )
+        assert create_response.status_code == 404
+        assert "not found or disabled" in create_response.get_json()["error"]
+
     session_response = client.post(
         "/api/sessions",
         json={"project_id": project["id"]},
@@ -543,6 +556,72 @@ def test_create_and_patch_session_reject_archived_agent(isolated_state, tmp_path
     )
     assert patch_response.status_code == 404
     assert "not found or disabled" in patch_response.get_json()["error"]
+
+    for invalid_identity in (
+        {"agent_id": original.id},
+        {"agent_id": original.id, "agent_name": replacement.name},
+    ):
+        patch_response = client.patch(
+            f"/api/sessions/{session_id}",
+            json=invalid_identity,
+            headers=headers,
+        )
+        assert patch_response.status_code == 404
+        assert "not found or disabled" in patch_response.get_json()["error"]
+
+
+def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from vibe.ui_server import app
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, folder_path=str(tmp_path))
+
+    store = VibeAgentStore()
+    try:
+        agent = store.create(name="active-reviewer", backend="codex")
+    finally:
+        store.close()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    create_response = client.post(
+        "/api/sessions",
+        json={
+            "project_id": project["id"],
+            "agent_id": agent.id,
+            "agent_backend": "claude",
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    created = create_response.get_json()
+    assert (created["agent_id"], created["agent_name"], created["agent_backend"]) == (
+        agent.id,
+        agent.name,
+        agent.backend,
+    )
+
+    plain_response = client.post(
+        "/api/sessions",
+        json={"project_id": project["id"]},
+        headers=headers,
+    )
+    patch_response = client.patch(
+        f"/api/sessions/{plain_response.get_json()['id']}",
+        json={"agent_id": agent.id},
+        headers=headers,
+    )
+    assert patch_response.status_code == 200
+    patched = patch_response.get_json()
+    assert (patched["agent_id"], patched["agent_name"], patched["agent_backend"]) == (
+        agent.id,
+        agent.name,
+        agent.backend,
+    )
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
