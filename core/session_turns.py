@@ -2384,6 +2384,27 @@ class SessionTurnManager:
                                 logical_turn_id,
                                 "canceled",
                             )
+                        elif failed:
+                            # The durable start attempt may already have reached
+                            # the native backend before dispatch raised. Preserve
+                            # its ownership for exact-evidence recovery instead of
+                            # falsely completing the Message or dispatching it
+                            # again. Only failures proven before ``_run`` enters
+                            # dispatch are eligible for ``requeue_prewrite_failure``.
+                            with self._sqlite_engine().begin() as conn:
+                                reserve_write_lock(conn)
+                                durable_turn = delivery_store.get_turn(conn, logical_turn_id)
+                                if (
+                                    durable_turn is not None
+                                    and durable_turn["state"] == "starting"
+                                ):
+                                    delivery_store.cas_turn(
+                                        conn,
+                                        logical_turn_id,
+                                        expected_version=int(durable_turn["version"]),
+                                        expected_states=("starting",),
+                                        values={"state": "quarantined"},
+                                    )
                         elif settled_by is not None:
                             # A released waiter is positive evidence that this
                             # logical Turn no longer owns native work. This also
@@ -2395,18 +2416,6 @@ class SessionTurnManager:
                                 logical_turn_id,
                                 "completed",
                             )
-                        elif failed:
-                            with self._sqlite_engine().begin() as conn:
-                                reserve_write_lock(conn)
-                                durable_turn = delivery_store.get_turn(conn, logical_turn_id)
-                                if durable_turn is not None and durable_turn["state"] == "starting":
-                                    delivery_store.cas_turn(
-                                        conn,
-                                        logical_turn_id,
-                                        expected_version=int(durable_turn["version"]),
-                                        expected_states=("starting",),
-                                        values={"state": "quarantined"},
-                                    )
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before

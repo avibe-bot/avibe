@@ -491,6 +491,52 @@ def test_native_start_ambiguity_is_quarantined_without_duplicate_dispatch(manage
     assert turn["start_attempt_id"]
 
 
+def test_async_dispatch_failure_keeps_starting_delivery_quarantined(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def may_have_written(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        raise ConnectionError("native dispatch outcome lost")
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        may_have_written,
+    )
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    manager.controller.emit_agent_message = AsyncMock()
+
+    async def run():
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="ambiguous after dispatch entered",
+            ),
+            context=_context(),
+        )
+        await entered.wait()
+        holder = manager.in_flight["ses_fsm"].task
+        release.set()
+        await holder
+        return admitted
+
+    admitted = asyncio.run(run())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+        delivery = delivery_store.get_delivery(conn, str(admitted.delivery_id))
+    assert turn is not None
+    assert turn["state"] == "quarantined"
+    assert delivery is not None
+    assert delivery["state"] == "starting"
+    manager.controller.emit_agent_message.assert_awaited_once()
+
+
 def test_restart_reconciles_unrecorded_p0_interrupt_without_retry(managers) -> None:
     manager, restarted, engine, _engine_b, _starts = managers
 
