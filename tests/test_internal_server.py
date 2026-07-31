@@ -2357,6 +2357,68 @@ def test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle():
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
 
 
+def test_release_for_teardown_records_the_cause_before_cancelling_and_awaits_settlement():
+    """HFR-121: a session teardown must not be reported as a user Stop.
+
+    ``_run`` reads ``Turn.cancel_settled_by`` off the popped Turn and falls back to
+    ``SETTLED_BY_STOPPED`` when it is unset, so a canceller that cancels first and
+    records afterwards loses the race with its own settlement: the run terminalizes
+    ``canceled`` — user intent — for an infrastructure event nobody asked for, and no
+    interruption notice is ever owed because nothing classified it as a failure. The
+    order is the contract, so the turn observes the cause from inside its own
+    cancellation handler.
+
+    The await is the second half of the contract. The caller's next step is tearing
+    the backend down, and a dismantled backend can no longer settle its own turn, so
+    ``release_for_teardown`` must not return until the turn's settlement has run.
+    """
+
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    statuses = []
+    controller.set_agent_status = lambda session_id, status: statuses.append((session_id, status))
+    observed: dict = {}
+
+    async def _go():
+        started = asyncio.Event()
+
+        async def _busy():
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                observed["cause_at_cancel"] = manager.in_flight["ses_evicted"].cancel_settled_by
+                observed["stop_no_flush"] = manager.in_flight["ses_evicted"].stop_no_flush
+                # Stand in for ``_run``'s settlement work, which happens after the
+                # cancellation lands: a caller that did not await would return first.
+                await asyncio.sleep(0)
+                observed["settled"] = True
+                raise
+
+        task = asyncio.create_task(_busy())
+        ctx = MessageContext(user_id="U", channel_id="ses_evicted", platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": "ses_evicted",
+            "agent_session_target": {"agent_backend": "codex"},
+        }
+        manager.in_flight["ses_evicted"] = session_turns.Turn(task=task, context=ctx)
+        await started.wait()
+
+        released = await manager.release_for_teardown("ses_evicted", settled_by="evicted")
+        return released, task.done()
+
+    released, done = asyncio.run(_go())
+
+    assert released is True
+    assert observed["cause_at_cancel"] == "evicted"
+    assert observed["stop_no_flush"] is True
+    assert observed["settled"] is True
+    assert done is True
+    assert statuses == [("ses_evicted", "idle")]
+    # An absent turn is not an error and must not be reported as a release.
+    assert asyncio.run(manager.release_for_teardown("ses_never_ran", settled_by="evicted")) is False
+
+
 def test_release_for_backend_refresh_leaves_other_backend_turn_running():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)

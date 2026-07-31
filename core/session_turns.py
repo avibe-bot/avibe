@@ -1834,6 +1834,67 @@ class SessionTurnManager:
             )
         return released
 
+    async def release_for_teardown(self, session_id: str, *, settled_by: str) -> bool:
+        """Release one session's active turn because the SESSION is being reclaimed.
+
+        The generic, cause-carrying sibling of
+        :meth:`release_for_backend_refresh`: same shape, same ordering, but the event
+        is a session teardown (idle eviction, the stuck-active backstop, a transport
+        the session can no longer be reached through, controller shutdown) rather
+        than one backend's runtime being refreshed, so the caller names the cause.
+
+        DELIBERATELY NOT :meth:`cancel`. That is the user-Stop API — it routes through
+        ``command_handler.handle_stop`` and leaves ``cancel_settled_by`` unset, so
+        ``_run`` falls back to ``SETTLED_BY_STOPPED`` and the run settles ``canceled``:
+        an infrastructure interruption recorded as something the user asked for, with
+        no interruption notice owed because nothing classified it as a failure. An
+        infrastructure fault is not a cancellation.
+
+        Order matters and matches every other cause-aware canceller in the tree:
+        record ``cancel_settled_by`` on the ``Turn`` BEFORE ``task.cancel()``, because
+        ``_run``'s ``finally`` reads it off the popped ``Turn`` and a cancellation
+        that lands first is a cancellation with no story. ``stop_no_flush`` is set for
+        the same reason it is on the refresh path: the send-while-busy queue must
+        survive an interruption nobody asked for.
+
+        The cancelled task is AWAITED, so by the time this returns the turn's own
+        settlement has run and a caller may safely tear the backend down — a
+        dismantled backend can no longer settle its own turn. Returns whether a turn
+        was found and released.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return False
+        turn = self.in_flight.get(resolved)
+        if turn is None:
+            return False
+        turn.stop_no_flush = True
+        turn.cancel_settled_by = settled_by
+        if turn.task.done():
+            self.in_flight.pop(resolved, None)
+            from core.inbox_events import bus
+
+            bus.publish("turn.end", {"session_id": resolved})
+        else:
+            turn.task.cancel()
+            await asyncio.gather(turn.task, return_exceptions=True)
+        if self.controller is not None:
+            self.controller.set_agent_status(resolved, "idle")
+        # DISCARD rather than defer, which is where this parts company with the
+        # refresh path: a refreshed backend comes back and its sessions resume, but a
+        # torn-down session is not coming back, so re-queueing it for a post-restart
+        # drain would resurrect work into a session that no longer exists.
+        deferred = self._deferred_restart_sessions.get(self._context_backend(turn.context))
+        if deferred is not None:
+            deferred.discard(resolved)
+        logger.info(
+            "Released the active Workbench turn for session %s (%s)",
+            resolved,
+            settled_by,
+        )
+        return True
+
     async def cancel(self, session_id: str) -> dict:
         """Stop the active turn: interrupt the agent's backend run via the SAME path
         the IM ``/stop`` command uses (Claude interrupt / Codex turn-interrupt /

@@ -24,6 +24,7 @@ from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_EVICTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
@@ -2576,6 +2577,229 @@ def test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing(
     assert settled["metadata"]["interrupt_reason"] == "restarted"
     # ...and the claim is not waiting to fire the same prompt a second time.
     assert request.id not in {pending.id for pending in request_store.list_pending()}
+
+
+def _ensure_reservation_agent() -> str:
+    """An enabled default Agent, which ``_reserve_runtime_session`` requires."""
+
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore()
+    try:
+        return agent_store.ensure_default_agent(backend="codex").name
+    finally:
+        agent_store.close()
+
+
+def _hanging_turn() -> tuple[asyncio.Event, Any]:
+    """A turn that starts and never finishes, so teardown meets a LIVE execution."""
+
+    turn_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _hang(_controller, _context, _message) -> None:
+        turn_started.set()
+        await never_finishes.wait()
+
+    return turn_started, _hang
+
+
+def test_cancel_session_executions_finds_a_pinned_session_execution_via_lock_owners(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-103: the teardown join must compose all three hops, not just the ends.
+
+    A session id is not a run id and a run id is not a lock key, so
+    ``session_id -> _session_lock_cache -> lock key -> _session_lock_owners -> run id
+    -> _inflight_executions`` is the ONLY path from what a teardown knows to the task
+    it must interrupt. Drop the middle hop and there is no path at all: the cache's
+    values are lock keys while ``_inflight_executions`` is keyed by run id, so the
+    scan silently misses every ordinary pinned session — i.e. the common case, and
+    the whole wedge this helper exists to remove.
+
+    The cause is asserted alongside the status: a terminality-only assertion passes
+    against a plain user Stop, which settles ``canceled`` and owes no interruption
+    notice, and would let exactly the wrong story ship.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_name = _ensure_reservation_agent()
+    request_store = TaskExecutionStore()
+    turn_started, on_turn = _hanging_turn()
+    controller = _SettlementControllerDouble(on_turn=on_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    # A real, resolvable session to pin to, so the lock key is the one a live
+    # dispatch would compute rather than a fallback.
+    pinned_session_id = service._reserve_runtime_session(
+        agent_name=agent_name,
+        deliver_key="slack::channel::C123",
+        metadata=None,
+    )
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        session_id=pinned_session_id,
+        prompt="a pinned-session turn interrupted by eviction",
+        deliver_key="slack::channel::C123",
+        agent_name=agent_name,
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        assert service._inflight_executions.get(request.id) is not None
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        lock_key = service._session_lock_cache[pinned_session_id]
+        assert service._session_lock_owners[lock_key] == request.id
+        observed["lock_key"] = lock_key
+        observed["result"] = await service.cancel_session_executions(
+            pinned_session_id,
+            settled_by=SETTLED_BY_EVICTED,
+        )
+
+    asyncio.run(_exercise())
+
+    result = observed["result"]
+    assert result.cancelled_count == 1
+    # The pre-cancel snapshot is what a teardown reconciler has to work from: by the
+    # time the await returns, the maps that proved this process owned the run are
+    # already empty.
+    assert request.id in result.claimed_run_ids
+    assert request.id not in service._inflight_executions
+    assert observed["lock_key"] not in service._inflight_sessions
+    assert service._session_lock_owners == {}
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
+def test_reservation_stamps_the_session_id_onto_the_create_per_run_run_row(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-122: the run<->session association must be durable DURING the turn.
+
+    Until now ``agent_runs.session_id`` was first written by the completion path's
+    identity UPDATE, so for the whole life of a ``create_per_run`` turn the row named
+    no session at all. That is the one policy with no lock key either, so a row whose
+    in-memory association was missed had nothing left to find it by — and a
+    session-keyed DB reconcile, the backstop for exactly that case, could not select
+    it. Stamping at reservation time is what makes the backstop possible.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_name = _ensure_reservation_agent()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        prompt="a runtime-session turn",
+        deliver_key="slack::channel::C123",
+        agent_name=agent_name,
+        session_policy="create_per_run",
+        run_type="watch",
+    )
+    turn_started, on_turn = _hanging_turn()
+    controller = _SettlementControllerDouble(on_turn=on_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        # Read the row while the run is STILL in flight — asserting after completion
+        # would pass against the old completion-time write and prove nothing.
+        observed["reserved"] = service._execution_session_ids[request.id]
+        observed["row"] = request_store.get_run(request.id)
+        execution = service._inflight_executions[request.id]
+        execution.cancel()
+        await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    row = observed["row"]
+    assert row is not None
+    assert row["status"] == "running"
+    assert row["session_id"] == observed["reserved"]
+
+
+def test_cancel_session_executions_finds_a_create_per_run_execution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-104: the policy with no lock key still has to be reachable.
+
+    ``_execution_lock_key`` returns ``None`` for ``create_per_run`` by design, so the
+    pinned-session join above cannot see this execution at ALL — no cache entry, no
+    lock owner, nothing. Its session is minted mid-flight and used to live only in a
+    local variable, so evicting that session left the task and its run ``running``
+    forever, evading both the cancel and any later sweep. The reservation-time
+    association is the second, independent path this helper needs; neither subsumes
+    the other.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_name = _ensure_reservation_agent()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        prompt="a runtime-session turn interrupted by eviction",
+        deliver_key="slack::channel::C123",
+        agent_name=agent_name,
+        session_policy="create_per_run",
+        run_type="watch",
+    )
+    turn_started, on_turn = _hanging_turn()
+    controller = _SettlementControllerDouble(on_turn=on_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        reserved = service._execution_session_ids[request.id]
+        # The join the pinned case uses has nothing to offer here, which is the point.
+        assert service._session_lock_owners == {}
+        assert service._session_lock_cache.get(reserved) is None
+        observed["reserved"] = reserved
+        observed["result"] = await service.cancel_session_executions(
+            reserved,
+            settled_by=SETTLED_BY_EVICTED,
+        )
+
+    asyncio.run(_exercise())
+
+    result = observed["result"]
+    assert result.cancelled_count == 1
+    assert request.id in result.claimed_run_ids
+    assert request.id not in service._inflight_executions
+    # The association retires with the execution; a live map entry would offer a
+    # finished run up for cancellation.
+    assert service._execution_session_ids == {}
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
 
 
 def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(

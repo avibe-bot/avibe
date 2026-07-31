@@ -7,6 +7,7 @@ import json
 import logging
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -447,6 +448,26 @@ class AgentRunExecutionResult:
     # post-completion side effects: callback delivery and session-queue recovery.
     settled_out_of_band: bool = False
     delivery_outcome: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class SessionCancellationResult:
+    """What one session teardown cancelled, plus the ownership it saw beforehand.
+
+    ``cancelled_count`` is how many live executions/turns this call actually
+    interrupted — a caller's "did anything need stopping?" answer.
+
+    ``claimed_run_ids`` is the far more important half: the set of run ids this
+    PROCESS was executing at the instant before the cancellation, captured because
+    awaiting the cancellation destroys the evidence. ``_on_execution_done`` and
+    ``SessionTurnManager._run``'s ``finally`` both run during that await and erase
+    the very maps a teardown reconciler would consult, so a reconciler that looked
+    afterwards would see a ``running`` row with no owner and could not tell an
+    interrupted claim of ours from an unrelated row it must never touch.
+    """
+
+    cancelled_count: int
+    claimed_run_ids: frozenset[str]
 
 
 #: Durable definition-metadata key recording the last binding recovery, so a
@@ -1905,6 +1926,17 @@ class TaskExecutionStore:
             return False
         return self._sqlite.record_run_skip_reason(run_id, reason=reason)
 
+    def stamp_run_session_id(self, run_id: str, *, session_id: str) -> bool:
+        """Record which session an in-flight run is executing in (SQLite only).
+
+        ``False`` on the legacy file store, which has no row a session-keyed teardown
+        could query anyway — the in-memory association is the whole story there.
+        """
+
+        if self._sqlite is None:
+            return False
+        return self._sqlite.stamp_run_session_id(run_id, session_id=session_id)
+
     def sweep_stale_runs(
         self,
         *,
@@ -2476,6 +2508,20 @@ class ScheduledTaskService:
         # ``CancelledError``. Written BEFORE the cancel (see ``_cancel_execution``) so
         # the handler can never observe the cancellation without its reason.
         self._execution_cancel_causes: Dict[str, str] = {}
+        # execution/run id -> the session a ``create_per_run`` reservation minted for
+        # it, recorded the moment the reservation succeeds.
+        #
+        # ``create_per_run`` is the one policy with NO session lock key by design
+        # (``_execution_lock_key`` returns ``None`` for it), so the
+        # session -> lock key -> owner -> task join that finds every pinned execution
+        # cannot see it at all. Without this map a teardown of the runtime-created
+        # session reaches nothing and the run stays ``running`` forever.
+        #
+        # Deliberately NOT ``_session_lock_cache``: that maps session id -> lock key,
+        # so writing a run id into it would both be keyed the wrong way round for a
+        # cancel that starts from a session id AND hand that run id back to the next
+        # caller as a session lock key, silently breaking per-session serialization.
+        self._execution_session_ids: Dict[str, str] = {}
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
         self._pending_recovered_activity_terminals: list[Any] = []
@@ -2770,6 +2816,199 @@ class ScheduledTaskService:
         task.cancel()
         return True
 
+    def _teardown_owned_run_ids(self) -> set[str]:
+        """Every run id this PROCESS is executing right now, for a teardown snapshot.
+
+        Same two lanes as :meth:`_owned_agent_run_ids` — the drain lane's
+        ``_inflight_executions`` and the turn lane's
+        ``SessionTurnManager.owned_agent_run_ids`` — but the OPPOSITE failure
+        posture, and the asymmetry is the point.
+
+        ``_owned_agent_run_ids`` feeds the staleness sweep, where under-reporting an
+        owner terminalizes a live run, so it raises rather than answer "nothing is
+        owned". This snapshot feeds a teardown reconciler that may only settle rows
+        INSIDE the set, so an incomplete answer can only leave work for the existing
+        sweep to find later — never kill a healthy run. Raising here would instead
+        abort the teardown itself, which is the one outcome that leaves the wedge in
+        place, so a missing/failing turn lane degrades to the drain lane alone.
+        """
+
+        owned = {str(run_id) for run_id in self._inflight_executions if run_id}
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "owned_agent_run_ids", None)
+        if not callable(provider):
+            logger.debug("Teardown snapshot: no turn-lane ownership provider available")
+            return owned
+        try:
+            owned |= {str(run_id) for run_id in provider() if run_id}
+        except Exception:
+            logger.warning(
+                "Teardown snapshot: turn-lane ownership could not be read; "
+                "reconciling with the drain lane only",
+                exc_info=True,
+            )
+        return owned
+
+    async def _release_manager_turn(self, session_id: str, *, settled_by: str) -> bool:
+        """Cancel the session's live Workbench turn with ``settled_by`` recorded first.
+
+        Thin adapter onto :meth:`SessionTurnManager.release_for_teardown` so a
+        controller without a turn manager (headless service, tests) is a no-op rather
+        than an exception on a path that is already tearing something down.
+        """
+
+        session_turns = getattr(self.controller, "session_turns", None)
+        release = getattr(session_turns, "release_for_teardown", None)
+        if not callable(release):
+            logger.debug("Session teardown: no turn manager to release session %s", session_id)
+            return False
+        try:
+            return bool(await release(session_id, settled_by=settled_by))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Session teardown: releasing the Workbench turn for session %s failed",
+                session_id,
+                exc_info=True,
+            )
+            return False
+
+    async def cancel_session_executions(
+        self,
+        session_id: str,
+        *,
+        settled_by: str,
+        include_manager_lane: bool = True,
+    ) -> SessionCancellationResult:
+        """Interrupt everything this process is running inside one session.
+
+        The shared teardown primitive: every run-blind teardown (idle eviction, the
+        stuck-active backstop, a broken transport, controller shutdown, Running-tab
+        End) reclaims a session while runs may still be executing inside it. Left
+        alone those runs stay ``running`` forever and their session lock stays held,
+        so the next drain cannot dispatch into the session either.
+
+        ``settled_by`` is recorded BEFORE each cancellation and is never inferred
+        afterwards: eviction, restart and a user Stop all arrive at the handler as the
+        same bare ``CancelledError``, so the caller's knowledge of WHY is the only
+        place the truth exists. The status and the user-visible copy are then decided
+        solely by ``core.run_settlement``'s tables — no call site picks either.
+
+        ``include_manager_lane=False`` is for the one caller that owns the manager
+        turn itself: Running-tab End cancels the scheduler lane here and then runs the
+        canonical user-Stop path for the turn, which must record ``stopped`` and keep
+        backend Stop behaviour. Cancelling the turn here first would leave that path
+        with nothing to stop and degrade it to an error.
+
+        THE SNAPSHOT IS TAKEN FIRST, AND IS PROCESS-SCOPED RATHER THAN
+        SESSION-FILTERED. Two independent reasons:
+
+        - Awaiting the cancellation runs ``_on_execution_done`` and
+          ``SessionTurnManager._run``'s ``finally``, which erase the ownership maps.
+          A reconciler that looked afterwards would find a ``running`` row with no
+          owner and could not distinguish an interrupted claim of ours from an
+          unrelated row it must never settle.
+        - A ``create_per_run`` execution whose dedicated map entry was missed has NO
+          session-keyed entry anywhere in memory — that is the failure mode the DB
+          stamp exists to cover. A session-filtered snapshot would exclude exactly
+          that row, i.e. precisely the one the reconciler is for. Session scoping
+          happens later and in the right place: the reconciler intersects this
+          snapshot with ``agent_runs.session_id``.
+
+        Three lookup paths, no shared code, because they are three different facts:
+
+        1. an ordinary pinned session, via session id -> lock key -> lock owner ->
+           in-flight task;
+        2. a ``create_per_run`` execution, via the reservation-time association;
+        3. the Workbench turn lane, which the scheduler maps never see because
+           ``_execute_request`` hands an avibe-targeted turn to the gate and returns.
+
+        Returns the count of things actually interrupted plus the pre-cancel
+        ownership snapshot; the cancelled tasks are awaited before returning, so a
+        caller that reconciles afterwards sees settled rows rather than a race.
+        """
+
+        claimed_run_ids = frozenset(self._teardown_owned_run_ids())
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return SessionCancellationResult(cancelled_count=0, claimed_run_ids=claimed_run_ids)
+
+        current_task = self._current_asyncio_task()
+        cancelled_tasks: list["asyncio.Task[Any]"] = []
+        cancelled_run_ids: set[str] = set()
+
+        def _cancel(run_id: str) -> None:
+            if run_id in cancelled_run_ids:
+                return
+            task = self._inflight_executions.get(run_id)
+            if task is None:
+                return
+            if task is current_task:
+                # Teardown invoked from inside the very execution it would cancel
+                # (an agent that evicts its own session). Cancelling and awaiting
+                # ourselves deadlocks; the run stays in ``claimed_run_ids`` so the
+                # reconciler can still account for it. Same exemption ``_begin_stop``
+                # makes.
+                logger.debug(
+                    "Session teardown for %s skipped its own execution %s", resolved, run_id
+                )
+                return
+            if self._cancel_execution(run_id, settled_by):
+                cancelled_run_ids.add(run_id)
+                cancelled_tasks.append(task)
+
+        # Path 1 — ordinary pinned session. The cache is warm by construction for any
+        # live pinned execution: ``_spawn_execution`` is only ever reached through
+        # ``_session_lock_key``, which resolves a session id through
+        # ``_canonical_session_lock`` and memoizes it here. A cold entry therefore
+        # means "this process holds no lock for that session", which is the same
+        # answer. Resolving it afresh is deliberately NOT done: with no session key to
+        # pass, an unresolvable id would be cached as ``sid:<id>`` and handed to the
+        # next dispatch as ITS lock key, splitting a conversation's serialization.
+        lock_key = self._session_lock_cache.get(resolved)
+        if lock_key is not None:
+            owner = self._session_lock_owners.get(lock_key)
+            if owner:
+                _cancel(owner)
+
+        # Path 2 — ``create_per_run``, which has no lock key at all.
+        for run_id, reserved_session_id in list(self._execution_session_ids.items()):
+            if reserved_session_id == resolved:
+                _cancel(run_id)
+
+        for task in cancelled_tasks:
+            # Not our own cancellation being swallowed: this is the cancelled task's
+            # terminal state arriving, and it is the terminal ROW write we are here
+            # to wait for.
+            with suppress(asyncio.CancelledError):
+                await task
+        if cancelled_tasks:
+            # ``_on_execution_done`` is a done callback, i.e. ``call_soon``: without
+            # one more loop pass the session lock is still held by a finished run.
+            await asyncio.sleep(0)
+
+        cancelled_count = len(cancelled_tasks)
+
+        # Path 3 — the turn lane. Last, so the scheduler lane's terminal writes have
+        # landed before a backend teardown can start dismantling anything.
+        if include_manager_lane and await self._release_manager_turn(
+            resolved, settled_by=settled_by
+        ):
+            cancelled_count += 1
+
+        if cancelled_count:
+            logger.info(
+                "Session %s teardown cancelled %d in-flight execution(s)/turn(s) as %s",
+                resolved,
+                cancelled_count,
+                settled_by,
+            )
+        return SessionCancellationResult(
+            cancelled_count=cancelled_count,
+            claimed_run_ids=claimed_run_ids,
+        )
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -2838,6 +3077,7 @@ class ScheduledTaskService:
         self._inflight_sessions.clear()
         self._session_lock_owners.clear()
         self._execution_cancel_causes.clear()
+        self._execution_session_ids.clear()
 
     async def _watch_store(self) -> None:
         while self._running:
@@ -4892,6 +5132,11 @@ class ScheduledTaskService:
         # execution finished on its own first). Either way it dies with the
         # execution: a stale entry would be read by whatever run next carries this id.
         self._execution_cancel_causes.pop(request_id, None)
+        # The runtime session this execution reserved retires with it. The row's own
+        # ``session_id`` stamp is durable and stays — that is the DB half a later
+        # reconcile reads — but the in-memory association describes a LIVE execution
+        # and would otherwise make a finished run look cancellable.
+        self._execution_session_ids.pop(request_id, None)
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
             # Only if it is still OURS: a later execution may already have taken the
@@ -4949,6 +5194,7 @@ class ScheduledTaskService:
                         deliver_key=request.deliver_key,
                         metadata=request.metadata,
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
+                        execution_id=request.id,
                     )
                     session_key = ""
                 elif not (request.session_id or request.session_key):
@@ -5258,6 +5504,7 @@ class ScheduledTaskService:
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     workdir=task.cwd,
+                    execution_id=execution_id,
                 )
                 session_key = ""
             error = await self._execute_request(
@@ -6121,6 +6368,7 @@ class ScheduledTaskService:
         model: Any = _UNSET,
         reasoning_effort: Any = _UNSET,
         definition_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
     ) -> str:
         """Reserve a background session for a run.
 
@@ -6148,6 +6396,15 @@ class ScheduledTaskService:
         unreferenced between its reserve and its dispatch, and fires of such a
         definition can overlap, so stamping one would put a live reservation inside
         the sweep's definition of an orphan.
+
+        ``execution_id`` names the run this reservation is FOR, and is passed only by
+        the two ``create_per_run`` dispatch sites -- the callee has no run id of its
+        own, and the ``create_once`` rebind reserves for a DEFINITION rather than for
+        any one run. Supplying it records the run <-> session association immediately
+        (see :meth:`_record_execution_session`) instead of at completion, which is
+        where it used to appear and far too late: for the whole life of the turn the
+        run executes inside a session nothing can name, so a teardown of that session
+        cannot find it.
         """
         scope_id = ""
         if isinstance(metadata, dict):
@@ -6248,7 +6505,38 @@ class ScheduledTaskService:
             service.close()
         if not session_id:
             raise ValueError("failed to reserve runtime session")
+        if execution_id:
+            self._record_execution_session(execution_id, session_id)
         return session_id
+
+    def _record_execution_session(self, execution_id: str, session_id: str) -> None:
+        """Associate a run with the session its reservation just minted.
+
+        TWO RECORDS, ORDERED, DELIBERATELY NOT ATOMIC. The in-memory map goes first
+        because it is what the cancel path reads and it cannot fail; the durable
+        stamp on the run row goes second because it is what a DB reconciler reads
+        when the map was never written or has already been torn down. They live in
+        different stores, so no transaction spans them -- and none is needed, because
+        the two cover each other: a crash between them leaves the map entry with a
+        live process to use it, and a map entry missed entirely still leaves the row
+        findable by ``agent_runs.session_id``.
+
+        The stamp never fails the run. A reservation that succeeded has produced a
+        usable session and the turn must go ahead; losing the association degrades
+        teardown to the existing staleness sweep rather than costing the user a run.
+        """
+
+        self._execution_session_ids[execution_id] = session_id
+        try:
+            self.request_store.stamp_run_session_id(execution_id, session_id=session_id)
+        except Exception:
+            logger.warning(
+                "Could not stamp reserved session %s onto run %s; "
+                "teardown will rely on the in-memory association only",
+                session_id,
+                execution_id,
+                exc_info=True,
+            )
 
     def _release_reserved_session(self, session_id: str, *, reason: str) -> bool:
         """Give back a session ``_reserve_runtime_session`` handed out and nothing adopted.

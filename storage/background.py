@@ -3896,6 +3896,58 @@ class SQLiteBackgroundTaskStore:
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
             _defer_run_ids_updated_from_connection(conn, recovered_ids)
 
+    def stamp_run_session_id(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Associate a still-open run with the session it is actually executing in.
+
+        WHY THIS EXISTS. A ``create_per_run`` run mints its session at dispatch time,
+        and until now that id lived only in a Python local until the run completed:
+        ``settle_run_terminal``'s identity block was the first and only writer of
+        ``agent_runs.session_id`` for those rows. So while the run was in flight the
+        column was NULL, and a session teardown had no way to ask the database "which
+        runs belong to the session I am reclaiming" — exactly the row a teardown
+        reconciler most needs to find, because the same policy has no session lock key
+        either and so is invisible to every in-memory join as well.
+
+        NARROW ON PURPOSE. It writes ``session_id`` and ``updated_at`` and nothing
+        else: this is an association, not a state change, and a reservation must never
+        be able to move a run's status, error or result. The ``WHERE`` is guarded to
+        ``NON_TERMINAL_RUN_STATUSES`` for the same reason every other writer in this
+        file is guarded — a late reservation racing a terminal write must lose, not
+        re-stamp identity onto settled history.
+
+        Returns whether a row was actually updated; ``False`` when the run is missing
+        or already terminal.
+        """
+
+        resolved_run_id = str(run_id or "").strip()
+        resolved_session_id = str(session_id or "").strip()
+        if not resolved_run_id or not resolved_session_id:
+            return False
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == resolved_run_id)
+                .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
+                .values(session_id=resolved_session_id, updated_at=now)
+            )
+            if not result.rowcount:
+                return False
+            row_to_publish = dict(
+                conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == resolved_run_id).limit(1)
+                ).mappings().one()
+            )
+        _publish_run_rows_updated([row_to_publish])
+        return True
+
     def record_run_skip_reason(self, run_id: str, *, reason: str, at: Optional[str] = None) -> bool:
         """Record WHY the drain deferred a queued run — only when it changes.
 
