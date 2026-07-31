@@ -93,6 +93,7 @@ def test_list_show_pages_preserves_archived_agent_display_name(monkeypatch, tmp_
     store = VibeAgentStore()
     try:
         original = store.create(name="pm", backend="claude")
+        store.create(name="zz-fallback", backend="claude")
         _seed_session(
             "ses_archived_agent",
             agent_id=original.id,

@@ -312,6 +312,7 @@ def test_update_project_clears_default_agent(engine, tmp_path):
 
 def test_project_agent_save_serializes_with_archive_and_rejects_stale_route(engine, tmp_path):
     _ensure_agent("pm", "claude")
+    _ensure_agent("zz-fallback", "claude")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:

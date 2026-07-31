@@ -105,6 +105,7 @@ def test_explicit_agent_name_derives_backend_on_create(engine, tmp_path):
 
 def test_archived_project_default_is_not_inherited_by_new_session(engine, tmp_path):
     _ensure_agent("retired-default", "claude")
+    _ensure_agent("zz-fallback", "claude")
     created = _project_with_default(
         engine,
         tmp_path,
