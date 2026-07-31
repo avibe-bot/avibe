@@ -6058,8 +6058,9 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
 
     Ordinary result settlement is intentionally allowed after every IM send failed,
     and Avibe creates a synthetic send id before persistence, so neither
-    ``status='succeeded'`` nor ``message_ids_json`` can suppress the durable fallback.
-    Only a real ``messages`` row carrying this child run's provenance is a receipt.
+    ``status='succeeded'`` nor a Workbench ``message_ids_json`` entry can suppress
+    the durable fallback. Only a real ``messages`` row carrying this child run's
+    provenance is a Workbench receipt.
     """
 
     import core.scheduled_tasks as scheduled_tasks
@@ -6073,6 +6074,7 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
         source_kind="callback",
         parent_run_id="run-cb-no-receipt",
         session_id="ses-callback-target",
+        session_key="avibe::project::proj_callback",
     )
     sqlite.update_callback_status(
         "run-cb-no-receipt", status="sent", callback_run_id=callback.id
@@ -6098,6 +6100,57 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
 
     assert delivered == ["run-cb-no-receipt"]
     assert sqlite.owed_failure_notice("run-cb-no-receipt")["state"] == "sent"
+
+
+def test_callback_native_im_delivery_id_prevents_duplicate_failure_notice(
+    tmp_path: Path,
+) -> None:
+    """A real IM send remains delivered if transcript persistence fails afterwards."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-native-receipt", deliver_key="slack::channel::C1")
+    _callback_session(sqlite)
+    _callback_run(
+        sqlite,
+        "run-cb-native-receipt",
+        "task-cb-native-receipt",
+        status="pending",
+    )
+    callback = requests.enqueue_agent_run(
+        message="deliver through Slack",
+        source_kind="callback",
+        parent_run_id="run-cb-native-receipt",
+        session_id="ses-callback-target",
+        session_key="slack::channel::C1",
+    )
+    sqlite.update_callback_status(
+        "run-cb-native-receipt", status="sent", callback_run_id=callback.id
+    )
+    claimed = requests.claim(callback.id)
+    assert claimed is not None
+    recorded = sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="callback reached Slack",
+        message_id="native-slack-message-id",
+        terminal_status="succeeded",
+    )
+    assert recorded["terminal_transition"]
+    assert sqlite.run_callback_state("run-cb-native-receipt") == "sent"
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == []
+    notice = sqlite.owed_failure_notice("run-cb-native-receipt")
+    assert notice["state"] == "skipped"
+    assert notice["skip_reason"] == "delivered_by_callback"
 
 
 def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(

@@ -29,6 +29,7 @@ from sqlalchemy import (
 )
 
 from config import paths
+from config.platform_registry import PLATFORM_REGISTRY
 from storage.agent_session_rows import (
     INBOX_SESSION_VISIBILITIES,
     reserve_write_lock,
@@ -3067,12 +3068,15 @@ class SQLiteBackgroundTaskStore:
         already resolved, or worse, deliver beside a callback that just landed.
         A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
         callback child. The user has the callback only after that child succeeds,
-        records delivery evidence, and targets a Session admitted by the Inbox; a
-        receipt in suppressed background history proves persistence, not visibility.
-        This read joins the child and target Session and projects the state the notice
-        lane actually needs: queued/running is pending, succeeded with a visible
-        recorded message is sent, and every other terminal outcome releases the notice
-        as failed. All three lookups are primary-key probes in one statement.
+        records delivery evidence, and targets a Session admitted by the Inbox. A
+        persisted result row is evidence for every platform; a recorded native send id
+        is also evidence for real IM conversations because those ids are returned only
+        after transport delivery. Workbench ids are synthetic and never qualify on
+        their own, while a receipt in suppressed background history proves persistence,
+        not visibility. This read joins the child and target Session and projects the
+        state the notice lane actually needs: queued/running is pending, succeeded with
+        visible delivery evidence is sent, and every other terminal outcome releases
+        the notice as failed. All three lookups are primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
         is different from a callback whose status column is empty — a target with
@@ -3106,6 +3110,8 @@ class SQLiteBackgroundTaskStore:
                     persisted_receipt,
                     callback_session.c.status,
                     callback_session.c.visibility,
+                    child.c.legacy_session_key,
+                    child.c.message_ids_json,
                 )
                 .select_from(
                     parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
@@ -3125,7 +3131,22 @@ class SQLiteBackgroundTaskStore:
         child_status = normalize_run_status(row[3]) if row[3] is not None else ""
         if child_status in {"queued", "running"}:
             return "pending"
-        has_delivery_receipt = bool(row[4])
+        target_key_parts = self._parse_session_key(row[7])
+        message_ids = _json_loads(row[8], [])
+        descriptor = (
+            PLATFORM_REGISTRY.get(target_key_parts[0])
+            if target_key_parts is not None
+            else None
+        )
+        has_native_im_receipt = (
+            descriptor is not None
+            and descriptor.kind == "im"
+            and target_key_parts is not None
+            and target_key_parts[1] in {"channel", "user"}
+            and isinstance(message_ids, list)
+            and any(str(message_id or "").strip() for message_id in message_ids)
+        )
+        has_delivery_receipt = bool(row[4]) or has_native_im_receipt
         target_is_visible = (
             str(row[5] or "").strip() != "archived"
             and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
