@@ -101,6 +101,15 @@ import {
 // ``in_flight:true``; only an idle reading (past the post-send grace) clears it.
 const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
 
+function sessionAgentDisplayName(
+  session: Pick<WorkbenchSession, 'agent_name'>,
+  agents: VibeAgentBrief[],
+): string | null {
+  const agentName = session.agent_name?.trim() || null;
+  if (!agentName) return null;
+  return agents.find((agent) => agent.name === agentName)?.display_name?.trim() || agentName;
+}
+
 // Grace window after we optimistically set ``working`` from a local send before
 // an idle ``/turn-state`` reading is trusted to CLEAR it. A just-sent turn isn't
 // registered in the controller's in-flight map until POST→dispatch_async lands,
@@ -1980,6 +1989,8 @@ export const ChatPage: React.FC = () => {
     );
   }
 
+  const agentDisplayName = sessionAgentDisplayName(session, agents);
+
   return (
     // Fill the viewport so the transcript is the only scrolling region and
     // the compose bar genuinely anchors to the bottom. The outer AppShell
@@ -2084,6 +2095,7 @@ export const ChatPage: React.FC = () => {
         <Transcript
           messages={messages}
           session={session}
+          agentDisplayName={agentDisplayName}
           working={working}
           hasOlder={!!olderCursor}
           loadingOlder={loadingOlder}
@@ -2616,7 +2628,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const readOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
-  const sessionAgent = session.agent_name ? agents.find((agent) => agent.name === session.agent_name) : null;
+  const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   // Backend locks once a NATIVE conversation exists — a native can only be
   // resumed by the backend that created it — or while a turn is RUNNING (the
   // in-flight turn binds its native on the current route any moment); mirrors
@@ -2680,7 +2692,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
             {readOnlyReason === 'archived' && (
               <span className="truncate text-[12px] font-medium text-muted">
-                {sessionAgent?.display_name || session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
+                {sessionAgentLabel || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
               </span>
             )}
             <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px] font-bold">
@@ -2833,6 +2845,7 @@ const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit, readOnly }) =>
 interface TranscriptProps {
   messages: WorkbenchMessage[];
   session: WorkbenchSession;
+  agentDisplayName: string | null;
   working: boolean;
   hasOlder: boolean;
   loadingOlder: boolean;
@@ -2889,6 +2902,7 @@ interface TranscriptProps {
 const Transcript: React.FC<TranscriptProps> = ({
   messages,
   session,
+  agentDisplayName,
   working,
   hasOlder,
   loadingOlder,
@@ -3322,6 +3336,7 @@ const Transcript: React.FC<TranscriptProps> = ({
                 <MessageRow
                   message={message}
                   session={session}
+                  agentDisplayName={agentDisplayName}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
                   vaultRequests={provisionRequestsByMessage.get(message.id)}
@@ -3346,7 +3361,7 @@ const Transcript: React.FC<TranscriptProps> = ({
               onToggleTools={activity.onToggleTools}
             />
           ) : showThinking ? (
-            <ThinkingBubble session={session} />
+            <ThinkingBubble session={session} agentDisplayName={agentDisplayName} />
           ) : null}
           {footer}
         </div>
@@ -3399,14 +3414,19 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
 // agent bubble with three dots that fade in sequence (``.vr-typing-dot``
 // keyframes in index.css), so the user gets immediate feedback a reply is
 // coming (feedback #1).
-const ThinkingBubble: React.FC<{ session: WorkbenchSession }> = ({ session }) => {
+export const ThinkingBubble: React.FC<{
+  session: WorkbenchSession;
+  agentDisplayName: string | null;
+}> = ({ session, agentDisplayName }) => {
   const { t } = useTranslation();
   return (
     <div className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
           <RoleAvatar tone="mint"><Bot /></RoleAvatar>
-          <span className="text-[11px] font-medium text-muted">{session.agent_name || t('chat.thinking')}</span>
+          <span className="text-[11px] font-medium text-muted">
+            {agentDisplayName || session.agent_name || t('chat.thinking')}
+          </span>
         </div>
         <div className="w-fit rounded-2xl rounded-tl-md border border-mint/25 bg-mint/[0.09] px-3.5 py-2.5">
           <div className="flex items-center gap-1 py-0.5">
@@ -3423,6 +3443,7 @@ const ThinkingBubble: React.FC<{ session: WorkbenchSession }> = ({ session }) =>
 type MessageRowProps = {
   message: WorkbenchMessage;
   session: WorkbenchSession;
+  agentDisplayName?: string | null;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
   vaultRequests?: VaultRequest[];
@@ -3452,6 +3473,7 @@ type MessageRowProps = {
 export const MessageRow = memo(function MessageRow({
   message,
   session,
+  agentDisplayName,
   messageFontSize,
   onQuickReply,
   vaultRequests,
@@ -3720,7 +3742,9 @@ export const MessageRow = memo(function MessageRow({
   }
 
   // ----- Agent / system: left-aligned bubble with avatar + name header -----
-  const name = isAgent ? session.agent_name || message.author_name : message.author_name;
+  const name = isAgent
+    ? agentDisplayName || session.agent_name || message.author_name
+    : message.author_name;
   return (
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
