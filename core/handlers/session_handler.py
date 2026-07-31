@@ -1544,6 +1544,7 @@ class SessionHandler(BaseHandler):
         settled_by: str,
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
+        include_manager_lane: bool = True,
     ):
         """Clean up a specific session by composite key.
 
@@ -1562,10 +1563,20 @@ class SessionHandler(BaseHandler):
         Once the SDK client is disconnected nothing can settle the turn it was
         running, so a run still in flight here would be stranded ``running`` forever
         with its session lock held — the zombie this ordering exists to prevent.
+
+        ``include_manager_lane`` exists for the one caller that is ALREADY inside a
+        manager-level stop: a Stop (or Send Now) owns the Workbench turn's
+        cancellation and its flush timing, and cancels it itself AFTER this cleanup
+        returns. Releasing that turn from here would run its ``finally`` — including
+        Send Now's ``flush_on_cancel``-forced flush — while the old runtime client is
+        still registered, dispatching the replacement turn into a dying runtime.
         """
 
         await teardown_composite_session_runs(
-            self.controller, composite_key, settled_by=settled_by
+            self.controller,
+            composite_key,
+            settled_by=settled_by,
+            include_manager_lane=include_manager_lane,
         )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)

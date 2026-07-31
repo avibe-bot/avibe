@@ -2657,6 +2657,32 @@ scenarios:
     # snapshot is the only surviving proof of which claims were ours, so it is a
     # required leg of the intersection rather than an optimisation.
     test: tests/test_scheduled_tasks.py::test_reconciler_does_not_settle_an_unrelated_running_row_on_the_same_session
+  - id: HFR-126
+    name: stop-path cleanup leaves the manager turn to the stop that owns it
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: claude
+    # PR2 review round 1. Claude's Stop handling reaches cleanup_session, whose new
+    # settle-first preamble tore down BOTH lanes -- including the manager turn the
+    # stop itself is in the middle of stopping. For Send Now that is not merely
+    # redundant: _interrupt_for_send_now sets flush_on_cancel BEFORE awaiting
+    # handle_stop, and flush_on_cancel outranks stop_no_flush in _run's should_flush,
+    # so releasing the turn from inside the teardown ran the turn's finally and
+    # flushed the durable send-while-busy queue into a runtime the same call was
+    # about to disconnect -- the replacement turn dispatched against a closing Claude
+    # client. Pre-PR2 the turn was cancelled only AFTER cleanup, by the stop owner.
+    # FIX: the stop-handling call site passes include_manager_lane=False (threaded
+    # through _cleanup_runtime_session / _cleanup_runtime_session_state /
+    # cleanup_session); every other teardown entry, end_runtime_session included,
+    # keeps the default because no manager-level stop owner is active there.
+    # A second test carries this same id, for teardowns that WIN the race with a
+    # send-now instead of nesting inside it: release_for_teardown now clears
+    # flush_on_cancel next to stop_no_flush, because a reclaimed session must not
+    # drain its queue into a dying runtime -- the rows are durable and survive for
+    # the recreated session.
+    # tests/test_internal_server.py::test_release_for_teardown_does_not_flush_a_pending_send_now_queue
+    test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_stop_path_cleanup_does_not_release_the_manager_turn
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

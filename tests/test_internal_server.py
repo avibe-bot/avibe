@@ -2419,6 +2419,87 @@ def test_release_for_teardown_records_the_cause_before_cancelling_and_awaits_set
     assert asyncio.run(manager.release_for_teardown("ses_never_ran", settled_by="evicted")) is False
 
 
+def test_release_for_teardown_does_not_flush_a_pending_send_now_queue(monkeypatch, tmp_path):
+    """HFR-126: a teardown that wins the race with Send Now must still not flush.
+
+    ``send_now`` sets ``flush_on_cancel`` on the live turn BEFORE awaiting the backend
+    stop, and ``_run``'s ``should_flush`` lets ``flush_on_cancel`` override
+    ``stop_no_flush``. So a teardown (eviction, restart, a broken transport) that
+    lands on a turn already opted into the flush would drain the durable
+    send-while-busy queue into a session that is being dismantled. The rows are
+    durable and survive for the recreated session; the flush must not happen here.
+    """
+
+    from core.run_settlement import SETTLED_BY_EVICTED
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_teardown_flush",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+    session_id = session["id"]
+
+    started = asyncio.Event()
+
+    async def long_handler(ctx, text):
+        started.set()
+        await asyncio.sleep(5)  # held until the teardown cancels it
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    controller = _build_controller_double(handler=long_handler)
+    app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            await client.post(
+                "/internal/dispatch_async", json={"session_id": session_id, "text": "first"}
+            )
+            await asyncio.wait_for(started.wait(), timeout=3)
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn, scope_id=scope_id, session_id=session_id, text="q1"
+                )
+            # A send-now already opted this turn into flushing as it unwinds; the
+            # teardown wins the race.
+            manager.in_flight[session_id].flush_on_cancel = True
+            released = await manager.release_for_teardown(
+                session_id, settled_by=SETTLED_BY_EVICTED
+            )
+            for _ in range(200):
+                if session_id not in app.state.in_flight_dispatches:
+                    break
+                await asyncio.sleep(0.02)
+            return released
+
+    released = asyncio.run(_go())
+
+    assert released is True
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        transcript = messages_service.list_session_messages(
+            conn, session_id=session_id, types=("user",)
+        )
+    assert [q["text"] for q in queued] == ["q1"], "teardown must keep the durable queue"
+    assert transcript["messages"] == [], "teardown must not flush into a dying runtime"
+
+
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
     tmp_path, monkeypatch
 ):

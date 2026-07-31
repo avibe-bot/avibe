@@ -452,6 +452,7 @@ class ClaudeAgent(BaseAgent):
         settled_by: str,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        include_manager_lane: bool = True,
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task.
 
@@ -460,6 +461,9 @@ class ClaudeAgent(BaseAgent):
         default here would reinstate the inference the parameter exists to remove.
         Each call site below names the event it is handling: a user Stop, an
         eviction, a runtime refresh, or a fault the run did not survive.
+
+        ``include_manager_lane=False`` is for a call site that is itself the manager
+        lane's stop owner; see ``SessionHandler.cleanup_session``.
         """
 
         await self._prepare_steering_cleanup(composite_key)
@@ -469,6 +473,7 @@ class ClaudeAgent(BaseAgent):
                 settled_by=settled_by,
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
+                include_manager_lane=include_manager_lane,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -480,6 +485,7 @@ class ClaudeAgent(BaseAgent):
         settled_by: str,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
+        include_manager_lane: bool = True,
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -501,6 +507,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 settled_by=settled_by,
                 current_receiver_task=current_receiver_task,
+                include_manager_lane=include_manager_lane,
             )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -968,7 +975,19 @@ class ClaudeAgent(BaseAgent):
             # A user pressed Stop. Anything still running settles ``canceled`` with no
             # interruption notice -- reporting their own decision back to them as an
             # infrastructure failure is the inversion HFR-012/037 pin.
-            await self._cleanup_runtime_session(composite_key, settled_by=SETTLED_BY_STOPPED)
+            #
+            # SCHEDULER LANE ONLY (HFR-126). The Workbench turn belongs to the stop
+            # that is in progress -- a plain Stop (``SessionTurnManager.cancel``) or a
+            # Send Now (``_interrupt_for_send_now``) -- and that owner cancels it
+            # itself AFTER this backend cleanup returns. Cancelling it here would run
+            # the turn's ``finally`` while the old client is still registered, and for
+            # Send Now the forced ``flush_on_cancel`` flush would dispatch the queued
+            # replacement turn into the runtime this call is about to disconnect.
+            await self._cleanup_runtime_session(
+                composite_key,
+                settled_by=SETTLED_BY_STOPPED,
+                include_manager_lane=False,
+            )
         except Exception as err:
             logger.error("Failed to clean up stopped Claude session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)

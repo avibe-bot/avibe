@@ -65,7 +65,9 @@ class _StubController:
         self.claude_client = SimpleNamespace(_is_skip_message=lambda message: False)
         self.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
 
-        async def _cleanup_session(composite_key, *, settled_by="", current_receiver_task=None):
+        async def _cleanup_session(
+            composite_key, *, settled_by="", current_receiver_task=None, include_manager_lane=True
+        ):
             receiver_task = self.receiver_tasks.pop(composite_key, None)
             client = self.claude_sessions.pop(composite_key, None)
             cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
@@ -435,11 +437,144 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             settled_by="stopped",
             current_receiver_task=None,
+            # HFR-126: the stop owns the manager turn; cleanup takes the scheduler
+            # lane only.
+            include_manager_lane=False,
         )
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+
+    async def test_stop_path_cleanup_does_not_release_the_manager_turn(self):
+        """HFR-126: Send Now's flush must not race the stop's own backend teardown.
+
+        ``SessionTurnManager._interrupt_for_send_now`` sets ``flush_on_cancel`` on the
+        live turn and then awaits ``handle_stop``. Claude's stop handling tears the
+        runtime session down, and that teardown settles the session's runs first. If
+        it also released the MANAGER lane, the turn's ``finally`` would run right
+        there — and ``flush_on_cancel`` beats ``stop_no_flush`` in ``should_flush``,
+        so the queued replacement turn would be dispatched into the very runtime this
+        cleanup is about to disconnect. The manager-level stop owner cancels the turn
+        itself, AFTER cleanup returns; the nested teardown takes the scheduler lane
+        only.
+        """
+
+        from core.run_settlement import SETTLED_BY_STOPPED
+        from core.scheduled_tasks import ScheduledTaskService
+        from core.session_teardown import teardown_composite_session_runs
+        from core.session_turns import SessionTurnManager, Turn
+        from modules.im import MessageContext
+
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        session_id = "ses_stop_126"
+
+        class _Client:
+            async def interrupt(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.set_agent_status = lambda *_args, **_kwargs: None
+        controller.sessions = SimpleNamespace(
+            find_session_ids_for_anchor=lambda anchor, workdir=None, **_kw: [session_id]
+        )
+        # Stores default to the per-test isolated ``AVIBE_HOME`` (tests/conftest.py).
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        # The real cleanup ordering: settle the session's runs FIRST, then drop the
+        # runtime client. ``include_manager_lane`` is what the adapter forwards.
+        async def _cleanup_session(
+            composite_key, *, settled_by="", current_receiver_task=None, include_manager_lane=True
+        ):
+            await teardown_composite_session_runs(
+                controller,
+                composite_key,
+                settled_by=settled_by,
+                include_manager_lane=include_manager_lane,
+            )
+            controller.claude_sessions.pop(composite_key, None)
+
+        controller.session_handler.cleanup_session = AsyncMock(side_effect=_cleanup_session)
+
+        observed: dict = {}
+        flushed: list[str] = []
+
+        async def _flush_queue(sid):
+            # Where the bug lands: a flush that runs while the stopped runtime is
+            # still registered dispatches the replacement turn into a dying client.
+            flushed.append(sid)
+            return True
+
+        manager.flush_queue = _flush_queue
+
+        started = asyncio.Event()
+
+        async def _busy():
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                turn = manager.in_flight.get(session_id)
+                observed["cancelled_while_client_registered"] = runtime_key in controller.claude_sessions
+                if turn is not None and turn.flush_on_cancel:
+                    await manager.flush_queue(session_id)
+                raise
+
+        turn_task = asyncio.create_task(_busy())
+        turn_ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+        turn_ctx.platform_specific = {
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+        }
+        turn = Turn(task=turn_task, context=turn_ctx)
+        # Send Now opted this turn into flushing as it unwinds.
+        turn.flush_on_cancel = True
+        manager.in_flight[session_id] = turn
+        await started.wait()
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+        controller.emit_agent_message = AsyncMock()
+        controller.claude_sessions[runtime_key] = _Client()
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            stop_failure_reason=None,
+        )
+
+        try:
+            self.assertTrue(await service.handle_stop("claude", request))
+
+            # The turn is still the stop owner's to cancel.
+            self.assertFalse(turn_task.done())
+            self.assertIn(session_id, manager.in_flight)
+            self.assertNotIn("cancelled_while_client_registered", observed)
+            self.assertEqual(flushed, [])
+            # ...while the runtime itself was torn down as usual.
+            self.assertNotIn(runtime_key, controller.claude_sessions)
+            controller.session_handler.cleanup_session.assert_awaited_once_with(
+                runtime_key,
+                settled_by=SETTLED_BY_STOPPED,
+                current_receiver_task=None,
+                include_manager_lane=False,
+            )
+        finally:
+            turn_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await turn_task
 
     async def test_handle_stop_waits_for_in_flight_steering_write(self):
         controller = _StubController()
@@ -619,6 +754,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             settled_by="stopped",
             current_receiver_task=None,
+            # HFR-126: the stop owns the manager turn; cleanup takes the scheduler
+            # lane only.
+            include_manager_lane=False,
         )
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
@@ -1293,6 +1431,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             session_key,
             settled_by="interrupted",
             current_receiver_task=receiver_task,
+            include_manager_lane=True,
         )
         self.assertNotIn(session_key, agent._last_assistant_text)
         self.assertNotIn(session_key, agent._pending_assistant_message)
@@ -1518,6 +1657,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
+            include_manager_lane=True,
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -2003,6 +2143,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             # The stuck-active backstop IS an eviction, and says so.
             settled_by="evicted",
             current_receiver_task=None,
+            include_manager_lane=True,
         )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         controller.emit_agent_message.assert_awaited_once_with(
@@ -2138,6 +2279,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
+            include_manager_lane=True,
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)
         self.assertEqual(agent._remove_ack_reaction.await_args_list[0].args, (pending_request_1,))

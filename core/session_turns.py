@@ -1870,6 +1870,12 @@ class SessionTurnManager:
         if turn is None:
             return False
         turn.stop_no_flush = True
+        # A torn-down session must not flush its durable send-while-busy queue into a
+        # dying runtime (HFR-126). The queue rows survive for the recreated session,
+        # and a send-now that set ``flush_on_cancel`` before this teardown won the
+        # race would otherwise override ``stop_no_flush`` in ``_run``'s
+        # ``should_flush``.
+        turn.flush_on_cancel = False
         turn.cancel_settled_by = settled_by
         if turn.task.done():
             self.in_flight.pop(resolved, None)
