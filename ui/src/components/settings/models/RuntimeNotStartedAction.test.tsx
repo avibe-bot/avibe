@@ -165,6 +165,28 @@ describe('installed but not-started Model Hub runtime', () => {
     expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
   });
 
+  it('offers installation and transition polling for a pristine missing runtime', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={i18n}>
+        <ModelsPageActions
+          runtimeHealth="not_installed"
+          startingRuntime={false}
+          issueCount={2}
+          issuesOnly={false}
+          onStartRuntime={vi.fn()}
+          onFocusIssues={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    const here = dirname(fileURLToPath(import.meta.url));
+    const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(html).toContain(zh.settings.models.runtime.startNow);
+    expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
+    expect(html).not.toContain(zh.settings.models.runtime.notStarted);
+    expect(page).toMatch(/runtimeCanRecover[\s\S]+runtimeHealth === 'not_installed'/);
+  });
+
   it('keeps the explicit start action after an unhealthy attempt', () => {
     for (const health of ['down', 'degraded'] as const) {
       const html = renderToStaticMarkup(
@@ -208,12 +230,12 @@ describe('installed but not-started Model Hub runtime', () => {
     expect(page).toMatch(/runtimeRecoveryPending\n\s+\|\| runtimeHealth === 'not_started'/);
   });
 
-  it('wires idle and down runtime states to the POST-backed start action', () => {
+  it('wires recoverable runtime states to the POST-backed start action', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
     const api = readFileSync(join(here, 'modelsApi.ts'), 'utf8');
 
-    expect(page).toMatch(/runtimeNotStarted\n\s+\|\| runtimeHealth === 'down'/);
+    expect(page).toMatch(/runtimeNotStarted\n\s+\|\| runtimeHealth === 'not_installed'/);
     expect(page).toMatch(/startRuntimeWithStatusRefresh\(modelsApi\)/);
     expect(api).toMatch(/'\/api\/models\/runtime\/start', jsonInit\('POST'\)/);
   });

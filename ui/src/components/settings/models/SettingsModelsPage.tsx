@@ -108,6 +108,7 @@ export const ModelsPageActions: React.FC<{
   const runtimeNotStarted = runtimeHealth === 'not_started';
   const runtimeStartable = runtimeRecoveryPending
     || runtimeNotStarted
+    || runtimeHealth === 'not_installed'
     || runtimeHealth === 'down'
     || runtimeHealth === 'degraded';
   if (!runtimeStartable) {
@@ -276,6 +277,7 @@ export const SettingsModelsPage: React.FC = () => {
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRecoveryPending
       || runtimeHealth === 'not_started'
+      || runtimeHealth === 'not_installed'
       || runtimeHealth === 'down'
       || runtimeHealth === 'degraded';
     if (!runtimeCanRecover || startingRuntime) return undefined;

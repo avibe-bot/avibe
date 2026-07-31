@@ -607,7 +607,10 @@ class ModelHubService:
         self._engine_preparation_failed = False
 
     def _runtime_status_after_demand(self, status: EngineStatus) -> EngineStatus:
-        if self._engine_preparation_failed and status.health is EngineHealth.NOT_STARTED:
+        if self._engine_preparation_failed and status.health in {
+            EngineHealth.NOT_INSTALLED,
+            EngineHealth.NOT_STARTED,
+        }:
             return replace(status, health=EngineHealth.DOWN)
         return status
 

@@ -392,13 +392,26 @@ def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
     assert [binding.source_id for binding in adapter.synced[0]] == ["src_runtime01"]
 
 
-def test_runtime_start_sync_failure_is_reported_as_down(tmp_path):
+@pytest.mark.parametrize(
+    ("idle_health", "installed_version", "verified", "recovered_health"),
+    [
+        (EngineHealth.NOT_STARTED, "v7.2.95", True, "not_started"),
+        (EngineHealth.NOT_INSTALLED, None, False, "not_installed"),
+    ],
+)
+def test_runtime_start_sync_failure_is_reported_as_down(
+    tmp_path,
+    idle_health,
+    installed_version,
+    verified,
+    recovered_health,
+):
     class IdleAdapter(FakeAdapter):
         async def status(self):
             return EngineStatus(
-                health=EngineHealth.NOT_STARTED,
-                installed_version="v7.2.95",
-                verified=True,
+                health=idle_health,
+                installed_version=installed_version,
+                verified=verified,
                 listen_host="127.0.0.1",
                 listen_port=None,
                 last_check_iso=None,
@@ -441,7 +454,7 @@ def test_runtime_start_sync_failure_is_reported_as_down(tmp_path):
     asyncio.run(service._commit_synced(config, service._clone_config(config)))
 
     recovered = asyncio.run(service.runtime_status())
-    assert recovered["status"]["health"] == "not_started"
+    assert recovered["status"]["health"] == recovered_health
 
 
 def test_runtime_start_in_progress_remains_not_started(tmp_path):

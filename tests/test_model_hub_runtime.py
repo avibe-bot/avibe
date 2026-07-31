@@ -432,6 +432,34 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
 
 
+def test_engine_status_rehashes_binary_only_after_file_identity_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    binary_path = Path(installed["path"])
+    original_file_sha256 = managed_runtime.file_sha256
+    hashed_paths: list[Path] = []
+
+    def tracked_file_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(managed_runtime, "file_sha256", tracked_file_sha256)
+
+    assert manager.status()["installed"] is True
+    assert manager.status()["installed"] is True
+    assert hashed_paths == [binary_path]
+
+    binary_path.write_bytes(binary_path.read_bytes() + b"\n# tampered\n")
+
+    assert manager.status()["installed"] is False
+    assert hashed_paths == [binary_path, binary_path]
+
+
 def test_engine_version_check_uses_minimal_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
