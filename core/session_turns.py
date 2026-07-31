@@ -730,12 +730,13 @@ class Turn:
     stop_no_flush: bool = False
     #: WHY this turn's task was cancelled, in the ``core.run_settlement``
     #: vocabulary — set by the canceller BEFORE ``task.cancel()`` so ``_run`` can
-    #: attribute the run it owns correctly. ``None`` means a plain user Stop
-    #: (``cancel`` / ``send_now``), which is the default reading of a cancelled
-    #: turn; a backend runtime refresh sets ``SETTLED_BY_BACKEND_REFRESH`` so a
-    #: routine ``agents.*`` reconciliation is not reported as if the user pressed
-    #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
-    #: do: it retires when the turn is popped, with no parallel set to leak.
+    #: attribute the run it owns correctly. User interruption paths set
+    #: ``SETTLED_BY_STOPPED`` before invoking the backend because a successful Stop
+    #: may emit its terminal result before ``handle_stop`` returns; backend runtime
+    #: refresh sets ``SETTLED_BY_BACKEND_REFRESH`` so a routine ``agents.*``
+    #: reconciliation is not reported as if the user pressed Stop (Codex P1). It
+    #: rides on the Turn for the same reason the flush intents do: it retires when
+    #: the turn is popped, with no parallel set to leak.
     cancel_settled_by: Optional[str] = None
     #: One shared backend Stop attempt for concurrent send-now callers. Each
     #: caller already owns its own durable queue row; they must not interrupt the
@@ -1050,7 +1051,10 @@ class SessionTurnManager:
             return
         for session_id in sorted(session_ids):
             if not self.is_in_flight(session_id):
-                await self.flush_queue(session_id)
+                if self._durable_schema_available():
+                    await self._resume_post_terminal(session_id)
+                else:
+                    await self.flush_queue(session_id)
 
     def active_session_ids_for_backend(self, backend: str) -> set[str]:
         return {
@@ -1773,11 +1777,14 @@ class SessionTurnManager:
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
         turn.context.platform_specific["suppress_stop_no_active_notice"] = True
+        turn.cancel_settled_by = SETTLED_BY_STOPPED
         try:
             stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
         except Exception:
             logger.exception("durable P0 interrupt failed for Session=%s", session_id)
             stopped = False
+        if not stopped:
+            turn.cancel_settled_by = None
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             delivery = delivery_store.get_delivery(conn, delivery_id)
@@ -1815,12 +1822,18 @@ class SessionTurnManager:
         *,
         context: Optional["MessageContext"] = None,
     ) -> bool:
-        attempt_id = delivery_store.new_attempt_id()
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
             if turn is None or turn["state"] != "starting":
                 return False
+            backend = str(turn.get("backend") or "").strip()
+            if backend in self._draining_backends:
+                self._deferred_restart_sessions.setdefault(backend, set()).add(
+                    str(turn["session_id"])
+                )
+                return False
+            attempt_id = delivery_store.new_attempt_id()
             claimed = delivery_store.claim_start_attempt(
                 conn,
                 turn_id,
@@ -2614,7 +2627,9 @@ class SessionTurnManager:
                             # for startup reconciliation instead.
                             durable_terminal_result = self._terminalize_durable_turn(
                                 logical_turn_id,
-                                "completed",
+                                "canceled"
+                                if settled_by == SETTLED_BY_STOPPED
+                                else "completed",
                             )
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
@@ -3270,6 +3285,7 @@ class SessionTurnManager:
         # turn STARTED under so the right backend is interrupted even if the Chat
         # header swapped the session's agent / model mid-turn.
         turn.stop_no_flush = True
+        turn.cancel_settled_by = SETTLED_BY_STOPPED
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
         turn.context.platform_specific["suppress_stop_no_active_notice"] = True
@@ -3311,6 +3327,7 @@ class SessionTurnManager:
             # keep the Workbench turn registered so Stop remains available and
             # later natural completion can flush normally.
             turn.stop_no_flush = False
+            turn.cancel_settled_by = None
             return {"ok": False, "code": "stop_failed", "session_id": session_id, "reason": reason or None}
         backend = self._context_backend(turn.context)
         deferred = self._deferred_restart_sessions.get(backend)
@@ -3331,6 +3348,7 @@ class SessionTurnManager:
         """Own one backend Stop attempt shared by concurrent send-now callers."""
 
         turn.flush_on_cancel = True
+        turn.cancel_settled_by = SETTLED_BY_STOPPED
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
         turn.context.platform_specific["suppress_stop_no_active_notice"] = True
@@ -3346,6 +3364,7 @@ class SessionTurnManager:
             )
         if not stopped:
             turn.flush_on_cancel = False
+            turn.cancel_settled_by = None
             return {
                 "ok": False,
                 "code": "stop_failed",
@@ -3494,6 +3513,68 @@ class SessionTurnManager:
         if session_id:
             self.controller.set_agent_status(session_id, "running")
 
+    @staticmethod
+    def _durable_terminal_outcome(*, is_error: bool, settled_by: str | None) -> str:
+        if is_error:
+            return "failed"
+        if settled_by == SETTLED_BY_STOPPED:
+            return "canceled"
+        return "completed"
+
+    def _finish_durable_terminal_result(
+        self,
+        session_id: str,
+        logical_turn_id: str,
+        *,
+        is_error: bool,
+        settled_by: str | None,
+    ) -> None:
+        try:
+            terminal = self._terminalize_durable_turn(
+                logical_turn_id,
+                self._durable_terminal_outcome(
+                    is_error=is_error,
+                    settled_by=settled_by,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "durable terminal reconciliation deferred after native completion for Turn=%s",
+                logical_turn_id,
+            )
+            return
+        current = self.in_flight.get(session_id)
+        should_resume = bool(terminal.get("successor_turn_id")) or not bool(
+            terminal.get("preserve_queue")
+        )
+        if (
+            terminal.get("changed")
+            and should_resume
+            and (current is None or current.logical_turn_id != logical_turn_id)
+        ):
+            asyncio.create_task(
+                self._resume_after_native_terminal(session_id, logical_turn_id),
+                name=f"durable-result-resume:{session_id}",
+            )
+
+    async def _finish_durable_terminal_after_release(
+        self,
+        session_id: str,
+        logical_turn_id: str,
+        sink: dict[str, Any],
+        *,
+        is_error: bool,
+    ) -> None:
+        done = sink.get("done_event")
+        if done is not None and not done.is_set():
+            await done.wait()
+        self._finish_durable_terminal_result(
+            session_id,
+            logical_turn_id,
+            is_error=is_error,
+            settled_by=str(sink.get("settled_by") or "") or None,
+        )
+
     def on_terminal_result(self, context: "MessageContext", *, is_error: bool) -> None:
         """OUTBOUND turn chokepoint for the active terminal ``result``."""
         if self.controller is None:
@@ -3511,22 +3592,33 @@ class SessionTurnManager:
             or ""
         ).strip()
         if logical_turn_id:
-            terminal = self._terminalize_durable_turn(
-                logical_turn_id,
-                "failed" if is_error else "completed",
-            )
             current = self.in_flight.get(session_id)
-            should_resume = bool(terminal.get("successor_turn_id")) or not bool(
-                terminal.get("preserve_queue")
-            )
-            if (
-                terminal.get("changed")
-                and should_resume
-                and (current is None or current.logical_turn_id != logical_turn_id)
-            ):
+            sink = None
+            get_sink = getattr(self.controller, "get_turn_sink", None)
+            get_key = getattr(self.controller, "_get_session_key", None)
+            if callable(get_sink) and callable(get_key):
+                try:
+                    sink = get_sink(get_key(context))
+                except Exception:
+                    logger.debug("failed to inspect terminal Turn sink", exc_info=True)
+            if isinstance(sink, dict) and sink.get("done_event") is not None:
                 asyncio.create_task(
-                    self._resume_after_native_terminal(session_id, logical_turn_id),
-                    name=f"durable-result-resume:{session_id}",
+                    self._finish_durable_terminal_after_release(
+                        session_id,
+                        logical_turn_id,
+                        sink,
+                        is_error=is_error,
+                    ),
+                    name=f"durable-result-reconcile:{session_id}",
+                )
+            else:
+                self._finish_durable_terminal_result(
+                    session_id,
+                    logical_turn_id,
+                    is_error=is_error,
+                    settled_by=(
+                        current.cancel_settled_by if current is not None else None
+                    ),
                 )
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
 
@@ -3638,6 +3730,8 @@ class SessionTurnManager:
                 cancelled = True
                 raise
             finally:
+                sink = self.get_turn_sink(session_key)
+                settled_by = str((sink or {}).get("settled_by") or "")
                 self.pop_turn_sink(session_key, done)
                 current = self.in_flight.get(session_id)
                 turn = current if current is not None and current.task is asyncio.current_task() else None
@@ -3648,7 +3742,9 @@ class SessionTurnManager:
                 if durable_turn_registered:
                     self._terminalize_durable_turn(
                         turn_token,
-                        "canceled" if cancelled else "completed",
+                        "canceled"
+                        if cancelled or settled_by == SETTLED_BY_STOPPED
+                        else "completed",
                     )
                 # Flush the send-while-busy queue on NATURAL completion (mirrors
                 # ``_run``): a plain Stop keeps the queue, send_now opts back in.

@@ -412,7 +412,11 @@ def terminalize_and_claim_successor(
                 continue
             advance_values: dict[str, Any] = {"state": "starting"}
             if delivery.get("receipt_outcome") is None:
-                advance_values["receipt_outcome"] = outcome
+                advance_values["receipt_outcome"] = (
+                    "accepted"
+                    if delivery["state"] == "interrupting" and outcome == "canceled"
+                    else outcome
+                )
             advanced = cas_delivery(
                 conn,
                 str(delivery["id"]),
@@ -434,7 +438,11 @@ def terminalize_and_claim_successor(
         } or (delivery["state"] == "reconciling" and delivery["priority"] == "p0"):
             completion_values: dict[str, Any] = {"state": "completed"}
             if delivery.get("receipt_outcome") is None:
-                completion_values["receipt_outcome"] = outcome
+                completion_values["receipt_outcome"] = (
+                    "accepted"
+                    if delivery["state"] == "interrupting" and outcome == "canceled"
+                    else outcome
+                )
             completed = cas_delivery(
                 conn,
                 str(delivery["id"]),

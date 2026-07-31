@@ -1685,3 +1685,140 @@ def test_restart_retires_ownerless_legacy_turn_and_ignores_late_terminal(
     assert turn["state"] == "terminal"
     assert turn["terminal_outcome"] == "ownerless_legacy_restart"
     assert active is None
+
+
+def test_terminal_reconciliation_waits_for_release_and_contains_write_failure(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        done = asyncio.Event()
+        sink = {"done_event": done, "turn_token": turn_id}
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        manager.controller.get_turn_sink = lambda _session_key: sink
+        calls = 0
+
+        def unavailable_terminal_write(_turn_id, _outcome):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("ownership database unavailable")
+
+        monkeypatch.setattr(manager, "_terminalize_durable_turn", unavailable_terminal_write)
+        manager.on_terminal_result(context, is_error=False)
+        assert calls == 0
+        sink["settled_by"] = "terminal_result"
+        done.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert calls == 1
+        assert manager.controller.statuses[-1] == ("ses_fsm", "idle")
+
+    asyncio.run(run())
+
+
+def test_stop_terminal_result_preserves_canceled_turn_and_accepted_receipt(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        done = asyncio.Event()
+        sink = {"done_event": done, "turn_token": turn_id}
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        manager.controller.get_turn_sink = lambda _session_key: sink
+        manager.is_active_emit = lambda _context_value: True
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def stop_with_terminal(stop_context):
+            manager.on_terminal_result(stop_context, is_error=False)
+            sink["settled_by"] = "stopped"
+            done.set()
+            await asyncio.sleep(0)
+            return True
+
+        manager.controller.command_handler.handle_stop = AsyncMock(
+            side_effect=stop_with_terminal
+        )
+        replacement = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement",
+            ),
+            context=_context(),
+        )
+        for _ in range(3):
+            await asyncio.sleep(0)
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return turn_id, replacement
+
+    turn_id, replacement = asyncio.run(run())
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, turn_id)
+        delivery = delivery_store.get_delivery(conn, str(replacement.delivery_id))
+    assert terminal is not None
+    assert terminal["terminal_outcome"] == "canceled"
+    assert delivery is not None
+    assert delivery["state"] == "starting"
+    assert delivery["receipt_outcome"] == "accepted"
+
+
+def test_backend_drain_defers_durable_successor_start_attempt(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        manager.begin_backend_drain("codex")
+        replacement = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="after refresh",
+            ),
+            context=_context(),
+        )
+        assert replacement.state == "waiting_terminal"
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        manager.in_flight.pop("ses_fsm", None)
+        terminal_task = manager.on_native_terminal(context, outcome="canceled")
+        assert terminal_task is not None
+        await terminal_task
+
+        with engine.connect() as conn:
+            delivery = delivery_store.get_delivery(conn, str(replacement.delivery_id))
+            successor = delivery_store.get_turn(
+                conn,
+                str((delivery or {}).get("successor_turn_id") or ""),
+            )
+        assert successor is not None
+        assert successor["state"] == "starting"
+        assert successor["start_attempt_id"] is None
+        assert starts == [turn_id]
+
+        await manager.end_backend_drain("codex")
+        return str(successor["id"])
+
+    successor_id = asyncio.run(run())
+    with engine.connect() as conn:
+        successor = delivery_store.get_turn(conn, successor_id)
+    assert successor is not None
+    assert successor["start_attempt_id"] is not None
+    assert len(starts) == 2
+    assert starts[1] == successor_id
