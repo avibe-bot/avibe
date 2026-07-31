@@ -12,7 +12,7 @@ from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -28,6 +28,11 @@ DEFAULT_AGENT_META_KEY = "default_agent_name"
 BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "lock_delete": True}
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
 SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
+RECOMMENDED_AGENT_MODELS = {
+    "claude": "claude-opus-5",
+    "codex": "gpt-5.6-sol",
+    "opencode": "openai/gpt-5.6-sol",
+}
 _UNSET = object()
 
 
@@ -77,6 +82,10 @@ def validate_agent_backend(backend: str) -> str:
         supported = ", ".join(sorted(SUPPORTED_AGENT_BACKENDS))
         raise ValueError(f"unsupported agent backend: {backend}. Supported backends: {supported}")
     return value
+
+
+def recommended_agent_model(backend: str) -> str:
+    return RECOMMENDED_AGENT_MODELS[validate_agent_backend(backend)]
 
 
 def _json_dumps(value: Any) -> str:
@@ -142,6 +151,7 @@ class VibeAgentStore:
         else:
             run_migrations(self.db_path)
         self.engine = create_sqlite_engine(self.db_path)
+        self.prefill_missing_models()
         self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:
@@ -150,6 +160,22 @@ class VibeAgentStore:
 
     def maybe_reload(self) -> bool:
         return self._probe.has_external_write()
+
+    def prefill_missing_models(self) -> int:
+        """Materialize release recommendations on legacy model-less Agents."""
+
+        now = _utc_now_iso()
+        updated = 0
+        with self.engine.begin() as conn:
+            for backend, model in RECOMMENDED_AGENT_MODELS.items():
+                result = conn.execute(
+                    agents.update()
+                    .where(agents.c.backend == backend)
+                    .where(agents.c.model.is_(None) | (func.trim(agents.c.model) == ""))
+                    .values(model=model, updated_at=now)
+                )
+                updated += int(result.rowcount or 0)
+        return updated
 
     def list_agents(self, *, include_disabled: bool = True) -> list[VibeAgent]:
         with self.engine.connect() as conn:
@@ -200,14 +226,15 @@ class VibeAgentStore:
         enabled: bool = True,
     ) -> VibeAgent:
         normalized = normalize_agent_name(name)
+        normalized_backend = validate_agent_backend(backend)
         now = _utc_now_iso()
         agent = VibeAgent(
             id=uuid4().hex[:12],
             name=str(name).strip(),
             normalized_name=normalized,
-            backend=validate_agent_backend(backend),
+            backend=normalized_backend,
             description=_clean_optional(description),
-            model=_clean_optional(model),
+            model=_clean_optional(model) or recommended_agent_model(normalized_backend),
             reasoning_effort=_clean_optional(reasoning_effort),
             system_prompt=_clean_optional(system_prompt),
             enabled=bool(enabled),
@@ -240,7 +267,7 @@ class VibeAgentStore:
         if description is not _UNSET:
             values["description"] = _clean_optional(description)
         if model is not _UNSET:
-            values["model"] = _clean_optional(model)
+            values["model"] = _clean_optional(model) or recommended_agent_model(existing.backend)
         if reasoning_effort is not _UNSET:
             values["reasoning_effort"] = _clean_optional(reasoning_effort)
         if system_prompt is not _UNSET:

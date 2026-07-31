@@ -764,7 +764,6 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                             "OpenCodeConfig",
                             (),
                             {
-                                "default_model": "GPT-5.4",
                                 "default_provider": "openai",
                                 "default_reasoning_effort": "high",
                             },
@@ -777,7 +776,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
 
         def get_opencode_overrides(self, context):
-            return None, None, None
+            return None, "openai/gpt-5.4", None
 
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = _Controller()

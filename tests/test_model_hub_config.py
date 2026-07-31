@@ -169,12 +169,11 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
 
     for example in _schema("agent-supply.schema.json")["examples"]:
         agent = ModelHubAgentSupplyConfig.from_payload(example)
-        # `current`, `builtin_models` and `standard_vendors` are read-only
-        # endpoint projections (v1.2), not persisted config — reconstruct them
+        # `builtin_models` and `standard_vendors` are read-only endpoint
+        # projections (v1.2), not persisted config — reconstruct them
         # the way `_agent_payload` merges them onto to_payload().
         serialized = {
             **agent.to_payload(),
-            "current": example.get("current"),
             "builtin_models": example.get("builtin_models"),
             "standard_vendors": example.get("standard_vendors"),
         }
@@ -195,7 +194,7 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
-def test_agent_supply_contract_accepts_unmapped_native_alias_current():
+def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     payload = {
         "backend": "claude",
         "mode": "hub",
@@ -203,11 +202,6 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_current():
         "selected_by_agent": None,
         "selected_model_id": "claude-opus-4-5",
         "selected_model_explicit": True,
-        "current": {
-            "model_id": "claude-opus-4-5-20251101",
-            "source_id": "src_anthropic1",
-            "channel": "hub",
-        },
         "sources": {
             "policy": "follow",
             "order": ["src_anthropic1"],
@@ -354,7 +348,6 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
         "selected_by_agent": None,
         "selected_model_id": None,
         "selected_model_explicit": False,
-        "current": None,
         "sources": {"policy": "follow", "order": [], "eligibility": []},
         "supply_status": None,
         "mappings": [],
@@ -400,11 +393,6 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
     signal_supply.update(
         {
             "selected_model_id": "claude-opus-4-6",
-            "current": {
-                "model_id": "claude-opus-4-6",
-                "source_id": "src_anthkey01",
-                "channel": "hub",
-            },
             "supply_status": "degraded",
         }
     )

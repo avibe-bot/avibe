@@ -806,7 +806,7 @@ class SessionHandler(BaseHandler):
         # resolves DM users from the users store (not the stale channels store).
         routing = self._get_settings_manager(context).get_channel_routing(settings_key)
 
-        # Priority: subagent params > channel config > agent frontmatter > global default
+        # Priority: subagent params > channel config > Agent model.
         # Note: agent frontmatter model is applied later after loading agent file
         effective_agent = subagent_name or (routing.claude_agent if routing else None)
         # Store explicit model override (not including default yet)
@@ -825,7 +825,6 @@ class SessionHandler(BaseHandler):
             configured_agent_model = launch_agent_data.get("model") if launch_agent_data else None
             if configured_agent_model and configured_agent_model.lower() not in ("inherit", ""):
                 launch_model = configured_agent_model
-        launch_model = launch_model or self.config.claude.default_model
         cached_base = (
             f"{base_session_id}:{effective_agent}"
             if effective_agent
@@ -1000,8 +999,8 @@ class SessionHandler(BaseHandler):
         if agent_model and agent_model.lower() in ("inherit", ""):
             agent_model = None
 
-        # Determine final model: explicit override > agent frontmatter > global default
-        effective_model = explicit_model or agent_model or self.config.claude.default_model
+        # The routed Vibe Agent model is materialized into ``explicit_model``.
+        effective_model = explicit_model or agent_model
         from modules.agents.model_hub import (
             build_claude_hub_env,
             claude_setting_sources_for_launch,

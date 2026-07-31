@@ -20,7 +20,6 @@ class ClaudeCompatConfig:
     permission_mode: str
     cwd: str
     system_prompt: Optional[str] = None
-    default_model: Optional[str] = None
     cli_path: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     auth_mode: str = "oauth"
@@ -43,7 +42,6 @@ class CodexCompatConfig:
     enabled: bool
     binary: str
     extra_args: list[str]
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     auth_mode: str = "oauth"
 
@@ -54,7 +52,6 @@ class OpenCodeCompatConfig:
     binary: str
     port: int
     request_timeout_seconds: int
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
     # User's saved default provider from Settings → Backends → OpenCode.
@@ -104,7 +101,6 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         permission_mode="bypassPermissions",
         cwd=v2.runtime.default_cwd,
         system_prompt=None,
-        default_model=v2.agents.claude.default_model,
         cli_path=v2.agents.claude.cli_path,
         idle_timeout_seconds=v2.agents.claude.idle_timeout_seconds,
         # Forward V2Config auth fields so ``session_handler`` can inject the
@@ -122,7 +118,6 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             enabled=True,
             binary=v2.agents.codex.cli_path,
             extra_args=[],
-            default_model=v2.agents.codex.default_model,
             idle_timeout_seconds=v2.agents.codex.idle_timeout_seconds,
             auth_mode=v2.agents.codex.auth_mode,
         )
@@ -133,7 +128,6 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             binary=v2.agents.opencode.cli_path,
             port=4096,
             request_timeout_seconds=60,
-            default_model=v2.agents.opencode.default_model,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,
             error_retry_limit=v2.agents.opencode.error_retry_limit,
             # Surface the user's saved provider choice so the OpenCode agent

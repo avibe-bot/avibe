@@ -107,7 +107,14 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
         if agent["backend"] == "claude"
     )
-    assert claude["current"]["source_id"] == started["source_id"]
+    assert "current" not in claude
+    assert claude["selected_model_id"] == "claude-opus-4-6"
+    assert claude["supply_status"] == "ok"
+    chain = client.get(
+        "/api/models/agents/claude/chain?model=claude-opus-4-6",
+        base_url=BASE_URL,
+    ).get_json()["chain"]
+    assert next(item for item in chain["chain"] if item["runnable"])["source_id"] == started["source_id"]
 
 
 def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_path):
@@ -234,7 +241,8 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
         for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
         if agent["backend"] == "claude"
     )
-    assert claude["current"] is None
+    assert "current" not in claude
+    assert claude["supply_status"] == "interrupted"
 
     cancelled = client.post(
         "/api/models/oauth/start",

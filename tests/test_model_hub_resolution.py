@@ -179,12 +179,14 @@ def _service(tmp_path, adapter, *, agents=None, now=None):
             policy="custom",
             order=[source.id for source in sources],
         )
+    store = MemoryStore(config)
     return ModelHubService(
-        store=MemoryStore(config),
+        store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json", max_entries=5),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=now or (lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc)),
+        requested_model_override=lambda backend: store.requested_model(backend),
     )
 
 
@@ -784,8 +786,8 @@ def test_wall_drawers_chain_probe_and_resolver_share_native_alias_supply_truth(
     )
     probe = asyncio.run(service.probe_agent("claude", "claude-opus-4-5"))
 
-    # The row wall consumes model_supply/current. Both drawers consume the chain
-    # endpoint. Probe and live resolution must carry those exact same bytes.
+    # The row wall consumes model_supply. Both drawers consume the chain
+    # endpoint. Probe and live resolution must carry that same resolved model.
     wall = next(
         row
         for row in agent["model_supply"]
@@ -793,8 +795,7 @@ def test_wall_drawers_chain_probe_and_resolver_share_native_alias_supply_truth(
     )
     assert wall["chain_length"] == len(chain["chain"]) == 1
     assert (
-        agent["current"]["model_id"]
-        == chain["chain"][0]["resolved_model_id"]
+        chain["chain"][0]["resolved_model_id"]
         == resolution.target_model
         == probe["model_id"]
         == effective_model
@@ -956,7 +957,7 @@ def test_runtime_alias_blocker_event_uses_requested_menu_id(tmp_path):
     assert blocker["model_id"] == "claude-opus-4-5"
 
 
-def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tmp_path):
+def test_opencode_provider_prefix_selects_matching_source(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
     config = service.store.load()
@@ -968,7 +969,7 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
     config.sources[1].vendor = "anthropic"
     config.agents["opencode"].menu.checked = ["anthropic/claude-opus-4-6"]
 
-    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
+    chain = service.agent_chain("opencode", "anthropic/claude-opus-4-6")
     resolved = asyncio.run(
         service.resolve(
             backend="opencode",
@@ -977,7 +978,7 @@ def test_opencode_provider_prefix_selects_matching_source_and_current_payload(tm
         )
     )
 
-    assert current["source_id"] == "src_backup001"
+    assert chain["chain"][0]["source_id"] == "src_backup001"
     assert resolved.source_id == "src_backup001"
     assert adapter.invocations == [("src_backup001", "claude-opus-4-6", "opencode")]
     assert service.list_events(limit=10) == []
@@ -1034,7 +1035,7 @@ def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     config.agents["opencode"].menu.checked = ["custom/claude-opus-4-6"]
 
     menu = asyncio.run(service.set_opencode_menu(config.agents["opencode"].menu.to_payload()))
-    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
+    chain = service.agent_chain("opencode", "custom/claude-opus-4-6")
     resolved = asyncio.run(
         service.resolve(
             backend="opencode",
@@ -1044,7 +1045,7 @@ def test_opencode_unknown_vendor_uses_custom_provider_identifier(tmp_path):
     )
 
     assert menu["menu"]["checked"] == ["custom/claude-opus-4-6"]
-    assert current["source_id"] == "src_primary01"
+    assert chain["chain"][0]["source_id"] == "src_primary01"
     assert resolved.source_id == "src_primary01"
 
 
@@ -1107,8 +1108,6 @@ def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
     service = _service(tmp_path, adapter)
     service.store.load().agents["opencode"].menu.checked = []
 
-    current = next(agent for agent in service.list_agents() if agent["backend"] == "opencode")["current"]
-
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
             service.resolve(
@@ -1119,7 +1118,6 @@ def test_opencode_resolution_rejects_models_outside_checked_menu(tmp_path):
         )
 
     assert exc_info.value.code == "mapping_target_unavailable"
-    assert current is None
     assert adapter.invocations == []
 
 
@@ -1147,25 +1145,6 @@ def test_persisted_hub_sources_sync_before_first_resolution(tmp_path):
         "src_primary01",
         "src_backup001",
     ]
-
-
-def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
-    service = _service(tmp_path, FakeAdapter([]))
-    config = service.store.load()
-    config.sources[0].state = ModelHubSourceStateConfig(
-        status="cooldown",
-        retry_at="2026-07-23T03:05:00Z",
-    )
-
-    claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
-    assert claude["current"]["source_id"] == "src_backup001"
-
-    config.sources[1].state = ModelHubSourceStateConfig(
-        status="error",
-        detail_key="models.source.error.unclassified",
-    )
-    claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
-    assert claude["current"] is None
 
 
 @pytest.mark.parametrize(
@@ -1573,9 +1552,10 @@ def test_source_delete_cascades_agent_model_references(tmp_path, force, mode):
     assert all(agent.sources.order == ["src_backup001"] for agent in persisted.agents.values())
     _assert_no_references_to(service, "retired-model")
     if force:
-        agents = {agent["backend"]: agent for agent in service.list_agents()}
-        assert agents["claude"]["current"]["source_id"] == "src_backup001"
-        assert agents["opencode"]["current"]["source_id"] == "src_backup001"
+        claude_chain = service.agent_chain("claude", "claude-opus-4-6")
+        opencode_chain = service.agent_chain("opencode", "anthropic/claude-opus-4-6")
+        assert claude_chain["chain"][0]["source_id"] == "src_backup001"
+        assert opencode_chain["chain"][0]["source_id"] == "src_backup001"
         resolved = asyncio.run(
             service.resolve(
                 backend="claude",
@@ -1583,7 +1563,7 @@ def test_source_delete_cascades_agent_model_references(tmp_path, force, mode):
                 request={},
             )
         )
-        assert resolved.source_id == agents["claude"]["current"]["source_id"]
+        assert resolved.source_id == claude_chain["chain"][0]["source_id"]
 
 
 def test_deleting_last_hub_source_syncs_empty_binding_set(tmp_path):
@@ -2169,7 +2149,9 @@ def test_supply_guard_uses_only_enabled_menu_mappings_from_fresh_fixtures(
 def test_supply_guard_reports_menu_identifier_and_effective_named_agents(tmp_path):
     service, _adapter = _repair_guard_service(tmp_path, enabled=True)
     service.named_agents_override = lambda backend: (
-        [("pm", None), ("reviewer", "claude-opus-4-6")] if backend == "claude" else []
+        [("pm", "claude-opus-4-6"), ("reviewer", "claude-opus-4-6")]
+        if backend == "claude"
+        else []
     )
     service.store.requested_models["claude"] = "claude-opus-4-6"
 

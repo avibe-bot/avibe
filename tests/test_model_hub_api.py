@@ -66,12 +66,16 @@ class MemoryStore:
                 for backend in ("claude", "codex", "opencode")
             }
         )
+        self.requested_models = {}
 
     def load(self):
         return self.config
 
     def save(self, config):
         self.config = config
+
+    def requested_model(self, backend):
+        return self.requested_models.get(backend, "")
 
 
 class FakeInvokeHandle:
@@ -233,6 +237,7 @@ def _service(tmp_path):
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        requested_model_override=lambda backend: store.requested_model(backend),
     )
     return service, store, adapter
 
@@ -419,8 +424,8 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "codex": "gpt-5.3-codex",
     }.get(backend)
     service.named_agents_override = lambda backend: {
-        "claude": [("pm", None), ("reviewer", "claude-opus-4-6")],
-        "codex": [("codex", None)],
+        "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
+        "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],
     }[backend]
 
@@ -834,7 +839,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         headers=headers,
         base_url=base_url,
     )
-    assert response.get_json()["agent"]["current"] is None
+    assert "current" not in response.get_json()["agent"]
     response = client.get(
         "/api/models/agents/codex/chain?model=gpt-5",
         base_url=base_url,
@@ -850,7 +855,6 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
             "selected_by_agent",
             "selected_model_id",
             "selected_model_explicit",
-            "current",
             "sources",
             "supply_status",
             "model_supply",
@@ -1226,6 +1230,9 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
     store.config.sources.append(source)
     store.config.refresh_follow_orders()
     store.requested_model = lambda backend: ("claude-opus-4-6" if backend == "claude" else "")
+    service.named_agents_override = lambda backend: (
+        [("claude", "claude-opus-4-6")] if backend == "claude" else []
+    )
     flow = asyncio.run(
         service.reauth_source(
             source.id,
@@ -1251,7 +1258,7 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
         {
             "backend": "claude",
             "model_id": "claude-opus-4-6",
-            "agents": [],
+                "agents": ["claude"],
         }
     ]
     assert store.config.sources[0].models == []
@@ -2644,6 +2651,9 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     store.requested_model = lambda backend: (
         "claude-opus-4-6" if backend == "claude" else ""
     )
+    service.named_agents_override = lambda backend: (
+        [("claude", "claude-opus-4-6")] if backend == "claude" else []
+    )
 
     async def discover_narrower(vendor, protocol, base_url, credential_ref):
         return ("replacement-only-model",)
@@ -2669,7 +2679,7 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
         {
             "backend": "claude",
             "model_id": "claude-opus-4-6",
-            "agents": [],
+            "agents": ["claude"],
         }
     ]
     committed = client.put(

@@ -290,7 +290,6 @@ class OpenCodeConfig:
     enabled: bool = True
     cli_path: str = "opencode"
     default_agent: Optional[str] = None
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
     # Provider the user picked in Settings → Backends → OpenCode. The provider
@@ -306,7 +305,6 @@ class OpenCodeConfig:
 class ClaudeConfig:
     enabled: bool = True
     cli_path: str = "claude"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" relies on Claude Code's own credential storage;
     # "api_key" injects ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL)
@@ -331,7 +329,6 @@ class ClaudeConfig:
 class CodexConfig:
     enabled: bool = True
     cli_path: str = "codex"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" defers to whatever ~/.codex/config.toml already
     # has (typically `auth.method = "ChatGPT"`); "api_key" writes the
