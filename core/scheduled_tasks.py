@@ -3035,6 +3035,60 @@ class ScheduledTaskService:
             )
             return False
 
+    def session_lane_backends(self, session_id: str) -> set[str]:
+        """Backends of the runs a scheduler-lane cancel for ``session_id`` would reach.
+
+        The identity End needs to decide whether that cancel is even ITS business
+        (HFR-327). Mirrors the two paths :meth:`cancel_session_executions` actually
+        cancels — the session lock owner, and every ``create_per_run`` execution that
+        reserved this session — so the answer describes the real blast radius rather
+        than a plausible proxy for it.
+
+        WHY THE RUN ROW AND NOT ``agent_sessions.agent_backend``. The session row's
+        backend is write-once after the first native bind: a genuine mid-conversation
+        switch moves the old anchor aside and creates a NEW row
+        (``_claim_anchor_row``), or is refused outright
+        (``bind_agent_session_by_id``, ``workbench_sessions_service.update_session``).
+        So it cannot say who owns the lane NOW. ``agent_runs.agent_backend`` is
+        stamped at enqueue from the resolved dispatch target, which is exactly "the
+        backend this in-flight run actually went to".
+
+        Only NON-EMPTY backends are reported, and the column is nullable, so an empty
+        result means "unresolvable" and never "no backend". A caller must treat that
+        as "cannot prove a mismatch" and keep its unconditional behaviour; anything
+        else would silently withdraw the cancel from every enqueue path that leaves
+        the column blank.
+
+        Read-only: it cancels nothing, claims nothing and takes no lock.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return set()
+        run_ids: list[str] = []
+        lock_key = self._session_lock_cache.get(resolved)
+        if lock_key is not None:
+            owner = self._session_lock_owners.get(lock_key)
+            if owner:
+                run_ids.append(str(owner))
+        for run_id, reserved_session_id in list(self._execution_session_ids.items()):
+            if reserved_session_id == resolved and str(run_id) not in run_ids:
+                run_ids.append(str(run_id))
+
+        backends: set[str] = set()
+        for run_id in run_ids:
+            try:
+                run = self.request_store.get_run(run_id)
+            except Exception:
+                logger.debug("Could not read run %s for lane backend identity", run_id, exc_info=True)
+                continue
+            if not run:
+                continue
+            backend = str(run.get("agent_backend") or "").strip()
+            if backend:
+                backends.add(backend)
+        return backends
+
     async def cancel_session_executions(
         self,
         session_id: str,

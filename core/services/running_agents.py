@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from core.run_settlement import SETTLED_BY_STOPPED
 from core.session_teardown import (
+    SchedulerLaneCancellation,
     cancel_session_scheduler_lane,
     reconcile_session_runs,
     resolve_teardown_session_ids,
@@ -826,6 +827,56 @@ def _teardown_session_id(
     return candidates[0] if candidates else ""
 
 
+def _scheduler_lane_is_this_rows_business(
+    controller: "Controller",
+    teardown_session_id: str,
+    backend: Optional[str],
+) -> bool:
+    """Whether End may cancel ``teardown_session_id``'s scheduler lane (HFR-327).
+
+    ``False`` ONLY when the lane is provably somebody else's: every backend the
+    cancel would reach is known, and none of them is the clicked row's. Everything
+    else answers ``True`` — an unknown clicked backend, a session id we could not
+    resolve, a service that cannot report, a lane whose runs carry no backend. None
+    of those PROVES a mismatch, and refusing to cancel on a guess would reopen the
+    idle-state race the unconditional call exists to close.
+
+    Note ``_teardown_session_id`` only narrows by backend on its fallback path: when
+    the Running-tab row carries a ``session_id`` it is returned verbatim, which is
+    precisely the stale-row case. So the check has to happen here, against the lane's
+    own runs, rather than being assumed upstream.
+    """
+
+    clicked = str(backend or "").strip()
+    resolved = str(teardown_session_id or "").strip()
+    if not clicked or not resolved:
+        return True
+    service = getattr(controller, "scheduled_task_service", None)
+    reader = getattr(service, "session_lane_backends", None)
+    if not callable(reader):
+        return True
+    try:
+        lane_backends = reader(resolved)
+    except Exception:
+        logger.warning(
+            "End: could not resolve the scheduler-lane backend for session %s; "
+            "cancelling unconditionally",
+            resolved,
+            exc_info=True,
+        )
+        return True
+    if not lane_backends or clicked in lane_backends:
+        return True
+    logger.info(
+        "End: skipping the scheduler-lane cancel for session %s — its lane is owned by "
+        "%s, not the %s row being ended",
+        resolved,
+        ", ".join(sorted(lane_backends)),
+        clicked,
+    )
+    return False
+
+
 def _workdir_from_composite(composite_key: Optional[str]) -> Optional[str]:
     """The working path half of a composite key, or ``None`` when it names none.
 
@@ -1262,9 +1313,34 @@ async def end_running_agent(
         base_session_id=base_session_id,
         backend=backend,
     )
-    scheduler_lane = await cancel_session_scheduler_lane(
-        controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
-    )
+    # ...BUT IT IS STILL SCOPED TO THE CLICKED BACKEND (HFR-327).
+    #
+    # "Unconditional" above means "not gated on the live-state READ", which is the
+    # race being closed. It never meant "cancel whatever else holds this session".
+    # A session id can outlive the backend that was running under it, and the
+    # Running tab hands us stale rows by construction: ``_choose_session_meta``
+    # falls back to the most recent ``agent_sessions`` row when none matches the
+    # clicked row's live backend, so a dead Codex row can carry the session id of a
+    # conversation that has since moved to Claude. The lock owner for that id is
+    # then the HEALTHY Claude execution, and cancelling it kills the user's working
+    # turn because they tidied up a dead row.
+    #
+    # HFR-324 fixed only the reconcile half of this shape (manager ids no longer
+    # ride into the claim). The cancel half reaches whatever the lock owner names.
+    #
+    # SKIP ONLY ON A POSITIVE MISMATCH. An unknown clicked backend or an
+    # unresolvable lane identity proves nothing, so both keep the unconditional
+    # behaviour and the race stays closed. On a mismatch the whole call is skipped —
+    # cancel AND claim — which leaves ``claimed_run_ids`` empty, and both reconcile
+    # sites are already no-ops on an empty set (``reconcile_session_runs`` returns
+    # before touching the store). End still runs its normal state branch and tears
+    # down the clicked row's own runtime; it simply stops speaking for a lane that
+    # is not its own.
+    scheduler_lane = SchedulerLaneCancellation(frozenset(), frozenset())
+    if _scheduler_lane_is_this_rows_business(controller, teardown_session_id, backend):
+        scheduler_lane = await cancel_session_scheduler_lane(
+            controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
+        )
     claimed_run_ids = scheduler_lane.claimed_run_ids
 
     if state == "active":

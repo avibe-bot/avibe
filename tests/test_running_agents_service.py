@@ -8,6 +8,7 @@ against fake controller registries — it never touches real state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import types
 
 import pytest
@@ -1372,7 +1373,16 @@ def _settlement_service(tmp_path):
     return service, request_store
 
 
-def _running_harness_run(request_store, *, session_id: str, message: str) -> str:
+def _running_harness_run(
+    request_store, *, session_id: str, message: str, agent_backend: str | None = None
+) -> str:
+    """A running ``agent_runs`` row on ``session_id``.
+
+    ``agent_backend`` is the column the run carries from its DISPATCH target, so it
+    names the backend the run actually went to. Left unset by default because most
+    callers here predate HFR-327 and exercise the unresolvable-identity path.
+    """
+
     from sqlalchemy import update
 
     from storage.db import create_sqlite_engine
@@ -1382,6 +1392,7 @@ def _running_harness_run(request_store, *, session_id: str, message: str) -> str
         session_key="slack::channel::C123",
         message=message,
         agent_name="codex",
+        agent_backend=agent_backend,
     )
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1607,3 +1618,146 @@ def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
     # ...and the guarded writer still accepts the turn's real result afterwards,
     # which is precisely what a wrongly settled row makes impossible.
     assert request_store.settle_without_result(run_id, terminal_status="succeeded") == "succeeded"
+
+
+def _end_with_scheduler_lane_owner(tmp_path, *, lane_backend, clicked_backend):
+    """End a codex row on a session whose scheduler lane is held by ``lane_backend``.
+
+    Returns ``(result, task_cancelled, run_status, cleared)``. The lane owner is a
+    REAL running row plus the two service maps ``cancel_session_executions`` Path 1
+    reads (``_session_lock_cache`` -> lock key, ``_session_lock_owners`` -> run id)
+    and the ``_inflight_executions`` task it would actually cancel.
+    """
+
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store,
+        session_id="chat-1",
+        message="a live execution holding this session's scheduler lane",
+        agent_backend=lane_backend,
+    )
+
+    cleared = {}
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({}, pending=set())
+    treg.clear_session = lambda b: cleared.__setitem__("treg", b)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=treg,
+        _transports={"/w": types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())},
+        _transport_last_activity={"/w": 0.0},
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = types.SimpleNamespace(
+        is_in_flight=lambda sid: False,
+        cancel=_AsyncFlag(),
+        in_flight={},
+        owned_agent_run_ids=lambda: set(),
+    )
+    controller.scheduled_task_service = service
+    service.controller = controller
+
+    async def _go():
+        async def _busy():
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(_busy())
+        await asyncio.sleep(0)
+        service._session_lock_cache["chat-1"] = "sid:chat-1"
+        service._session_lock_owners["sid:chat-1"] = run_id
+        service._inflight_executions[run_id] = task
+
+        res = await running_agents.end_running_agent(
+            controller,
+            backend=clicked_backend,
+            state="idle",
+            session_id="chat-1",
+            base_session_id="codex-base",
+        )
+        cancelled = task.cancelled() or task.cancelling() > 0
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return res, cancelled
+
+    res, cancelled = asyncio.run(_go())
+    return res, cancelled, request_store.get_run(run_id)["status"], cleared
+
+
+def test_end_of_stale_backend_row_does_not_cancel_the_sessions_new_backend_execution(
+    tmp_path, monkeypatch
+):
+    """HFR-327: End's scheduler-lane cancel must be scoped to the CLICKED backend.
+
+    ``end_running_agent`` calls ``cancel_session_scheduler_lane`` unconditionally,
+    before the state branch, with no backend check at all. HFR-324 only stopped
+    un-cancelled MANAGER ids from riding into the reconcile snapshot; scheduler-owned
+    tasks are still both claimed AND actually cancelled, and the cancel reaches
+    whatever the session lock owner names.
+
+    So ending a stale Codex row after the session has switched to Claude cancelled
+    the healthy Claude execution: the lock owner for ``chat-1`` is the live Claude
+    run, ``_cancel(owner)`` interrupts its task, and the user's working turn dies
+    because they cleaned up a dead row in the Running tab.
+
+    The decisive identity is the LANE OWNER'S RUN ROW, not the session row.
+    ``agent_sessions.agent_backend`` is write-once after the first native bind (a
+    real switch supersedes the anchor and creates a NEW row, or is refused outright),
+    so it cannot tell you who owns the lane NOW. ``agent_runs.agent_backend`` is
+    stamped at enqueue from the resolved dispatch target, so it names the backend the
+    in-flight run actually went to.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    res, cancelled, status, cleared = _end_with_scheduler_lane_owner(
+        tmp_path, lane_backend="claude", clicked_backend="codex"
+    )
+
+    assert res["ok"] is True
+    # The newer backend's execution was left alone...
+    assert cancelled is False
+    assert status == "running"
+    # ...and End still did its own job: the stale codex runtime is torn down.
+    assert cleared.get("clr") == "codex-base"
+    assert cleared.get("treg") == "codex-base"
+
+
+def test_end_still_cancels_the_scheduler_lane_when_the_backend_matches(tmp_path, monkeypatch):
+    """HFR-327 companion: the same-backend path stays unconditional.
+
+    The scoping must not reopen the race the unconditional cancel closes. ``live_state``
+    is a READ and a scheduler-lane execution can take the session right after it, so a
+    matching backend still cancels without consulting any state.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    res, cancelled, _status, cleared = _end_with_scheduler_lane_owner(
+        tmp_path, lane_backend="codex", clicked_backend="codex"
+    )
+
+    assert res["ok"] is True
+    assert cancelled is True
+    assert cleared.get("clr") == "codex-base"
+
+
+def test_end_cancels_the_scheduler_lane_when_the_owning_backend_is_unknown(tmp_path, monkeypatch):
+    """HFR-327 companion: an unresolvable identity keeps today's behaviour.
+
+    ``agent_runs.agent_backend`` is nullable and some enqueue paths leave it empty. A
+    blank column proves nothing, and refusing to cancel on a guess would reopen the
+    idle-state race for every one of those runs, so the guard skips only on a POSITIVE
+    mismatch.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    res, cancelled, _status, _cleared = _end_with_scheduler_lane_owner(
+        tmp_path, lane_backend=None, clicked_backend="codex"
+    )
+
+    assert res["ok"] is True
+    assert cancelled is True

@@ -3059,6 +3059,55 @@ scenarios:
     # Both tests previously asserted the OPPOSITE (state preserved, next sweep retries),
     # which was only safe while eviction settled nothing.
     test: tests/test_codex_agent.py::test_codex_force_eviction_converges_when_transport_stop_fails
+  - id: HFR-327
+    name: End's scheduler-lane cancel is scoped to the clicked backend
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # PR2 review round 6, and the CANCEL half of HFR-324's shape. end_running_agent
+    # called cancel_session_scheduler_lane(teardown_session_id, stopped)
+    # unconditionally, before the state branch, with no backend check. HFR-324 only
+    # stopped un-cancelled MANAGER ids from riding into the reconcile snapshot;
+    # scheduler-owned tasks are still both claimed AND actually cancelled, and
+    # cancel_session_executions Path 1 cancels whatever the session lock owner names.
+    # LIVE SHAPE: the Running tab hands out stale rows by construction --
+    # _choose_session_meta falls back to the most recent agent_sessions row when none
+    # matches the clicked row's live backend -- so a dead Codex row can carry the
+    # session id of a conversation that has since moved to Claude. Ending that row
+    # cancelled the healthy Claude execution and its reconcile then settled the live
+    # row canceled, which settle_run_terminal (queued|running) can never take back.
+    # DECISIVE IDENTITY: the LANE OWNER'S RUN ROW, agent_runs.agent_backend, exposed by
+    # the new read-only ScheduledTaskService.session_lane_backends(session_id). It
+    # mirrors both paths the cancel actually reaches (the session lock owner and every
+    # create_per_run execution that reserved the session), so it describes the real
+    # blast radius. It is stamped at enqueue from the RESOLVED DISPATCH TARGET, i.e.
+    # the backend the in-flight run actually went to.
+    # WHY NOT agent_sessions.agent_backend: it is write-once after the first native
+    # bind. A genuine mid-conversation switch moves the old anchor aside and creates a
+    # NEW row (_claim_anchor_row), or is refused outright (bind_agent_session_by_id
+    # ignores a backend switch on a bound row; workbench_sessions_service.update_session
+    # raises SessionBackendLockedError once a native id exists or a turn is running). So
+    # no single row's backend ever flips, and the column cannot say who owns the lane
+    # NOW. _teardown_session_id also skips its own backend narrowing whenever the row
+    # carries a session_id -- exactly the stale-row case -- so the check must happen
+    # against the lane's runs.
+    # SKIP ONLY ON A POSITIVE MISMATCH. Unknown clicked backend, unresolvable session
+    # id, absent service, or a lane whose runs carry no backend (the column is nullable)
+    # all keep the unconditional cancel, so the idle-state race that call closes stays
+    # closed. On a mismatch the cancel AND its claim are skipped together, leaving
+    # claimed_run_ids empty -- both reconcile sites already no-op on an empty set
+    # (session_teardown.reconcile_session_runs returns before touching the store, and
+    # ScheduledTaskService.reconcile_session_teardown guards the same way). End still
+    # runs its normal state branch and tears down the clicked row's own runtime.
+    # RESIDUAL: on a mismatch the active branch also loses the manager-lane snapshot it
+    # would have unioned into its reconcile. Accepted and narrow -- the alternative is
+    # cancelling a healthy execution, and an unsettled run is recoverable by the
+    # staleness sweep while a wrongly terminalized live one is not.
+    # Companions carrying this same id:
+    # tests/test_running_agents_service.py::test_end_still_cancels_the_scheduler_lane_when_the_backend_matches
+    # tests/test_running_agents_service.py::test_end_cancels_the_scheduler_lane_when_the_owning_backend_is_unknown
+    test: tests/test_running_agents_service.py::test_end_of_stale_backend_row_does_not_cancel_the_sessions_new_backend_execution
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
