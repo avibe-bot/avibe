@@ -1576,6 +1576,10 @@ class SessionHandler(BaseHandler):
             self.controller,
             composite_key,
             settled_by=settled_by,
+            # This handler owns Claude runtimes and nothing else, so a candidate row
+            # on another backend is another runtime's session that happens to share
+            # the anchor — and the teardown CANCELS what it resolves (HFR-128).
+            agent_backend="claude",
             include_manager_lane=include_manager_lane,
         )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -1755,7 +1759,10 @@ class SessionHandler(BaseHandler):
             # explanation, and it is the same one, because the reason is the eviction
             # rather than the state that qualified for it.
             await teardown_composite_session_runs(
-                self.controller, composite_key, settled_by=SETTLED_BY_EVICTED
+                self.controller,
+                composite_key,
+                settled_by=SETTLED_BY_EVICTED,
+                agent_backend="claude",
             )
             if composite_key in self.active_sessions:
                 agent_service = getattr(self.controller, "agent_service", None)

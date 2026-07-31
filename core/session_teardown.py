@@ -75,6 +75,7 @@ def resolve_teardown_session_ids(
     *,
     session_anchor: str,
     workdir: Optional[str] = None,
+    agent_backend: Optional[str] = None,
 ) -> list[str]:
     """Resolve a RUNTIME identity to the Avibe session ids a teardown must settle.
 
@@ -88,6 +89,12 @@ def resolve_teardown_session_ids(
     Returns a LIST because ``(scope, anchor)`` is the unique key, not the anchor
     alone. Normally one id; empty when the anchor names no live session, which is the
     common and cheap case (an IM session with no harness runs).
+
+    ``agent_backend`` is the runtime's OWN backend, and every caller has it because
+    every caller is a specific runtime being reclaimed. It is passed down as a
+    predicate rather than used to pick a winner afterwards: an ambiguous list is not
+    inspected here, it is CANCELLED, so the narrowing has to happen before the rows
+    become ids.
     """
 
     anchor = str(session_anchor or "").strip()
@@ -98,7 +105,11 @@ def resolve_teardown_session_ids(
     if not callable(finder):
         return []
     try:
-        resolved = finder(anchor, workdir=workdir or None)
+        resolved = finder(
+            anchor,
+            workdir=workdir or None,
+            agent_backend=str(agent_backend or "").strip() or None,
+        )
     except Exception:
         logger.debug(
             "Session teardown: could not resolve session ids for anchor %s",
@@ -229,20 +240,32 @@ async def teardown_runtime_session_runs(
     *,
     session_anchor: str,
     workdir: Optional[str] = None,
+    agent_backend: Optional[str] = None,
     settled_by: str,
     include_manager_lane: bool = True,
 ) -> int:
     """:func:`teardown_session_runs` for callers that hold a runtime identity.
 
-    Resolves the anchor (plus working dir, when known) to session ids and settles each
-    one. Every id the resolve returns is torn down rather than just the newest: an
-    ambiguous anchor means we cannot tell which session the runtime belonged to, and
-    the reconciler's ownership intersection already makes a wrong guess inert — it can
+    Resolves the anchor (plus working dir and backend, when known) to session ids and
+    settles each one. Every id the resolve returns is torn down rather than just the
+    newest: a genuinely ambiguous anchor gives no way to pick, and the reconciler's
+    ownership intersection makes a wrong guess inert on the RECONCILE leg — it can
     only fail to find rows, never settle a run this process did not claim.
+
+    THAT PROTECTION DOES NOT COVER THE CANCEL LEG, which is why the resolve must be
+    narrow rather than generous. ``cancel_session_executions`` and
+    ``release_for_teardown`` actively interrupt whatever each candidate is running,
+    with no ownership intersection in front of them: a foreign scope's live turn gets
+    cancelled by another scope's eviction. ``agent_backend`` — which every runtime
+    caller knows about itself — keeps the candidate set to sessions this runtime could
+    plausibly own.
     """
 
     session_ids = resolve_teardown_session_ids(
-        controller, session_anchor=session_anchor, workdir=workdir
+        controller,
+        session_anchor=session_anchor,
+        workdir=workdir,
+        agent_backend=agent_backend,
     )
     touched = 0
     for session_id in session_ids:
@@ -260,6 +283,7 @@ async def teardown_composite_session_runs(
     composite_key: Optional[str],
     *,
     settled_by: str,
+    agent_backend: Optional[str] = None,
     include_manager_lane: bool = True,
 ) -> int:
     """:func:`teardown_runtime_session_runs` keyed by a Claude composite session key."""
@@ -271,6 +295,7 @@ async def teardown_composite_session_runs(
         controller,
         session_anchor=anchor,
         workdir=working_path,
+        agent_backend=agent_backend,
         settled_by=settled_by,
         include_manager_lane=include_manager_lane,
     )

@@ -2708,6 +2708,39 @@ scenarios:
     # settle_deferred_run both answer False there, so settle_activity_runs is inert
     # against it and there is no parked intent for any lifecycle to apply.
     test: tests/test_scheduled_tasks.py::test_cancelled_run_with_blocking_activity_keeps_its_terminal_intent_parked
+  - id: HFR-128
+    name: an ambiguous anchor teardown does not cancel a foreign scope's work
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 1. find_session_ids_for_anchor drops the scope predicate --
+    # a runtime teardown has no scope to offer -- so (scope, anchor) collapses to
+    # anchor and two unrelated conversations can answer to the same one.
+    # teardown_runtime_session_runs then tore down EVERY id it returned, justified by
+    # the reconciler's ownership intersection. That justification covers the RECONCILE
+    # leg only: cancel_session_executions and release_for_teardown interrupt whatever
+    # each candidate is running with no ownership check at all, so one scope's
+    # eviction cancelled another scope's live scheduler executions and Workbench turn.
+    # The workdir filter made it worse rather than better -- "absence is not a
+    # mismatch" admitted a NULL-workdir row from any scope alongside the exact match.
+    # FIX, narrowing by what a runtime genuinely owns rather than guessing a winner:
+    # (a) agent_backend (NOT NULL on agent_sessions, previously unused here) becomes
+    # an optional exact predicate, plumbed through SessionsFacade / SessionsStore /
+    # resolve_teardown_session_ids / teardown_runtime_session_runs /
+    # teardown_composite_session_runs, and passed by every caller that owns a runtime:
+    # "claude" from SessionHandler.cleanup_session and evict_idle_sessions, "codex"
+    # from the Codex transport eviction, the row's own backend from End's
+    # _teardown_session_id fallback.
+    # (b) a NULL-workdir row no longer TIES with a row naming the evicted workdir: it
+    # is a fallback for rows bound before workdirs were recorded, kept only when no
+    # exact match exists. Both live in find_session_ids_for_anchor, the one layer that
+    # sees row["workdir"] -- the resolver above it receives ids and cannot rank them.
+    # No scope plumbing was added (the callers genuinely have no scope) and the
+    # reconciler is unchanged.
+    # A second test carries this same id, pinning the leniency that must survive:
+    # tests/test_session_teardown.py::test_anchor_resolve_still_accepts_a_null_workdir_row_when_nothing_matches_exactly
+    test: tests/test_session_teardown.py::test_teardown_does_not_cancel_a_foreign_scope_sharing_the_anchor
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

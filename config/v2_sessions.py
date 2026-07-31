@@ -399,6 +399,7 @@ class SessionsStore:
         session_anchor: str,
         *,
         workdir: str | None = None,
+        agent_backend: str | None = None,
     ) -> list[str]:
         """Read-through to the scope-free anchor lookup used by session teardown."""
 
@@ -406,7 +407,7 @@ class SessionsStore:
         finder = getattr(self._service, "find_session_ids_for_anchor", None)
         if not callable(finder):
             return []
-        return finder(session_anchor, workdir=workdir)
+        return finder(session_anchor, workdir=workdir, agent_backend=agent_backend)
 
     def find_session_for_anchor(self, user_id: str, session_anchor: str):
         """Read-through to the SQLite service's ``(scope, anchor)`` lookup (latest

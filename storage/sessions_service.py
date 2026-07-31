@@ -181,6 +181,7 @@ class SQLiteSessionsService:
         session_anchor: str,
         *,
         workdir: str | None = None,
+        agent_backend: str | None = None,
         limit: int = 4,
     ) -> list[str]:
         """Session ids for one anchor, WITHOUT a scope key. For teardown only.
@@ -197,8 +198,25 @@ class SQLiteSessionsService:
         session_anchor)`` — not ``session_anchor`` alone — is the unique key, so two
         scopes can hold the same anchor. Hence a LIST, not a row: the caller decides
         what to do with an ambiguous answer rather than being handed an arbitrary one
-        that looks certain. ``workdir`` narrows it when known, keeping rows whose own
-        ``workdir`` is unset (nullable, and absence is not a mismatch).
+        that looks certain.
+
+        WHAT NARROWS AN AMBIGUOUS ANSWER, AND WHY IT MATTERS MORE THAN IT LOOKS. The
+        teardown callers do not merely READ this list; they cancel every id in it.
+        A candidate that belongs to a different scope therefore has its scheduler
+        executions and its Workbench turn cancelled by an eviction that had nothing
+        to do with it. So the two facts a runtime teardown genuinely owns are both
+        applied as predicates:
+
+        - ``agent_backend``: a Claude eviction cannot own a Codex row. The column is
+          ``NOT NULL``, so this is an exact match with no absence case to forgive.
+        - ``workdir``: nullable, so absence really is not a mismatch — but it is not a
+          TIE either. When the caller names a working directory and some rows name
+          that same directory, those rows outrank the ones that name none, and the
+          null-workdir rows are dropped. They remain acceptable only when no exact
+          match exists at all, which is the case the leniency was written for (a row
+          bound before workdirs were recorded). Keeping both was the bug: a
+          null-workdir row in an unrelated scope sharing the anchor was torn down
+          alongside the row the caller actually meant.
 
         Archived rows are excluded: they are terminal and inert, so nothing is
         executing in them.
@@ -208,6 +226,7 @@ class SQLiteSessionsService:
         if not resolved_anchor or limit <= 0:
             return []
         resolved_workdir = str(workdir or "").strip()
+        resolved_backend = str(agent_backend or "").strip()
         with self.engine.connect() as conn:
             stmt = (
                 select(agent_sessions.c.id, agent_sessions.c.workdir)
@@ -215,19 +234,29 @@ class SQLiteSessionsService:
                 .where(agent_sessions.c.status != "archived")
                 .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
             )
+            if resolved_backend:
+                stmt = stmt.where(agent_sessions.c.agent_backend == resolved_backend)
             rows = list(conn.execute(stmt).mappings())
-        session_ids: list[str] = []
+        exact: list[str] = []
+        unset_workdir: list[str] = []
         for row in rows:
-            if resolved_workdir:
-                row_workdir = str(row["workdir"] or "").strip()
-                if row_workdir and row_workdir != resolved_workdir:
-                    continue
             session_id = str(row["id"] or "").strip()
-            if session_id and session_id not in session_ids:
-                session_ids.append(session_id)
-            if len(session_ids) >= limit:
-                break
-        return session_ids
+            if not session_id:
+                continue
+            if not resolved_workdir:
+                if session_id not in exact:
+                    exact.append(session_id)
+                continue
+            row_workdir = str(row["workdir"] or "").strip()
+            if not row_workdir:
+                if session_id not in unset_workdir:
+                    unset_workdir.append(session_id)
+            elif row_workdir == resolved_workdir and session_id not in exact:
+                exact.append(session_id)
+        # A row that NAMES this workdir outranks one that names none; the lenient
+        # rows are the fallback, not a supplement.
+        session_ids = exact or unset_workdir
+        return session_ids[:limit]
 
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:
         with self.engine.connect() as conn:

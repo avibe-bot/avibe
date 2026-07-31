@@ -706,6 +706,10 @@ class CodexAgent(BaseAgent):
                         getattr(self, "controller", None),
                         session_anchor=base_session_id,
                         workdir=cwd,
+                        # The transport being evicted is a Codex one, so a candidate
+                        # row on another backend is not this runtime's to cancel
+                        # (HFR-128).
+                        agent_backend="codex",
                         settled_by=SETTLED_BY_EVICTED,
                     )
                 try:

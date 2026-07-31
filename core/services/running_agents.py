@@ -785,6 +785,7 @@ def _teardown_session_id(
     session_id: Optional[str],
     composite_key: Optional[str],
     base_session_id: Optional[str],
+    backend: Optional[str] = None,
 ) -> str:
     """The Avibe session id End must settle runs against.
 
@@ -794,6 +795,11 @@ def _teardown_session_id(
     exists to remove. Fall back to the runtime identity the row always has: the
     session anchor, narrowed by the working directory when the composite key carries
     one.
+
+    The row's ``backend`` narrows the fallback further (HFR-128). End resolves a
+    session it is about to cancel work in, and an anchor can be shared across scopes;
+    the backend is the one thing the Running-tab row always knows about the runtime
+    it is ending, so a row belonging to a different backend is never a candidate.
     """
 
     resolved = str(session_id or "").strip()
@@ -806,6 +812,7 @@ def _teardown_session_id(
         controller,
         session_anchor=anchor,
         workdir=_workdir_from_composite(composite_key),
+        agent_backend=str(backend or "").strip() or None,
     )
     return candidates[0] if candidates else ""
 
@@ -1238,6 +1245,7 @@ async def end_running_agent(
         session_id=session_id,
         composite_key=composite_key,
         base_session_id=base_session_id,
+        backend=backend,
     )
     claimed_run_ids = await cancel_session_scheduler_lane(
         controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
