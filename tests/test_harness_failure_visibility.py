@@ -5771,6 +5771,36 @@ def _callback_run(sqlite_store, run_id: str, definition_id: str, *, status: str)
         )
 
 
+def _callback_session(
+    sqlite_store,
+    *,
+    visibility: str = "foreground",
+    status: str = "active",
+) -> None:
+    """The callback target row whose visibility decides whether a receipt is visible."""
+
+    from storage.models import agent_sessions
+
+    now = "2026-07-27T00:00:00+00:00"
+    with sqlite_store.engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-callback-target",
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="callback-target",
+                native_session_id="native-callback-target",
+                status=status,
+                visibility=visibility,
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+
 def _notice_drain_service(tmp_path: Path, sqlite_store, requests) -> tuple[Any, list[str]]:
     """A detached drain service whose emitter records and acks every delivery."""
 
@@ -5824,6 +5854,7 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-cb", deliver_key="slack::channel::C1")
+    _callback_session(sqlite)
     _callback_run(sqlite, "run-cb", "task-cb", status="pending")
     callback = requests.enqueue_agent_run(
         message="deliver the callback",
@@ -5955,6 +5986,7 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-cb-no-receipt", deliver_key="slack::channel::C1")
+    _callback_session(sqlite)
     _callback_run(sqlite, "run-cb-no-receipt", "task-cb-no-receipt", status="pending")
     callback = requests.enqueue_agent_run(
         message="try the callback",
@@ -5979,6 +6011,49 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
 
     assert delivered == ["run-cb-no-receipt"]
     assert sqlite.owed_failure_notice("run-cb-no-receipt")["state"] == "sent"
+
+
+def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
+    tmp_path: Path,
+) -> None:
+    """A persisted background-history row is not a user-visible callback receipt."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-hidden", deliver_key="slack::channel::C1")
+    _callback_session(sqlite, visibility="background")
+    _callback_run(sqlite, "run-cb-hidden", "task-cb-hidden", status="pending")
+    callback = requests.enqueue_agent_run(
+        message="persist only in hidden history",
+        source_kind="callback",
+        parent_run_id="run-cb-hidden",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        "run-cb-hidden", status="sent", callback_run_id=callback.id
+    )
+    claimed = requests.claim(callback.id)
+    assert claimed is not None
+    recorded = sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="hidden callback body",
+        message_id="hidden-history-row",
+        terminal_status="succeeded",
+    )
+    assert recorded["terminal_transition"]
+    assert sqlite.run_callback_state("run-cb-hidden") == "failed"
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == ["run-cb-hidden"]
+    assert sqlite.owed_failure_notice("run-cb-hidden")["state"] == "sent"
 
 
 def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(

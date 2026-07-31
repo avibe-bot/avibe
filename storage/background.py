@@ -30,6 +30,7 @@ from sqlalchemy import (
 
 from config import paths
 from storage.agent_session_rows import (
+    INBOX_SESSION_VISIBILITIES,
     reserve_write_lock,
     session_openable_in_chat,
     unchanged_text,
@@ -3005,12 +3006,13 @@ class SQLiteBackgroundTaskStore:
         notice decision keyed on the stale copy would defer a row whose blocker is
         already resolved, or worse, deliver beside a callback that just landed.
         A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
-        callback child. The user has the callback only after that child succeeds AND
-        records delivery evidence, so this read joins the child by ``callback_run_id``
-        and projects the state the notice lane actually needs: queued/running is
-        pending, succeeded with a recorded message id is sent, and every terminal
-        outcome without that receipt releases the notice as failed. The parent and
-        child lookups are both primary-key probes in one statement.
+        callback child. The user has the callback only after that child succeeds,
+        records delivery evidence, and targets a Session admitted by the Inbox; a
+        receipt in suppressed background history proves persistence, not visibility.
+        This read joins the child and target Session and projects the state the notice
+        lane actually needs: queued/running is pending, succeeded with a visible
+        recorded message is sent, and every other terminal outcome releases the notice
+        as failed. All three lookups are primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
         is different from a callback whose status column is empty — a target with
@@ -3020,6 +3022,7 @@ class SQLiteBackgroundTaskStore:
 
         parent = agent_runs.alias("callback_parent")
         child = agent_runs.alias("callback_child")
+        callback_session = agent_sessions.alias("callback_session")
         with self.engine.connect() as conn:
             row = conn.execute(
                 select(
@@ -3028,8 +3031,15 @@ class SQLiteBackgroundTaskStore:
                     parent.c.callback_run_id,
                     child.c.status,
                     child.c.message_ids_json,
+                    callback_session.c.status,
+                    callback_session.c.visibility,
                 )
-                .select_from(parent.outerjoin(child, child.c.id == parent.c.callback_run_id))
+                .select_from(
+                    parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
+                        callback_session,
+                        callback_session.c.id == child.c.session_id,
+                    )
+                )
                 .where(parent.c.id == str(run_id))
                 .limit(1)
             ).first()
@@ -3046,7 +3056,11 @@ class SQLiteBackgroundTaskStore:
         has_delivery_receipt = isinstance(message_ids, list) and any(
             str(message_id or "").strip() for message_id in message_ids
         )
-        if child_status == "succeeded" and has_delivery_receipt:
+        target_is_visible = (
+            str(row[5] or "").strip() != "archived"
+            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
+        )
+        if child_status == "succeeded" and has_delivery_receipt and target_is_visible:
             return "sent"
         return "failed"
 
