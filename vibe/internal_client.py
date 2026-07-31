@@ -387,7 +387,6 @@ async def memory_search(
 
 async def memory_clear(
     *,
-    user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
@@ -398,7 +397,7 @@ async def memory_clear(
         headers=_memory_user_key_headers(
             "POST",
             "/internal/memory/clear",
-            user_key,
+            "avibe:local",
         ),
         socket_path=socket_path,
         timeout=timeout,

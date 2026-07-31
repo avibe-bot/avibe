@@ -337,11 +337,10 @@ Neither cost is worth removing a state the CLI already detects, logs, and gives
 a one-line recovery for. Documented as a known limitation under `vibe start` in
 `docs/CLI.md` and `docs/CLI_ZH.md`.
 
-Scope note: the affected surface is the Web UI Memory Settings page. Direct
-loopback reads use the `avibe:local` principal; authenticated Avibe Cloud reads
-use the remote Workbench account's `avibe:remote:<subject>` principal behind the
-same process-private proof. `vibe memory ...` uses the Agent session's
-controller-side principal association and is unaffected.
+Scope note: the affected surface is the Web UI Memory Settings page, which
+reads as the `avibe:local` principal behind this proof. `vibe memory ...`
+uses the Agent session's controller-side principal association and is
+unaffected.
 
 `d8bfd0bb` also introduces one new behavior, reviewed and kept: when the service
 is freshly started and a UI is already running, the UI is restarted so the pair

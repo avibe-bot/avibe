@@ -1377,41 +1377,6 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
-def memory_ui_user_key() -> str | None:
-    """Resolve the Memory principal for a trusted browser request.
-
-    Direct loopback keeps the install-local identity. Remote browser access is
-    admitted only through the configured Avibe Cloud origin with a valid signed
-    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
-    the same origin evidence as mutations so a remote session cookie cannot be
-    used as a cross-origin Memory oracle.
-    """
-
-    if is_direct_loopback_memory_request():
-        return "avibe:local"
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return None
-    source = _request_origin(request.headers.get("Origin")) or _request_origin(
-        request.headers.get("Referer")
-    )
-    if not source or not _same_origin(source, _current_origin()):
-        return None
-    try:
-        from vibe import remote_access
-
-        payload = remote_access.parse_session_cookie(
-            config,
-            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
-        )
-    except Exception:
-        return None
-    subject = payload.get("sub") if isinstance(payload, dict) else None
-    if not isinstance(subject, str) or not subject.strip():
-        return None
-    return f"avibe:remote:{subject.strip()}"
-
-
 def _normalized_host(value: str | None) -> str:
     raw_host = (value or "").lower().strip()
     if raw_host.startswith("[") and "]" in raw_host:

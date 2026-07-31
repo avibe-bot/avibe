@@ -3471,8 +3471,8 @@
       "settings": "Settings"
     },
     "remoteUnavailable": {
-      "title": "Memory unavailable on this connection",
-      "description": "Connect directly to this Avibe install or use an authenticated Avibe Cloud session. Other remote routes remain blocked."
+      "title": "Available on this device only",
+      "description": "Memory settings and data are visible only from a direct connection to this Avibe install — not through Avibe Cloud or another remote route."
     },
     "status": {
       "title": "Status",

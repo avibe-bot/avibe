@@ -1,4 +1,4 @@
-"""Process-private proof for Memory operations initiated by the trusted Settings UI."""
+"""Process-private proof for Memory reads initiated by the local Settings UI."""
 
 from __future__ import annotations
 
