@@ -3781,6 +3781,64 @@ scenarios:
     # on every path (_teardown_admission empties), and admission still reads closed
     # afterwards -- now for sessions the stack never held as well.
     test: tests/test_session_teardown.py::test_shutdown_admission_stays_closed_after_settlement_returns
+  - id: HFR-340
+    name: >-
+      a shutdown settlement slower than its wait is converged synchronously, never
+      abandoned mid-write
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 14. The HFR-333 lesson (settle BEFORE teardown, and actually
+    # await the settlement) reaching the one caller that awaits across a thread
+    # boundary, resolved with the HFR-326 shape (bounded attempt, then converge).
+    # THE BUG: cleanup_sync's _stop_loop_coroutine wraps future.result(timeout=5) in a
+    # bare except Exception. A settlement whose turn unwinds slowly -- HFR-333's exact
+    # subject -- raises TimeoutError, is logged as "cleanup skipped", and the shutdown
+    # proceeds to watch/watcher/Model Hub/Codex teardown while the settlement coroutine
+    # AND its terminal writers are still running on the loop. Backends are dismantled
+    # under a turn that can no longer settle itself, and the run stays `running` until
+    # restart recovery or the staleness sweep. Verified end to end pre-fix: the row read
+    # `running` at the instrumented Codex teardown, and the settlement's own reconcile
+    # only landed afterwards.
+    # THE FIX, in three parts, all on the settlement call ONLY (per-call on_timeout, not
+    # a blanket change to _stop_loop_coroutine -- for the other stops a timeout really is
+    # a shrug, and they keep the behaviour they were audited with).
+    # (1) The wait stays bounded, at 8s rather than 5s: the in-process settlement writes
+    # a strictly richer outcome than the backstop can (the turn's own cause and
+    # provenance vs a reconciled `restarted`), so a few seconds of shutdown latency buy
+    # a better row -- and the bound is no longer lossy, so it is purely a latency knob.
+    # (2) On timeout the future is CANCELLED. run_coroutine_threadsafe's future is never
+    # marked RUNNING, so cancel() really does schedule the task's cancellation on the
+    # loop.
+    # (3) Then the cleanup thread CONVERGES synchronously. This is possible at all
+    # because the guarded writers are plain SQLite: reconcile_session_teardown is a sync
+    # method over TaskExecutionStore, so the thread that stopped trusting the loop
+    # finishes the job itself. It is the RECONCILER REUSED, not reimplemented, which is
+    # what makes the selection provably identical -- the three-way intersection plus
+    # every exclusion it states (queued-not-started, gate-parked
+    # workbench_queue_holds_run, watch_runtime, deferred-terminal). Cause `restarted` per
+    # D1; interrupt_reason + the owed-notice stamp ride the one guarded UPDATE.
+    # update_run_status is not involved.
+    # THE OWNERSHIP SNAPSHOT IS READ BEFORE THE COROUTINE IS SUBMITTED, because a
+    # timed-out settlement has already erased the maps that record it -- reading after
+    # would answer "nothing was owed" for exactly the runs this exists to find. The
+    # cross-thread read can lose a race with the loop mutating in_flight, so it retries
+    # and only then gives up empty; a shutdown must not die describing itself.
+    # WHAT A CANCELLED MID-TEARDOWN FUTURE LEAVES BEHIND, verified rather than assumed:
+    # the HFR-330 admission holds are counted and released from finally blocks as the
+    # CancelledError unwinds (and HFR-339's flag keeps admission shut regardless); the
+    # turn was already task.cancel()-ed with its cause stamped before the gather. But
+    # release_for_teardown awaits asyncio.gather(turn.task), and cancelling that gather
+    # CANCELS ITS CHILD -- so the turn's remaining unwind is truncated and it never
+    # reaches its own settlement. That is not a cost the convergence introduces; it is
+    # why the convergence is required, the alternative being backends coming apart under
+    # a writer nobody is waiting for. Pinned directly in the test.
+    # DOUBLE SETTLEMENT IS SAFE BY CONSTRUCTION and genuinely concurrent here: the
+    # draining cancelled settlement, the turn's own finally and the convergence all
+    # write through settle_run_terminal, whose UPDATE is scoped to queued|running. First
+    # writer wins, the rest no-op, no read-then-write window.
+    test: tests/test_running_agents_service.py::test_shutdown_converges_a_slow_settlement_before_teardown
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

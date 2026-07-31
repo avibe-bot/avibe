@@ -5,8 +5,9 @@ import concurrent.futures
 import json
 import logging
 import threading
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import ExitStack
-from typing import Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
@@ -40,6 +41,23 @@ from core.vibe_agents import VibeAgent, VibeAgentStore
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+#: How long ``cleanup_sync`` waits for the in-flight settlement before finishing the
+#: job itself (HFR-340).
+#:
+#: A little longer than the 5s every other stop here uses, and the asymmetry is the
+#: point. Those stops close watchers and gateways, where a timeout costs nothing
+#: because the process is about to exit anyway. This one produces the terminal rows a
+#: user sees, and the in-process settlement writes a strictly richer outcome than the
+#: convergence backstop can — the turn's own cause and provenance rather than a
+#: reconciled ``restarted`` — so a few extra seconds of shutdown latency are worth
+#: paying to let it finish honestly.
+#:
+#: It stays BOUNDED regardless, because a turn can hang for reasons no shutdown can
+#: fix, and the bound is no longer lossy: whatever the wait abandons is converged
+#: synchronously before any backend is torn down. Module-level so a test can drive the
+#: real ``cleanup_sync`` without spending the real wait.
+SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS = 8.0
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -1665,18 +1683,171 @@ class Controller:
                 )
                 await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
 
+    def _shutdown_settlement_debt(self) -> tuple[list[str], frozenset[str]]:
+        """What the shutdown settlement OWES, snapshotted before it is submitted.
+
+        Read from the cleanup thread, deliberately, and deliberately BEFORE the
+        settlement coroutine is handed to the loop: it is the pre-cancel ownership
+        snapshot :meth:`ScheduledTaskService.reconcile_session_teardown` requires, and
+        by the time a settlement has timed out every live map that recorded it has
+        been erased by the cancels it did manage to run. Taking it afterwards would
+        answer "nothing was owed" for exactly the runs the convergence exists to find.
+
+        The two halves are the reconciler's own two legs: which sessions, and which
+        runs this process owned. ``owned_agent_run_ids`` is process-scoped rather than
+        session-filtered on purpose — the DB half of the intersection does the session
+        narrowing, which is what lets it catch a row no session-keyed map ever knew
+        about.
+
+        CROSS-THREAD, so a read can lose a race with the loop mutating ``in_flight``
+        and raise ``dictionary changed size during iteration``. That is a transient,
+        not a state: it is retried a couple of times and only then given up on, empty,
+        because a shutdown must not die trying to describe itself.
+        """
+
+        manager = getattr(self, "session_turns", None)
+
+        def _read(reader, label, empty):
+            if not callable(reader):
+                return empty
+            for _ in range(3):
+                try:
+                    return reader()
+                except RuntimeError:
+                    # The loop mutated the map mid-iteration. Read it again.
+                    continue
+                except Exception:  # noqa: BLE001
+                    break
+            logger.debug("Shutdown: could not snapshot %s", label, exc_info=True)
+            return empty
+
+        session_ids = sorted(
+            _read(getattr(manager, "busy_session_ids", None), "busy sessions", set())
+        )
+        owned_run_ids = frozenset(
+            _read(getattr(manager, "owned_agent_run_ids", None), "owned runs", set())
+        )
+        return session_ids, owned_run_ids
+
+    def _converge_abandoned_shutdown_settlement(
+        self, session_ids: list[str], owned_run_ids: frozenset[str]
+    ) -> int:
+        """Finish, synchronously, the settlement the shutdown timeout walked away from.
+
+        THE INVARIANT IS "NO BACKEND TEARDOWN WHILE A TERMINAL WRITER IS MID-WRITE"
+        (HFR-340), and a bounded wait alone cannot keep it. When the settlement future
+        times out, ``cleanup_sync`` used to log "cleanup skipped" and proceed to
+        dismantle Codex and the rest while the settlement coroutine — and the guarded
+        writers inside it — were still running on the loop. The runs it owed stayed
+        open until restart recovery or the staleness sweep.
+
+        THIS RUNS ON THE CLEANUP THREAD, WITHOUT THE LOOP, which is the whole reason
+        the convergence is possible at all: the settlement writers are plain SQLite.
+        :meth:`ScheduledTaskService.reconcile_session_teardown` is a synchronous method
+        over ``TaskExecutionStore``, so the thread that gave up waiting can do the work
+        itself rather than asking the loop it just stopped trusting.
+
+        IT IS THE RECONCILER, NOT A REIMPLEMENTATION OF IT. Reusing that method is what
+        makes the selection provably the same one the awaited path would have applied:
+        the three-way intersection (our pre-cancel claim, the session's own rows, the
+        interrupted-work predicate) and every exclusion it states — queued rows that
+        never started, gate-parked ``workbench_queue_holds_run`` followers,
+        ``watch_runtime`` heartbeats, rows carrying a deferred terminal intent. The
+        cause is ``restarted``, which is D1's answer for an in-flight run at shutdown
+        and the same cause the settlement itself would have recorded; the guarded
+        UPDATE folds the ``interrupt_reason`` metadata and the owed-notice stamp into
+        one write, exactly as everywhere else. ``update_run_status`` is not involved.
+
+        DOUBLE SETTLEMENT IS SAFE BY CONSTRUCTION, and it is a real possibility here
+        rather than a theoretical one: the cancelled settlement may still be draining
+        on the loop, and the cancelled turn's own ``finally`` certainly is. All of them
+        write through ``settle_run_terminal``, whose UPDATE is scoped to
+        ``queued|running`` — so whoever lands first wins, everyone after no-ops, and a
+        row another actor already settled keeps that actor's outcome. There is no
+        read-then-write window to lose.
+
+        WHAT THE CANCELLED FUTURE LEAVES BEHIND is bounded for the same structural
+        reasons. The counted admission holds (HFR-330) are released from ``finally``
+        blocks as the ``CancelledError`` unwinds, and HFR-339's process-wide flag keeps
+        admission closed regardless. The turn was already ``task.cancel()``-ed with its
+        cause stamped before the gather that got cancelled, so it keeps unwinding on
+        the loop and settles itself if it gets there first. What is genuinely lost is
+        the reconcile leg that runs AFTER the awaited cancel — which is precisely this
+        method.
+        """
+
+        if not session_ids or not owned_run_ids:
+            # Either nothing was in flight, or this process owned no runs when the
+            # shutdown began. Either way there is provably nothing to converge.
+            return 0
+        service = getattr(self, "scheduled_task_service", None)
+        reconcile = getattr(service, "reconcile_session_teardown", None)
+        if not callable(reconcile):
+            return 0
+        settled = 0
+        for session_id in session_ids:
+            try:
+                settled += int(
+                    reconcile(
+                        session_id,
+                        settled_by=SETTLED_BY_RESTARTED,
+                        claimed_run_ids=owned_run_ids,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Shutdown convergence could not settle session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        logger.warning(
+            "Shutdown settlement exceeded its wait; converged %d run(s) synchronously "
+            "for session(s) %s before tearing the backends down",
+            settled,
+            ", ".join(session_ids),
+        )
+        return settled
+
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""
         logger.info("Cleaning up controller resources (sync, best-effort)...")
 
-        def _stop_loop_coroutine(coro, label: str) -> None:
+        def _stop_loop_coroutine(
+            coro,
+            label: str,
+            *,
+            timeout: float = 5,
+            on_timeout: Optional[Callable[[], Any]] = None,
+        ) -> None:
+            """Run one stop on the loop from this thread, and give up after ``timeout``.
+
+            ``on_timeout`` IS PER-CALL, not a blanket change (HFR-340). For most stops
+            here a timeout is genuinely a shrug: the process is about to exit and an
+            un-closed watcher costs nothing. For ONE of them — the in-flight settlement
+            — giving up silently leaves durable rows open and lets the backends come
+            apart underneath writers that are still running. Only that call passes a
+            convergence, so the others keep the behaviour they were audited with.
+            """
+
             try:
                 loop = self._loop
                 if not loop or loop.is_closed():
                     return
                 if loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(coro, loop)
-                    future.result(timeout=5)
+                    try:
+                        future.result(timeout=timeout)
+                    except FuturesTimeoutError:
+                        if on_timeout is None:
+                            raise
+                        # Best effort, and it is more than a formality: the future
+                        # returned by ``run_coroutine_threadsafe`` is never marked
+                        # RUNNING, so cancelling it schedules a real cancel of the task
+                        # on the loop. Whatever the coroutine has already written
+                        # stands — the convergence below writes through the same
+                        # guarded writer and cannot fight it.
+                        future.cancel()
+                        on_timeout()
                     return
                 loop.run_until_complete(coro)
             except Exception as e:
@@ -1706,7 +1877,20 @@ class Controller:
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
-        _stop_loop_coroutine(self._settle_inflight_turns_for_shutdown(), "In-flight session turns")
+        # THE ONE STOP THAT MAY NOT BE ABANDONED (HFR-340). The debt is read BEFORE the
+        # coroutine is submitted, because a timed-out settlement has already erased the
+        # maps that record it; the wait stays bounded so a wedged turn cannot hang the
+        # shutdown; and the timeout is no longer lossy, because whatever the settlement
+        # did not reach is finished synchronously, here, before any backend is touched.
+        settlement_sessions, settlement_owned = self._shutdown_settlement_debt()
+        _stop_loop_coroutine(
+            self._settle_inflight_turns_for_shutdown(),
+            "In-flight session turns",
+            timeout=SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS,
+            on_timeout=lambda: self._converge_abandoned_shutdown_settlement(
+                settlement_sessions, settlement_owned
+            ),
+        )
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
