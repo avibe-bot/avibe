@@ -2579,6 +2579,289 @@ def test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing(
     assert request.id not in {pending.id for pending in request_store.list_pending()}
 
 
+class _PerChannelSettlementController(_SettlementControllerDouble):
+    """``_SettlementControllerDouble`` with a session key per CHANNEL, not a constant.
+
+    The base double answers one constant session key on purpose, so a test can
+    pre-register a live sink and drive the concurrent-turn refusal. Two runs that
+    must be in flight AT THE SAME TIME need the opposite: distinct keys, or the
+    second turn is refused before it ever reaches the state a cancellation acts on.
+    """
+
+    def _get_session_key(self, context) -> str:  # type: ignore[override]
+        return f"{self.SESSION_KEY}::{context.channel_id}"
+
+
+def _turns_that_hang(count: int) -> tuple[asyncio.Event, Any]:
+    """A turn body that never finishes, plus an Event set once *count* have started.
+
+    ``_hanging_turn``'s single Event cannot express "both are live": waiting on it
+    returns as soon as the FIRST turn starts, and cancelling then races the second
+    execution into a state where no cause has been recorded for either.
+    """
+
+    all_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+    started: list[str] = []
+
+    async def _hang(_controller, _context, message) -> None:
+        started.append(message)
+        if len(started) >= count:
+            all_started.set()
+        await never_finishes.wait()
+
+    return all_started, _hang
+
+
+def test_cancellation_cause_distinguishes_eviction_from_shutdown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-105: two teardowns, two stories, and the row has to tell them apart.
+
+    Eviction and shutdown both arrive in the execution as the SAME bare
+    ``CancelledError``; nothing in the unwind can tell which happened. So the cause
+    is recorded at the cancel site — ``_cancel_execution`` for the session teardown,
+    ``stop()`` for the service going away — and the two runs must come out carrying
+    different reasons.
+
+    Asserted on ONE service in ONE pass, with both executions live, because the
+    interesting failure is not "does either value ever get written" but whether the
+    cause map keeps them apart: a single shared field, or a cause read after the
+    fact from the path, gives both runs whichever teardown ran last.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    evicted = request_store.enqueue_agent_run(
+        session_key="slack::channel::CEVICT",
+        message="a turn whose session is reclaimed",
+        agent_name="codex",
+    )
+    restarted = request_store.enqueue_agent_run(
+        session_key="slack::channel::CRESTART",
+        message="a turn the service restarts around",
+        agent_name="codex",
+    )
+
+    both_started, on_turn = _turns_that_hang(2)
+    service = ScheduledTaskService(
+        controller=_PerChannelSettlementController(on_turn=on_turn),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    service.scheduler = _StubScheduler()
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+        evicted_task = service._inflight_executions[evicted.id]
+        assert service._inflight_executions.get(restarted.id) is not None
+        # Teardown of ONE session, while the other run keeps executing.
+        assert service._cancel_execution(evicted.id, SETTLED_BY_EVICTED) is True
+        await _await_cancelled(evicted_task)
+        # ...and only then the service itself goes away around the survivor.
+        await asyncio.wait_for(service.stop(), timeout=5)
+
+    asyncio.run(_exercise())
+
+    evicted_row = request_store.get_run(evicted.id)
+    restarted_row = request_store.get_run(restarted.id)
+    assert evicted_row is not None and restarted_row is not None
+    # Both are infrastructure faults, so both are ``failed`` — the status alone is
+    # not the discriminator and asserting it alone would prove nothing here.
+    assert evicted_row["status"] == "failed"
+    assert restarted_row["status"] == "failed"
+    assert evicted_row["metadata"]["interrupt_reason"] == "evicted"
+    assert restarted_row["metadata"]["interrupt_reason"] == "restarted"
+    # The copy follows the cause through the settlement tables, so two different
+    # causes may never render the same sentence.
+    assert evicted_row["error"] != restarted_row["error"]
+
+
+def test_external_cancellation_without_recorded_cause_settles_interrupted_not_evicted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-109: an unexplained cancellation must not borrow somebody else's reason.
+
+    The explicit contrast to HFR-105. A cancellation this service did not originate
+    — a supervisor, a task group unwinding, ``asyncio`` cancellation from anywhere
+    outside ``_cancel_execution`` — records no cause at all, and the handler's
+    default decides what the user is told. Two defaults are wrong in opposite ways:
+    ``stopped`` claims the user did it, and ``evicted`` claims a session teardown
+    that never happened.
+
+    Run beside a run that IS being evicted in the same pass, because the failure
+    this pins is contamination rather than a bare default: a cause map keyed too
+    loosely — or a last-cause-wins field — hands the raw-cancelled run the
+    ``evicted`` its neighbour recorded, and a single-run test cannot see that.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    unexplained = request_store.enqueue_agent_run(
+        session_key="slack::channel::COUTSIDE",
+        message="a turn cancelled from outside this service",
+        agent_name="codex",
+    )
+    evicted = request_store.enqueue_agent_run(
+        session_key="slack::channel::CEVICT",
+        message="a turn whose session really was reclaimed",
+        agent_name="codex",
+    )
+
+    both_started, on_turn = _turns_that_hang(2)
+    service = ScheduledTaskService(
+        controller=_PerChannelSettlementController(on_turn=on_turn),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+        evicted_task = service._inflight_executions[evicted.id]
+        unexplained_task = service._inflight_executions[unexplained.id]
+        assert service._cancel_execution(evicted.id, SETTLED_BY_EVICTED) is True
+        # Deliberately NOT ``_cancel_execution``: this is the raw cancellation the
+        # service never gets to annotate.
+        unexplained_task.cancel()
+        await _await_cancelled(evicted_task)
+        await _await_cancelled(unexplained_task)
+
+    asyncio.run(_exercise())
+
+    row = request_store.get_run(unexplained.id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["completed_at"] is not None
+    assert row["error"]
+    assert row["metadata"]["interrupt_reason"] == "interrupted"
+    # The neighbour's cause stayed with the neighbour.
+    assert request_store.get_run(evicted.id)["metadata"]["interrupt_reason"] == "evicted"
+    # And the map is empty afterwards, so no later run can inherit either cause.
+    assert service._execution_cancel_causes == {}
+
+
+def test_cancellation_settles_coalesced_sibling_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-111: one claim, several runs — settling only the claim strands the rest.
+
+    A coalesced Workbench turn holds a SINGLE claim on behalf of every run folded
+    into it; the siblings stay ``queued`` and are settled by the primary when it
+    finishes. Cancel that claim and settle ``request.id`` alone and the siblings are
+    left queued with nothing left alive that will ever settle them — the zombie this
+    path exists to prevent, multiplied by the fan-out, and invisible because the
+    primary's row looks correctly terminal.
+
+    Nothing re-dispatches them either: a held sibling is excluded from
+    ``list_pending`` precisely because the primary owns it, so "requeued" is not
+    even an available outcome. Terminal, with the cause, is the only honest one.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    sibling = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="folded into the primary turn",
+        agent_name="codex",
+        # What the Workbench queue stamps on a follower: the primary owns it, so the
+        # drain must not claim it as work of its own.
+        metadata={"workbench_queue_holds_run": True},
+    )
+    primary = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="the coalesced primary",
+        agent_name="codex",
+        metadata={"coalesced_queue": {"execution_ids": [sibling.id]}},
+    )
+    assert sibling.id not in {pending.id for pending in request_store.list_pending()}
+
+    turn_started, on_turn = _hanging_turn()
+    service = ScheduledTaskService(
+        controller=_SettlementControllerDouble(on_turn=on_turn),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        execution = service._inflight_executions[primary.id]
+        assert service._cancel_execution(primary.id, SETTLED_BY_EVICTED) is True
+        await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    for run_id in (primary.id, sibling.id):
+        settled = request_store.get_run(run_id)
+        assert settled is not None, run_id
+        assert settled["status"] == "failed", run_id
+        assert settled["completed_at"] is not None, run_id
+        assert settled["error"], run_id
+        assert settled["metadata"]["interrupt_reason"] == "evicted", run_id
+    assert request_store.list_pending() == []
+
+
+def test_file_store_cancellation_terminalizes_via_complete(tmp_path: Path) -> None:
+    """HFR-112: the legacy backend has one terminal path, and it must be taken.
+
+    The file store has no deferred-terminal lane and no guarded writer, so
+    ``defer_run_terminal`` / ``settle_deferred_run`` both answer ``False`` there.
+    Read as "already settled" that is exactly the old bug wearing new clothes: the
+    cancellation writes nothing and the claim is left behind. The fallback is
+    ``complete(ok=False)``, and it has to carry the SAME cause the SQLite path
+    would have recorded.
+
+    HFR-003 pins the same backend under the generic default. This one is the
+    RECORDED-cause half: a fallback that terminalizes but drops ``settled_by`` on
+    the floor passes HFR-003 and still tells every evicted run's user nothing about
+    why their turn stopped.
+    """
+
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    assert request_store.supports_guarded_settlement() is False
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    request = request_store.enqueue_task_run(task.id)
+
+    turn_started, on_turn = _hanging_turn()
+    service = ScheduledTaskService(
+        controller=_SettlementControllerDouble(on_turn=on_turn),
+        store=store,
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        execution = service._inflight_executions[request.id]
+        assert service._cancel_execution(request.id, SETTLED_BY_EVICTED) is True
+        await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    # Nothing pending, nothing mid-flight: the claim is not waiting to re-send.
+    assert not (request_store.pending_dir / f"{request.id}.json").exists()
+    assert not (request_store.processing_dir / f"{request.id}.json").exists()
+    completed_path = request_store.completed_dir / f"{request.id}.json"
+    assert completed_path.exists()
+    completed = json.loads(completed_path.read_text(encoding="utf-8"))
+    assert completed["ok"] is False
+    assert completed["error"]
+    assert completed["completed_at"]
+    assert completed["metadata"]["interrupt_reason"] == "evicted"
+
+
 def _ensure_reservation_agent() -> str:
     """An enabled default Agent, which ``_reserve_runtime_session`` requires."""
 

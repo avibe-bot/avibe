@@ -339,6 +339,70 @@ def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
     assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
 
 
+def test_interrupt_reason_survives_a_crash_between_defer_and_settle(tmp_path: Path) -> None:
+    """HFR-110 (PR2): the cause is durable, not in-process.
+
+    A defer and its settlement are two separate statements, and everything between
+    them is a gap a crash can land in. The cause of an out-of-band terminalization
+    lives only at the cancel site, so if it were held in memory across that gap —
+    or written by a THIRD statement after the settlement — a process that dies in
+    between settles the row with no ``interrupt_reason`` at all. The row then reads
+    as an ordinary failure, and the owed notice picks the ordinary lane, because
+    ``_owed_failure_notice_for_transition`` reads the merged metadata at transition
+    time and a notice is never re-stamped once written. Too late is the same as
+    never.
+
+    So the intent is parked WITH its metadata in ``result_payload_json``, and the
+    proof has to be a genuinely fresh store: a second ``SQLiteBackgroundTaskStore``
+    over the same file, after the first is closed, shares no cache, no connection
+    and no Python object with the process that deferred.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    db_path = sqlite.db_path
+    request = requests.enqueue_agent_run(
+        session_key="slack::channel::C110",
+        message="a turn the eviction interrupted",
+        agent_name=None,
+    )
+    assert requests.claim(request.id) is not None
+    assert sqlite.defer_run_terminal(
+        request.id,
+        terminal_status="failed",
+        error="the session was reclaimed mid-turn",
+        metadata={"interrupt_reason": "evicted"},
+    )
+    parked = sqlite.get_run(request.id)
+    assert parked["status"] == "running", "the defer must not terminalize by itself"
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+    assert (parked.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+    # The crash: everything this process knew about the cancellation is gone.
+    sqlite.close()
+
+    reopened = SQLiteBackgroundTaskStore(db_path)
+    try:
+        assert reopened.settle_deferred_run(request.id) is True
+        saved = reopened.get_run(request.id)
+    finally:
+        reopened.close()
+
+    assert saved["status"] == "failed"
+    assert saved["completed_at"] is not None
+    assert saved["error"] == "the session was reclaimed mid-turn"
+    assert saved["metadata"]["interrupt_reason"] == "evicted"
+    # And the stamper saw it IN TIME: the interruption identity, not the bare run id
+    # an ordinary failure would have produced.
+    notice = saved["metadata"][OWED_FAILURE_NOTICE_KEY]
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["failure_id"] == f"interrupt:{request.id}:evicted"
+    # The parked copy is consumed by the settlement rather than left behind to be
+    # replayed by a later reader.
+    assert "deferred_terminal_metadata" not in (saved.get("result_payload") or {})
+    assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 
@@ -1632,6 +1696,97 @@ def test_the_drain_delivers_an_ordinary_failure_once_and_acks_it(tmp_path: Path,
     emitted.clear()
     asyncio.run(service._drain_failure_notices())
     assert emitted == [], "an acknowledged notice must never be delivered twice"
+
+
+def test_evicted_scheduled_run_without_a_callback_target_still_notifies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-102 — PR2's exit criterion, end to end over the real store.
+
+    P3's user-visible harm is a run that dies with a session and tells nobody. The
+    obvious answer, "fire the callback", covers only the runs that HAVE one: a
+    scheduled fire has no ``callback_session_id`` at all, so for exactly the class
+    of run nobody is watching, the callback lane is empty. That is why the teardown
+    settlement stamps an owed notice instead of calling an emitter — and why the
+    proof has to run past the stamp to a DELIVERY.
+
+    Three seams, in the order the failure travels, because each one alone has a
+    green reading that hides the next: the teardown settles the row ``failed`` with
+    ``evicted``; the stamp lands on the interruption identity (a bare-run-id
+    identity would let the dedup swallow it behind an ordinary failure notice for
+    the same execution); and PR6's drain — untouched by PR2, which is the point —
+    picks it up on its own ladder and acks it. ``list_pending_callbacks`` is
+    asserted EMPTY throughout so the delivery can only have come from the notice.
+    """
+
+    import core.scheduled_tasks as scheduled_tasks
+    from core.run_settlement import SETTLED_BY_EVICTED
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-evicted", name="nightly deploy", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-evicted")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    # The association a session teardown selects on, written exactly where the
+    # reservation writes it.
+    assert sqlite.stamp_run_session_id(run.id, session_id="ses-evicted") is True
+    staged = sqlite.get_run(run.id)
+    assert staged["status"] == "running"
+    assert not staged["callback_session_id"], (
+        "the scenario is a run with NO callback target; a run that has one proves "
+        "the other lane"
+    )
+
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+
+    settled = service.reconcile_session_teardown(
+        "ses-evicted",
+        settled_by=SETTLED_BY_EVICTED,
+        claimed_run_ids=frozenset({run.id}),
+    )
+    assert settled == 1
+    row = sqlite.get_run(run.id)
+    assert row["status"] == "failed"
+    assert row["completed_at"] is not None
+    assert row["metadata"]["interrupt_reason"] == "evicted"
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["failure_id"] == f"interrupt:{run.id}:evicted"
+    assert requests.list_pending_callbacks() == [], (
+        "nothing may reach the user through the callback lane in this scenario"
+    )
+
+    emitted: list[dict] = []
+
+    async def _fake_emit(controller, context, backend, diagnostic, **kwargs):
+        emitted.append(
+            {
+                "platform": context.platform,
+                "channel_id": context.channel_id,
+                "failure_id": kwargs.get("failure_id"),
+            }
+        )
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.delivered_id = "1717.102"
+            evidence.persisted_row = {"id": "msg-102"}
+        return False
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _fake_emit)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(emitted) == 1, f"the interrupted run reached nobody: {emitted}"
+    assert (emitted[0]["platform"], emitted[0]["channel_id"]) == ("slack", "C1")
+    assert emitted[0]["failure_id"] == f"interrupt:{run.id}:evicted"
+    delivered = sqlite.owed_failure_notice(run.id)
+    assert delivered["state"] == NOTICE_SENT
+    assert delivered["attempts"] == 1, "and it must not spend the backoff getting there"
+    assert requests.list_pending_callbacks() == []
 
 
 def test_the_drain_body_names_what_failed_and_how_to_re_run(tmp_path: Path) -> None:
