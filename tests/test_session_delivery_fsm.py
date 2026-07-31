@@ -537,6 +537,52 @@ def test_async_dispatch_failure_keeps_starting_delivery_quarantined(
     manager.controller.emit_agent_message.assert_awaited_once()
 
 
+def test_refused_native_start_requeues_without_automatic_redispatch(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    release = asyncio.Event()
+
+    async def refused(*_args, **_kwargs):
+        await release.wait()
+        return SimpleNamespace(settled_by="refused_concurrent_turn")
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        refused,
+    )
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+
+    async def run():
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="retry after native owner releases",
+            ),
+            context=_context(),
+        )
+        holder = manager.in_flight["ses_fsm"].task
+        release.set()
+        await holder
+        await asyncio.sleep(0)
+        return admitted
+
+    admitted = asyncio.run(run())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+        delivery = delivery_store.get_delivery(conn, str(admitted.delivery_id))
+        owner = delivery_store.active_turn(conn, "ses_fsm")
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "refused_concurrent_turn"
+    assert delivery is not None
+    assert delivery["state"] == "queued"
+    assert delivery["target_turn_id"] is None
+    assert owner is None
+
+
 def test_restart_reconciles_unrecorded_p0_interrupt_without_retry(managers) -> None:
     manager, restarted, engine, _engine_b, _starts = managers
 

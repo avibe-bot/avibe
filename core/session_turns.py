@@ -33,6 +33,7 @@ from core.run_settlement import (
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_REFUSED_CONCURRENT_TURN,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
@@ -2352,6 +2353,9 @@ class SessionTurnManager:
             finally:
                 if isinstance(session_id, str):
                     durable_terminal_result: dict[str, Any] = {}
+                    prewrite_refused = (
+                        settled_by == SETTLED_BY_REFUSED_CONCURRENT_TURN
+                    )
                     # The turn is over — the agent emitted its terminal result, the
                     # user stopped it, or dispatch raised before any backend turn.
                     # NO turn-duration timeout: the slot is freed only by a real
@@ -2405,6 +2409,28 @@ class SessionTurnManager:
                                         expected_states=("starting",),
                                         values={"state": "quarantined"},
                                     )
+                        elif prewrite_refused:
+                            with self._sqlite_engine().begin() as conn:
+                                reserve_write_lock(conn)
+                                queued = delivery_store.requeue_prewrite_failure(
+                                    conn,
+                                    logical_turn_id,
+                                    outcome=SETTLED_BY_REFUSED_CONCURRENT_TURN,
+                                )
+                                message_id = str(
+                                    (queued or {}).get("message_id") or ""
+                                )
+                                if (
+                                    message_id
+                                    and not messages_service.project_session_delivery(
+                                        conn,
+                                        message_id,
+                                        state="queued",
+                                    )
+                                ):
+                                    raise RuntimeError(
+                                        "refused native start Message projection lost ownership"
+                                    )
                         elif settled_by is not None:
                             # A released waiter is positive evidence that this
                             # logical Turn no longer owns native work. This also
@@ -2439,7 +2465,12 @@ class SessionTurnManager:
                     # after a plain Stop (keep the queue) or a terminal failure; send-now
                     # still forces a flush via flush_on_cancel.
                     should_flush = (
-                        (not cancelled and not failed and not (turn is not None and turn.stop_no_flush))
+                        (
+                            not cancelled
+                            and not failed
+                            and not prewrite_refused
+                            and not (turn is not None and turn.stop_no_flush)
+                        )
                         or (turn is not None and turn.flush_on_cancel)
                     )
                     backend = self._context_backend(context)
