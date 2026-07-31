@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import ExitStack
 from typing import Any, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ _WORKING_PATH_HEAD = re.compile(r"[A-Za-z]:[\\/]|[\\/]")
 __all__ = [
     "SchedulerLaneCancellation",
     "cancel_session_scheduler_lane",
+    "hold_session_admission",
     "reconcile_session_runs",
     "resolve_teardown_session_ids",
     "split_composite_session_key",
@@ -195,6 +197,52 @@ def resolve_teardown_session_ids(
     return session_ids
 
 
+def hold_session_admission(
+    controller: Any,
+    session_id: str,
+    *,
+    admission_holds: Optional[ExitStack],
+) -> None:
+    """Extend one session's teardown admission hold onto the CALLER's scope (HFR-330).
+
+    ``SessionTurnManager.release_for_teardown`` closes admission for the duration of
+    its own cancel-and-await, but the window it guards does not end there: the caller
+    goes on to drop the cached runtime client, and until that happens a session whose
+    ``in_flight`` entry was already popped reads IDLE with a live client still
+    registered. A message admitted in that gap dispatches onto the dying runtime.
+
+    So the hold is handed OUTWARD rather than resolved twice. The caller owns an
+    ``ExitStack``; this registers the manager's reentrant hold on it here, where the
+    session id has just been resolved from a runtime identity (and where the HFR-323
+    narrowing already refused anything ambiguous), and the stack releases it when the
+    caller's teardown block exits — after the runtime is gone, on every path including
+    exceptions. Passing ``None`` opts out and leaves ``release_for_teardown``'s own
+    narrower hold as the only guard.
+
+    Defensive like everything else in this module: a controller with no turn manager
+    (headless runs, the test doubles) is a silent no-op, never an exception on a path
+    already tearing something down.
+    """
+
+    if admission_holds is None:
+        return
+    resolved = str(session_id or "").strip()
+    if not resolved:
+        return
+    manager = getattr(controller, "session_turns", None)
+    hold = getattr(manager, "teardown_admission", None)
+    if not callable(hold):
+        return
+    try:
+        admission_holds.enter_context(hold(resolved))
+    except Exception:
+        logger.warning(
+            "Session teardown: holding admission for session %s failed",
+            resolved,
+            exc_info=True,
+        )
+
+
 async def teardown_session_runs(
     controller: Any,
     session_id: str,
@@ -346,6 +394,7 @@ async def teardown_runtime_session_runs(
     agent_backend: Optional[str] = None,
     settled_by: str,
     include_manager_lane: bool = True,
+    admission_holds: Optional[ExitStack] = None,
 ) -> int:
     """:func:`teardown_session_runs` for callers that hold a runtime identity.
 
@@ -362,6 +411,11 @@ async def teardown_runtime_session_runs(
     another scope's eviction. ``agent_backend`` — which every runtime caller knows
     about itself — keeps the candidate set to sessions this runtime could plausibly
     own, and the refusal covers what that still cannot separate.
+
+    ``admission_holds`` is the caller's ``ExitStack``, for the callers that go on to
+    remove the runtime after this returns — see :func:`hold_session_admission`
+    (HFR-330). This is the one place a runtime identity has already become a session
+    id, so registering the hold here costs no second resolve.
     """
 
     session_ids = resolve_teardown_session_ids(
@@ -372,6 +426,9 @@ async def teardown_runtime_session_runs(
     )
     touched = 0
     for session_id in session_ids:
+        # BEFORE the teardown, not after: the window opens inside the very first
+        # ``release_for_teardown`` this call reaches.
+        hold_session_admission(controller, session_id, admission_holds=admission_holds)
         touched += await teardown_session_runs(
             controller,
             session_id,
@@ -388,6 +445,7 @@ async def teardown_composite_session_runs(
     settled_by: str,
     agent_backend: Optional[str] = None,
     include_manager_lane: bool = True,
+    admission_holds: Optional[ExitStack] = None,
 ) -> int:
     """:func:`teardown_runtime_session_runs` keyed by a Claude composite session key."""
 
@@ -401,4 +459,5 @@ async def teardown_composite_session_runs(
         agent_backend=agent_backend,
         settled_by=settled_by,
         include_manager_lane=include_manager_lane,
+        admission_holds=admission_holds,
     )

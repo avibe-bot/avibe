@@ -3218,6 +3218,58 @@ scenarios:
     # not mislabel a delivered failure that outranks it, and must still be consumed):
     # tests/test_harness_failure_visibility.py::test_a_parked_cause_does_not_mislabel_an_outcome_that_outranks_it
     test: tests/test_harness_failure_visibility.py::test_parked_interrupt_reason_survives_settlement_through_record_run_output
+  - id: HFR-330
+    name: session admission stays closed through the whole teardown
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 9. release_for_teardown cancels the turn and AWAITS it, and that
+    # await runs _run's finally -- whose first act is to pop in_flight and publish
+    # turn.end. The caller (SessionHandler.cleanup_session, the idle-eviction loop, the
+    # Claude fault paths) removes the cached runtime client only AFTER the await
+    # returns. Between those two moments the session reads IDLE with a live client still
+    # registered and being dismantled.
+    # THE ADMISSION BUG: SessionTurnManager.submit's idle branch keys on in_flight --
+    # its own docstring pins the no-await invariant between the check and the enqueue
+    # callback -- so an ORDINARY message arriving in that window sees an idle session
+    # and dispatches straight onto the dying runtime. Strictly broader than HFR-126,
+    # which closed this window for one shape only: there a Send Now had to have set
+    # flush_on_cancel AND a durable queue had to already exist. Here nothing is opted
+    # into and nothing pre-exists.
+    # FIX: SessionTurnManager.teardown_admission(session_id), a REENTRANT (counted)
+    # context manager, plus submit folding it into `busy` for EVERY branch -- the
+    # enqueue decision, the queue.updated publish, the send-now deferral, and the idle
+    # branch's immediate flush_queue, which would otherwise walk the durable queue into
+    # the same dying runtime. A held session queues behind the teardown on the ordinary
+    # send-while-busy road and flushes afterwards, onto the replacement runtime.
+    # NOT _draining_backends, though submit already consults it: that set is
+    # BACKEND-granular (one session's teardown would stall every session on the backend)
+    # and carries resume semantics this path explicitly rejects -- a drained backend
+    # comes back and _deferred_restart_sessions replays its sessions, whereas
+    # release_for_teardown DISCARDS that entry because a torn-down session is not coming
+    # back. Same word, opposite contract.
+    # OWNERSHIP, because the hold must outlive release_for_teardown itself: the manager
+    # owns the counter; release_for_teardown holds it for its own cancel-and-await
+    # (entered AFTER the HFR-320 self-turn guard, which cancels nothing and whose
+    # caller's own dispatch must proceed); and the hold is handed OUTWARD to the caller
+    # on an ExitStack threaded through core.session_teardown -- registered by
+    # hold_session_admission inside teardown_runtime_session_runs, the one place a
+    # runtime identity has already become a session id, so nothing resolves twice. The
+    # stack is owned by cleanup_session and by the eviction loop (whose settle-then-drop
+    # pair opens a WIDER window than cleanup_session's own, and starts earlier than
+    # cleanup_session's inner hold can reach). Counted rather than a set precisely
+    # because those two nest. Every decrement is in a finally: a leaked hold is a
+    # permanently wedged session.
+    # AGENT_STATUS, the second half of the same window: the post-await
+    # set_agent_status(idle) could overwrite the running a newer turn had just stamped.
+    # THE STAMP RULE is now identity-based -- idle is asserted only when in_flight holds
+    # no OTHER Turn. A different entry is a newer turn that already owns the status
+    # (both doors, _run and begin_agent_initiated_turn, register synchronously and stamp
+    # running as they do it); the SAME entry is a turn whose settlement did not pop
+    # itself and must still be stamped, or an evicted session stays running forever.
+    # Presence alone was too coarse and broke HFR-121's double.
+    test: tests/test_internal_server.py::test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_runtime
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

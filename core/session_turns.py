@@ -17,11 +17,12 @@ terminal-result move onto the manager in subsequent commits.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection, Engine
@@ -773,6 +774,10 @@ class SessionTurnManager:
         self.in_flight: dict[str, Turn] = {}
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
+        # Sessions whose ADMISSION is closed because a teardown is dismantling the
+        # runtime underneath them, counted so nested holds nest (HFR-330). See
+        # :meth:`teardown_admission` for why ``in_flight`` cannot carry this.
+        self._teardown_admission: dict[str, int] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
         # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
@@ -789,6 +794,59 @@ class SessionTurnManager:
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
+
+    def is_teardown_admission_closed(self, session_id: Optional[str]) -> bool:
+        """True while a teardown holds this session's admission shut (HFR-330)."""
+        resolved = str(session_id or "").strip()
+        return bool(resolved) and self._teardown_admission.get(resolved, 0) > 0
+
+    @contextlib.contextmanager
+    def teardown_admission(self, session_id: Optional[str]) -> Iterator[None]:
+        """Hold one session's admission CLOSED for the whole of a teardown.
+
+        ``in_flight`` cannot express this, and that gap is the bug. ``submit``'s idle
+        branch keys on ``in_flight``, but ``_run``'s ``finally`` pops that entry (and
+        publishes ``turn.end``) as the very last thing the cancelled turn does — which
+        is INSIDE :meth:`release_for_teardown`'s ``asyncio.gather``, long before the
+        caller has removed the cached runtime client. Between those two moments the
+        session reads IDLE while its runtime is being dismantled, so an ordinary
+        submission arriving in that window dispatches straight onto a dying client
+        (HFR-330). HFR-126 closed the same window for the one Send Now shape that
+        reached it through ``flush_on_cancel``; nothing needed to be opted in for this
+        one.
+
+        NOT ``_draining_backends``, deliberately, though ``submit`` already consults
+        it. That set is BACKEND-granular — closing it would stall every other session
+        on the backend for one session's teardown — and it carries resume semantics
+        this path explicitly rejects: a drained backend comes back and
+        ``_deferred_restart_sessions`` replays its sessions, whereas
+        :meth:`release_for_teardown` DISCARDS that entry because a torn-down session
+        is not coming back. Same word, opposite contract.
+
+        REENTRANT (counted, not a set) because the teardown chain nests: the idle
+        eviction loop holds this across ``teardown_composite_session_runs`` AND the
+        ``cleanup_session`` that follows it, and ``cleanup_session`` holds it again for
+        its own settle-then-drop pair. A set would be released by the inner exit while
+        the outer teardown was still running.
+
+        Held on EVERY path including exceptions — a leaked hold is a permanently
+        wedged session, so the decrement lives in a ``finally``. An empty session id
+        is a no-op hold, matching every other entry point's forgiveness.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            yield
+            return
+        self._teardown_admission[resolved] = self._teardown_admission.get(resolved, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._teardown_admission.get(resolved, 0) - 1
+            if remaining > 0:
+                self._teardown_admission[resolved] = remaining
+            else:
+                self._teardown_admission.pop(resolved, None)
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:
@@ -1101,6 +1159,15 @@ class SessionTurnManager:
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
+        # A teardown holding this session's admission counts as BUSY even though
+        # ``in_flight`` is already empty: the turn was cancelled and popped, but the
+        # runtime it ran in has not been removed yet, so "idle" here would dispatch
+        # onto a dying client (HFR-330). It is folded into ``busy`` for EVERY branch
+        # below, not just the enqueue decision — the idle branch's immediate
+        # ``flush_queue`` would otherwise walk the durable queue into that same
+        # runtime, which is the failure HFR-126 pins on the Send Now shape.
+        tearing_down = self.is_teardown_admission_closed(session_id)
+        admission_closed = busy or tearing_down
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
         if delivery_intent == "send_now":
@@ -1115,7 +1182,7 @@ class SessionTurnManager:
         elif backend in self._draining_backends:
             should_enqueue = True
             self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
-        elif busy:
+        elif admission_closed:
             should_enqueue = True
         else:
             with self._sqlite_engine().connect() as conn:
@@ -1124,10 +1191,15 @@ class SessionTurnManager:
             queue_persisted = bool(enqueue()) if enqueue is not None else False
             delivery_status = None
             if queue_persisted and delivery_intent == "send_now":
-                if backend in self._draining_backends and not busy:
-                    # The row is durable, but a backend cutover deliberately owns
+                if (
+                    backend in self._draining_backends or tearing_down
+                ) and not busy:
+                    # The row is durable, but a backend cutover — or the teardown
+                    # dismantling this session's runtime (HFR-330) — deliberately owns
                     # when the next turn may start. Report the deferral instead of
-                    # mislabelling the still-present queue as empty.
+                    # mislabelling the still-present queue as empty. ``send_now``'s
+                    # idle branch flushes DIRECTLY, so reaching it here would put the
+                    # queue on the dying runtime by the send-now road.
                     delivery_status = "deferred"
                 else:
                     delivery_result = await self.send_now(session_id)
@@ -1136,7 +1208,7 @@ class SessionTurnManager:
                         or delivery_result.get("code")
                         or "failed"
                     )
-            if queue_persisted and (busy or backend in self._draining_backends):
+            if queue_persisted and (admission_closed or backend in self._draining_backends):
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
                 # (the later flush emits its own queue.updated when it pops). This
@@ -1146,7 +1218,7 @@ class SessionTurnManager:
                 bus.publish("queue.updated", {"session_id": session_id})
             elif (
                 delivery_intent != "send_now"
-                and not busy
+                and not admission_closed
                 and backend not in self._draining_backends
             ):
                 # Idle + pre-existing queue → no running turn to flush behind, so
@@ -1895,6 +1967,17 @@ class SessionTurnManager:
         dismantled backend can no longer settle its own turn. Returns whether a turn
         was found and released.
 
+        THAT AWAIT IS ALSO A GATE-REOPEN WINDOW, which is why the admission hold exists
+        (HFR-330). ``asyncio.gather(turn.task)`` runs ``_run``'s ``finally``, and the
+        first thing it does is pop ``in_flight`` and publish ``turn.end`` — while the
+        caller still holds the runtime it is about to remove. ``submit``'s idle branch
+        keys on exactly that map, so an ordinary message arriving here reads IDLE and
+        dispatches onto the dying client. :meth:`teardown_admission` keeps the session
+        reading BUSY across the window, so the message takes the durable
+        send-while-busy queue instead and runs later, on the replacement runtime. This
+        is not the HFR-126 shape: nothing has to opt into ``flush_on_cancel`` to reach
+        it, and no queue has to pre-exist.
+
         THE CALLER'S OWN TURN IS EXEMPT, and the exemption is checked before anything
         is written to the ``Turn`` (HFR-320). The reaching call is IN-DISPATCH
         CLEANUP, not an exotic re-entrancy: a Workbench turn's dispatch calls
@@ -1948,24 +2031,50 @@ class SessionTurnManager:
                 settled_by,
             )
             return False
-        turn.stop_no_flush = True
-        # A torn-down session must not flush its durable send-while-busy queue into a
-        # dying runtime (HFR-126). The queue rows survive for the recreated session,
-        # and a send-now that set ``flush_on_cancel`` before this teardown won the
-        # race would otherwise override ``stop_no_flush`` in ``_run``'s
-        # ``should_flush``.
-        turn.flush_on_cancel = False
-        turn.cancel_settled_by = settled_by
-        if turn.task.done():
-            self.in_flight.pop(resolved, None)
-            from core.inbox_events import bus
+        # Admission closes BEFORE the cancel and stays closed for the rest of this
+        # call — the whole window in which ``_run``'s ``finally`` pops ``in_flight``
+        # while the runtime is still registered (HFR-330). It is entered AFTER the
+        # HFR-320 self-turn guard on purpose: that path cancels nothing, and the
+        # caller's own dispatch is mid-flight and must proceed.
+        #
+        # This hold covers only THIS call. A caller that goes on to drop the runtime
+        # afterwards must extend it across that drop too, which is what the
+        # ``admission_holds`` stack threaded through ``core.session_teardown`` is for;
+        # the hold nests, so both can be held at once.
+        with self.teardown_admission(resolved):
+            turn.stop_no_flush = True
+            # A torn-down session must not flush its durable send-while-busy queue into
+            # a dying runtime (HFR-126). The queue rows survive for the recreated
+            # session, and a send-now that set ``flush_on_cancel`` before this teardown
+            # won the race would otherwise override ``stop_no_flush`` in ``_run``'s
+            # ``should_flush``.
+            turn.flush_on_cancel = False
+            turn.cancel_settled_by = settled_by
+            if turn.task.done():
+                self.in_flight.pop(resolved, None)
+                from core.inbox_events import bus
 
-            bus.publish("turn.end", {"session_id": resolved})
-        else:
-            turn.task.cancel()
-            await asyncio.gather(turn.task, return_exceptions=True)
-        if self.controller is not None:
-            self.controller.set_agent_status(resolved, "idle")
+                bus.publish("turn.end", {"session_id": resolved})
+            else:
+                turn.task.cancel()
+                await asyncio.gather(turn.task, return_exceptions=True)
+            successor = self.in_flight.get(resolved)
+            if self.controller is not None and successor in (None, turn):
+                # THE STAMP RULE: this settlement may assert idle only while no OTHER
+                # turn holds the gate — compared by Turn IDENTITY, not by mere presence.
+                # ``in_flight`` is registered SYNCHRONOUSLY by ``_run`` and by
+                # ``begin_agent_initiated_turn``, and both stamp ``running`` as they do
+                # it, so a DIFFERENT entry here is a newer turn that already owns this
+                # session's status: stamping idle over it darkens the sidebar dot under
+                # a live turn and, worse, hands ``update_session``'s backend lock a false
+                # idle to re-check against. The same entry (a turn whose own settlement
+                # did not pop it) is not a successor and must still be stamped, or an
+                # evicted session stays ``running`` forever.
+                #
+                # The admission hold keeps ``submit`` out of this window entirely; this
+                # predicate covers the agent-initiated door, which does not go through
+                # ``submit``.
+                self.controller.set_agent_status(resolved, "idle")
         # DISCARD rather than defer, which is where this parts company with the
         # refresh path: a refreshed backend comes back and its sessions resume, but a
         # torn-down session is not coming back, so re-queueing it for a post-restart

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
@@ -1584,47 +1585,55 @@ class SessionHandler(BaseHandler):
         ``settled_by`` stays required — the signature must not grow a way to omit the
         cause — and is simply unused on that path, because nothing is being settled
         by this call.
+
+        THE ADMISSION HOLD SPANS THE WHOLE METHOD (HFR-330). The settlement above pops
+        the turn's ``in_flight`` entry — the map ``SessionTurnManager.submit`` reads to
+        decide idle-vs-busy — while the client below is still registered, so without
+        the hold a message arriving in between dispatches onto the runtime this method
+        is dismantling. The stack releases it once the client is gone, on every path.
         """
 
-        if settle_runs:
-            await teardown_composite_session_runs(
-                self.controller,
-                composite_key,
-                settled_by=settled_by,
-                # This handler owns Claude runtimes and nothing else, so a candidate
-                # row on another backend is another runtime's session that happens to
-                # share the anchor — and the teardown CANCELS what it resolves
-                # (HFR-128).
-                agent_backend="claude",
-                include_manager_lane=include_manager_lane,
-            )
-        receiver_task = self.receiver_tasks.pop(composite_key, None)
-        client = self.claude_sessions.pop(composite_key, None)
-        if client is not None and retire_model_hub_scope:
-            self._retire_model_hub_process_scope(composite_key)
-        cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
-        native_session_id = getattr(client, "_vibe_native_session_id", None)
-        keep_pid = get_claude_client_pid(client)
-        self.clear_session_tracking(composite_key)
+        with ExitStack() as admission_holds:
+            if settle_runs:
+                await teardown_composite_session_runs(
+                    self.controller,
+                    composite_key,
+                    settled_by=settled_by,
+                    # This handler owns Claude runtimes and nothing else, so a candidate
+                    # row on another backend is another runtime's session that happens to
+                    # share the anchor — and the teardown CANCELS what it resolves
+                    # (HFR-128).
+                    agent_backend="claude",
+                    include_manager_lane=include_manager_lane,
+                    admission_holds=admission_holds,
+                )
+            receiver_task = self.receiver_tasks.pop(composite_key, None)
+            client = self.claude_sessions.pop(composite_key, None)
+            if client is not None and retire_model_hub_scope:
+                self._retire_model_hub_process_scope(composite_key)
+            cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
+            native_session_id = getattr(client, "_vibe_native_session_id", None)
+            keep_pid = get_claude_client_pid(client)
+            self.clear_session_tracking(composite_key)
 
-        try:
-            # Close the SDK client first so its receive stream can finish normally.
-            # Cancelling the receiver first can leave the SDK's anyio cancel scope
-            # retrying cancellation on every event-loop tick.
-            if client is not None:
-                if cleanup_from_receiver:
-                    self._disconnect_client_after_receiver(client, composite_key, receiver_task)
-                else:
-                    await self._disconnect_client(client, composite_key)
-        finally:
-            if not cleanup_from_receiver:
-                await self._stop_receiver_task(receiver_task, composite_key)
-            await reap_duplicate_claude_resume_processes(
-                native_session_id,
-                keep_pid=keep_pid if cleanup_from_receiver else None,
-                cli_path=self._get_claude_cli_path_override(),
-                logger=logger,
-            )
+            try:
+                # Close the SDK client first so its receive stream can finish normally.
+                # Cancelling the receiver first can leave the SDK's anyio cancel scope
+                # retrying cancellation on every event-loop tick.
+                if client is not None:
+                    if cleanup_from_receiver:
+                        self._disconnect_client_after_receiver(client, composite_key, receiver_task)
+                    else:
+                        await self._disconnect_client(client, composite_key)
+            finally:
+                if not cleanup_from_receiver:
+                    await self._stop_receiver_task(receiver_task, composite_key)
+                await reap_duplicate_claude_resume_processes(
+                    native_session_id,
+                    keep_pid=keep_pid if cleanup_from_receiver else None,
+                    cli_path=self._get_claude_cli_path_override(),
+                    logger=logger,
+                )
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
         try:
@@ -1774,22 +1783,30 @@ class SessionHandler(BaseHandler):
             # idle session and a stuck-active session owe their runs the same
             # explanation, and it is the same one, because the reason is the eviction
             # rather than the state that qualified for it.
-            await teardown_composite_session_runs(
-                self.controller,
-                composite_key,
-                settled_by=SETTLED_BY_EVICTED,
-                agent_backend="claude",
-            )
-            if composite_key in self.active_sessions:
-                agent_service = getattr(self.controller, "agent_service", None)
-                claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
-                force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
-                if callable(force_cleanup):
-                    await force_cleanup(composite_key)
+            #
+            # The admission hold spans BOTH statements (HFR-330). This settlement pops
+            # the turn's ``in_flight`` entry, and the runtime it ran in is not dropped
+            # until the branch below runs — a wider reopen window than
+            # ``cleanup_session``'s own, and one its inner hold cannot cover because it
+            # starts after this returns. The hold nests, so both are held here.
+            with ExitStack() as admission_holds:
+                await teardown_composite_session_runs(
+                    self.controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                    admission_holds=admission_holds,
+                )
+                if composite_key in self.active_sessions:
+                    agent_service = getattr(self.controller, "agent_service", None)
+                    claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
+                    force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
+                    if callable(force_cleanup):
+                        await force_cleanup(composite_key)
+                    else:
+                        await self.cleanup_session(composite_key, settled_by=SETTLED_BY_EVICTED)
                 else:
                     await self.cleanup_session(composite_key, settled_by=SETTLED_BY_EVICTED)
-            else:
-                await self.cleanup_session(composite_key, settled_by=SETTLED_BY_EVICTED)
             evicted += 1
 
         return evicted

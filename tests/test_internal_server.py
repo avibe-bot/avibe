@@ -70,6 +70,14 @@ def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "202
     )
 
 
+def _queued_texts(engine, session_id: str) -> list[str]:
+    """The durable send-while-busy queue, in order."""
+    from storage import messages_service
+
+    with engine.connect() as conn:
+        return [row["text"] for row in messages_service.list_queued(conn, session_id)]
+
+
 def _build_controller_double(handler=None):
     """A MagicMock controller whose ``message_handler.handle_user_message``
     can be patched to emit chunks via the real ``_stream_chunk`` hook.
@@ -2591,6 +2599,193 @@ def test_release_for_teardown_skips_the_callers_own_turn():
     assert turn.flush_on_cancel is False
     # No idle stamp either: the agent is still working.
     assert statuses == []
+
+
+def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_runtime(
+    monkeypatch, tmp_path
+):
+    """HFR-330: the teardown holds the gate SHUT until the runtime is actually gone.
+
+    ``release_for_teardown`` cancels the turn and awaits it, and that await runs
+    ``_run``'s ``finally`` — whose FIRST act is to pop ``in_flight`` and publish
+    ``turn.end``. The caller removes the cached runtime client only after the await
+    returns, so between those two moments the session reads IDLE while its client is
+    still registered and being dismantled. ``submit``'s idle branch keys on exactly
+    that map (its docstring pins the no-await invariant between the check and the
+    callback), so an ORDINARY message arriving in the window dispatches immediately,
+    onto the dying runtime.
+
+    Broader than HFR-126, which closed this window for one shape only: there a Send Now
+    had to have set ``flush_on_cancel`` and a durable queue had to already exist. Here
+    nothing is opted into and nothing pre-exists — one message typed at the wrong
+    instant is enough.
+
+    The caller is modelled by its real parts, not simulated: ``hold_session_admission``
+    is the call ``teardown_runtime_session_runs`` makes once a runtime identity has
+    been resolved to a session id, and the ``ExitStack`` is the one
+    ``SessionHandler.cleanup_session`` (and the idle-eviction loop) wraps around its
+    settle-then-drop pair. The racer is launched from the ``turn.end`` subscriber —
+    the exact instant the gate reopened.
+    """
+
+    from core.inbox_events import bus
+    from core.run_settlement import SETTLED_BY_EVICTED
+    from core.services import sessions as sessions_service
+    from core.session_teardown import hold_session_admission
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_teardown_admission",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+    session_id = session["id"]
+
+    dispatched: list[str] = []
+    first_started = asyncio.Event()
+
+    async def long_handler(ctx, text):
+        dispatched.append(text)
+        if text == "first":
+            first_started.set()
+        await asyncio.sleep(30)  # held open until something cancels it
+
+    controller = _build_controller_double(handler=long_handler)
+    statuses: list[tuple[str, str]] = []
+    controller.set_agent_status = lambda sid, status: statuses.append((sid, status))
+    ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+    ctx.platform_specific = {
+        "agent_session_id": session_id,
+        "agent_session_target": {"agent_backend": "claude"},
+    }
+    manager = session_turns.SessionTurnManager(controller, build_context=lambda _sid: ctx)
+
+    def _enqueue(text: str):
+        def _write() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn, scope_id=scope_id, session_id=session_id, text=text
+                )
+            return True
+
+        return _write
+
+    observed: dict = {}
+
+    async def _go():
+        racer_done = asyncio.Event()
+
+        async def _race():
+            # The ordinary message that arrives while the runtime is being taken
+            # apart: no send-now, no pre-existing queue, no opt-in of any kind.
+            observed["result"] = await manager.submit(
+                session_id, ctx, "racer", enqueue=_enqueue("racer")
+            )
+            observed["in_flight_after_race"] = manager.is_in_flight(session_id)
+            racer_done.set()
+
+        def _on_event(event_type: str, _data) -> None:
+            if event_type != "turn.end" or observed.get("racer_started"):
+                return
+            # Synchronous, inside ``_run``'s finally: the gate has JUST reopened.
+            observed["racer_started"] = True
+            observed["admission_closed_at_turn_end"] = (
+                manager.is_teardown_admission_closed(session_id)
+            )
+            asyncio.get_running_loop().create_task(_race())
+
+        token = bus.subscribe_callback(_on_event)
+        try:
+            first = await manager.submit(
+                session_id, ctx, "first", enqueue=_enqueue("first")
+            )
+            assert first.route == "ran"
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            # THE CALLER'S SCOPE: settle, then drop the runtime. The racer lands
+            # between the two, which is the whole point of the hold.
+            with contextlib.ExitStack() as admission_holds:
+                hold_session_admission(
+                    controller, session_id, admission_holds=admission_holds
+                )
+                observed["released"] = await manager.release_for_teardown(
+                    session_id, settled_by=SETTLED_BY_EVICTED
+                )
+                await asyncio.wait_for(racer_done.wait(), timeout=3)
+                observed["queued_during_teardown"] = _queued_texts(engine, session_id)
+                observed["dispatched_during_teardown"] = list(dispatched)
+                # ... and only NOW is the client gone.
+            observed["admission_open_after"] = not manager.is_teardown_admission_closed(
+                session_id
+            )
+
+            # The replacement runtime is up: the row flushes normally.
+            observed["flushed"] = await manager.flush_queue(session_id)
+            for _ in range(300):
+                if "racer" in dispatched:
+                    break
+                await asyncio.sleep(0.01)
+            observed["queued_after_flush"] = _queued_texts(engine, session_id)
+        finally:
+            bus.unsubscribe(token)
+            for turn in list(manager.in_flight.values()):
+                turn.task.cancel()
+            await asyncio.gather(
+                *(t.task for t in manager.in_flight.values()), return_exceptions=True
+            )
+
+    asyncio.run(_go())
+
+    assert observed["released"] is True
+    assert observed.get("racer_started") is True, "the turn.end hook never fired"
+    assert observed["admission_closed_at_turn_end"] is True, (
+        "admission reopened the instant in_flight was popped, while the caller still "
+        "held the runtime"
+    )
+    result = observed["result"]
+    assert result.route == "enqueued", (
+        "an ordinary message admitted during a teardown dispatched onto the runtime "
+        "being dismantled"
+    )
+    assert result.queue_persisted is True
+    assert observed["in_flight_after_race"] is False, (
+        "no new turn may be registered against the dying runtime"
+    )
+    assert observed["dispatched_during_teardown"] == ["first"], (
+        "nothing may reach the backend between the cancel and the client's removal"
+    )
+    assert observed["queued_during_teardown"] == ["racer"], (
+        "the message is not dropped — it takes the durable send-while-busy queue"
+    )
+    # Marker cleared on the way out, and the queue flushes onto the fresh runtime.
+    assert observed["admission_open_after"] is True, (
+        "a leaked hold is a permanently wedged session"
+    )
+    assert observed["flushed"] is True
+    assert dispatched == ["first", "racer"], (
+        "the queued row runs exactly once, after the teardown"
+    )
+    assert observed["queued_after_flush"] == []
+    # The post-await idle stamp lands (no newer turn held the gate at that moment),
+    # and the flushed turn stamps its own running afterwards.
+    assert statuses == [
+        (session_id, "running"),
+        (session_id, "idle"),
+        (session_id, "running"),
+    ]
 
 
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
