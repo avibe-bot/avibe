@@ -197,6 +197,35 @@ def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path) -> None:
         agent_store.close()
 
 
+def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent_store.create(name="worker", backend="codex")
+        archived = agent_store.archive("worker")
+        assert archived is not None
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        ):
+            update_result, update_payload = _capture_stderr_json(
+                cli.cmd_agent_update,
+                _parse_agent(["update", archived.archived_name, "--description", "changed"]),
+            )
+            enable_result, enable_payload = _capture_stderr_json(
+                lambda parsed: cli.cmd_agent_set_enabled(parsed, enabled=True),
+                _parse_agent(["enable", archived.archived_name]),
+            )
+
+        for result, payload in ((update_result, update_payload), (enable_result, enable_payload)):
+            assert result == 1
+            assert payload["code"] == "agent_archived_read_only"
+            assert payload["error"] == f"Agent `{archived.archived_name}` 已归档，无法编辑。"
+            assert payload["hint"] == "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+    finally:
+        agent_store.close()
+
+
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     for index in range(25):
@@ -895,6 +924,59 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert payload["definition"]["cwd"] is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
+
+
+def test_task_add_releases_create_once_session_when_definition_write_fails(monkeypatch) -> None:
+    _no_caller_context(monkeypatch)
+    args = _parse_task_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-task",
+            "--at",
+            "2026-08-02T00:00:00+00:00",
+            "--message",
+            "hello",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-task",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=None),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-task"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._task_store",
+            return_value=SimpleNamespace(
+                add_task=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_definition_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-task",
+            "task creation failed before its Session reservation was adopted",
+        )
+    ]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:

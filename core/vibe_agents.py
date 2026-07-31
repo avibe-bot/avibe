@@ -89,6 +89,16 @@ class AgentArchiveError(ValueError):
         self.agent_name = str(agent_name)
 
 
+class AgentArchivedEditError(ValueError):
+    """An archived Agent is read-only on public mutation surfaces."""
+
+    code = "agent_archived_read_only"
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = str(agent_name)
+
+
 class AgentNameValidationError(ValueError):
     """A public Agent name violates a catalog namespace rule."""
 
@@ -496,7 +506,7 @@ class VibeAgentStore:
                 )
             existing = self._from_row(row)
             if existing.archived_at is not None:
-                raise ValueError(f"agent '{name}' is archived and cannot be edited")
+                raise AgentArchivedEditError(agent_name=name)
 
             values: dict[str, Any] = {"updated_at": _utc_now_iso()}
             if description is not _UNSET:
@@ -518,7 +528,7 @@ class VibeAgentStore:
                 .values(**values)
             )
             if result.rowcount != 1:
-                raise ValueError(f"agent '{name}' is archived and cannot be edited")
+                raise AgentArchivedEditError(agent_name=name)
             updated = conn.execute(
                 select(agents).where(agents.c.id == existing.id).limit(1)
             ).mappings().one()
@@ -543,7 +553,7 @@ class VibeAgentStore:
                     )
                 agent = self._from_row(row)
                 if agent.archived_at is not None:
-                    raise ValueError(f"agent '{name}' is archived and cannot be renamed")
+                    raise AgentArchivedEditError(agent_name=name)
                 if is_builtin_default_agent(agent):
                     raise ValueError(f"agent '{agent.name}' is built in and cannot be renamed")
                 if new_normalized == agent.normalized_name:
@@ -876,6 +886,7 @@ class VibeAgentStore:
 
         definition_rows = conn.execute(
             select(run_definitions.c.id, run_definitions.c.agent_name, run_definitions.c.metadata_json)
+            .where(run_definitions.c.deleted_at.is_(None))
         ).mappings().all()
         for row in definition_rows:
             values = {}

@@ -332,6 +332,62 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
+def test_watch_add_releases_create_once_session_when_definition_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    args = _parse_watch_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-watch",
+            "--cwd",
+            str(tmp_path),
+            "--shell",
+            "true",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-watch",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=str(tmp_path)),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-watch"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._watch_store",
+            return_value=SimpleNamespace(
+                add_watch=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_definition_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-watch",
+            "watch creation failed before its Session reservation was adopted",
+        )
+    ]
+
+
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")

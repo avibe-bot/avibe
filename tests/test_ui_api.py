@@ -2830,6 +2830,29 @@ def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
     assert result["message"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
 
 
+def test_vibe_agent_api_localizes_archived_edit_refusal(tmp_path, monkeypatch):
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    store.create(name="archive-fallback", backend="codex")
+    store.create(name="worker", backend="codex")
+    archived = store.archive("worker")
+    assert archived is not None
+    monkeypatch.setattr(api, "VibeAgentStore", lambda: store)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.update_vibe_agent(archived.archived_name, {"description": "changed"})
+
+    assert result == {
+        "ok": False,
+        "code": "agent_archived_read_only",
+        "message": f"Agent `{archived.archived_name}` 已归档，无法编辑。",
+        "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。",
+    }
+
+
 def test_vibe_agent_api_localizes_reserved_create_and_rename_names(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr(

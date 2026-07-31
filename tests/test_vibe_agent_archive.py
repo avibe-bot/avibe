@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 from core.scheduled_tasks import TaskExecutionStore
 from core.vibe_agents import (
     AGENT_ARCHIVE_METADATA_KEY,
+    AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
     AgentUnavailableError,
@@ -247,8 +248,12 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
         assert store.require_reference(result.archived_name).id == original.id
         with pytest.raises(AgentUnavailableError, match="disabled"):
             store.require_enabled(result.archived_name)
-        with pytest.raises(ValueError, match="archived and cannot be edited"):
+        with pytest.raises(AgentArchivedEditError) as edit_error:
             store.set_enabled(result.archived_name, True)
+        assert edit_error.value.code == "agent_archived_read_only"
+        assert edit_error.value.agent_name == result.archived_name
+        with pytest.raises(AgentArchivedEditError):
+            store.rename(result.archived_name, "restored-pm")
 
         listed_with_archives = store.list_agents(include_disabled=True, include_archived=True)
         assert any(agent.id == original.id for agent in listed_with_archives)
@@ -269,11 +274,15 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             "agent": result.archived_name,
         }
         assert session["agent_name"] == result.archived_name
-        assert {row["agent_name"] for row in definitions} == {result.archived_name}
-        assert {
-            json.loads(row["metadata_json"])["session_settings_snapshot"]["agent_name"]
-            for row in definitions
-        } == {result.archived_name}
+        definitions_by_id = {row["id"]: row for row in definitions}
+        assert definitions_by_id["task_live"]["agent_name"] == result.archived_name
+        assert definitions_by_id["watch_deleted"]["agent_name"] == "pm"
+        assert json.loads(definitions_by_id["task_live"]["metadata_json"])[
+            "session_settings_snapshot"
+        ]["agent_name"] == result.archived_name
+        assert json.loads(definitions_by_id["watch_deleted"]["metadata_json"])[
+            "session_settings_snapshot"
+        ]["agent_name"] == "pm"
         assert {
             row["agent_name"]
             for row in runs
@@ -811,11 +820,15 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
             "agent": result.archived_name,
         }
         assert session["agent_name"] == result.archived_name
-        assert {row["agent_name"] for row in definitions} == {result.archived_name}
-        assert {
-            json.loads(row["metadata_json"])["session_settings_snapshot"]["agent_name"]
-            for row in definitions
-        } == {result.archived_name}
+        definitions_by_id = {row["id"]: row for row in definitions}
+        assert definitions_by_id["task_live"]["agent_name"] == result.archived_name
+        assert definitions_by_id["watch_deleted"]["agent_name"] == stored_name
+        assert json.loads(definitions_by_id["task_live"]["metadata_json"])[
+            "session_settings_snapshot"
+        ]["agent_name"] == result.archived_name
+        assert json.loads(definitions_by_id["watch_deleted"]["metadata_json"])[
+            "session_settings_snapshot"
+        ]["agent_name"] == stored_name
         assert set(live_runs) == {result.archived_name}
         queued_spec = json.loads(queued_metadata)["scheduled_provenance"]["platform_specific"]
         assert queued_spec["vibe_agent_name"] == result.archived_name
@@ -904,6 +917,43 @@ def test_archive_refuses_to_overwrite_malformed_definition_metadata(tmp_path) ->
                 )
             ).one()
         assert row == (original.name, "{not-json")
+    finally:
+        store.close()
+
+
+def test_archive_ignores_soft_deleted_definition_metadata(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        _create_archive_fallback(store)
+        original = store.create(name="pm", backend="claude")
+        with store.engine.begin() as conn:
+            conn.execute(
+                run_definitions.insert().values(
+                    id="task_deleted_malformed",
+                    definition_type="scheduled",
+                    name="Deleted malformed metadata",
+                    agent_name=original.name,
+                    enabled=0,
+                    deleted_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json="{not-json",
+                )
+            )
+
+        archived = store.archive(original.name)
+
+        assert archived is not None
+        assert archived.references["definitions"] == 0
+        with store.engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    run_definitions.c.agent_name,
+                    run_definitions.c.metadata_json,
+                    run_definitions.c.deleted_at,
+                ).where(run_definitions.c.id == "task_deleted_malformed")
+            ).one()
+        assert row == (original.name, "{not-json", NOW)
     finally:
         store.close()
 

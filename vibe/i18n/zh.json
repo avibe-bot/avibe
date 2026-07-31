@@ -182,6 +182,12 @@
         "hint": "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
       }
     },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` 已归档，无法编辑。",
+        "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+      }
+    },
     "agentNameValidation": {
       "agent_name_reserved": {
         "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",

@@ -3522,7 +3522,7 @@ def _vibe_agent_result_response(result: dict):
     status = 200
     if not result.get("ok", True):
         code = result.get("code")
-        if code == "agent_in_use":
+        if code in {"agent_in_use", "agent_archived_read_only"}:
             status = 409
         elif code in {"agent_not_found", "agent_import_source_not_found"}:
             status = 404

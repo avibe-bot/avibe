@@ -47,7 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import AgentArchiveError, AgentNameValidationError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
@@ -2915,6 +2915,7 @@ def _wait_for_watch_startup(
 
 
 def cmd_task_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         session_default_notice = _apply_caller_session_default(
@@ -2968,6 +2969,7 @@ def cmd_task_add(args):
                 help_command="vibe task add --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
             )
+            reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -3047,6 +3049,7 @@ def cmd_task_add(args):
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
                 expected_enabled_agent_id=expected_enabled_agent_id,
             )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(task)
         payload_fields = {
@@ -3057,6 +3060,11 @@ def cmd_task_add(args):
         _print_definition_payload(task_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="task creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task add --help")
         return 1
 
@@ -3156,6 +3164,7 @@ def cmd_task_remove(task_id: str):
 
 
 def cmd_task_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _task_store()
         task = store.get_task(args.task_id)
@@ -3441,6 +3450,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_policy == "existing":
             metadata.pop("session_workdir", None)
@@ -3518,11 +3528,17 @@ def cmd_task_update(args):
             metadata=metadata,
             expected_enabled_agent_id=expected_enabled_agent_id,
         )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -3532,6 +3548,11 @@ def cmd_task_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
 
@@ -3960,6 +3981,9 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -3970,9 +3994,26 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
+
+
+def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+        details={"agent": exc.agent_name},
+    )
 
 
 def cmd_agent_remove(args):
@@ -4705,6 +4746,32 @@ def _reserve_definition_session(
             help_command=help_command,
         )
     return session_id
+
+
+def _release_definition_session_reservation(session_id: str, *, reason: str) -> bool:
+    """Release only the unadopted Session reserved by a failed CLI mutation."""
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    service: Optional[SQLiteSessionsService] = None
+    try:
+        service = SQLiteSessionsService(paths.get_sqlite_state_path())
+        return service.release_reserved_agent_session(session_id, reason=reason)
+    except Exception:
+        logger.exception(
+            "Could not release the reserved Agent Session %s after a failed definition mutation",
+            session_id,
+        )
+        return False
+    finally:
+        if service is not None:
+            try:
+                service.close()
+            except Exception:
+                logger.exception(
+                    "Could not close the Session store after releasing reservation %s",
+                    session_id,
+                )
 
 
 def cmd_agent_run(args):
@@ -8485,6 +8552,7 @@ def cmd_vault_key_import(args):
 
 
 def cmd_watch_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         session_default_notice = _apply_caller_session_default(
@@ -8538,6 +8606,7 @@ def cmd_watch_add(args):
                 help_command="vibe watch add --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
             )
+            reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -8587,6 +8656,7 @@ def cmd_watch_add(args):
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
             expected_enabled_agent_id=expected_enabled_agent_id,
         )
+        reserved_session_id = None
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -8599,6 +8669,11 @@ def cmd_watch_add(args):
         _print_definition_payload(watch_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="watch creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch add --help")
         return 1
 
@@ -8678,6 +8753,7 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
 
 
 def cmd_watch_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _watch_store()
         watch = store.get_watch(args.watch_id)
@@ -8938,6 +9014,7 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_workdir:
             metadata["session_workdir"] = session_workdir
@@ -9007,12 +9084,18 @@ def cmd_watch_update(args):
             **changes,
             expected_enabled_agent_id=expected_enabled_agent_id,
         )
+        reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -9022,6 +9105,11 @@ def cmd_watch_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_definition_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1
 

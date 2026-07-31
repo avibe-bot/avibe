@@ -107,11 +107,21 @@ def test_agent_run_message_provenance_enrichment(isolated_state):
     #  - source_kind='callback' → source_actor is a run id; the source is the
     #    PARENT (delegated) run's session.
     # A non-agent_run harness message (task trigger) is left untouched.
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    store.create(name="archive-fallback", backend="claude")
+    caller_agent = store.create(name="pm", backend="claude")
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_target")
-        _seed_titled_agent_session(conn, scope_id, "ses_caller", title="Caller 总控", agent_name="pm")
+        _seed_titled_agent_session(conn, scope_id, "ses_caller", title=None, agent_name="pm")
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "ses_caller")
+            .values(agent_id=caller_agent.id)
+        )
         _seed_titled_agent_session(conn, scope_id, "ses_delegated", title="Delegated 审计", agent_name="evm")
         # Agent spawn: source_actor is the caller session.
         _insert_agent_run(conn, "execAgent", session_id="ses_target",
@@ -131,11 +141,15 @@ def test_agent_run_message_provenance_enrichment(isolated_state):
                             author_id="def_1", native_message_id="scheduled:def_1:execB",
                             msg_id="msg_task", created_at="2026-05-30T10:00:02Z")
 
+    archived = store.archive("pm")
+    assert archived is not None
+    store.close()
+
     with engine.connect() as conn:
         result = messages_service.list_session_messages(conn, session_id="ses_target")
     by_id = {m["id"]: m for m in result["messages"]}
     assert by_id["msg_agent"]["source_session_id"] == "ses_caller"
-    assert by_id["msg_agent"]["source_session_title"] == "Caller 总控"
+    assert by_id["msg_agent"]["source_session_title"] is None
     assert by_id["msg_agent"]["source_session_agent_name"] == "pm"
     # Callback resolves through the parent run's session, not the run-id source_actor.
     assert by_id["msg_cb"]["source_session_id"] == "ses_delegated"

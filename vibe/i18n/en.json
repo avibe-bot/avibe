@@ -182,6 +182,12 @@
         "hint": "Keep another enabled Agent available when archiving the current default."
       }
     },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` is archived and cannot be edited.",
+        "hint": "Archived Agents are read-only and remain available only to existing durable references."
+      }
+    },
     "agentNameValidation": {
       "agent_name_reserved": {
         "message": "Agent names starting with `_` are reserved for Avibe.",

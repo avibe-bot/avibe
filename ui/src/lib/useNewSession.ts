@@ -48,6 +48,15 @@ export interface NewSessionState {
   upsertSelectProject: (project: WorkbenchProject) => void;
 }
 
+export function isProjectDefaultAgentAvailable(
+  project: WorkbenchProject | null,
+  agents: VibeAgentBrief[],
+): boolean {
+  const name = project?.default_agent?.agent_name;
+  if (!name) return false;
+  return agents.some((agent) => agent.name === name && agent.enabled && !agent.archived);
+}
+
 const sortByRecent = (list: WorkbenchProject[]) =>
   list
     .slice()
@@ -121,8 +130,12 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     setUserPick((prev) => (Object.keys(prev).length ? {} : prev));
   }
 
-  // The selected project's default Agent as a route (empty when it has none).
+  // The selected project's default Agent as a route. An archived binding stays
+  // on the project for durable history, but the enabled catalog intentionally
+  // excludes it, so a new chat falls back to the live global default.
+  const projectDefaultAvailable = isProjectDefaultAgentAvailable(target, agents);
   const projectDefaultRoute = useMemo<AgentRouteSelection>(() => {
+    if (!projectDefaultAvailable) return {};
     const def = target?.default_agent;
     return def
       ? {
@@ -132,7 +145,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
           reasoning_effort: def.reasoning_effort,
         }
       : {};
-  }, [target?.default_agent]);
+  }, [projectDefaultAvailable, target?.default_agent]);
 
   // The GLOBAL default Agent resolved to a concrete route, looked up from the
   // agents list by name. The picker needs a concrete route to render the model
@@ -190,7 +203,9 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
 
   // Label for the picker's "Default" option: the project default's agent when
   // set, otherwise the global default agent.
-  const effectiveDefaultAgentName = target?.default_agent?.agent_name ?? defaultAgentName;
+  const effectiveDefaultAgentName = projectDefaultAvailable
+    ? target?.default_agent?.agent_name ?? defaultAgentName
+    : defaultAgentName;
 
   const send = useCallback(
     async (text: string): Promise<{ sessionId: string; initialMessage: string } | null> => {

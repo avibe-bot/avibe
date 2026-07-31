@@ -116,7 +116,7 @@ def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> 
 _BACKEND_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
-def _session_agent_display_label(row: Mapping[str, Any]) -> str | None:
+def session_agent_display_label(row: Mapping[str, Any]) -> str | None:
     agent_name = str(row["agent_name"] or "").strip()
     catalog_name = str(row["catalog_agent_name"] or "").strip()
     if row["catalog_agent_archived_at"]:
@@ -187,7 +187,7 @@ def read_session_display_meta(
     for row in rows:
         title = str(row["title"] or "").strip() or None
         platform = str(row["platform"] or "").strip() or None
-        agent = _session_agent_display_label(row)
+        agent = session_agent_display_label(row)
         meta[str(row["id"])] = {"title": title, "platform": platform, "agent": agent}
     return meta
 

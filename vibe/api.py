@@ -68,6 +68,7 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
     VibeAgentStore,
@@ -1449,6 +1450,8 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
             agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
+        except AgentArchivedEditError as exc:
+            return _agent_archived_edit_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1460,6 +1463,20 @@ def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
     except Exception:
         lang = "en"
     key = f"error.agentNameValidation.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang, agent=exc.agent_name),
+        "hint": backend_t(f"{key}.hint", lang, agent=exc.agent_name),
+    }
+
+
+def _agent_archived_edit_error(exc: AgentArchivedEditError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
     return {
         "ok": False,
         "code": exc.code,
