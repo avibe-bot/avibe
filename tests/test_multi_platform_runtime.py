@@ -677,6 +677,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 
 def test_opencode_prompt_disables_question_tool_for_all_platforms():
     calls = []
+    active_polls = []
 
     class _Server:
         async def ensure_running(self):
@@ -732,6 +733,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            active_polls.append(kwargs)
             return None
 
         def remove_active_poll(self, session_id):
@@ -786,6 +788,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
@@ -797,7 +800,10 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 user_id="u",
                 channel_id="c",
                 platform="slack",
-                platform_specific={"agent_session_id": "ses_test"},
+                platform_specific={
+                    "agent_session_id": "ses_test",
+                    "turn_token": "logical-turn",
+                },
             ),
             message="hello",
             user_message="hello",
@@ -814,6 +820,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+    steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
+    assert steering_snapshot["system"] == calls[0]["system"]
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():
@@ -1138,6 +1146,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
@@ -1320,6 +1329,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
     agent._get_server = _get_server
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = _remove_ack
@@ -1459,7 +1469,9 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     class _Controller:
         agent_auth_service = _AuthSvc()
 
-        def _t(self, key):
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
             return f"translated:{key}"
 
         async def emit_agent_message(
@@ -1812,7 +1824,7 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
 
         def __init__(self):
             self.config = type(
-                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"}
+                "Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "zh"}
             )()
             self.processing_indicator = ProcessingIndicatorService(self)
 
@@ -1845,7 +1857,10 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
                         "id": "msg-restored-error",
                         "role": "assistant",
                         "time": {"completed": 1},
-                        "error": {"name": "ProviderError", "data": {"message": "quota exceeded"}},
+                        "error": {
+                            "name": "NativeSessionEndedBeforeResult",
+                            "data": {"message": "OpenCode 已结束，但没有产出模型回复。"},
+                        },
                     },
                     "parts": [],
                 }
@@ -1901,9 +1916,19 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
 
     asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
 
-    assert model_hub_failures == [("hub", "src_hub_restore", "ProviderError - quota exceeded")]
+    assert model_hub_failures == [
+        (
+            "hub",
+            "src_hub_restore",
+            "NativeSessionEndedBeforeResult - OpenCode 已结束，但没有产出模型回复。",
+        )
+    ]
     assert removed == ["oc-restored-error"]
     assert [item[0] for item in emitted] == ["notify", "notify", "result"]
+    assert emitted[1][1] == (
+        "OpenCode 错误：NativeSessionEndedBeforeResult - "
+        "OpenCode 已结束，但没有产出模型回复。"
+    )
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

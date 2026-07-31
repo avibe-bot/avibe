@@ -8,6 +8,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock
@@ -439,6 +440,129 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
+    async def test_handle_stop_waits_for_in_flight_steering_write(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        interrupt_called = asyncio.Event()
+
+        class _Client:
+            async def query(self, _text, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            async def end_input(self):
+                return None
+
+            async def interrupt(self):
+                interrupt_called.set()
+
+            async def disconnect(self):
+                return None
+
+        async def _receiver():
+            await asyncio.Future()
+
+        agent = ClaudeAgent(controller)
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.active_sessions = {runtime_key}
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        client = _Client()
+        receiver_task = asyncio.create_task(_receiver())
+        controller.claude_sessions[runtime_key] = client
+        controller.receiver_tasks[runtime_key] = receiver_task
+        target = ActiveSteerTarget(
+            runtime_key=runtime_key,
+            logical_turn_id="logical-turn",
+            context=pending_request.context,
+            agent_request=pending_request,
+            agent=agent,
+        )
+        steer_request = SteerRequest(
+            target_session_id="wechat_o9",
+            expected_logical_turn_id="logical-turn",
+            expected_native_turn_id=(
+                f"claude:{runtime_key}:{id(client)}:{id(receiver_task)}"
+            ),
+            text="steer while active",
+        )
+        stop_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            composite_session_id=runtime_key,
+            stop_failure_reason=None,
+        )
+
+        steer_task = asyncio.create_task(agent.steer_active_turn(steer_request, target))
+        await query_started.wait()
+        stop_task = asyncio.create_task(agent.handle_stop(stop_request))
+        await asyncio.sleep(0)
+        self.assertFalse(interrupt_called.is_set())
+
+        release_query.set()
+        receipt = await steer_task
+        stopped = await stop_task
+
+        self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertTrue(stopped)
+        self.assertTrue(interrupt_called.is_set())
+        self.assertNotIn(runtime_key, agent._steering_locks)
+        self.assertNotIn(runtime_key, agent._steering_generations)
+        self.assertNotIn(runtime_key, agent._steering_closing)
+
+    async def test_handle_stop_failure_keeps_runtime_nonsteerable(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+
+        class _Client:
+            async def interrupt(self):
+                raise TimeoutError("interrupt acknowledgement timed out")
+
+        async def _receiver():
+            await asyncio.Future()
+
+        agent = ClaudeAgent(controller)
+        controller.emit_agent_message = AsyncMock()
+        client = _Client()
+        receiver_task = asyncio.create_task(_receiver())
+        controller.claude_sessions[runtime_key] = client
+        controller.receiver_tasks[runtime_key] = receiver_task
+        controller.session_handler.active_sessions = {runtime_key}
+        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={}))
+        agent._pending_requests[runtime_key] = [pending_request]
+        target = ActiveSteerTarget(
+            runtime_key=runtime_key,
+            logical_turn_id="logical-turn",
+            context=pending_request.context,
+            agent_request=pending_request,
+            agent=agent,
+        )
+        stop_request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            composite_session_id=runtime_key,
+            stop_failure_reason=None,
+        )
+
+        try:
+            self.assertIsNotNone(agent.steering_native_turn_id(target))
+            self.assertFalse(await agent.handle_stop(stop_request))
+
+            self.assertEqual(stop_request.stop_failure_reason, "interrupt_failed")
+            self.assertNotIn(runtime_key, agent._steering_closing_keys())
+            self.assertIn(runtime_key, agent._ambiguous_interrupt_keys())
+            self.assertIsNone(agent.steering_native_turn_id(target))
+            self.assertEqual(agent._pending_requests[runtime_key], [pending_request])
+            self.assertFalse(receiver_task.done())
+        finally:
+            receiver_task.cancel()
+            await asyncio.gather(receiver_task, return_exceptions=True)
+
     async def test_handle_stop_cleans_up_when_silent_result_emit_fails(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"
@@ -869,6 +993,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 raise
 
         controller.receiver_tasks[session_key] = asyncio.create_task(_receiver())
+        agent._steering_lock(session_key)
+        agent._steering_generations[session_key] = 1
         await asyncio.sleep(0)
 
         cleared = await agent.clear_sessions("wechat-user")
@@ -878,6 +1004,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task_cancelled.is_set())
         self.assertNotIn(session_key, controller.receiver_tasks)
         self.assertNotIn(session_key, controller.claude_sessions)
+        self.assertNotIn(session_key, agent._steering_locks)
+        self.assertNotIn(session_key, agent._steering_generations)
         self.assertEqual(controller.session_manager.cleared, ["wechat-user"])
 
     async def test_clear_sessions_cancels_subagent_runtime_keys_for_cleared_session(self):
@@ -1363,6 +1491,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         error_result.duration_ms = 0
 
         class _Client:
+            async def disconnect(self):
+                return None
+
             def receive_messages(self):
                 async def _iterate():
                     yield init_message
@@ -1395,23 +1526,24 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent = ClaudeAgent(controller)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
         composite_key = "session-1:/tmp/work"
+        init_consumed = asyncio.Event()
+        release_stream = asyncio.Event()
 
         init_message = type(
             "SystemMessage",
             (),
             {"subtype": "init", "data": {"session_id": "session-sdk"}},
         )()
-        result_message = type(
-            "ResultMessage",
-            (),
-            {"subtype": "success", "result": "done", "duration_ms": 1},
-        )()
 
         class _Client:
+            async def disconnect(self):
+                return None
+
             def receive_messages(self):
                 async def _iterate():
                     yield init_message
-                    yield result_message
+                    init_consumed.set()
+                    await release_stream.wait()
 
                 return _iterate()
 
@@ -1419,11 +1551,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.claude_sessions[composite_key] = runtime_client
         agent.emit_result_message = AsyncMock()
 
-        await agent._receive_messages(runtime_client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(
+                runtime_client,
+                "session-1",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        await init_consumed.wait()
 
         self.assertEqual(getattr(runtime_client, "_vibe_native_session_id"), "session-sdk")
         self.assertEqual(agent._native_session_ids[composite_key], "session-sdk")
         controller.emit_agent_message.assert_not_awaited()
+
+        release_stream.set()
+        await receiver_task
 
     async def test_receive_legacy_refusal_fallback_notifies_without_dropping_replacement_text(self):
         controller = _StubController()

@@ -19,6 +19,13 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.services.agent_steering import (
+    ActiveSteerTarget,
+    SteerOutcome,
+    SteerRequest,
+    SteerResult,
+    result as steer_result,
+)
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -310,6 +317,118 @@ class CodexAgent(BaseAgent):
                 # web-Chat working/Stop state instead of leaving it until the
                 # fallback timeout (Codex P2).
                 self._event_handler._release_stream_turn(request.context)
+
+    def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
+        active_request = target.agent_request
+        if active_request is None:
+            return None
+        return self._turn_registry.get_active_turn(active_request.base_session_id)
+
+    async def steer_active_turn(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        active_request = target.agent_request
+        if active_request is None:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_primary_request", backend=self.name)
+
+        base_session_id = active_request.base_session_id
+        turn_id = self._turn_registry.get_active_turn(base_session_id)
+        if not turn_id or turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
+
+        thread_id = self._session_mgr.get_thread_id(base_session_id)
+        cwd = self._session_mgr.get_cwd(base_session_id) or active_request.working_path
+        transport = self._transports.get(cwd)
+        if not thread_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_native_thread", backend=self.name)
+        if transport is None or not transport.is_initialized:
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+
+        try:
+            response = await transport.send_request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": request.expected_native_turn_id,
+                    "input": [{"type": "text", "text": request.text}],
+                },
+            )
+        except RuntimeError as exc:
+            diagnostic = str(exc)
+            lowered = diagnostic.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "no active turn to steer",
+                    "thread not found",
+                    "expected turn",
+                    "expectedturnid",
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.NOT_ACTIVE,
+                    reason="native_turn_mismatch",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            if "activeturnnotsteerable" in lowered or "not steerable" in lowered:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="native_turn_not_steerable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            return steer_result(
+                SteerOutcome.REFUSED,
+                reason="backend_refused",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except ConnectionError as exc:
+            diagnostic = str(exc)
+            if diagnostic in {
+                "Codex app-server transport is not available",
+                "Codex app-server stdin is not available",
+            }:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="runtime_unavailable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except TimeoutError as exc:
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        self._touch_transport_activity(cwd)
+        response_turn_id = str(response.get("turnId") or "").strip()
+        if response_turn_id != request.expected_native_turn_id:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="untrusted_acknowledgement",
+                backend=self.name,
+                response_turn_id=response_turn_id,
+            )
+        return steer_result(
+            SteerOutcome.ACCEPTED,
+            backend=self.name,
+            thread_id=thread_id,
+            turn_id=response_turn_id,
+        )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         """Gracefully interrupt the active turn."""

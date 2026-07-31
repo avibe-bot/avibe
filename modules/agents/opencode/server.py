@@ -59,6 +59,15 @@ def _percent_encode_path(path: str) -> str:
     return _url_quote(path, safe="/")
 
 
+class OpenCodePromptRejectedError(RuntimeError):
+    """Definitive HTTP rejection from OpenCode's async prompt endpoint."""
+
+    def __init__(self, status: int, response_text: str) -> None:
+        self.status = status
+        self.response_text = response_text
+        super().__init__(f"Failed to start async prompt: {status} {response_text}")
+
+
 class OpenCodeServerManager:
     """Manages a singleton OpenCode server process shared across all working directories."""
 
@@ -1532,7 +1541,7 @@ class OpenCodeServerManager:
                 # OpenCode returns 204 when accepted.
                 if resp.status not in (200, 204):
                     error_text = await resp.text()
-                    raise RuntimeError(f"Failed to start async prompt: {resp.status} {error_text}")
+                    raise OpenCodePromptRejectedError(resp.status, error_text)
             self._last_prompt_started_at[session_id] = started_at
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:
@@ -1546,6 +1555,26 @@ class OpenCodeServerManager:
                     error_text = await resp.text()
                     raise RuntimeError(f"Failed to list messages: {resp.status} {error_text}")
                 return await resp.json()
+
+    async def get_session_status(
+        self,
+        session_id: str,
+        directory: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the installed OpenCode runtime status for one native session."""
+
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.get(
+                f"{self.base_url}/session/status",
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"Failed to get session status: {resp.status} {error_text}")
+                statuses = await resp.json()
+                status = statuses.get(session_id) if isinstance(statuses, dict) else None
+                return status if isinstance(status, dict) else None
 
     async def get_message(self, session_id: str, message_id: str, directory: str) -> Dict[str, Any]:
         async with self._request_scope():
