@@ -21,6 +21,7 @@ from typing import Any, Optional
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
+from storage.agent_session_rows import reserve_write_lock
 from storage.models import agents, scope_settings, scopes
 
 
@@ -308,10 +309,14 @@ def update_project(
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
     """
+    reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
         raise LookupError(f"Project not found: {project_id}")
+    current_agent_name = conn.execute(
+        select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
+    ).scalar_one_or_none()
 
     now = _utc_now_iso()
     if display_name is not None:
@@ -328,6 +333,19 @@ def update_project(
     settings_values: dict[str, Any] = {}
     if folder_path is not None:
         settings_values["workdir"] = str(_resolve_folder(folder_path))
+    if agent_name is not _UNSET:
+        requested_agent = str(agent_name or "").strip() or None
+        if requested_agent is not None and requested_agent != current_agent_name:
+            available_agent = conn.execute(
+                select(agents.c.name)
+                .where(agents.c.name == requested_agent)
+                .where(agents.c.enabled == 1)
+                .where(agents.c.archived_at.is_(None))
+                .limit(1)
+            ).scalar_one_or_none()
+            if available_agent is None:
+                raise ValueError(f"Agent is unavailable: {requested_agent}")
+            agent_name = available_agent
     for field_name, value in (
         ("agent_name", agent_name),
         ("agent_variant", agent_variant),

@@ -16,6 +16,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
@@ -366,25 +367,45 @@ class VibeAgentStore:
         metadata: Any = _UNSET,
         enabled: Any = _UNSET,
     ) -> VibeAgent:
-        existing = self.require(name)
-        if existing.archived_at is not None:
-            raise ValueError(f"agent '{name}' is archived and cannot be edited")
-        values: dict[str, Any] = {"updated_at": _utc_now_iso()}
-        if description is not _UNSET:
-            values["description"] = _clean_optional(description)
-        if model is not _UNSET:
-            values["model"] = _clean_optional(model) or recommended_agent_model(existing.backend)
-        if reasoning_effort is not _UNSET:
-            values["reasoning_effort"] = _clean_optional(reasoning_effort)
-        if system_prompt is not _UNSET:
-            values["system_prompt"] = _clean_optional(system_prompt)
-        if metadata is not _UNSET:
-            values["metadata_json"] = _json_dumps(dict(metadata or {}))
-        if enabled is not _UNSET:
-            values["enabled"] = 1 if bool(enabled) else 0
+        normalized = normalize_agent_name(name)
         with self.engine.begin() as conn:
-            conn.execute(agents.update().where(agents.c.id == existing.id).values(**values))
-        return self.require(name)
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agents).where(agents.c.normalized_name == normalized).limit(1)
+            ).mappings().first()
+            if row is None:
+                raise AgentUnavailableError(
+                    f"agent '{name}' not found", agent_name=name, reason="missing"
+                )
+            existing = self._from_row(row)
+            if existing.archived_at is not None:
+                raise ValueError(f"agent '{name}' is archived and cannot be edited")
+
+            values: dict[str, Any] = {"updated_at": _utc_now_iso()}
+            if description is not _UNSET:
+                values["description"] = _clean_optional(description)
+            if model is not _UNSET:
+                values["model"] = _clean_optional(model) or recommended_agent_model(existing.backend)
+            if reasoning_effort is not _UNSET:
+                values["reasoning_effort"] = _clean_optional(reasoning_effort)
+            if system_prompt is not _UNSET:
+                values["system_prompt"] = _clean_optional(system_prompt)
+            if metadata is not _UNSET:
+                values["metadata_json"] = _json_dumps(dict(metadata or {}))
+            if enabled is not _UNSET:
+                values["enabled"] = 1 if bool(enabled) else 0
+            result = conn.execute(
+                agents.update()
+                .where(agents.c.id == existing.id)
+                .where(agents.c.archived_at.is_(None))
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise ValueError(f"agent '{name}' is archived and cannot be edited")
+            updated = conn.execute(
+                select(agents).where(agents.c.id == existing.id).limit(1)
+            ).mappings().one()
+            return self._from_row(updated)
 
     def set_enabled(self, name: str, enabled: bool) -> VibeAgent:
         return self.update(name, enabled=enabled)
@@ -398,6 +419,7 @@ class VibeAgentStore:
         now = _utc_now_iso()
         try:
             with self.engine.begin() as conn:
+                reserve_write_lock(conn)
                 row = conn.execute(
                     select(agents).where(agents.c.normalized_name == old_normalized).limit(1)
                 ).mappings().first()
@@ -435,14 +457,18 @@ class VibeAgentStore:
                 )
                 if self._default_agent_name(conn) == agent.name:
                     self._write_default_agent_name(conn, raw_new_name, now=now)
+                updated = conn.execute(
+                    select(agents).where(agents.c.id == agent.id).limit(1)
+                ).mappings().one()
         except IntegrityError as exc:
             raise ValueError(f"agent '{new_name}' already exists") from exc
-        return self.require(raw_new_name)
+        return self._from_row(updated)
 
     def archive(self, name: str) -> Optional[AgentArchiveResult]:
         normalized = normalize_agent_name(name)
         now = _utc_now_iso()
         with self.engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agents).where(agents.c.normalized_name == normalized).limit(1)
             ).mappings().first()
@@ -884,17 +910,25 @@ class VibeAgentStore:
             return self._default_agent_name(conn)
 
     def set_default_agent_name(self, name: str) -> None:
-        agent = self.require_enabled(name)
+        normalized = normalize_agent_name(name)
         now = _utc_now_iso()
         with self.engine.begin() as conn:
-            conn.execute(state_meta.delete().where(state_meta.c.key == DEFAULT_AGENT_META_KEY))
-            conn.execute(
-                state_meta.insert().values(
-                    key=DEFAULT_AGENT_META_KEY,
-                    value_json=_json_dumps(agent.name),
-                    updated_at=now,
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agents).where(agents.c.normalized_name == normalized).limit(1)
+            ).mappings().first()
+            if row is None:
+                raise AgentUnavailableError(
+                    f"agent '{name}' not found", agent_name=name, reason="missing"
                 )
-            )
+            agent = self._from_row(row)
+            if not agent.enabled or agent.archived_at is not None:
+                raise AgentUnavailableError(
+                    f"agent '{agent.name}' is disabled",
+                    agent_name=agent.name,
+                    reason="disabled",
+                )
+            self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:
         name = self.get_default_agent_name()

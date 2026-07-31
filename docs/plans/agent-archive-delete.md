@@ -26,6 +26,8 @@ The Agent row is updated first inside a single write transaction, followed by ev
 
 Definition rewrites stamp a dedicated Agent-binding revision in metadata. Full-row task/watch updates compare that marker, so a payload read before rename/archive cannot restore the old public name after the transaction commits.
 
+Agent edits, default selection, lifecycle changes, and Project route saves reserve SQLite's writer slot before reading the state they decide from. A Project may preserve its exact archived binding, but a stale or newly assigned unavailable Agent name is rejected.
+
 ## Compatibility
 
 - The DELETE API and `vibe agent remove` command keep their existing entry points, but return archive details instead of rejecting referenced Agents.

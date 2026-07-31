@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
+from sqlalchemy.exc import OperationalError
 
 from core.vibe_agents import (
     AGENT_ARCHIVE_METADATA_KEY,
@@ -17,6 +18,34 @@ from storage.models import agent_runs, agent_sessions, agents, run_definitions, 
 
 NOW = "2026-07-31T14:00:00+00:00"
 SCOPE_ID = "avibe::project::proj_archive"
+
+
+def _race_archive_at_agent_read(
+    primary: VibeAgentStore,
+    competitor: VibeAgentStore,
+) -> dict[str, object]:
+    state: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+    @event.listens_for(competitor.engine, "checkout")
+    def _no_wait(dbapi_connection, *_args) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout = 0")
+        cursor.close()
+
+    @event.listens_for(primary.engine, "after_cursor_execute")
+    def _archive_on_read(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.split())
+        if state["fired"] or "FROM agents WHERE agents.normalized_name" not in normalized:
+            return
+        state["fired"] = 1
+        try:
+            competitor.archive("pm")
+        except OperationalError as exc:
+            state["refused"].append(str(exc))
+        else:
+            state["committed"] = 1
+
+    return state
 
 
 def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
@@ -182,6 +211,48 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
         assert replacement.id != original.id
     finally:
         store.close()
+
+
+def test_update_holds_the_write_lock_before_checking_archived_state(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    primary = VibeAgentStore(db_path)
+    competitor = VibeAgentStore(db_path)
+    try:
+        primary.create(name="pm", backend="claude", enabled=False)
+        race = _race_archive_at_agent_read(primary, competitor)
+
+        updated = primary.set_enabled("pm", True)
+
+        assert updated.enabled is True
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+        assert primary.require("pm").archived_at is None
+    finally:
+        competitor.close()
+        primary.close()
+
+
+def test_default_selection_holds_the_write_lock_before_agent_validation(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    primary = VibeAgentStore(db_path)
+    competitor = VibeAgentStore(db_path)
+    try:
+        primary.create(name="fallback", backend="claude")
+        primary.create(name="pm", backend="claude")
+        primary.set_default_agent_name("fallback")
+        race = _race_archive_at_agent_read(primary, competitor)
+
+        primary.set_default_agent_name("pm")
+
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+        assert primary.get_default_agent_name() == "pm"
+        assert primary.require("pm").archived_at is None
+    finally:
+        competitor.close()
+        primary.close()
 
 
 def test_rename_moves_references_and_default_without_changing_agent_identity(tmp_path) -> None:

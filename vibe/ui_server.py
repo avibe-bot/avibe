@@ -5915,7 +5915,7 @@ def projects_update(project_id: str):
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    except (FileNotFoundError, NotADirectoryError) as err:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as err:
         return jsonify({"error": str(err)}), 400
     return jsonify(project)
 

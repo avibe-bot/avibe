@@ -8,7 +8,11 @@ project is restored after archiving, without a dedicated unarchive endpoint.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from core.vibe_agents import VibeAgentStore
 from storage import projects_service
@@ -288,6 +292,7 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
 
 
 def test_update_project_clears_default_agent(engine, tmp_path):
+    _ensure_agent("codex", "codex")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
@@ -303,6 +308,72 @@ def test_update_project_clears_default_agent(engine, tmp_path):
             reasoning_effort=None,
         )
     assert cleared["default_agent"] is None
+
+
+def test_project_agent_save_serializes_with_archive_and_rejects_stale_route(engine, tmp_path):
+    _ensure_agent("pm", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        projects_service.update_project(conn, created["id"], agent_name="pm")
+
+    competitor = VibeAgentStore(Path(str(engine.url.database)))
+    race: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+    @event.listens_for(competitor.engine, "checkout")
+    def _no_wait(dbapi_connection, *_args) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout = 0")
+        cursor.close()
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _archive_on_project_read(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if race["fired"] or "SELECT scopes.id FROM scopes WHERE scopes.id" not in normalized:
+            return
+        race["fired"] = 1
+        try:
+            competitor.archive("pm")
+        except OperationalError as exc:
+            race["refused"].append(str(exc))
+        else:
+            race["committed"] = 1
+
+    try:
+        with engine.begin() as conn:
+            updated = projects_service.update_project(conn, created["id"], agent_name="pm")
+        assert updated["default_agent"]["agent_name"] == "pm"
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+
+        archived = competitor.archive("pm")
+        assert archived is not None
+        with engine.begin() as conn:
+            preserved = projects_service.update_project(
+                conn,
+                created["id"],
+                display_name="Still archived",
+                agent_name=archived.archived_name,
+            )
+        assert preserved["display_name"] == "Still archived"
+        assert preserved["default_agent"]["agent_name"] == archived.archived_name
+
+        with engine.begin() as conn:
+            with pytest.raises(ValueError, match="Agent is unavailable: pm"):
+                projects_service.update_project(conn, created["id"], agent_name="pm")
+        with engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == created["scope_id"]
+                )
+            ).scalar_one()
+        assert stored_name == archived.archived_name
+    finally:
+        competitor.close()
 
 
 def test_rename_leaves_default_agent_untouched(engine, tmp_path):

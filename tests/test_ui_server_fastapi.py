@@ -1105,6 +1105,48 @@ def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatc
     assert page["next_before_id"] == page["sessions"][0]["id"]
 
 
+def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.models import scope_settings
+    from storage.projects_service import create_project, update_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    store = VibeAgentStore()
+    try:
+        store.create(name="pm", backend="claude")
+        with engine.begin() as conn:
+            project = create_project(conn, str(folder), display_name="Project")
+            update_project(conn, project["id"], agent_name="pm")
+        archived = store.archive("pm")
+        assert archived is not None
+
+        client = app.test_client()
+        response = client.patch(
+            f"/api/projects/{project['id']}",
+            json={"agent_name": "pm"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "Agent is unavailable: pm"}
+        with engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == project["scope_id"]
+                )
+            ).scalar_one()
+        assert stored_name == archived.archived_name
+    finally:
+        store.close()
+        engine.dispose()
+
+
 def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, tmp_path):
     # Fresh install edge: no config file exists yet, but the setup wizard
     # (and the reused provider-config modal that calls getConfig()) must be
