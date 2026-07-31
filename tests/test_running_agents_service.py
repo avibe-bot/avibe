@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import types
 
 import pytest
@@ -2022,6 +2023,202 @@ def test_stopped_loop_shutdown_converges_a_slow_settlement(tmp_path, monkeypatch
     # (7) HFR-330's holds released, HFR-339's flag still shut.
     assert manager._teardown_admission == {}
     assert manager.is_admission_closed_for_shutdown() is True
+
+
+def test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind(
+    tmp_path, monkeypatch
+):
+    """HFR-342: HFR-341's hard-deadline refinement — the bound may not await the cancel.
+
+    HFR-341 bounded the stopped-loop branch with
+    ``run_until_complete(asyncio.wait_for(coro, timeout))``. ``wait_for`` is NOT a hard
+    deadline: when its timer fires it cancels the inner task and then AWAITS the
+    cancellation to be acknowledged, and ``run_until_complete`` cannot return before
+    its own task is done. So a turn whose unwind DELAYS OR SUPPRESSES ``CancelledError``
+    — the exact slow-settlement case the branch exists for, one notch worse — re-opens
+    the very hang HFR-341 closed: ``_StopTimedOut`` is never raised, the synchronous
+    convergence never runs, and the backends are never torn down.
+
+    HFR-341's own turn eventually re-raises on the second cancel, so its unwind is
+    merely SLOW and ``wait_for`` gets its acknowledgment. This turn's ``finally`` never
+    gives one: every cancel delivered to it is caught and it goes back to sleeping.
+    Nothing about that is exotic — a ``finally`` that awaits a flush/notify with its own
+    shielded retry produces it — and a shutdown deadline that a coroutine can veto by
+    ignoring its cancel is not a deadline.
+
+    The running-loop branch never had this hole: ``future.cancel()`` schedules the
+    cancel and returns immediately, with no acknowledgment await anywhere. This pins
+    the stopped-loop branch to the same semantics.
+
+    RED pre-fix: this test HANGS in ``run_until_complete`` (exit 124 under a 60s shell
+    ``timeout``). GREEN: ``asyncio.wait`` returns at the deadline WITHOUT cancelling,
+    the task is cancelled best-effort and abandoned UNACKNOWLEDGED, and the convergence
+    settles the row before the instrumented backend teardown reads it.
+    """
+
+    from core import controller as controller_module
+    from core import session_turns
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store,
+        session_id="ses-shutdown-342",
+        message="a turn whose unwind refuses to acknowledge its cancel",
+    )
+
+    monkeypatch.setattr(controller_module, "SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS", 0.1)
+
+    loop = asyncio.new_event_loop()
+    observed: dict = {}
+    events: list[str] = []
+
+    async def _turn_body(started):
+        try:
+            started.set()
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # ``_run``'s finally as an ACKNOWLEDGMENT-SUPPRESSING unwind: it catches
+            # every CancelledError delivered to it and goes back to waiting, so the
+            # task never reaches a done state. HFR-341's version re-raises on the
+            # second cancel, which is what let ``wait_for``'s acknowledgment await
+            # terminate there; nothing terminates it here.
+            events.append("turn_unwind_started")
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    events.append("turn_unwind_suppressed_a_cancel")
+                    continue
+
+    async def _codex_shutdown():
+        # THE INSTRUMENTED BACKEND TEARDOWN, same probe as HFR-340/341.
+        events.append("codex_teardown")
+        row = request_store.get_run(run_id)
+        observed["status_at_teardown"] = row["status"] if row else None
+        observed["metadata_at_teardown"] = (row or {}).get("metadata") or {}
+        observed["open_rows_at_teardown"] = [
+            item["id"]
+            for item in request_store.list_open_runs_for_session("ses-shutdown-342")
+            if item.get("status") in {"queued", "running"}
+        ]
+
+    async def _noop_stop():
+        return None
+
+    async def _arm_turn():
+        started = asyncio.Event()
+        task = asyncio.ensure_future(_turn_body(started))
+        ctx = types.SimpleNamespace(
+            platform_specific={
+                "agent_session_id": "ses-shutdown-342",
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "slack_x",
+                },
+                "task_execution_id": run_id,
+            }
+        )
+        manager.in_flight["ses-shutdown-342"] = session_turns.Turn(task=task, context=ctx)
+        await started.wait()
+        return task
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(stop=lambda: None)
+    controller.scheduled_task_service = service
+    controller.watch_service = types.SimpleNamespace(stop=_noop_stop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop_stop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(
+        agents={"codex": types.SimpleNamespace(shutdown_runtime=_codex_shutdown)}
+    )
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    service.controller = controller
+    for name in (
+        "_settle_inflight_turns_for_shutdown",
+        "_shutdown_settlement_debt",
+        "_converge_abandoned_shutdown_settlement",
+    ):
+        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+
+    # THE STOPPED-LOOP SHAPE, exactly as ``Controller.run()`` produces it.
+    turn_task = loop.run_until_complete(_arm_turn())
+    assert not loop.is_running() and not loop.is_closed()
+    started_at = time.monotonic()
+    try:
+        Controller.cleanup_sync(controller)
+        elapsed = time.monotonic() - started_at
+        assert "turn_unwind_started" in events, (
+            "the settlement never reached the turn's unwind"
+        )
+    finally:
+        if not turn_task.done():
+            turn_task.cancel()
+            # It will not acknowledge this either; the short wait only proves the
+            # abandonment is what closes the test, not a hidden acknowledgment.
+            loop.run_until_complete(asyncio.wait([turn_task], timeout=0.2))
+        loop.close()
+
+    # (1) THE DEADLINE IS HARD. Pre-fix this never returned at all; the bound must not
+    # be extendable by a coroutine that ignores its cancel.
+    assert elapsed < 20, f"cleanup_sync took {elapsed:.1f}s despite a 0.1s settlement wait"
+
+    # (2) THE INVARIANT, unchanged from HFR-340/341: the row was already terminal when
+    # the backend teardown ran.
+    assert observed["status_at_teardown"] == "failed", (
+        "Codex was torn down while the settlement still owed this run a terminal row"
+    )
+    assert observed["metadata_at_teardown"].get("interrupt_reason") == "restarted"
+    # (3) Nothing left open for the busy session.
+    assert observed["open_rows_at_teardown"] == []
+    # (4) The user is owed the notice, stamped by the same guarded UPDATE.
+    notice = observed["metadata_at_teardown"]["owed_failure_notice"]
+    assert notice["state"] == "pending"
+    assert notice["failure_id"] == f"interrupt:{run_id}:restarted"
+    # (5) THE HONEST STOPPED-LOOP GUARANTEE. It is NOT "the coroutine is provably
+    # finished" — this turn never finishes, by construction. It is: the deadline was
+    # enforced without waiting for an acknowledgment, so the settlement task was still
+    # pending when the convergence ran, and the guarded ``queued|running``-scoped
+    # writers are what make that concurrency safe.
+    assert not turn_task.done(), (
+        "the suppressing unwind was expected to stay pending; if it finished, the "
+        "bound is still awaiting an acknowledgment somewhere"
+    )
+    assert "turn_unwind_suppressed_a_cancel" in events
+    # (6) The abandonment is DELIBERATE, not a leak: the timed-out task is kept
+    # referenced and logged rather than silently dropped mid-shutdown.
+    abandoned = controller._abandoned_shutdown_tasks
+    assert len(abandoned) == 1
+    assert not abandoned[0].done()
+    # (7) ...and the shutdown continued past it to the backend teardown.
+    assert "codex_teardown" in events
+    assert events.index("turn_unwind_started") < events.index("codex_teardown")
+
+    # (8) The convergence's write is the terminal one.
+    final = request_store.get_run(run_id)
+    assert final["status"] == "failed"
+    assert final["metadata"]["interrupt_reason"] == "restarted"
+    # (9) THE COUNTED HOLDS LEAK HERE, AND THAT IS THE ABANDONMENT'S HONEST PRICE:
+    # the frozen settlement task still owns its ExitStack/teardown-chain holds, and
+    # their ``finally`` blocks can only run if the loop ever drives the task to
+    # acknowledge its cancel — which a suppressing unwind may never do. Asserting
+    # ``_teardown_admission == {}`` would demand the very acknowledgment the hard
+    # deadline exists to stop waiting for. What holds instead is the strict
+    # superset: HFR-339's shutdown flag is never cleared, so admission stays closed
+    # for every session regardless of what the frozen task still counts.
+    assert manager._teardown_admission.get("ses-shutdown-342", 0) > 0
+    assert manager.is_admission_closed_for_shutdown() is True
+    assert manager.is_teardown_admission_closed("ses-shutdown-342") is True
+    assert manager.is_teardown_admission_closed("some-unrelated-session") is True
 
 
 def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(

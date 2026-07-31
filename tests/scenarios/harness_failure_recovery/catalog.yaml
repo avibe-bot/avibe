@@ -3867,14 +3867,14 @@ scenarios:
     # that skips it. The per-call opt-in shape is unchanged: only the settlement passes
     # an on_timeout, and every other stop keeps its audited shrug on BOTH branches, now
     # via a _StopTimedOut that re-raises into the same swallow-and-log.
-    # THE STOPPED-LOOP GUARANTEE IS STRICTLY STRONGER than the running-loop one, and the
-    # difference is why the convergence is safe to run immediately: wait_for cancels the
-    # inner task AND awaits it, and run_until_complete cannot return before its own task
-    # is done, so on return the coroutine is provably finished (cancelled) and there is
-    # no concurrent writer at all -- where the threadsafe future's cancel() is only
-    # best-effort and may leave a straggler unwinding. Abandoning it here would also be
-    # worse than on a running loop: a stopped loop makes no further progress, so the
-    # coroutine would be frozen mid-write until the process exits.
+    # SUPERSEDED IN PART BY HFR-342: the paragraph this entry used to carry here --
+    # "the stopped-loop guarantee is strictly stronger; on return the coroutine is
+    # provably finished and there is no concurrent writer" -- was true only because
+    # wait_for PAID for it by awaiting the cancellation acknowledgment, which is
+    # itself a hang for an unwind that delays or suppresses CancelledError. Round 16
+    # replaced wait_for with asyncio.wait (which cancels nothing and returns at the
+    # deadline) plus an unacknowledged best-effort cancel; the honest guarantee is
+    # now the weaker one HFR-342 records, on both branches.
     # HFR-340's truncated-unwind cost applies unchanged -- cancelling the settlement
     # cancels the gather, which cancels the turn, so the turn never reaches its own
     # settlement -- which is the reason the convergence must run, not a reason to skip
@@ -3886,6 +3886,44 @@ scenarios:
     # builtin on 3.11+, so a single clause covers every spelling.
     # RED: the test HANGS pre-fix (exit 124 under a 60s shell timeout); GREEN in ~2s.
     test: tests/test_running_agents_service.py::test_stopped_loop_shutdown_converges_a_slow_settlement
+  - id: HFR-342
+    name: >-
+      the shutdown deadline holds even when the settlement's unwind suppresses its
+      cancellation
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 16. HFR-341's REFINEMENT: the bound it added was not a hard
+    # deadline. wait_for's timer CANCELS the inner task and then AWAITS the
+    # acknowledgment, and run_until_complete cannot return before its own task is
+    # done -- so a turn whose unwind delays or catches CancelledError (the exact
+    # slow-settlement case this branch exists for, one notch worse) could veto the
+    # deadline and hold the shutdown open indefinitely all over again.
+    # THE FIX: the coroutine runs as a loop-side task driven by
+    # run_until_complete(asyncio.wait({task}, timeout)) -- asyncio.wait cancels
+    # NOTHING and genuinely returns at the deadline -- then a best-effort
+    # UNACKNOWLEDGED task.cancel(), then _StopTimedOut -> the shared convergence ->
+    # backend teardown. The abandoned task is kept strongly referenced on the
+    # controller with a done-callback that consumes any late exception, so the
+    # abandonment is visible and deliberate rather than interpreter noise.
+    # WHAT IS TRUE ON RETURN, stated honestly (this corrects HFR-341's claim): the
+    # frozen task is NOT done -- cancel() only marks the cancel for delivery and an
+    # un-driven loop delivers nothing. The guarantee on both branches is "no writer
+    # is MAKING PROGRESS while the loop is not driven" plus guarded first-writer-wins
+    # idempotence; and since cleanup_sync's LATER stops do drive this loop again, a
+    # straggler can wake after the convergence -- safe because the convergence has
+    # already terminalized the rows and the straggler's writes are scoped to
+    # queued|running, so they no-op. Safety rests on first-writer-wins, never on the
+    # process exiting in time.
+    # ACCEPTED PRICE, pinned by the test: the frozen task's ExitStack/teardown-chain
+    # admission holds LEAK (their finally blocks may never run); HFR-339's
+    # never-cleared shutdown flag is the strict superset that keeps admission closed
+    # regardless, so the leak costs nothing in an exiting process.
+    # RED: the suppressing-unwind test HANGS pre-fix (exit 124 under a 60s shell
+    # timeout); GREEN in ~2s with the row converged restarted + owed notice before
+    # the instrumented backend teardown.
+    test: tests/test_running_agents_service.py::test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

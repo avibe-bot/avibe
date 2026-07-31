@@ -1823,6 +1823,54 @@ class Controller:
         """Best-effort synchronous cleanup without cross-loop awaits"""
         logger.info("Cleaning up controller resources (sync, best-effort)...")
 
+        # Tasks that missed their shutdown deadline and were cancelled WITHOUT an
+        # acknowledgment await (HFR-342). Parked on the controller, not in this frame,
+        # so they outlive ``cleanup_sync`` — see ``_abandon_after_deadline``.
+        abandoned_after_deadline: list[asyncio.Task] = (
+            getattr(self, "_abandoned_shutdown_tasks", None) or []
+        )
+        self._abandoned_shutdown_tasks = abandoned_after_deadline
+
+        def _abandon_after_deadline(task: asyncio.Task, label: str) -> None:
+            """Drop a task that missed the shutdown deadline — deliberately and visibly.
+
+            The cancel that precedes this is not acknowledged, so the task may never
+            reach a done state at all. Two consequences of that are handled here rather
+            than left to chance:
+
+            * a STRONG REFERENCE is kept for the rest of the process's life, so the task
+              is not finalized while the shutdown is still running and cannot emit
+              asyncio's "Task was destroyed but it is pending!" as an unexplained
+              warning mid-teardown. If the interpreter finalizes it at exit anyway the
+              message is simply TRUE — the task really was abandoned — and the debug
+              line below is what explains it.
+            * a done callback CONSUMES any late result or exception, so an abandoned
+              coroutine that does eventually finish badly cannot resurface as
+              "Task exception was never retrieved" noise.
+
+            Deliberately NOT done: poking ``task._log_destroy_pending``. The abandonment
+            is real, so it is logged rather than hidden behind a private flag.
+            """
+
+            def _consume(done_task: asyncio.Task) -> None:
+                if done_task.cancelled():
+                    return
+                exc = done_task.exception()
+                if exc is not None:
+                    logger.debug(
+                        "%s finished with %r after it was abandoned at its deadline",
+                        label,
+                        exc,
+                    )
+
+            abandoned_after_deadline.append(task)
+            task.add_done_callback(_consume)
+            logger.debug(
+                "%s missed its shutdown deadline; cancelled best-effort and abandoned "
+                "without waiting for acknowledgment (intentional in an exiting process)",
+                label,
+            )
+
         def _stop_loop_coroutine(
             coro,
             label: str,
@@ -1850,6 +1898,13 @@ class Controller:
             below, so a third loop state — or a future caller — cannot pick up a branch
             that quietly skips them.
 
+            AND THE BOUND IS A HARD DEADLINE (HFR-342), which is a stronger claim than
+            "bounded" and had to be fixed separately: HFR-341's first bound was
+            ``wait_for``, which cancels and then AWAITS the acknowledgment, so any
+            coroutine willing to delay or suppress its ``CancelledError`` could veto the
+            deadline and re-open the same hang. Expiry now means cancel-and-abandon on
+            both branches, with no acknowledgment awaited anywhere.
+
             Making the stopped-loop branch bounded bounds it for EVERY stop, not just
             the settlement. That is the intended levelling: the running-loop branch has
             always applied the same default wait to all of them, and the stops that pass
@@ -1858,26 +1913,57 @@ class Controller:
             """
 
             def _wait_bounded() -> None:
-                """Wait at most ``timeout`` for ``coro``; raise ``_StopTimedOut`` if it wins.
+                """Wait at most ``timeout`` for ``coro``, then abandon it and raise.
 
-                The cancel differs in STRENGTH between the two loop states, and the
-                difference decides what may still be running when the convergence runs:
+                THE CONTRACT, identical on both loop states (HFR-342): this is a HARD
+                deadline. On expiry the coroutine is cancelled BEST EFFORT and is NOT
+                waited on — no acknowledgment is required and none is awaited — and
+                ``_StopTimedOut`` is raised immediately. Proving the coroutine finished
+                is explicitly NOT this helper's job; correctness after the deadline
+                belongs to the convergence plus the guarded writers, which is exactly
+                where HFR-340 put it for the running-loop branch already.
+
+                It has to be that, not merely "bounded". HFR-341 bounded the stopped-loop
+                branch with ``wait_for``, and ``wait_for`` cancels the inner task and
+                then AWAITS the cancellation, while ``run_until_complete`` cannot return
+                before its own task is done. A turn whose unwind delays or suppresses
+                ``CancelledError`` — the exact slow-settlement case this branch exists
+                for, one notch worse — therefore held the shutdown open indefinitely all
+                over again: no ``_StopTimedOut``, no convergence, no backend teardown.
+                ``asyncio.wait`` is the primitive that really does return at a deadline:
+                it leaves whatever is still pending ALONE, so there is nothing for a
+                coroutine to refuse to grant.
+
+                WHAT IS ACTUALLY TRUE ON RETURN, stated honestly:
 
                 * RUNNING LOOP — the future from ``run_coroutine_threadsafe`` is never
                   marked RUNNING, so ``cancel()`` schedules a real cancel of the task on
-                  the loop. It is still only BEST EFFORT: the coroutine can be mid-unwind
-                  beside us when we return, so the convergence runs concurrently with a
-                  straggler.
-                * STOPPED LOOP — ``wait_for`` cancels the inner task AND awaits it, and
-                  ``run_until_complete`` cannot return before its own task is done.
-                  So on return the coroutine is provably finished (cancelled) and there
-                  is NO concurrent writer at all — the convergence has the field to
-                  itself. (Abandoning it here would also be strictly worse than on a
-                  running loop: a stopped loop makes no further progress, so the
-                  coroutine would simply be frozen mid-write until the process exits.)
+                  the loop and returns at once. The coroutine can be mid-unwind beside
+                  us, so the convergence runs concurrently with a straggler.
+                * STOPPED LOOP — ``task.cancel()`` only MARKS the cancel for delivery,
+                  and a loop nobody is driving delivers nothing, so on return the task
+                  is FROZEN, not finished. The guarantee is NOT "the coroutine is
+                  provably finished" — HFR-341 claimed that, and it was only true
+                  because ``wait_for`` paid for it with the hang above. What is left is
+                  weaker and sufficient: no writer is MAKING PROGRESS while the loop is
+                  not being driven.
 
-                Either way the convergence is safe, because it writes through the same
-                ``queued|running``-scoped guarded UPDATE and cannot fight a straggler.
+                Neither state promises "no concurrent writer", and neither has to. The
+                convergence writes through the same ``queued|running``-scoped guarded
+                UPDATE the turn's own settlement uses, so whichever lands first wins and
+                the loser no-ops.
+
+                AND THE FROZEN TASK DOES GET DRIVEN AGAIN — faced, not hand-waved. It is
+                NOT true that the loop is never driven again before the process exits:
+                ``cleanup_sync`` goes on to stop the watch service, the runtime command
+                watcher, the Model Hub gateway and the Codex runtime, and every one of
+                those calls ``run_until_complete`` on THIS loop. Those calls resume the
+                abandoned task's pending callbacks, so a straggler can wake up after the
+                convergence has run. That is safe for precisely HFR-340's running-loop
+                reason, now true on both branches: by then the convergence has already
+                terminalized the rows, and the straggler's own writes are scoped to
+                ``queued|running``, so they no-op against a terminal row. The safety
+                rests on first-writer-wins, never on the process exiting in time.
 
                 The same truncated-unwind cost HFR-340 pins applies on both branches:
                 cancelling the settlement cancels the ``gather`` it is waiting on, which
@@ -1890,20 +1976,43 @@ class Controller:
                     try:
                         future.result(timeout=timeout)
                     except FuturesTimeoutError:
+                        # Best effort and UNACKNOWLEDGED: ``cancel()`` returns as soon
+                        # as the cancel is scheduled on the loop. The loop still owns
+                        # and drives this task, so there is nothing to park here.
                         future.cancel()
                         raise _StopTimedOut(f"exceeded its {timeout}s wait") from None
                     return
-                try:
-                    loop.run_until_complete(asyncio.wait_for(coro, timeout))
-                except asyncio.TimeoutError:
-                    # 3.11+ collapses ``asyncio.TimeoutError``, ``TimeoutError`` and
-                    # ``concurrent.futures.TimeoutError`` into one builtin, so this
-                    # single clause covers every spelling. The aliasing does mean a
-                    # coroutine that raises ``TimeoutError`` of its own is read as an
-                    # expiry — the running-loop branch has always had exactly that
-                    # ambiguity via ``future.result``, and converging an already
-                    # settled run is a no-op, so both stay safe under it.
-                    raise _StopTimedOut(f"exceeded its {timeout}s wait") from None
+                # Loop-side task, so the deadline is enforced from OUTSIDE the coroutine
+                # instead of depending on its cooperation. ``loop.create_task`` is the
+                # right constructor on a STOPPED loop: it needs the loop open, not
+                # running (it only has to ``call_soon`` the first step), and it names the
+                # owning loop explicitly rather than going through
+                # ``asyncio.ensure_future``'s running-loop lookup, which has no running
+                # loop to find here.
+                task = loop.create_task(coro)
+                # ``asyncio.wait`` returns AT the deadline and never cancels what is
+                # still pending — so, unlike ``wait_for``, it never awaits a
+                # cancellation a coroutine can withhold.
+                loop.run_until_complete(asyncio.wait({task}, timeout=timeout))
+                if task.done():
+                    try:
+                        task.result()
+                    except TimeoutError:
+                        # 3.11+ collapses ``asyncio.TimeoutError``, ``TimeoutError`` and
+                        # ``concurrent.futures.TimeoutError`` into one builtin, so a
+                        # coroutine raising a ``TimeoutError`` of its own reads as an
+                        # expiry. That aliasing is the running-loop branch's
+                        # long-standing behaviour via ``future.result``; it is PRESERVED
+                        # here rather than quietly repaired on one branch only, and
+                        # converging an already settled run is a no-op, so both stay
+                        # safe under it. Every other exception propagates: a coroutine
+                        # that FAILED is not a coroutine that ran out of time, and the
+                        # caller's audited ``except Exception`` swallow still logs it.
+                        raise _StopTimedOut(f"exceeded its {timeout}s wait") from None
+                    return
+                task.cancel()
+                _abandon_after_deadline(task, label)
+                raise _StopTimedOut(f"exceeded its {timeout}s wait")
 
             try:
                 loop = self._loop
