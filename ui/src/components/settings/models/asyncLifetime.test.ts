@@ -251,8 +251,16 @@ describe('sourcesWithEcho — one refresh result inside the shared authority', (
   it('routes refresh and full reads through the same latest-result authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
 
-    expect(page).toMatch(/refreshAuthority\.run\(async \(\) => \{\s*const refreshed = await modelsApi\.refreshSource/);
+    expect(page).toMatch(/const refreshed = await modelsApi\.refreshSource\(source\.id\);\s*await refreshAuthority\.run/);
     expect(page).toMatch(/if \(landing\.kind === 'source'\)[\s\S]*?sourcesWithEcho\(previous, landing\.source\)/);
+  });
+
+  it('keeps the mutating refresh failure outside stale-read suppression', () => {
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+    const refresh = page.slice(page.indexOf('const refreshSource ='), page.indexOf('// Resolve an open drawer'));
+
+    expect(refresh.indexOf('modelsApi.refreshSource')).toBeLessThan(refresh.indexOf('refreshAuthority.run'));
+    expect(refresh).toMatch(/catch \{[\s\S]*?sourceActions\.refreshFailed/);
   });
 });
 

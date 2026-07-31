@@ -367,15 +367,16 @@ export const SettingsModelsPage: React.FC = () => {
     if (refreshingSourceId !== null) return;
     setRefreshingSourceId(source.id);
     try {
-      let discovered = 0;
-      await refreshAuthority.run(async () => {
-        const refreshed = await modelsApi.refreshSource(source.id);
-        discovered = refreshed.discovered;
-        return { kind: 'source' as const, source: refreshed.source };
-      });
+      // The mutation must fail outside the read authority: that authority
+      // intentionally suppresses stale read errors, while a discovery failure
+      // writes the source's error state and must always reach the honest toast.
+      const refreshed = await modelsApi.refreshSource(source.id);
+      await refreshAuthority.run(() =>
+        Promise.resolve({ kind: 'source' as const, source: refreshed.source }),
+      );
       await refreshSourcesAgents();
       if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.refreshed', { count: discovered }) as string, 'success');
+        showToast(t('settings.models.sourceActions.refreshed', { count: refreshed.discovered }) as string, 'success');
       }
     } catch {
       if (!aliveRef.current) return;
