@@ -219,6 +219,16 @@ def hold_session_admission(
     exceptions. Passing ``None`` opts out and leaves ``release_for_teardown``'s own
     narrower hold as the only guard.
 
+    THIS HOLD ALSO OWES THE DRAIN (HFR-332). Refusing admission is only half a
+    contract: the message the refusal pushed onto the durable send-while-busy queue
+    has to run once the teardown is over, and nothing dequeues it — the turn that
+    would have flushed ended inside ``release_for_teardown``'s ``gather``, and the
+    callers here drop the runtime and return. THIS is the hold that may ask for the
+    drain, precisely because it is the one that spans the runtime removal: when it
+    releases, the dying client is gone and a queued row has a replacement to land on.
+    ``release_for_teardown``'s own narrower hold asks for nothing, since its exit is
+    still inside the window.
+
     Defensive like everything else in this module: a controller with no turn manager
     (headless runs, the test doubles) is a silent no-op, never an exception on a path
     already tearing something down.
@@ -234,7 +244,7 @@ def hold_session_admission(
     if not callable(hold):
         return
     try:
-        admission_holds.enter_context(hold(resolved))
+        admission_holds.enter_context(hold(resolved, drain_on_release=True))
     except Exception:
         logger.warning(
             "Session teardown: holding admission for session %s failed",

@@ -3308,6 +3308,62 @@ scenarios:
     # test_interrupt_reason_survives_a_crash_between_defer_and_settle and is not
     # duplicated; record_run_output's own two directions stay pinned by HFR-329's pair.
     test: tests/test_harness_failure_visibility.py::test_user_cancel_beats_a_parked_interruption_cause
+  - id: HFR-332
+    name: a reopening teardown admission drains the queue it refused
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 10, and HFR-330's RESIDUAL: the half of that fix that was never
+    # written. HFR-330 taught submit to treat a held session as busy, so an ordinary
+    # message arriving mid-teardown is persisted to the durable send-while-busy queue and
+    # deliberately NOT dispatched onto the dying runtime. Correct, and only half a
+    # contract -- refusing admission says nothing about resuming.
+    # THE BUG: when the outermost hold releases (the counter reaches zero in
+    # teardown_admission's finally) nothing dequeues. No live turn remains whose finally
+    # could flush -- the turn ended inside release_for_teardown's gather and, being a
+    # cancellation, does not flush anyway -- and the production teardown callers
+    # (SessionHandler.cleanup_session, the idle-eviction loop) drop the runtime and
+    # return without ever calling flush_queue. The row waits for an unrelated later
+    # submission or a restart: the user typed a message, the UI showed it queued, and the
+    # agent never answers. HFR-330's own test flushed BY HAND at exactly that point,
+    # which is what masked it.
+    # FIX: teardown_admission grows drain_on_release, and the counter's zero consumes it
+    # by scheduling _drain_after_teardown as a TASK -- outside the teardown's own call
+    # stack, because the release happens in a finally during the caller's ExitStack
+    # unwind, mid-runtime-removal, which is no place to start dispatching a turn. No
+    # running loop (a synchronous hold) skips rather than forces, leaving the
+    # pre-HFR-332 backstops.
+    # A FLAG, NOT THE DEFAULT, because only some holds can promise the queue a live
+    # runtime: release_for_teardown's own hold covers the cancel-and-await ONLY, and its
+    # caller still has the dying client registered when it exits -- draining there is
+    # precisely the dispatch HFR-126 and HFR-330 exist to prevent. The hold registered by
+    # hold_session_admission is the other kind: entered by the caller that OWNS the
+    # runtime removal, released once the client is gone. It is the one that asks. The two
+    # nest, so the request is a per-session flag consumed at the counter's zero rather
+    # than a decision taken per exit.
+    # EVERY CHECK IS RE-TAKEN WHEN THE DRAIN RUNS, not when it was scheduled. Admission
+    # closed again -> skip (teardowns nest and repeat; that reopening owes its own
+    # drain). A turn in flight -> skip, and this is the case that makes the rule
+    # mandatory rather than defensive: the in-dispatch client recreation (HFR-320) enters
+    # cleanup_session's hold while the CALLER'S OWN turn is still in flight and
+    # release_for_teardown spares it, so a drain at that hold's release would run the
+    # queued row now AND again when the live turn's finally flushes. A draining backend
+    # is left to flush_queue, which already applies _run's finally rule
+    # (_deferred_restart_sessions, then return) against the freshly rebuilt context;
+    # repeating it here would need a second context build and could only disagree. An
+    # empty queue needs no check -- flush_queue is already a no-op on it.
+    # FLUSH_QUEUE IS SAFE POST-TEARDOWN by construction: it holds no reference to any
+    # cached runtime client, rebuilding routing from the current session row via
+    # _build_context and entering _run/dispatch_turn on the same road a first message
+    # takes, so the backend adapter creates a replacement runtime.
+    # TEST FIDELITY, found while fixing this: HFR-330's test resolved
+    # hold_session_admission through a MagicMock controller, so the caller's hold -- its
+    # whole subject -- was a silent no-op and only release_for_teardown's inner hold was
+    # real. controller.session_turns is now bound to the manager under test.
+    # LESSON: a test that performs by hand what production must do automatically pins the
+    # mechanism and not the outcome. The manual flush WAS the residual.
+    test: tests/test_internal_server.py::test_reopening_teardown_admission_drains_the_queued_messages
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -778,6 +778,12 @@ class SessionTurnManager:
         # runtime underneath them, counted so nested holds nest (HFR-330). See
         # :meth:`teardown_admission` for why ``in_flight`` cannot carry this.
         self._teardown_admission: dict[str, int] = {}
+        # Sessions whose admission hold OWES a drain when it finally reopens
+        # (HFR-332). See :meth:`teardown_admission`'s ``drain_on_release``.
+        self._teardown_drain_owed: set[str] = set()
+        # Strong references to the scheduled drains, so the loop cannot collect a
+        # task nobody is awaiting.
+        self._teardown_drain_tasks: dict[str, asyncio.Task] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
         # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
@@ -801,7 +807,12 @@ class SessionTurnManager:
         return bool(resolved) and self._teardown_admission.get(resolved, 0) > 0
 
     @contextlib.contextmanager
-    def teardown_admission(self, session_id: Optional[str]) -> Iterator[None]:
+    def teardown_admission(
+        self,
+        session_id: Optional[str],
+        *,
+        drain_on_release: bool = False,
+    ) -> Iterator[None]:
         """Hold one session's admission CLOSED for the whole of a teardown.
 
         ``in_flight`` cannot express this, and that gap is the bug. ``submit``'s idle
@@ -832,12 +843,34 @@ class SessionTurnManager:
         Held on EVERY path including exceptions — a leaked hold is a permanently
         wedged session, so the decrement lives in a ``finally``. An empty session id
         is a no-op hold, matching every other entry point's forgiveness.
+
+        ``drain_on_release`` MAKES THE REOPENING GIVE THE QUEUE BACK (HFR-332).
+        Everything above is about refusing admission; nothing was about resuming. A
+        message admitted during the hold takes the durable send-while-busy queue and
+        then has nobody to dequeue it: the turn that would normally flush on its way
+        out ended inside ``release_for_teardown``'s ``gather`` (and, being a
+        cancellation, does not flush), and the production teardown callers drop the
+        runtime and return without ever calling :meth:`flush_queue`. The row waits for
+        an unrelated later submission or a restart.
+
+        It is a FLAG rather than the default because only some holds can promise the
+        queue a live runtime to land on. ``release_for_teardown``'s own hold covers
+        the cancel-and-await ONLY; its caller still has the dying client registered
+        when it exits, so draining there is the very dispatch HFR-126 and HFR-330
+        exist to prevent. The hold that :func:`core.session_teardown.hold_session_admission`
+        registers is the other kind: it is entered by the caller that OWNS the runtime
+        removal and released only once the client is gone, so its reopening is the
+        first honest moment a queued row may run. The two nest, and the drain is owed
+        by the outer one — hence a per-session flag consumed at the counter's zero
+        rather than a decision made per exit.
         """
 
         resolved = str(session_id or "").strip()
         if not resolved:
             yield
             return
+        if drain_on_release:
+            self._teardown_drain_owed.add(resolved)
         self._teardown_admission[resolved] = self._teardown_admission.get(resolved, 0) + 1
         try:
             yield
@@ -847,6 +880,92 @@ class SessionTurnManager:
                 self._teardown_admission[resolved] = remaining
             else:
                 self._teardown_admission.pop(resolved, None)
+                owed = resolved in self._teardown_drain_owed
+                self._teardown_drain_owed.discard(resolved)
+                if owed:
+                    self._schedule_post_teardown_drain(resolved)
+
+    def _schedule_post_teardown_drain(self, session_id: str) -> None:
+        """Queue the post-teardown drain OUTSIDE the teardown's own call stack.
+
+        The hold is released from a ``finally`` during a caller's ``ExitStack``
+        unwind — a synchronous frame in the middle of dismantling a runtime, which is
+        no place to start dispatching a turn. A task defers the work to the next turn
+        of the loop, after the teardown's own frames are gone.
+
+        NO RUNNING LOOP means nothing here could dispatch anyway (a synchronous
+        teardown context, or a hold entered outside asyncio in a test): the drain is
+        skipped rather than forced, and the durable queue keeps its pre-HFR-332
+        backstops — the next submission and restart recovery.
+        """
+
+        pending = self._teardown_drain_tasks.get(session_id)
+        if pending is not None and not pending.done():
+            # One drain per session is enough: it re-reads the world when it runs, so
+            # a second would either duplicate this one's flush or repeat its no-op.
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._drain_after_teardown(session_id),
+            name=f"teardown-drain:{session_id}",
+        )
+        self._teardown_drain_tasks[session_id] = task
+        task.add_done_callback(
+            lambda finished, sid=session_id: self._clear_teardown_drain(sid, finished)
+        )
+
+    def _clear_teardown_drain(self, session_id: str, task: asyncio.Task) -> None:
+        if self._teardown_drain_tasks.get(session_id) is task:
+            self._teardown_drain_tasks.pop(session_id, None)
+
+    async def _drain_after_teardown(self, session_id: str) -> None:
+        """Flush the send-while-busy queue a finished teardown left behind (HFR-332).
+
+        EVERY CHECK HERE IS MADE WHEN THE DRAIN RUNS, NOT WHEN IT WAS SCHEDULED. The
+        scheduling instant proves only that one teardown finished; by the time the
+        loop gets here the session may have moved on, and dispatching against a stale
+        snapshot is the failure mode this whole file is about.
+
+        - ADMISSION CLOSED AGAIN: a new teardown started (they nest and they repeat —
+          eviction re-enters ``cleanup_session``). Its own reopening will owe the
+          drain; this one must not dispatch into it.
+        - A TURN IS IN FLIGHT: decline, because the queue is that turn's to flush.
+          This is not a corner case, it is the in-dispatch client recreation
+          (HFR-320): ``cleanup_session`` holds admission across its settle-then-drop
+          pair while the CALLER'S OWN turn is still running, and
+          ``release_for_teardown`` deliberately spares it. Draining at that hold's
+          release would run the queued row now AND again when the live turn's
+          ``finally`` flushes.
+        - A DRAINING BACKEND is left to :meth:`flush_queue`, which already applies
+          exactly ``_run``'s ``finally`` rule — defer the session onto
+          ``_deferred_restart_sessions`` and return — against the freshly rebuilt
+          context. Repeating the check here would need a second context build and
+          could only disagree with the one that matters.
+
+        An EMPTY queue needs no check of its own: ``flush_queue`` is already a no-op
+        on it. Failures are swallowed for the same reason everything on a teardown
+        path is: a drain that raises must not be worse than the row it came for.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return
+        if self.is_teardown_admission_closed(resolved):
+            return
+        entry = self.in_flight.get(resolved)
+        if entry is not None and not entry.task.done():
+            return
+        try:
+            await self.flush_queue(resolved)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "post-teardown drain failed for session=%s", resolved, exc_info=True
+            )
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:

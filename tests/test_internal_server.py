@@ -2672,6 +2672,10 @@ def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_run
         "agent_session_target": {"agent_backend": "claude"},
     }
     manager = session_turns.SessionTurnManager(controller, build_context=lambda _sid: ctx)
+    # ``hold_session_admission`` resolves the manager off the CONTROLLER. Without this
+    # the MagicMock double hands back a MagicMock context manager and the caller's
+    # hold — the whole subject of this test — is a silent no-op.
+    controller.session_turns = manager
 
     def _enqueue(text: str):
         def _write() -> bool:
@@ -2732,8 +2736,9 @@ def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_run
                 session_id
             )
 
-            # The replacement runtime is up: the row flushes normally.
-            observed["flushed"] = await manager.flush_queue(session_id)
+            # The replacement runtime is up and the reopening drains the queue on its
+            # own (HFR-332) — NOT flushed by hand here, which is what used to mask the
+            # residual: nothing in production performs that flush.
             for _ in range(300):
                 if "racer" in dispatched:
                     break
@@ -2774,7 +2779,6 @@ def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_run
     assert observed["admission_open_after"] is True, (
         "a leaked hold is a permanently wedged session"
     )
-    assert observed["flushed"] is True
     assert dispatched == ["first", "racer"], (
         "the queued row runs exactly once, after the teardown"
     )
@@ -2786,6 +2790,266 @@ def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_run
         (session_id, "idle"),
         (session_id, "running"),
     ]
+
+
+def test_reopening_teardown_admission_drains_the_queued_messages(monkeypatch, tmp_path):
+    """HFR-332: HFR-330's hold has to hand the queue back when it lets go.
+
+    The hold does its job — an ordinary message arriving mid-teardown is persisted to
+    the durable send-while-busy queue and deliberately NOT dispatched. But nothing
+    then dequeues it. The turn that would normally flush on its way out has already
+    ended (its ``finally`` ran inside ``release_for_teardown``'s ``gather``, and it
+    was a cancellation, so it does not flush anyway), and the production teardown
+    callers — ``SessionHandler.cleanup_session`` and the idle-eviction loop — drop
+    the runtime and return without ever touching ``flush_queue``. The row sits there
+    until an unrelated later submission or a restart happens to pick it up: the user
+    typed a message, the UI showed it queued, and the agent never answers.
+
+    HFR-330's own test flushed BY HAND at that point, which is what hid this.
+
+    So the reopening owes the drain, and it is scheduled OUTSIDE the teardown's call
+    stack (a task, not an inline await) — the hold is released from a ``finally``
+    inside the caller's ``ExitStack`` unwind, which is no place to start dispatching a
+    turn. The drain re-checks the world when it actually RUNS rather than when it was
+    scheduled; see the companion test for the case it must decline.
+    """
+
+    from core.inbox_events import bus
+    from core.run_settlement import SETTLED_BY_EVICTED
+    from core.services import sessions as sessions_service
+    from core.session_teardown import hold_session_admission
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_teardown_drain",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+        quiet_session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+    session_id = session["id"]
+    quiet_session_id = quiet_session["id"]
+
+    dispatched: list[str] = []
+    first_started = asyncio.Event()
+
+    async def long_handler(ctx_arg, text):
+        dispatched.append(text)
+        if text == "first":
+            first_started.set()
+        await asyncio.sleep(30)
+
+    controller = _build_controller_double(handler=long_handler)
+    ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+    ctx.platform_specific = {
+        "agent_session_id": session_id,
+        "agent_session_target": {"agent_backend": "claude"},
+    }
+    manager = session_turns.SessionTurnManager(controller, build_context=lambda _sid: ctx)
+    controller.session_turns = manager
+
+    def _enqueue(text: str):
+        def _write() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn, scope_id=scope_id, session_id=session_id, text=text
+                )
+            return True
+
+        return _write
+
+    observed: dict = {}
+
+    async def _go():
+        try:
+            first = await manager.submit(
+                session_id, ctx, "first", enqueue=_enqueue("first")
+            )
+            assert first.route == "ran"
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            # The caller's real scope: settle, then drop the runtime.
+            with contextlib.ExitStack() as admission_holds:
+                hold_session_admission(
+                    controller, session_id, admission_holds=admission_holds
+                )
+                await manager.release_for_teardown(
+                    session_id, settled_by=SETTLED_BY_EVICTED
+                )
+                observed["racer"] = await manager.submit(
+                    session_id, ctx, "racer", enqueue=_enqueue("racer")
+                )
+                observed["queued_during_teardown"] = _queued_texts(engine, session_id)
+                observed["dispatched_during_teardown"] = list(dispatched)
+
+            # NOT flushed by hand. The reopening owes the drain, and the only thing
+            # that has to happen is that the event loop turns.
+            for _ in range(300):
+                if "racer" in dispatched:
+                    break
+                await asyncio.sleep(0.01)
+            observed["dispatched_after_reopen"] = list(dispatched)
+            observed["queued_after_reopen"] = _queued_texts(engine, session_id)
+
+            # A session whose queue is EMPTY drains to a clean no-op: no turn, no
+            # dispatch, no exception out of the scheduled task.
+            with contextlib.ExitStack() as quiet_holds:
+                hold_session_admission(
+                    controller, quiet_session_id, admission_holds=quiet_holds
+                )
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+            observed["quiet_in_flight"] = manager.is_in_flight(quiet_session_id)
+            observed["dispatched_after_quiet"] = list(dispatched)
+        finally:
+            for turn in list(manager.in_flight.values()):
+                turn.task.cancel()
+            await asyncio.gather(
+                *(t.task for t in manager.in_flight.values()), return_exceptions=True
+            )
+
+    asyncio.run(_go())
+
+    assert observed["racer"].route == "enqueued"
+    assert observed["racer"].queue_persisted is True
+    assert observed["dispatched_during_teardown"] == ["first"], (
+        "nothing may reach the backend while the runtime is being dismantled"
+    )
+    assert observed["queued_during_teardown"] == ["racer"]
+    # THE ASSERTION: no manual flush anywhere above.
+    assert observed["dispatched_after_reopen"] == ["first", "racer"], (
+        "the message queued during the teardown was never dequeued after it ended"
+    )
+    assert observed["queued_after_reopen"] == []
+    # ...and the empty-queue reopening cost nothing.
+    assert observed["quiet_in_flight"] is False
+    assert observed["dispatched_after_quiet"] == ["first", "racer"]
+
+
+def test_reopening_teardown_admission_declines_to_drain_under_the_callers_own_turn(
+    monkeypatch, tmp_path
+):
+    """HFR-332's re-check, against the shape that makes it mandatory (HFR-320).
+
+    The in-dispatch client recreation enters a teardown from INSIDE a live turn: a
+    Workbench dispatch calls ``get_or_create_claude_session``, the cached client's
+    launch inputs no longer match, and ``cleanup_session`` runs its whole
+    settle-then-drop pair — admission hold included — while the caller's own turn is
+    STILL IN FLIGHT. ``release_for_teardown`` spares that turn (HFR-320), so when the
+    hold releases there is a live turn holding the session.
+
+    Draining there would dispatch a SECOND turn under the first one: the queued row
+    runs immediately AND again when the live turn's own ``finally`` flushes. So the
+    drain re-checks ``in_flight`` at RUN time, not at schedule time, and declines.
+    The live turn's completion is the seam that owns this queue.
+    """
+
+    from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+    from core.services import sessions as sessions_service
+    from core.session_teardown import hold_session_admission
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_teardown_drain_self",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+    session_id = session["id"]
+
+    dispatched: list[str] = []
+    recreated = asyncio.Event()
+    observed: dict = {}
+
+    async def long_handler(ctx_arg, text):
+        dispatched.append(text)
+        if text == "first":
+            # ``cleanup_session``'s scope, reached from inside this very turn.
+            with contextlib.ExitStack() as admission_holds:
+                hold_session_admission(
+                    controller, session_id, admission_holds=admission_holds
+                )
+                observed["released"] = await manager.release_for_teardown(
+                    session_id, settled_by=SETTLED_BY_BACKEND_REFRESH
+                )
+            recreated.set()
+        await asyncio.sleep(30)
+
+    controller = _build_controller_double(handler=long_handler)
+    ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+    ctx.platform_specific = {
+        "agent_session_id": session_id,
+        "agent_session_target": {"agent_backend": "claude"},
+    }
+    manager = session_turns.SessionTurnManager(controller, build_context=lambda _sid: ctx)
+    controller.session_turns = manager
+
+    def _enqueue_racer() -> bool:
+        with engine.begin() as conn:
+            messages_service.enqueue_queued(
+                conn, scope_id=scope_id, session_id=session_id, text="racer"
+            )
+        return True
+
+    async def _go():
+        try:
+            first = await manager.submit(session_id, ctx, "first", enqueue=lambda: True)
+            assert first.route == "ran"
+            # A message queued behind the live turn, exactly as the user would.
+            racer = await manager.submit(
+                session_id, ctx, "racer", enqueue=_enqueue_racer
+            )
+            observed["racer_route"] = racer.route
+            await asyncio.wait_for(recreated.wait(), timeout=3)
+            for _ in range(30):
+                await asyncio.sleep(0.01)
+            observed["dispatched"] = list(dispatched)
+            observed["queued"] = _queued_texts(engine, session_id)
+            observed["still_in_flight"] = manager.is_in_flight(session_id)
+        finally:
+            for turn in list(manager.in_flight.values()):
+                turn.task.cancel()
+            await asyncio.gather(
+                *(t.task for t in manager.in_flight.values()), return_exceptions=True
+            )
+
+    asyncio.run(_go())
+
+    assert observed["released"] is False, "the caller's own turn is not a release"
+    assert observed["racer_route"] == "enqueued"
+    assert observed["still_in_flight"] is True, "the spared turn must still hold the gate"
+    assert observed["dispatched"] == ["first"], (
+        "the drain dispatched a second turn underneath the turn that called the teardown"
+    )
+    assert observed["queued"] == ["racer"], (
+        "the queue belongs to the live turn's own completion, not to this reopening"
+    )
 
 
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
