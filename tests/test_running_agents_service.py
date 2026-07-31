@@ -1842,6 +1842,188 @@ def test_shutdown_converges_a_slow_settlement_before_teardown(tmp_path, monkeypa
     assert manager.is_admission_closed_for_shutdown() is True
 
 
+def test_stopped_loop_shutdown_converges_a_slow_settlement(tmp_path, monkeypatch):
+    """HFR-341: HFR-340's twin on the stopped-loop branch — the NORMAL shutdown.
+
+    HFR-340 bounded the settlement wait and made the timeout converge instead of
+    shrug, but it only did so on ONE of ``_stop_loop_coroutine``'s two branches: the
+    ``run_coroutine_threadsafe`` + ``future.result(timeout)`` path taken when the loop
+    is still running beside the cleanup thread. The other branch — ``loop.is_running()``
+    false — fell through to a bare ``run_until_complete(coro)`` with NO bound at all.
+
+    That branch is not the exotic one. It is how the service actually shuts down:
+    ``Controller.run()`` calls ``self._loop.run_forever()``, and when that returns its
+    ``finally`` calls ``self.cleanup_sync()`` on the SAME thread, with the loop stopped
+    but not closed. So the exact failure HFR-340 exists to prevent — a cancelled turn
+    whose unwind outlasts the wait — did not merely time out here, it blocked the
+    shutdown indefinitely: no bound, no convergence, no backend teardown, and the
+    ``agent_runs`` row left ``running`` until restart recovery.
+
+    Driven through the REAL ``cleanup_sync`` on the real stopped-loop shape: the loop
+    runs long enough to start the turn (standing in for ``run_forever``), returns, and
+    then the same thread calls ``cleanup_sync``. Only the wait is shortened.
+
+    RED pre-fix: this test HANGS on ``run_until_complete``. GREEN: the wait is bounded
+    by ``asyncio.wait_for``, which cancels the inner task and awaits it, so the
+    convergence runs with no concurrent writer and the row is terminal BEFORE the
+    instrumented backend teardown reads it.
+    """
+
+    from core import controller as controller_module
+    from core import session_turns
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store,
+        session_id="ses-shutdown-341",
+        message="a turn whose unwind outlasts a shutdown with no loop running",
+    )
+
+    # Parameterized so the real path can be driven without a real 8s wait.
+    monkeypatch.setattr(controller_module, "SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS", 0.1)
+
+    loop = asyncio.new_event_loop()
+    observed: dict = {}
+    events: list[str] = []
+
+    async def _turn_body(started):
+        try:
+            started.set()
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # ``_run``'s finally, made EFFECTIVELY UNBOUNDED rather than merely slow.
+            # Pre-fix the stopped-loop branch awaited this to completion, so anything
+            # short would have let the buggy path finish and pass; the hang is the
+            # defect.
+            events.append("turn_unwind_started")
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                events.append("turn_unwind_aborted")
+                raise
+            events.append("turn_unwound")
+            raise
+
+    async def _codex_shutdown():
+        # THE INSTRUMENTED BACKEND TEARDOWN. Whatever the row says here is what the
+        # shutdown was willing to dismantle a backend on top of.
+        events.append("codex_teardown")
+        row = request_store.get_run(run_id)
+        observed["status_at_teardown"] = row["status"] if row else None
+        observed["metadata_at_teardown"] = (row or {}).get("metadata") or {}
+        observed["open_rows_at_teardown"] = [
+            item["id"]
+            for item in request_store.list_open_runs_for_session("ses-shutdown-341")
+            if item.get("status") in {"queued", "running"}
+        ]
+
+    async def _noop_stop():
+        return None
+
+    async def _arm_turn():
+        started = asyncio.Event()
+        task = asyncio.ensure_future(_turn_body(started))
+        ctx = types.SimpleNamespace(
+            platform_specific={
+                "agent_session_id": "ses-shutdown-341",
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "slack_x",
+                },
+                # The turn owns the harness run; this is where the pre-settlement
+                # ownership snapshot reads it from.
+                "task_execution_id": run_id,
+            }
+        )
+        manager.in_flight["ses-shutdown-341"] = session_turns.Turn(task=task, context=ctx)
+        # The turn must be genuinely IN FLIGHT before the loop stops, or the cancel
+        # would never reach the unwind this test is about.
+        await started.wait()
+        return task
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(stop=lambda: None)
+    controller.scheduled_task_service = service
+    controller.watch_service = types.SimpleNamespace(stop=_noop_stop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop_stop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(
+        agents={"codex": types.SimpleNamespace(shutdown_runtime=_codex_shutdown)}
+    )
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    # Reached by ``release_for_teardown`` on the branch where the unwind wins the race
+    # with the cancel; present so the test proves the settlement path rather than an
+    # AttributeError inside it.
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    service.controller = controller
+    for name in (
+        "_settle_inflight_turns_for_shutdown",
+        "_shutdown_settlement_debt",
+        "_converge_abandoned_shutdown_settlement",
+    ):
+        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+
+    # THE STOPPED-LOOP SHAPE, exactly as ``Controller.run()`` produces it: the loop runs
+    # (here just long enough to put a turn in flight), returns, and the SAME thread then
+    # calls ``cleanup_sync`` with the loop stopped but not closed.
+    turn_task = loop.run_until_complete(_arm_turn())
+    assert not loop.is_running() and not loop.is_closed()
+    try:
+        Controller.cleanup_sync(controller)
+        assert "turn_unwind_started" in events, (
+            "the settlement never reached the turn's unwind"
+        )
+    finally:
+        if not turn_task.done():
+            turn_task.cancel()
+            loop.run_until_complete(asyncio.wait([turn_task], timeout=5))
+        loop.close()
+
+    # (1) THE INVARIANT. The row was ALREADY terminal when the backend teardown ran —
+    # pre-fix the shutdown never got this far at all.
+    assert observed["status_at_teardown"] == "failed", (
+        "Codex was torn down while the settlement still owed this run a terminal row"
+    )
+    assert observed["metadata_at_teardown"].get("interrupt_reason") == "restarted"
+    # (2) Nothing was left behind for the busy session.
+    assert observed["open_rows_at_teardown"] == []
+    # (3) The user is owed the notice, stamped by the same guarded UPDATE that
+    # terminalized the row rather than by a second write.
+    notice = observed["metadata_at_teardown"]["owed_failure_notice"]
+    assert notice["state"] == "pending"
+    assert notice["failure_id"] == f"interrupt:{run_id}:restarted"
+    # (4) THE STOPPED-LOOP GUARANTEE, which is strictly stronger than the running-loop
+    # branch's best-effort cancel: ``wait_for`` cancels the inner task AND awaits it,
+    # and ``run_until_complete`` cannot return before its own task is done. So by the
+    # time the convergence ran there was no concurrent writer left — the turn's unwind
+    # was already truncated, as HFR-340 pins for the other branch.
+    assert turn_task.done()
+    assert "turn_unwind_aborted" in events
+    assert "turn_unwound" not in events
+    # (5) ...and the shutdown actually continued: it reached the backend teardown, and
+    # ``cleanup_sync`` returned at all, which pre-fix it never did.
+    assert "codex_teardown" in events
+    assert events.index("turn_unwind_aborted") < events.index("codex_teardown")
+
+    # (6) Double settlement stays safe: the cancelled settlement and the convergence
+    # both write through the same ``queued|running``-scoped writer.
+    final = request_store.get_run(run_id)
+    assert final["status"] == "failed"
+    assert final["metadata"]["interrupt_reason"] == "restarted"
+    # (7) HFR-330's holds released, HFR-339's flag still shut.
+    assert manager._teardown_admission == {}
+    assert manager.is_admission_closed_for_shutdown() is True
+
+
 def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
     tmp_path, monkeypatch
 ):

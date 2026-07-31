@@ -3839,6 +3839,53 @@ scenarios:
     # write through settle_run_terminal, whose UPDATE is scoped to queued|running. First
     # writer wins, the rest no-op, no read-then-write window.
     test: tests/test_running_agents_service.py::test_shutdown_converges_a_slow_settlement_before_teardown
+  - id: HFR-341
+    name: >-
+      the same bounded wait and convergence apply when cleanup_sync runs on a stopped
+      loop, which is the normal shutdown
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 15. HFR-340's TWIN, on the branch HFR-340 did not reach.
+    # THE BUG: _stop_loop_coroutine has two loop-state branches, and HFR-340's whole
+    # apparatus -- the bounded wait, the cancel, the synchronous convergence -- lived
+    # ONLY on the running-loop branch (run_coroutine_threadsafe + future.result). The
+    # other branch was a bare run_until_complete(coro) with NO bound at all. And that is
+    # the NORMAL shutdown path, not a corner: run() calls self._loop.run_forever(), and
+    # when that returns its finally calls self.cleanup_sync() on the SAME thread with
+    # the loop stopped but not closed. So HFR-333's exact subject -- a cancelled turn
+    # that unwinds slowly -- did not merely time out here, it blocked the shutdown
+    # INDEFINITELY: no bound, no convergence, no backend teardown, cleanup_sync never
+    # returning, and the row left `running` until restart recovery. Verified pre-fix by
+    # a faulthandler dump: the process is parked in run_until_complete at
+    # controller.py:1852, called from the settlement stop in cleanup_sync.
+    # THE FIX. (1) The stopped-loop branch is bounded LOOP-SIDE:
+    # run_until_complete(asyncio.wait_for(coro, timeout)). (2) The timeout decision --
+    # "bounded wait, then cancel, then converge" -- is extracted into ONE helper both
+    # branches call, so a third loop state or a future caller cannot acquire a branch
+    # that skips it. The per-call opt-in shape is unchanged: only the settlement passes
+    # an on_timeout, and every other stop keeps its audited shrug on BOTH branches, now
+    # via a _StopTimedOut that re-raises into the same swallow-and-log.
+    # THE STOPPED-LOOP GUARANTEE IS STRICTLY STRONGER than the running-loop one, and the
+    # difference is why the convergence is safe to run immediately: wait_for cancels the
+    # inner task AND awaits it, and run_until_complete cannot return before its own task
+    # is done, so on return the coroutine is provably finished (cancelled) and there is
+    # no concurrent writer at all -- where the threadsafe future's cancel() is only
+    # best-effort and may leave a straggler unwinding. Abandoning it here would also be
+    # worse than on a running loop: a stopped loop makes no further progress, so the
+    # coroutine would be frozen mid-write until the process exits.
+    # HFR-340's truncated-unwind cost applies unchanged -- cancelling the settlement
+    # cancels the gather, which cancels the turn, so the turn never reaches its own
+    # settlement -- which is the reason the convergence must run, not a reason to skip
+    # it. The ownership snapshot is still taken before either branch runs.
+    # SIDE EFFECT, intended: bounding the stopped-loop branch bounds it for every stop,
+    # not just the settlement. That levels the two branches on the default wait the
+    # running-loop branch has always applied to all of them.
+    # asyncio.TimeoutError, TimeoutError and concurrent.futures.TimeoutError are one
+    # builtin on 3.11+, so a single clause covers every spelling.
+    # RED: the test HANGS pre-fix (exit 124 under a 60s shell timeout); GREEN in ~2s.
+    test: tests/test_running_agents_service.py::test_stopped_loop_shutdown_converges_a_slow_settlement
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

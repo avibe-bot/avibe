@@ -60,6 +60,17 @@ logger = logging.getLogger(__name__)
 SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS = 8.0
 
 
+class _StopTimedOut(Exception):
+    """One ``cleanup_sync`` stop outlasted its bounded wait, on either loop state.
+
+    Raised by the single bounded-wait helper so the "then cancel, then converge"
+    decision has exactly one home no matter which loop state ran the coroutine
+    (HFR-341). It subclasses ``Exception`` deliberately: a stop that passed no
+    convergence re-raises it and lands in the same audited swallow-and-log that a
+    plain ``TimeoutError`` landed in before.
+    """
+
+
 class RemovedPlatformIMClient(BaseIMClient):
     """No-op sink for stale replies after an IM platform is hot-disabled."""
 
@@ -1827,29 +1838,85 @@ class Controller:
             — giving up silently leaves durable rows open and lets the backends come
             apart underneath writers that are still running. Only that call passes a
             convergence, so the others keep the behaviour they were audited with.
+
+            BOTH LOOP STATES ARE BOUNDED, and both reach that decision through ONE
+            path (HFR-341). The stopped-loop branch is not an exotic corner — it is the
+            NORMAL shutdown: ``run()`` calls ``cleanup_sync`` in its ``finally`` on the
+            very thread whose ``run_forever`` just returned, with the loop stopped but
+            not closed. That branch used to be a bare ``run_until_complete(coro)`` with
+            no bound at all, so a slow-unwinding turn hung the shutdown indefinitely and
+            never reached the convergence or the backend teardown behind it. The wait
+            and the "cancel, then converge" decision therefore live in the one helper
+            below, so a third loop state — or a future caller — cannot pick up a branch
+            that quietly skips them.
+
+            Making the stopped-loop branch bounded bounds it for EVERY stop, not just
+            the settlement. That is the intended levelling: the running-loop branch has
+            always applied the same default wait to all of them, and the stops that pass
+            no ``on_timeout`` keep their shrug on both branches — swallowed and logged,
+            never raised at the caller.
             """
 
-            try:
-                loop = self._loop
-                if not loop or loop.is_closed():
-                    return
+            def _wait_bounded() -> None:
+                """Wait at most ``timeout`` for ``coro``; raise ``_StopTimedOut`` if it wins.
+
+                The cancel differs in STRENGTH between the two loop states, and the
+                difference decides what may still be running when the convergence runs:
+
+                * RUNNING LOOP — the future from ``run_coroutine_threadsafe`` is never
+                  marked RUNNING, so ``cancel()`` schedules a real cancel of the task on
+                  the loop. It is still only BEST EFFORT: the coroutine can be mid-unwind
+                  beside us when we return, so the convergence runs concurrently with a
+                  straggler.
+                * STOPPED LOOP — ``wait_for`` cancels the inner task AND awaits it, and
+                  ``run_until_complete`` cannot return before its own task is done.
+                  So on return the coroutine is provably finished (cancelled) and there
+                  is NO concurrent writer at all — the convergence has the field to
+                  itself. (Abandoning it here would also be strictly worse than on a
+                  running loop: a stopped loop makes no further progress, so the
+                  coroutine would simply be frozen mid-write until the process exits.)
+
+                Either way the convergence is safe, because it writes through the same
+                ``queued|running``-scoped guarded UPDATE and cannot fight a straggler.
+
+                The same truncated-unwind cost HFR-340 pins applies on both branches:
+                cancelling the settlement cancels the ``gather`` it is waiting on, which
+                cancels the turn, so the turn never reaches its own settlement. That is
+                precisely why the convergence must run rather than a reason to skip it.
+                """
+
                 if loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(coro, loop)
                     try:
                         future.result(timeout=timeout)
                     except FuturesTimeoutError:
-                        if on_timeout is None:
-                            raise
-                        # Best effort, and it is more than a formality: the future
-                        # returned by ``run_coroutine_threadsafe`` is never marked
-                        # RUNNING, so cancelling it schedules a real cancel of the task
-                        # on the loop. Whatever the coroutine has already written
-                        # stands — the convergence below writes through the same
-                        # guarded writer and cannot fight it.
                         future.cancel()
-                        on_timeout()
+                        raise _StopTimedOut(f"exceeded its {timeout}s wait") from None
                     return
-                loop.run_until_complete(coro)
+                try:
+                    loop.run_until_complete(asyncio.wait_for(coro, timeout))
+                except asyncio.TimeoutError:
+                    # 3.11+ collapses ``asyncio.TimeoutError``, ``TimeoutError`` and
+                    # ``concurrent.futures.TimeoutError`` into one builtin, so this
+                    # single clause covers every spelling. The aliasing does mean a
+                    # coroutine that raises ``TimeoutError`` of its own is read as an
+                    # expiry — the running-loop branch has always had exactly that
+                    # ambiguity via ``future.result``, and converging an already
+                    # settled run is a no-op, so both stay safe under it.
+                    raise _StopTimedOut(f"exceeded its {timeout}s wait") from None
+
+            try:
+                loop = self._loop
+                if not loop or loop.is_closed():
+                    return
+                try:
+                    _wait_bounded()
+                except _StopTimedOut:
+                    if on_timeout is None:
+                        # The audited shrug, unchanged and now identical on both
+                        # branches: swallowed by the handler below as "cleanup skipped".
+                        raise
+                    on_timeout()
             except Exception as e:
                 logger.debug(f"{label} cleanup skipped: {e}")
 
