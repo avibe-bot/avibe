@@ -1156,6 +1156,7 @@ def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_
     store = VibeAgentStore()
     try:
         store.create(name="pm", backend="claude")
+        store.create(name="zz-fallback", backend="claude")
         with engine.begin() as conn:
             project = create_project(conn, str(folder), display_name="Project")
             update_project(conn, project["id"], agent_name="pm")

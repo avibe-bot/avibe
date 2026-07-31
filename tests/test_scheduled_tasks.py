@@ -6798,6 +6798,7 @@ def test_claimed_request_refreshes_agent_name_after_archive(monkeypatch, tmp_pat
     agent_store = VibeAgentStore()
     try:
         agent = agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
         request_store = TaskExecutionStore()
         request = request_store.enqueue_hook_send(
             session_key="slack::channel::C123",
@@ -6839,6 +6840,7 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
     agent_store = VibeAgentStore()
     try:
         agent = agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
         request_store = TaskExecutionStore()
         request = request_store.enqueue_hook_send(
             session_key="slack::channel::C123",

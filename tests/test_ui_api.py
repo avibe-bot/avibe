@@ -2798,6 +2798,7 @@ def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
 def test_vibe_agent_api_delete_archives_and_hides_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     api.create_vibe_agent({"name": "reviewer", "backend": "codex"})
+    api.create_vibe_agent({"name": "zz-fallback", "backend": "codex"})
 
     removed = api.remove_vibe_agent("reviewer")
 
@@ -2958,6 +2959,7 @@ def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monke
     store = VibeAgentStore()
     try:
         created = store.create(name="opencode", backend="opencode")
+        store.create(name="zz-fallback", backend="opencode")
         ensured = store.ensure_builtin_default_agent(backend="opencode")
 
         assert ensured.id == created.id
