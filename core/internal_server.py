@@ -831,6 +831,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
 
     app = create_app(controller)
     manager = getattr(controller, "session_turns", None)
+    delivery_recovery_ok = True
     recover_deliveries = getattr(manager, "recover_durable_delivery_state", None)
     if callable(recover_deliveries):
         try:
@@ -841,9 +842,10 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
                     ",".join(recovered),
                 )
         except Exception:
+            delivery_recovery_ok = False
             logger.exception("Failed to recover durable Session delivery owners")
     recover_queue = getattr(manager, "recover_persisted_agent_run_queue", None)
-    if callable(recover_queue):
+    if callable(recover_queue) and delivery_recovery_ok:
         try:
             recovered = await recover_queue()
             if recovered:

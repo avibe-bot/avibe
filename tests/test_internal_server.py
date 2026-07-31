@@ -5221,3 +5221,48 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
     # Routing keys the flush rebuilds are NOT carried.
     for routing in ("platform", "is_dm", "agent_session_id", "agent_session_target"):
         assert routing not in spec
+
+
+def test_boot_queue_recovery_stops_when_durable_owner_recovery_fails(
+    monkeypatch,
+    tmp_path,
+):
+    import uvicorn
+
+    calls: list[str] = []
+
+    async def fail_delivery_recovery():
+        calls.append("delivery")
+        raise RuntimeError("owner recovery failed")
+
+    async def recover_queue():
+        calls.append("queue")
+        return []
+
+    manager = SimpleNamespace(
+        recover_durable_delivery_state=fail_delivery_recovery,
+        recover_persisted_agent_run_queue=recover_queue,
+    )
+    controller = SimpleNamespace(session_turns=manager)
+
+    class _Server:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self, *, sockets):
+            assert len(sockets) == 1
+            calls.append("serve")
+
+    listener = SimpleNamespace(close=lambda: calls.append("close"))
+    monkeypatch.setattr(internal_server, "create_app", lambda _controller: object())
+    monkeypatch.setattr(
+        internal_server,
+        "_bind_socket",
+        lambda _path: (listener, tmp_path / "internal.sock"),
+    )
+    monkeypatch.setattr(uvicorn, "Config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    asyncio.run(internal_server.serve(controller))
+
+    assert calls == ["delivery", "serve", "close"]
