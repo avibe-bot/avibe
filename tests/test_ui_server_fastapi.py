@@ -115,6 +115,42 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted_scopes == [("telegram", "-1001", "42")]
 
 
+def test_scope_settings_routes_report_stale_agent_binding_conflicts(monkeypatch):
+    from storage.settings_service import StaleScopeAgentBindingError
+    from vibe import api
+
+    def stale(*_args, **_kwargs):
+        raise StaleScopeAgentBindingError("Agent binding changed while settings were open")
+
+    monkeypatch.setattr(api, "save_settings", stale)
+    monkeypatch.setattr(api, "save_thread_settings", stale)
+    monkeypatch.setattr(api, "save_users", stale)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    responses = (
+        client.post("/api/settings", json={"platform": "slack"}, headers=headers),
+        client.post(
+            "/api/settings/thread",
+            json={"platform": "telegram", "channel_id": "C1", "thread_id": "T1", "settings": {}},
+            headers=headers,
+        ),
+        client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+    )
+
+    for response in responses:
+        assert response.status_code == 409
+        assert response.get_json() == {
+            "ok": False,
+            "code": "settings_conflict",
+            "message": "Agent binding changed while settings were open",
+            "error": {
+                "code": "settings_conflict",
+                "message": "Agent binding changed while settings were open",
+            },
+        }
+
+
 def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     from vibe import runtime
 

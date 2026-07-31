@@ -4,17 +4,23 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from config import paths
 from config import v2_settings
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore, UserSettings
+from core.vibe_agents import VibeAgentStore
 from storage import projects_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
 from storage.models import scope_settings, scopes
 from storage.sessions_service import SQLiteSessionsService
-from storage.settings_service import SQLiteSettingsService, upsert_scope
+from storage.settings_service import (
+    SQLiteSettingsService,
+    StaleScopeAgentBindingError,
+    upsert_scope,
+)
 from modules.settings_manager import SettingsManager
 
 
@@ -434,6 +440,125 @@ def test_save_state_preserves_project_scope_settings(tmp_path: Path) -> None:
 
     assert row is not None, "project scope_settings was deleted by a settings save"
     assert row[0] == str(folder.resolve())
+
+
+def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agents_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    conflicting_store = None
+    try:
+        agents_store.create(name="pm", backend="claude")
+        route = RoutingSettings(agent_name="pm")
+        store.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=route),
+            platform="slack",
+        )
+        store.update_thread(
+            "C1",
+            "T1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+        store.update_user(
+            "U1",
+            UserSettings(display_name="Pat", routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+
+        race: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+        @event.listens_for(agents_store.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(store._service.engine, "after_cursor_execute")
+        def _archive_on_binding_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            normalized = " ".join(statement.split())
+            if race["fired"] or "SELECT scope_settings.agent_name" not in normalized:
+                return
+            race["fired"] = 1
+            try:
+                agents_store.archive("pm")
+            except OperationalError as exc:
+                race["refused"].append(str(exc))
+            else:
+                race["committed"] = 1
+
+        store.save()
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+
+        conflicting_store = SettingsStore(settings_path)
+        archived = agents_store.archive("pm")
+        assert archived is not None
+        replacement = agents_store.create(name="pm", backend="codex")
+
+        conflicting = conflicting_store.find_channel("C1", platform="slack")
+        assert conflicting is not None
+        conflicting.routing.agent_name = "codex"
+        with pytest.raises(StaleScopeAgentBindingError, match="Agent binding changed"):
+            conflicting_store.update_channel("C1", conflicting, platform="slack")
+
+        store.settings.channels["slack::C1"].custom_cwd = "/stale-channel"
+        store.settings.threads["slack::C1/T1"].custom_cwd = "/stale-thread"
+        store.settings.users["slack::U1"].custom_cwd = "/stale-user"
+        store.save()
+        assert store.settings.channels["slack::C1"].routing.agent_name == archived.archived_name
+        assert store.settings.threads["slack::C1/T1"].routing.agent_name == archived.archived_name
+        assert store.settings.users["slack::U1"].routing.agent_name == archived.archived_name
+
+        with agents_store.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    scopes.c.scope_type,
+                    scope_settings.c.agent_name,
+                    scope_settings.c.workdir,
+                    scope_settings.c.settings_json,
+                )
+                .select_from(scopes.join(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id.in_(("slack::channel::C1", "slack::thread::C1/T1", "slack::user::U1")))
+                .order_by(scopes.c.scope_type)
+            ).mappings().all()
+        assert len(rows) == 3
+        assert {row["agent_name"] for row in rows} == {archived.archived_name}
+        assert {row["workdir"] for row in rows} == {
+            "/stale-channel",
+            "/stale-thread",
+            "/stale-user",
+        }
+        assert {
+            json.loads(row["settings_json"])["routing"]["agent_name"] for row in rows
+        } == {archived.archived_name}
+
+        store.close()
+        fresh = SettingsStore(settings_path)
+        try:
+            channel = fresh.find_channel("C1", platform="slack")
+            assert channel is not None
+            channel.routing.agent_name = replacement.name
+            fresh.update_channel("C1", channel, platform="slack")
+        finally:
+            fresh.close()
+
+        with agents_store.engine.connect() as conn:
+            rebound = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).scalar_one()
+        assert rebound == replacement.name
+    finally:
+        if conflicting_store is not None:
+            conflicting_store.close()
+        store.close()
+        agents_store.close()
 
 
 def test_settings_save_preserves_observed_scope_metadata(tmp_path: Path) -> None:

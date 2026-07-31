@@ -5018,19 +5018,27 @@ def ui_reload():
 @app.route("/api/settings", methods=["POST"])
 def settings_post():
     from vibe import api
+    from storage.settings_service import StaleScopeAgentBindingError
 
     payload = request.json or {}
-    return jsonify(api.save_settings(payload))
+    try:
+        return jsonify(api.save_settings(payload))
+    except StaleScopeAgentBindingError as exc:
+        return _coded_error_response("settings_conflict", str(exc), 409)
 
 
 @app.post("/api/settings/thread", include_in_schema=False)
 async def thread_settings_post(starlette_request: FastAPIRequest):
     async def handler():
         from vibe import api
+        from storage.settings_service import StaleScopeAgentBindingError
 
         body = await starlette_request.body()
         payload = await starlette_request.json() if body else {}
-        return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+        try:
+            return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+        except StaleScopeAgentBindingError as exc:
+            return _coded_error_response("settings_conflict", str(exc), 409)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -8990,9 +8998,13 @@ def users_get():
 @app.route("/api/users", methods=["POST"])
 def users_post():
     from vibe import api
+    from storage.settings_service import StaleScopeAgentBindingError
 
     payload = request.json or {}
-    return jsonify(api.save_users(payload))
+    try:
+        return jsonify(api.save_users(payload))
+    except StaleScopeAgentBindingError as exc:
+        return _coded_error_response("settings_conflict", str(exc), 409)
 
 
 @app.route("/api/users/<user_id>/admin", methods=["POST"])

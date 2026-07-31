@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from config.v2_settings import (
     RoutingSettings,
     SettingsState,
     UserSettings,
+    _UNSET_AGENT_BINDING,
     _make_scoped_key,
     _split_scoped_key,
     make_thread_native_id,
@@ -23,6 +24,7 @@ from config.v2_settings import (
     normalize_show_message_types,
     split_thread_native_id,
 )
+from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.models import auth_codes, scope_settings, scopes
 
@@ -32,6 +34,10 @@ GUILD_POLICY_KIND = "guild_policy"
 # (storage.projects_service) share the scope_settings table but are NOT managed
 # here, so save_state must never delete or overwrite their rows.
 _MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
+
+
+class StaleScopeAgentBindingError(ValueError):
+    pass
 
 
 class SQLiteSettingsService:
@@ -60,7 +66,9 @@ class SQLiteSettingsService:
             )
 
     def save_state(self, state: SettingsState) -> None:
+        saved_bindings: list[tuple[ChannelSettings | UserSettings, RoutingSettings]] = []
         with self.engine.begin() as conn:
+            reserve_write_lock(conn)
             now = _utc_now_iso()
             # Per-row reconcile (NOT a delete-everything rewrite): upsert each
             # managed scope's settings, then delete only the managed rows that
@@ -72,7 +80,8 @@ class SQLiteSettingsService:
             for scoped_key, item in state.channels.items():
                 platform, channel_id = _split_scoped_key(scoped_key)
                 scope_id = upsert_scope(conn, platform or "unknown", "channel", channel_id, now=now)
-                routing = asdict(item.routing)
+                routed = self._reconcile_agent_binding(conn, scope_id, item)
+                routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
                     scope_id=scope_id,
@@ -90,9 +99,10 @@ class SQLiteSettingsService:
                     created_at=now,
                     updated_at=now,
                     settings_version=SETTINGS_VERSION,
-                    **_routing_columns(item.routing),
+                    **_routing_columns(routed),
                 )
                 kept.add(scope_id)
+                saved_bindings.append((item, routed))
 
             for scoped_key, item in state.threads.items():
                 platform, native_id = _split_scoped_key(scoped_key)
@@ -114,7 +124,8 @@ class SQLiteSettingsService:
                     native_type="forum_topic" if resolved_platform == "telegram" else "thread",
                     now=now,
                 )
-                routing = asdict(item.routing)
+                routed = self._reconcile_agent_binding(conn, scope_id, item)
+                routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
                     scope_id=scope_id,
@@ -132,9 +143,10 @@ class SQLiteSettingsService:
                     created_at=now,
                     updated_at=now,
                     settings_version=SETTINGS_VERSION,
-                    **_routing_columns(item.routing),
+                    **_routing_columns(routed),
                 )
                 kept.add(scope_id)
+                saved_bindings.append((item, routed))
 
             for platform in sorted(state.guild_scope_platforms):
                 scope_id = upsert_scope(conn, platform, "platform", platform, now=now)
@@ -188,7 +200,8 @@ class SQLiteSettingsService:
                     is_private=True,
                     now=now,
                 )
-                routing = asdict(item.routing)
+                routed = self._reconcile_agent_binding(conn, scope_id, item)
+                routing = asdict(routed)
                 self._upsert_scope_settings(
                     conn,
                     scope_id=scope_id,
@@ -208,12 +221,37 @@ class SQLiteSettingsService:
                     ),
                     created_at=now,
                     updated_at=now,
-                    **_routing_columns(item.routing),
+                    **_routing_columns(routed),
                 )
                 kept.add(scope_id)
+                saved_bindings.append((item, routed))
 
             self._delete_removed_scope_settings(conn, kept)
             self._sync_bind_codes(conn, state.bind_codes, now)
+
+        for item, routing in saved_bindings:
+            item.routing = routing
+            item._agent_name_at_load = routing.agent_name
+
+    @staticmethod
+    def _reconcile_agent_binding(
+        conn: Connection,
+        scope_id: str,
+        item: ChannelSettings | UserSettings,
+    ) -> RoutingSettings:
+        expected = item._agent_name_at_load
+        if expected is _UNSET_AGENT_BINDING:
+            return item.routing
+        current = conn.execute(
+            select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
+        ).scalar_one_or_none()
+        if current == expected:
+            return item.routing
+        if item.routing.agent_name == expected:
+            return replace(item.routing, agent_name=current)
+        raise StaleScopeAgentBindingError(
+            f"Agent binding changed while settings were open: {scope_id}"
+        )
 
     def _upsert_scope_settings(self, conn: Connection, *, scope_id: str, **values: Any) -> None:
         """Insert or update one scope's settings row by scope_id — no delete.
@@ -284,6 +322,7 @@ class SQLiteSettingsService:
                 routing=_routing_from_row(row, payload),
                 require_mention=_nullable_bool(row["require_mention"]),
                 require_bind=payload.get("require_bind"),
+                _agent_name_at_load=row["agent_name"],
             )
         return result
 
@@ -305,6 +344,7 @@ class SQLiteSettingsService:
                 routing=_routing_from_row(row, payload),
                 require_mention=_nullable_bool(row["require_mention"]),
                 require_bind=payload.get("require_bind"),
+                _agent_name_at_load=row["agent_name"],
             )
         return result
 
@@ -344,6 +384,7 @@ class SQLiteSettingsService:
                 routing=_routing_from_row(row, payload),
                 dm_chat_id=str(payload.get("dm_chat_id") or ""),
                 pending_bind_menu_hint=bool(payload.get("pending_bind_menu_hint", False)),
+                _agent_name_at_load=row["agent_name"],
             )
         return result
 
