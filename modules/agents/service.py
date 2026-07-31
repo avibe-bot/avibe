@@ -669,9 +669,11 @@ class AgentService:
             return
         manager = getattr(self.controller, "session_turns", None)
         bind_terminal = getattr(manager, "on_native_terminal", None)
-        if callable(bind_terminal):
-            bind_terminal(context, outcome="terminal")
-        self.release_runtime_turn_key(runtime_key, runtime_token)
+        try:
+            if callable(bind_terminal):
+                bind_terminal(context, outcome="terminal")
+        finally:
+            self.release_runtime_turn_key(runtime_key, runtime_token)
 
     def release_runtime_turn_key(self, runtime_key: str, runtime_token: str | None = None) -> None:
         runtime_key = str(runtime_key or "").strip()

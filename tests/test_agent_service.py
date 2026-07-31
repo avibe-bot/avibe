@@ -942,6 +942,38 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     assert gate.runtime_started is False
 
 
+def test_agent_service_releases_terminal_gate_when_owner_binding_fails() -> None:
+    async def _run():
+        controller = _Controller()
+
+        class _TurnOwner:
+            @staticmethod
+            def on_native_terminal(_context, *, outcome):
+                assert outcome == "terminal"
+                raise RuntimeError("terminal owner write failed")
+
+        controller.session_turns = _TurnOwner()
+        service = AgentService(controller=controller)
+        runtime_key = "session:/repo"
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "runtime-token"
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_runtime_turn_key": runtime_key,
+                "agent_runtime_turn_token": "runtime-token",
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="terminal owner write failed"):
+            service.release_runtime_turn(context)
+
+        assert not gate.lock.locked()
+        assert gate.token == ""
+
+    asyncio.run(_run())
+
+
 def test_agent_service_clear_backend_sessions_does_not_release_other_backend_gate() -> None:
     async def _run():
         service = AgentService(controller=_Controller())
