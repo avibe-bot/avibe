@@ -5801,6 +5801,25 @@ def _callback_session(
         )
 
 
+def _persist_callback_result(sqlite_store, run_id: str, *, text: str) -> None:
+    """Materialize the durable message receipt that a callback success requires."""
+
+    from storage import messages_service
+
+    with sqlite_store.engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-callback-target",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text=text,
+            metadata={"run_id": run_id},
+        )
+
+
 def _notice_drain_service(tmp_path: Path, sqlite_store, requests) -> tuple[Any, list[str]]:
     """A detached drain service whose emitter records and acks every delivery."""
 
@@ -5900,6 +5919,7 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
             terminal_status="succeeded",
         )
         assert delivered_callback["terminal_transition"]
+        _persist_callback_result(sqlite, callback.id, text="callback delivered")
         sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
         asyncio.run(service._drain_failure_notices())
         notice = sqlite.owed_failure_notice("run-cb")
@@ -5978,8 +5998,9 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
     """A child outcome is not proof that the callback reached its user.
 
     Ordinary result settlement is intentionally allowed after every IM send failed,
-    so ``status='succeeded'`` alone cannot suppress the durable fallback. Only the
-    message-id receipt written by the result recorder proves callback delivery.
+    and Avibe creates a synthetic send id before persistence, so neither
+    ``status='succeeded'`` nor ``message_ids_json`` can suppress the durable fallback.
+    Only a real ``messages`` row carrying this child run's provenance is a receipt.
     """
 
     import core.scheduled_tasks as scheduled_tasks
@@ -5999,8 +6020,15 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
     )
     claimed = requests.claim(callback.id)
     assert claimed is not None
-    requests.complete(claimed, ok=True)
-    assert sqlite.get_run(callback.id)["message_ids"] == []
+    recorded = sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="callback looked delivered",
+        message_id="msg_synthetic_only",
+        terminal_status="succeeded",
+    )
+    assert recorded["terminal_transition"]
+    assert sqlite.get_run(callback.id)["message_ids"] == ["msg_synthetic_only"]
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     import pytest as _pytest
@@ -6043,6 +6071,7 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
         terminal_status="succeeded",
     )
     assert recorded["terminal_transition"]
+    _persist_callback_result(sqlite, callback.id, text="hidden callback body")
     assert sqlite.run_callback_state("run-cb-hidden") == "failed"
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
@@ -6054,6 +6083,89 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
 
     assert delivered == ["run-cb-hidden"]
     assert sqlite.owed_failure_notice("run-cb-hidden")["state"] == "sent"
+
+
+def test_skip_reason_writer_cannot_erase_a_terminal_notice_from_its_write_gap(
+    tmp_path: Path,
+) -> None:
+    """A queued diagnostic must not overwrite a terminal owner's metadata."""
+
+    from sqlalchemy import event
+
+    sqlite, requests = _store(tmp_path)
+    run = requests.enqueue_agent_run(message="run later", source_kind="agent")
+    interleaved: list[str] = []
+
+    def _terminalize_before_skip_update(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        assert sqlite.settle_run_terminal(
+            run.id,
+            terminal_status="failed",
+            error="backend failed before dispatch",
+        ) == "failed"
+
+    event.listen(sqlite.engine, "before_cursor_execute", _terminalize_before_skip_update)
+    try:
+        written = sqlite.record_run_skip_reason(
+            run.id,
+            reason="transport_unavailable",
+            at="2026-07-31T00:00:00+00:00",
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _terminalize_before_skip_update)
+
+    assert interleaved, "the terminal owner never entered the write gap"
+    assert written is False, "the queued-only writer must lose after terminal settlement"
+    assert sqlite.get_run(run.id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None and notice["failure_id"] == run.id
+    assert notice["state"] == "pending"
+
+
+def test_skip_recovery_clear_cannot_erase_a_terminal_notice_from_its_write_gap(
+    tmp_path: Path,
+) -> None:
+    """Recovery clears only its JSON keys and only while the row stays queued."""
+
+    from sqlalchemy import event
+
+    sqlite, requests = _store(tmp_path)
+    run = requests.enqueue_agent_run(message="run later", source_kind="agent")
+    assert sqlite.record_run_skip_reason(
+        run.id,
+        reason="transport_unavailable",
+        at="2026-07-31T00:00:00+00:00",
+    )
+    interleaved: list[str] = []
+
+    def _terminalize_before_clear_update(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        assert sqlite.settle_run_terminal(
+            run.id,
+            terminal_status="failed",
+            error="backend failed during recovery",
+        ) == "failed"
+
+    event.listen(sqlite.engine, "before_cursor_execute", _terminalize_before_clear_update)
+    try:
+        cleared = sqlite._clear_transport_skip_evidence({run.id})
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _terminalize_before_clear_update)
+
+    assert interleaved, "the terminal owner never entered the write gap"
+    assert cleared == 0, "the queued-only clear must lose after terminal settlement"
+    assert sqlite.get_run(run.id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None and notice["failure_id"] == run.id
+    assert notice["state"] == "pending"
 
 
 def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(
@@ -8556,6 +8668,66 @@ def _binding_stamp(sqlite, run_id: str, *, task_id: str, signature: str = "sig-1
         new_session_id="ses-fresh",
         settings_preserved=True,
     )
+
+
+def test_binding_marker_rolls_back_when_its_notice_write_faults(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A transient notice fault must leave the transition retryable."""
+
+    from core.scheduled_tasks import BINDING_RECOVERY_METADATA_KEY, SessionBindingChange
+    from tests.test_scheduled_tasks import _binding_env
+
+    _binding_env(tmp_path, monkeypatch)
+    sqlite, requests = _store(tmp_path)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    task = service.store.add_task(
+        name="daily digest",
+        session_key="",
+        session_id="ses-fresh",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    run = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    assert requests.claim(run.id) is not None
+    change = SessionBindingChange(
+        action="rebound",
+        task_id=task.id,
+        reason="session_missing",
+        previous_session_id="ses-gone",
+        detail="the pinned session was replaced",
+        new_session_id="ses-fresh",
+        settings_preserved=True,
+    )
+
+    real_stamp = sqlite.stamp_binding_change_notice
+
+    def _fault(*args, **kwargs):
+        raise OSError("transient sqlite write fault")
+
+    monkeypatch.setattr(sqlite, "stamp_binding_change_notice", _fault)
+    asyncio.run(service._emit_binding_change(change, run_id=run.id, run_error=None))
+
+    after_fault = service.store.get_task(task.id)
+    assert after_fault is not None
+    assert BINDING_RECOVERY_METADATA_KEY not in (after_fault.metadata or {})
+    assert sqlite.owed_failure_notice(run.id) is None
+
+    monkeypatch.setattr(sqlite, "stamp_binding_change_notice", real_stamp)
+    asyncio.run(service._emit_binding_change(change, run_id=run.id, run_error=None))
+
+    recovered = service.store.get_task(task.id)
+    marker = (recovered.metadata or {}).get(BINDING_RECOVERY_METADATA_KEY)
+    assert isinstance(marker, dict) and marker["signature"] == change.signature
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None
+    assert notice["failure_id"] == f"binding:{task.id}:{change.signature}"
 
 
 def test_a_binding_stamp_refuses_a_failure_terminalized_inside_its_gap(tmp_path: Path) -> None:

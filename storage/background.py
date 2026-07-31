@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +41,7 @@ from storage.migrations import (
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agent_runs, agent_sessions, run_definitions, scopes
+from storage.models import agent_runs, agent_sessions, messages, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
@@ -2187,6 +2187,27 @@ class SQLiteBackgroundTaskStore:
             self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
         )
 
+    def upsert_scheduled_task_with_binding_notice(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation,
+        notice: dict[str, Any],
+    ) -> bool:
+        """Commit a recovery marker and its owed notice as one durable effect."""
+
+        with self.engine.begin() as conn:
+            self.stamp_binding_change_notice(_conn=conn, **notice)
+            landed = upsert_definition_in_connection(
+                conn,
+                self._scheduled_task_values(payload),
+                expect=expect,
+                definition_type="scheduled task",
+            )
+            if not landed:
+                return False
+        return True
+
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
             result = conn.execute(
@@ -3023,6 +3044,19 @@ class SQLiteBackgroundTaskStore:
         parent = agent_runs.alias("callback_parent")
         child = agent_runs.alias("callback_child")
         callback_session = agent_sessions.alias("callback_session")
+        persisted_receipt = (
+            select(literal(1))
+            .select_from(messages)
+            .where(messages.c.session_id == child.c.session_id)
+            .where(messages.c.type == "result")
+            .where(func.json_valid(messages.c.metadata_json) == 1)
+            .where(
+                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
+                == child.c.id
+            )
+            .correlate(child)
+            .exists()
+        )
         with self.engine.connect() as conn:
             row = conn.execute(
                 select(
@@ -3030,7 +3064,7 @@ class SQLiteBackgroundTaskStore:
                     parent.c.callback_status,
                     parent.c.callback_run_id,
                     child.c.status,
-                    child.c.message_ids_json,
+                    persisted_receipt,
                     callback_session.c.status,
                     callback_session.c.visibility,
                 )
@@ -3052,10 +3086,7 @@ class SQLiteBackgroundTaskStore:
         child_status = normalize_run_status(row[3]) if row[3] is not None else ""
         if child_status in {"queued", "running"}:
             return "pending"
-        message_ids = _json_loads(row[4], [])
-        has_delivery_receipt = isinstance(message_ids, list) and any(
-            str(message_id or "").strip() for message_id in message_ids
-        )
+        has_delivery_receipt = bool(row[4])
         target_is_visible = (
             str(row[5] or "").strip() != "archived"
             and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
@@ -3748,27 +3779,37 @@ class SQLiteBackgroundTaskStore:
         Returns ``True`` when a write actually happened.
         """
 
+        instant = at or _utc_now_iso()
+        raw_metadata = func.coalesce(agent_runs.c.metadata_json, "{}")
+        metadata = case(
+            (func.json_valid(raw_metadata) == 1, raw_metadata),
+            else_=literal("{}"),
+        )
         with self.engine.begin() as conn:
-            row = conn.execute(
-                select(agent_runs.c.status, agent_runs.c.metadata_json)
-                .where(agent_runs.c.id == run_id)
-                .limit(1)
-            ).mappings().first()
-            if not row or normalize_run_status(row["status"]) != "queued":
-                return False
-            metadata = _json_loads(row["metadata_json"], {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            if metadata.get("last_skip_reason") == reason:
-                return False
-            metadata["last_skip_reason"] = reason
-            metadata["last_skip_at"] = at or _utc_now_iso()
-            conn.execute(
+            result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
-                .values(metadata_json=_json_dumps(metadata))
+                .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                .where(
+                    cast(
+                        func.coalesce(
+                            func.json_extract(metadata, "$.last_skip_reason"), ""
+                        ),
+                        Text,
+                    )
+                    != reason
+                )
+                .values(
+                    metadata_json=func.json_set(
+                        metadata,
+                        "$.last_skip_reason",
+                        reason,
+                        "$.last_skip_at",
+                        instant,
+                    )
+                )
             )
-        return True
+        return bool(result.rowcount)
 
     def _clear_transport_skip_evidence(self, run_ids: set[str]) -> int:
         """Forget a ``transport_unavailable`` stamp whose outage has demonstrably ended.
@@ -3784,29 +3825,32 @@ class SQLiteBackgroundTaskStore:
         it will be reconsidered, with a fresh ``last_skip_at``, next sweep.
         """
 
-        cleared = 0
+        normalized_ids = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        if not normalized_ids:
+            return 0
+        raw_metadata = func.coalesce(agent_runs.c.metadata_json, "{}")
+        metadata = case(
+            (func.json_valid(raw_metadata) == 1, raw_metadata),
+            else_=literal("{}"),
+        )
         with self.engine.begin() as conn:
-            for run_id in sorted(run_ids):
-                row = conn.execute(
-                    select(agent_runs.c.status, agent_runs.c.metadata_json)
-                    .where(agent_runs.c.id == run_id)
-                    .limit(1)
-                ).mappings().first()
-                if not row or normalize_run_status(row["status"]) != "queued":
-                    continue
-                metadata = _json_loads(row["metadata_json"], {})
-                if not isinstance(metadata, dict):
-                    continue
-                if metadata.get("last_skip_reason") != SKIP_REASON_TRANSPORT_UNAVAILABLE:
-                    continue
-                metadata.pop("last_skip_reason", None)
-                metadata.pop("last_skip_at", None)
-                conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == run_id)
-                    .values(metadata_json=_json_dumps(metadata))
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id.in_(normalized_ids))
+                .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                .where(
+                    cast(func.json_extract(metadata, "$.last_skip_reason"), Text)
+                    == SKIP_REASON_TRANSPORT_UNAVAILABLE
                 )
-                cleared += 1
+                .values(
+                    metadata_json=func.json_remove(
+                        metadata,
+                        "$.last_skip_reason",
+                        "$.last_skip_at",
+                    )
+                )
+            )
+        cleared = int(result.rowcount or 0)
         if cleared:
             logger.debug("Cleared recovered transport skip evidence on %s harness run(s)", cleared)
         return cleared
@@ -4115,6 +4159,7 @@ class SQLiteBackgroundTaskStore:
         new_session_id: Optional[str],
         settings_preserved: bool,
         now: Optional[str] = None,
+        _conn: Any = None,
     ) -> Optional[dict[str, Any]]:
         """Owe the user a notice about a session binding that was replaced.
 
@@ -4124,9 +4169,9 @@ class SQLiteBackgroundTaskStore:
         later inherit it for free. A rebind whose retry SUCCEEDS produces no failed
         transition at all — ``error`` is ``None`` and the row settles ``succeeded`` —
         so the news that the user's pinned session was swapped had no writer and no
-        reader. This is that writer, and it is deliberately the only one: the caller
-        is ``_emit_binding_change``, which already runs exactly once per transition
-        because the durable dedup marker is written immediately before it.
+        reader. This is that writer, and it is deliberately the only one. The normal
+        caller commits this notice and the definition's durable dedup marker in the
+        same transaction, so neither effect can survive without the other.
 
         Everything downstream is unchanged. The blob has the same shape as a failure
         notice plus an additive ``kind``/``binding``, so the drain's receipt, backoff
@@ -4165,11 +4210,9 @@ class SQLiteBackgroundTaskStore:
         * The row settles ``succeeded`` — the ORDINARY outcome of the rebind this
           notice exists for — and a status CAS that refuses here loses the notice
           PERMANENTLY rather than deferring it. A successful settlement writes no
-          notice of its own, so the slot is left empty; and ``_emit_binding_change``
-          persists the ``binding_recovery`` dedup marker BEFORE calling this method, so
-          every later fire short-circuits on that marker and never retries. Refusing
-          this direction is how the user silently never hears that their pinned session
-          was replaced, which is the entire bug F6 exists to close.
+          notice of its own, so the slot is left empty. The store-level method also
+          remains correct when called outside the combined marker transaction: refusing
+          this direction would silently lose the news that the pinned session changed.
 
         So the read is re-asserted in the WHERE clause — the status the SELECT saw,
         verbatim, no cancellation request, plus ``owed_notice_absent()`` — and the
@@ -4210,9 +4253,8 @@ class SQLiteBackgroundTaskStore:
         ``settle_run_terminal`` and the rest of the terminal set are conditioned on a
         non-terminal status, so none of them can move the row once the re-read sees
         ``succeeded``, and the retry's status predicate cannot go stale a second time.
-        The notice slot is equally settled: ``record_binding_recovery`` is a guarded
-        write that admits a single stamper per transition, so no second binding stamp
-        exists to race, and no terminal transition remains to stamp a failure notice.
+        The notice slot is equally settled: another stamp on this run sees the occupied
+        slot, and no terminal transition remains to stamp a failure notice.
         The remaining writer that can touch this row is a sibling-key ``json_set`` (the
         sweep's ``interrupt_reason``), which changes neither the status nor the slot and
         so cannot make the retry lose.
@@ -4229,7 +4271,8 @@ class SQLiteBackgroundTaskStore:
         """
 
         instant = now or _utc_now_iso()
-        with self.engine.begin() as conn:
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4308,8 +4351,7 @@ class SQLiteBackgroundTaskStore:
             # The CAS lost. Re-read ONCE and decide on the winner: see the policy
             # table above. Only a ``succeeded`` winner is retried, because it is the
             # only terminal status that writes no notice of its own and so leaves a
-            # slot this method legitimately owes — and because refusing it is
-            # permanent, not deferred (the dedup marker is already durable).
+            # slot this method legitimately owes.
             settled = (
                 conn.execute(
                     select(agent_runs.c.status, agent_runs.c.metadata_json)

@@ -1357,12 +1357,20 @@ class ScheduledTaskStore:
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
-    def record_binding_recovery(self, task_id: str, payload: dict[str, Any]) -> bool:
+    def record_binding_recovery(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        *,
+        binding_notice: Optional[dict[str, Any]] = None,
+    ) -> bool:
         """Durably stamp what was done about a broken session binding.
 
         Written through the store (not by mutating a task the next
         ``maybe_reload`` may replace) because it is what makes the notification
-        once-per-transition instead of once-per-fire.
+        once-per-transition instead of once-per-fire. When a successful rebind
+        needs its own notice, both rows commit in one SQLite transaction: a failed
+        notice write therefore cannot leave a marker that suppresses every retry.
         """
 
         self.maybe_reload()
@@ -1377,6 +1385,20 @@ class ScheduledTaskStore:
         # A runtime stamp, not a user action: a lost write is reported by the return
         # value (the caller already treats ``False`` as "nothing recorded") rather than
         # by an exception through the fire path.
+        if self._sqlite is not None and binding_notice is not None:
+            try:
+                landed = self._sqlite.upsert_scheduled_task_with_binding_notice(
+                    task.to_dict(),
+                    expect=expect,
+                    notice=binding_notice,
+                )
+            except Exception:
+                self._reload_after_lost_write(task.id)
+                raise
+            if landed:
+                return True
+            self.load()
+            return False
         return self._write_task(task, expect)
 
     def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
@@ -5730,28 +5752,58 @@ class ScheduledTaskService:
         recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
         if isinstance(recorded, dict) and recorded.get("signature") == change.signature:
             return
-        if not self.store.record_binding_recovery(
-            change.task_id,
-            {
+        recovery_payload = {
+            "signature": change.signature,
+            "action": change.action,
+            "reason": change.reason,
+            "previous_session_id": change.previous_session_id,
+            "new_session_id": change.new_session_id,
+            "settings_preserved": change.settings_preserved,
+            "at": _utc_now_iso(),
+            # Only on the HFR-276 branch, so the recorded shape of every other
+            # transition is unchanged.
+            **(
+                {
+                    "orphaned_session_id": change.orphaned_session_id,
+                    "orphan_tracked": change.orphan_tracked,
+                }
+                if change.orphaned_session_id
+                else {}
+            ),
+        }
+        binding_notice = None
+        if (
+            run_id
+            and change.action == "rebound"
+            and change.new_session_id
+            and not run_error
+            and self.store._sqlite is not None
+        ):
+            binding_notice = {
+                "run_id": run_id,
+                "task_id": change.task_id,
                 "signature": change.signature,
                 "action": change.action,
                 "reason": change.reason,
                 "previous_session_id": change.previous_session_id,
                 "new_session_id": change.new_session_id,
                 "settings_preserved": change.settings_preserved,
-                "at": _utc_now_iso(),
-                # Only on the HFR-276 branch, so the recorded shape of every other
-                # transition is unchanged.
-                **(
-                    {
-                        "orphaned_session_id": change.orphaned_session_id,
-                        "orphan_tracked": change.orphan_tracked,
-                    }
-                    if change.orphaned_session_id
-                    else {}
-                ),
-            },
-        ):
+            }
+        try:
+            recorded_recovery = self.store.record_binding_recovery(
+                change.task_id,
+                recovery_payload,
+                binding_notice=binding_notice,
+            )
+        except Exception:
+            logger.exception(
+                "Not notifying the binding %s for task %s: its recovery marker and "
+                "notice could not be committed together",
+                change.action,
+                change.task_id,
+            )
+            return
+        if not recorded_recovery:
             logger.warning(
                 "Not notifying the binding %s for task %s: the recovery record was "
                 "refused, so the definition was reclaimed, repointed or removed and "
@@ -5760,93 +5812,7 @@ class ScheduledTaskService:
                 change.task_id,
             )
             return
-        self._stamp_binding_change_notice(change, run_id=run_id, run_error=run_error)
         await self._notify_binding_change(task, change)
-
-    def _stamp_binding_change_notice(
-        self,
-        change: SessionBindingChange,
-        *,
-        run_id: Optional[str],
-        run_error: Optional[str],
-    ) -> None:
-        """Owe the user a notice for a rebind whose retry SUCCEEDED.
-
-        Every other binding transition leaves the fire failed — ``paused``,
-        ``reclaimed`` and ``orphaned`` all set ``error`` to the change's own detail —
-        so the terminal write stamps an ordinary failure notice and the user hears
-        about it through the existing lane. ``rebound`` is the exception: the retry
-        works, the run settles ``succeeded`` with ``error=None``, and NO transition
-        owes anything. That is the whole of F6 — the pinned session was replaced,
-        possibly with different settings, and only a log line said so.
-
-        Two conditions, both narrow on purpose:
-
-        * ``action == "rebound"``, so the branches that already fail keep exactly the
-          notice they had;
-        * the run did not fail, because a rebind whose retry failed owes the FAILURE
-          notice and the binding notice must not take that slot. The store refuses to
-          overwrite an existing notice, but the ordering here is the other way round
-          (this runs before ``complete()``), so the guard has to be at the caller.
-
-        Called immediately after ``record_binding_recovery`` lands, which is what
-        makes this "once per transition" rather than once per fire — the same marker
-        that gates the log line gates the notice.
-        """
-
-        store = getattr(self.request_store, "_sqlite", None)
-        if store is None or not run_id:
-            return
-        if change.action != "rebound" or not change.new_session_id:
-            return
-        if run_error:
-            return
-        try:
-            stamped = store.stamp_binding_change_notice(
-                run_id,
-                task_id=change.task_id,
-                signature=change.signature,
-                action=change.action,
-                reason=change.reason,
-                previous_session_id=change.previous_session_id,
-                new_session_id=change.new_session_id,
-                settings_preserved=change.settings_preserved,
-            )
-            if stamped is None:
-                # The store's compare-and-swap refused, and NOTHING was written. That
-                # is the intended outcome rather than a fault to repair, but the two
-                # refusals are NOT the same outcome and the log must not blur them:
-                #
-                # * a concurrent ``failed`` settlement stamped its OWN failure notice
-                #   in the same UPDATE, so a notice does stand and it is that verdict's;
-                # * a concurrent ``canceled`` is the user's explicit Stop, which
-                #   outranks this news and deliberately owes NO notice at all — the
-                #   drain selects only failed/succeeded rows, so one written here would
-                #   be durable and undeliverable forever. Saying "the terminal
-                #   verdict's notice stands" would be plainly wrong for this branch:
-                #   there is no notice, by design.
-                #
-                # A ``succeeded`` settlement is no longer a refusal: the store re-reads
-                # the row and stamps, because that winner owes nothing of its own and
-                # this stamp is never retried (the dedup marker is already durable).
-                # The remaining refusal is an unreadable ``metadata_json`` blob, which
-                # cannot hold a readable notice anyway.
-                logger.warning(
-                    "binding notice not stamped for run %s (task %s): the run settled "
-                    "failed (its own failure notice stands) or canceled (no notice is "
-                    "owed for an explicit stop)",
-                    run_id,
-                    change.task_id,
-                )
-        except Exception:
-            # Never fatal to the fire: the run itself succeeded, and the transition is
-            # already durable on the definition (``metadata.binding_recovery``) and in
-            # the log. Losing the notification is bad; losing the run is worse.
-            logger.exception(
-                "failed to stamp the binding-change notice for task=%s run=%s",
-                change.task_id,
-                run_id,
-            )
 
     async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
         """Single delivery seam for a binding change.
@@ -5858,10 +5824,8 @@ class ScheduledTaskService:
         drain delivers through D5's ladder — carries the user-visible half. For
         ``paused`` / ``reclaimed`` / ``orphaned`` that notice comes from the terminal
         transition, because those fires end failed. For ``rebound`` the retry succeeds
-        and no transition owes anything, so ``_stamp_binding_change_notice`` writes it
-        explicitly just above; the docstring used to claim the run row covered that
-        case too, which was false in exactly the one case where the user's session had
-        actually been replaced.
+        and no transition owes anything, so ``record_binding_recovery`` commits the
+        marker and notice together before this log seam is reached.
 
         Either way this seam does not deliver anything itself: doing so would produce
         a SECOND message for one event, and it would be the un-retried one, since only
