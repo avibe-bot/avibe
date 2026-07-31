@@ -17,7 +17,15 @@ from storage.background import (
     SQLiteBackgroundTaskStore,
     definition_state_unchanged,
 )
-from storage.models import agent_runs, agent_sessions, agents, run_definitions, scope_settings, scopes
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    agents,
+    messages,
+    run_definitions,
+    scope_settings,
+    scopes,
+)
 from storage.sessions_service import SQLiteSessionsService
 
 
@@ -171,6 +179,32 @@ def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
                     metadata_json="{}",
                 )
             )
+        conn.execute(
+            messages.insert().values(
+                id="msg_queued_archive",
+                scope_id=SCOPE_ID,
+                session_id="ses_archive",
+                platform="avibe",
+                author="harness",
+                type="queued",
+                source="harness",
+                content_text="continue",
+                content_json=json.dumps({"text": "continue"}),
+                metadata_json=json.dumps(
+                    {
+                        "scheduled_provenance": {
+                            "platform_specific": {
+                                "vibe_agent_name": agent_name,
+                                "scheduled_target_agent_name": agent_name,
+                                "agent_session_target": {"agent_name": agent_name},
+                            }
+                        }
+                    }
+                ),
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
 
 
 def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> None:
@@ -217,6 +251,11 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             session = conn.execute(select(agent_sessions)).mappings().one()
             definitions = conn.execute(select(run_definitions).order_by(run_definitions.c.id)).mappings().all()
             runs = conn.execute(select(agent_runs.c.status, agent_runs.c.agent_name)).mappings().all()
+            queued_metadata = json.loads(
+                conn.execute(
+                    select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+                ).scalar_one()
+            )
         assert scope["agent_name"] == result.archived_name
         assert json.loads(scope["settings_json"])["routing"] == {
             "agent_name": result.archived_name,
@@ -238,6 +277,10 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             for row in runs
             if row["status"] in {"succeeded", "failed", "canceled"}
         } == {"pm"}
+        queued_spec = queued_metadata["scheduled_provenance"]["platform_specific"]
+        assert queued_spec["vibe_agent_name"] == result.archived_name
+        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
+        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
 
         replacement = store.create(name="pm", backend="claude")
         assert replacement.id != original.id
@@ -598,6 +641,39 @@ def test_archive_moves_references_that_use_the_normalized_agent_alias(tmp_path) 
             for row in definitions
         } == {result.archived_name}
         assert set(live_runs) == {result.archived_name}
+    finally:
+        store.close()
+
+
+def test_archive_refuses_to_overwrite_malformed_definition_metadata(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="pm", backend="claude")
+        with store.engine.begin() as conn:
+            conn.execute(
+                run_definitions.insert().values(
+                    id="task_malformed",
+                    definition_type="scheduled",
+                    name="Malformed metadata",
+                    agent_name=original.name,
+                    enabled=0,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json="{not-json",
+                )
+            )
+
+        with pytest.raises(ValueError, match="definition metadata is malformed"):
+            store.archive(original.name)
+
+        assert store.require_enabled(original.name).id == original.id
+        with store.engine.connect() as conn:
+            row = conn.execute(
+                select(run_definitions.c.agent_name, run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "task_malformed"
+                )
+            ).one()
+        assert row == (original.name, "{not-json")
     finally:
         store.close()
 

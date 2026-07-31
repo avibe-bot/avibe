@@ -509,6 +509,9 @@ def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: 
         conflicting.routing.agent_name = "codex"
         with pytest.raises(StaleScopeAgentBindingError, match="Agent binding changed"):
             conflicting_store.update_channel("C1", conflicting, platform="slack")
+        refreshed_conflict = conflicting_store.find_channel("C1", platform="slack")
+        assert refreshed_conflict is not None
+        assert refreshed_conflict.routing.agent_name == archived.archived_name
 
         store.settings.channels["slack::C1"].custom_cwd = "/stale-channel"
         store.settings.threads["slack::C1/T1"].custom_cwd = "/stale-thread"
@@ -596,6 +599,7 @@ def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_p
                     ),
                     platform="slack",
                 )
+            assert reloaded.find_channel("C2", platform="slack") is None
         finally:
             reloaded.close()
 

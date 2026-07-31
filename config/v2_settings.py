@@ -527,7 +527,13 @@ class SettingsStore:
         self._file_mtime += 1
 
     def save(self) -> None:
-        self._service.save_state(self.settings)
+        try:
+            self._service.save_state(self.settings)
+        except Exception:
+            # API helpers mutate the singleton before saving. A refused transaction
+            # must restore the durable snapshot before any later read or save.
+            self._load()
+            raise
         self._service.has_external_write()
         self._file_mtime += 1
 

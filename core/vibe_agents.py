@@ -20,7 +20,15 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
-from storage.models import agent_runs, agent_sessions, agents, run_definitions, scope_settings, state_meta
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    agents,
+    messages,
+    run_definitions,
+    scope_settings,
+    state_meta,
+)
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
 
 logger = logging.getLogger(__name__)
@@ -152,9 +160,20 @@ def _rewrite_definition_agent_name(
     direct_binding_changed: bool,
     revision: str,
 ) -> tuple[str, bool]:
-    payload = _json_loads(raw, {})
+    try:
+        payload = json.loads("{}" if raw is None else raw)
+    except (TypeError, ValueError) as exc:
+        if direct_binding_changed:
+            raise ValueError(
+                "cannot rewrite Agent reference because definition metadata is malformed"
+            ) from exc
+        return raw or "{}", False
     if not isinstance(payload, dict):
-        payload = {}
+        if direct_binding_changed:
+            raise ValueError(
+                "cannot rewrite Agent reference because definition metadata is not an object"
+            )
+        return raw or "{}", False
     changed = direct_binding_changed
     snapshot = payload.get("session_settings_snapshot")
     if isinstance(snapshot, dict) and snapshot.get("agent_name") in reference_names:
@@ -164,6 +183,38 @@ def _rewrite_definition_agent_name(
         return raw or "{}", False
     payload[DEFINITION_AGENT_BINDING_REVISION_KEY] = revision
     return _json_dumps(payload), True
+
+
+def _rewrite_queued_agent_provenance(
+    raw: str | None,
+    reference_names: frozenset[str],
+    new_name: str,
+) -> tuple[str, bool]:
+    """Move routing names captured on a queued Workbench harness message."""
+
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return raw or "{}", False
+    if not isinstance(payload, dict):
+        return raw or "{}", False
+    provenance = payload.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        return raw or "{}", False
+    spec = provenance.get("platform_specific")
+    if not isinstance(spec, dict):
+        return raw or "{}", False
+
+    changed = False
+    for key in ("vibe_agent_name", "scheduled_target_agent_name"):
+        if spec.get(key) in reference_names:
+            spec[key] = new_name
+            changed = True
+    target = spec.get("agent_session_target")
+    if isinstance(target, dict) and target.get("agent_name") in reference_names:
+        target["agent_name"] = new_name
+        changed = True
+    return (_json_dumps(payload), True) if changed else (raw or "{}", False)
 
 
 @dataclass(frozen=True)
@@ -727,6 +778,20 @@ class VibeAgentStore:
             .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
             .values(agent_name=new_name)
         )
+
+        queued_rows = conn.execute(
+            select(messages.c.id, messages.c.metadata_json).where(messages.c.type == "queued")
+        ).mappings().all()
+        for row in queued_rows:
+            metadata, changed = _rewrite_queued_agent_provenance(
+                row["metadata_json"], reference_names, new_name
+            )
+            if changed:
+                conn.execute(
+                    messages.update()
+                    .where(messages.c.id == row["id"])
+                    .values(metadata_json=metadata)
+                )
 
         scope_rows = conn.execute(
             select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)
