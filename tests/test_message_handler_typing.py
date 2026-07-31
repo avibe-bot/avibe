@@ -214,7 +214,13 @@ class _StubController:
     def resolve_agent_for_context(self, context):
         return "codex"
 
-    def resolve_vibe_agent_for_context(self, context, override_agent_name=None, required=False):
+    def resolve_vibe_agent_for_context(
+        self,
+        context,
+        override_agent_id=None,
+        override_agent_name=None,
+        required=False,
+    ):
         if override_agent_name:
             return type(
                 "VibeAgent",
@@ -669,6 +675,57 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         agent_name, _ = controller.agent_service.requests[0]
         self.assertEqual(agent_name, "codex")
+
+    async def test_unusable_durable_session_agent_does_not_fallback_to_backend(self):
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        observed = {}
+
+        def _reject_archived_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            raise ValueError("archived Agent is disabled")
+
+        controller.resolve_vibe_agent_for_context = _reject_archived_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="workbench",
+            channel_id="ses_archived",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_archived",
+                    "agent_id": "agent-archived",
+                    "agent_name": "_worker-ab12",
+                    "agent_backend": "codex",
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "continue")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": "agent-archived",
+                "agent_name": "_worker-ab12",
+                "required": True,
+            },
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+        self.assertTrue(
+            any("archived Agent is disabled" in text for _, text in controller.im_client.sent_messages)
+        )
 
     async def test_existing_session_backend_does_not_attach_default_vibe_agent_metadata(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

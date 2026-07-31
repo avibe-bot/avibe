@@ -3963,13 +3963,21 @@ def cmd_agent_remove(args):
         try:
             archived = store.archive(args.name)
         except AgentArchiveError as exc:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
             raise TaskCliError(
-                str(exc),
+                i18n_t(
+                    f"error.agentArchive.{exc.code}.message",
+                    lang,
+                    agent=exc.agent_name,
+                ),
                 code=exc.code,
-                hint=(
-                    "Built-in default Agents are created from enabled Backends and cannot be deleted."
-                    if exc.code == "agent_builtin"
-                    else "Keep another enabled Agent available when archiving the current default."
+                hint=i18n_t(
+                    f"error.agentArchive.{exc.code}.hint",
+                    lang,
+                    agent=exc.agent_name,
                 ),
                 details={"agent": args.name},
             ) from exc

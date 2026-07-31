@@ -2812,6 +2812,24 @@ def test_vibe_agent_api_delete_archives_and_hides_agent(tmp_path, monkeypatch):
     assert removed["archived_agent"]["name"] in [agent["name"] for agent in archived]
 
 
+def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    store.create(name="only-agent", backend="codex")
+    store.set_default_agent_name("only-agent")
+    monkeypatch.setattr(api, "VibeAgentStore", lambda: store)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.remove_vibe_agent("only-agent")
+
+    assert result["ok"] is False
+    assert result["code"] == "agent_no_default_replacement"
+    assert result["message"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
+
+
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 

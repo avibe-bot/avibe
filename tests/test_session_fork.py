@@ -934,6 +934,35 @@ def test_reserve_forked_session_rejects_archived_inherited_agent(tmp_path: Path)
     assert result.agent_name == replacement.name
 
 
+def test_reserve_forked_session_canonicalizes_legacy_inherited_agent_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(agent_name="WORKER")
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.agent_name == "worker"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(
+                select(agent_sessions.c.agent_name).where(
+                    agent_sessions.c.id == result.session_id
+                )
+            ).scalar_one() == "worker"
+    finally:
+        engine.dispose()
+
+
 def test_reserve_forked_session_agent_override_keeps_source_model_when_not_overridden(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)

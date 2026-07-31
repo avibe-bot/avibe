@@ -162,6 +162,20 @@
   },
   "error": {
     "sessionArchived": "该会话已归档，无法再修改。",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` 是内置 Agent，无法删除。",
+        "hint": "内置默认 Agent 由已启用的 Backend 创建，无法删除。"
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` 已归档。",
+        "hint": "已归档 Agent 的内部名称仅供现有持久引用继续使用。"
+      },
+      "agent_no_default_replacement": {
+        "message": "没有其他已启用 Agent 时，无法归档默认 Agent `{agent}`。",
+        "hint": "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+      }
+    },
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",

@@ -83,9 +83,10 @@ class AgentUnavailableError(ValueError):
 class AgentArchiveError(ValueError):
     """A catalog rule refused an otherwise valid archive request."""
 
-    def __init__(self, message: str, *, code: str) -> None:
-        super().__init__(message)
+    def __init__(self, *, code: str, agent_name: str) -> None:
+        super().__init__(code)
         self.code = code
+        self.agent_name = str(agent_name)
 
 
 def _utc_now_iso() -> str:
@@ -578,15 +579,15 @@ class VibeAgentStore:
             agent = self._from_row(row)
             if is_builtin_default_agent(agent):
                 raise AgentArchiveError(
-                    f"agent '{agent.name}' is built in and cannot be deleted",
                     code="agent_builtin",
+                    agent_name=agent.name,
                 )
             if agent.archived_at is not None:
                 if agent.name.startswith(LEGACY_ARCHIVED_AGENT_NAME_PREFIX):
                     return self._compact_legacy_archive(conn, agent, now=now)
                 raise AgentArchiveError(
-                    f"agent '{agent.name}' is already archived",
                     code="agent_already_archived",
+                    agent_name=agent.name,
                 )
 
             default_name = self._default_agent_name(conn)
@@ -600,8 +601,8 @@ class VibeAgentStore:
                 replacement = self._archive_default_replacement(conn, agent)
                 if replacement is None:
                     raise AgentArchiveError(
-                        "the default Agent cannot be archived without another enabled Agent",
                         code="agent_no_default_replacement",
+                        agent_name=agent.name,
                     )
             elif explicit_default_matches:
                 replacement = effective_default

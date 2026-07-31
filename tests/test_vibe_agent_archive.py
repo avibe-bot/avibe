@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 
 from core.vibe_agents import (
     AGENT_ARCHIVE_METADATA_KEY,
+    AgentArchiveError,
     AgentUnavailableError,
     VibeAgentStore,
     normalize_agent_name,
@@ -606,8 +607,10 @@ def test_archive_rolls_back_when_default_has_no_replacement(tmp_path) -> None:
         original = store.create(name="only-agent", backend="codex")
         store.set_default_agent_name(original.name)
 
-        with pytest.raises(ValueError, match="without another enabled Agent"):
+        with pytest.raises(AgentArchiveError) as exc_info:
             store.archive(original.name)
+        assert exc_info.value.code == "agent_no_default_replacement"
+        assert exc_info.value.agent_name == original.name
 
         assert store.require(original.name).id == original.id
         assert store.get_default_agent_name() == original.name
@@ -622,8 +625,10 @@ def test_archive_protects_the_only_effective_default_without_explicit_metadata(t
         assert store.get_default_agent_name() is None
         assert store.get_default_agent().id == original.id
 
-        with pytest.raises(ValueError, match="without another enabled Agent"):
+        with pytest.raises(AgentArchiveError) as exc_info:
             store.archive(original.name)
+        assert exc_info.value.code == "agent_no_default_replacement"
+        assert exc_info.value.agent_name == original.name
 
         assert store.require(original.name).id == original.id
         assert store.get_default_agent_name() is None

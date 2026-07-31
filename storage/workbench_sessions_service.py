@@ -731,6 +731,8 @@ def require_enabled_agent_identity(
 ) -> dict[str, str]:
     """Resolve one enabled Agent while requiring every supplied identity field to match."""
 
+    from core.vibe_agents import normalize_agent_name
+
     cleaned_id = str(agent_id or "").strip()
     cleaned_name = str(agent_name or "").strip()
     stmt = (
@@ -741,7 +743,11 @@ def require_enabled_agent_identity(
     if cleaned_id:
         stmt = stmt.where(agents.c.id == cleaned_id)
     if cleaned_name:
-        stmt = stmt.where(agents.c.name == cleaned_name)
+        try:
+            normalized_name = normalize_agent_name(cleaned_name)
+        except ValueError as exc:
+            raise LookupError(f"Agent not found or disabled: {cleaned_name}") from exc
+        stmt = stmt.where(agents.c.normalized_name == normalized_name)
     row = conn.execute(stmt.limit(1)).mappings().first() if cleaned_id or cleaned_name else None
     if row is None:
         raise LookupError(f"Agent not found or disabled: {cleaned_name or cleaned_id}")

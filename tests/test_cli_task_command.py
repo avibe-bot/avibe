@@ -172,6 +172,31 @@ def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
         agent_store.close()
 
 
+def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="only-agent", backend="codex")
+        agent_store.set_default_agent_name("only-agent")
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch(
+                "vibe.cli.V2Config.load",
+                return_value=SimpleNamespace(language="zh"),
+            ),
+        ):
+            result, payload = _capture_stderr_json(
+                cli.cmd_agent_remove,
+                _parse_agent(["remove", "only-agent"]),
+            )
+
+        assert result == 1
+        assert payload["code"] == "agent_no_default_replacement"
+        assert payload["error"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
+        assert payload["hint"] == "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+    finally:
+        agent_store.close()
+
+
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     for index in range(25):

@@ -1453,10 +1453,18 @@ def remove_vibe_agent(name: str) -> dict:
         try:
             archived = store.archive(name)
         except AgentArchiveError as exc:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
             return {
                 "ok": False,
                 "code": exc.code,
-                "message": str(exc),
+                "message": backend_t(
+                    f"error.agentArchive.{exc.code}.message",
+                    lang,
+                    agent=exc.agent_name,
+                ),
             }
         if archived is None:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}

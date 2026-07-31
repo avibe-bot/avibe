@@ -162,6 +162,20 @@
   },
   "error": {
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` is built in and cannot be deleted.",
+        "hint": "Built-in default Agents are created from enabled Backends and cannot be deleted."
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` is already archived.",
+        "hint": "Use the archived Agent's internal name only for existing durable references."
+      },
+      "agent_no_default_replacement": {
+        "message": "The default Agent `{agent}` cannot be archived without another enabled Agent.",
+        "hint": "Keep another enabled Agent available when archiving the current default."
+      }
+    },
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
