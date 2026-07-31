@@ -160,9 +160,12 @@ def build_partial_index_predicate(index_name: str) -> str:
     """Build one current ``messages`` partial-index predicate byte-for-byte."""
 
     if index_name == "ix_messages_inbox_activity":
+        excluded = types_without("inboxActivity")
         return (
-            "session_id is not null and type not in "
-            f"({_sql_values(types_without('inboxActivity'))})"
+            "session_id is not null"
+            if not excluded
+            else "session_id is not null and type not in "
+            f"({_sql_values(excluded)})"
         )
     if index_name == "ix_messages_inbox_agent_reply":
         return (

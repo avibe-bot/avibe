@@ -290,11 +290,9 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
                 messages.c.native_message_id,
             ).where(messages.c.session_id == session_id)
             if after is None:
-                message_query = (
-                    message_query.where(messages.c.type.not_in(("queued", "draft", "harness_dedupe")))
-                    .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-                    .limit(1)
-                )
+                message_query = message_query.order_by(
+                    messages.c.created_at.desc(), messages.c.id.desc()
+                ).limit(1)
             else:
                 message_query = (
                     message_query.where(

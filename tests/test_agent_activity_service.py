@@ -24,7 +24,7 @@ from sqlalchemy import select  # noqa: F401  (kept parallel to sibling tests)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from storage import agent_activity_service, messages_service
+from storage import agent_activity_service, message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages
@@ -511,26 +511,66 @@ def test_get_turn_group_unknown_id_returns_none(isolated_state):
 
 
 def test_silent_completion_marks_turn_done(isolated_state):
-    """The reported bug: a watch-triggered turn runs tool steps then finishes with a
-    ``<silent>`` reply (stripped, nothing delivered → an invisible ``silent`` marker).
-    It MUST be ``done``, not ``interrupted``, and — since the marker is invisible in
-    the transcript — anchored to the (visible) trigger AFTER it, not the marker."""
+    """A reply-less terminal Turn closes activity without a pseudo Message."""
     engine = create_sqlite_engine()
     sid = "ses_silent"
     with engine.begin() as conn:
         scope = _seed_session(conn, session_id=sid)
-        _msg(conn, scope, sid, mid="m_h1", mtype="harness", author="harness", created_at="2026-06-01T10:00:00.000000+00:00", text="watch fired", source="harness")
+        turn_id = "trn_silent"
+        attempt_id = "atm_silent"
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="m_h1",
+            session_id=sid,
+            priority="p3",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="watch fired",
+            ),
+            dispatch_text="watch fired",
+            current_attempt_id=attempt_id,
+            current_attempt_kind="start",
+            current_target_turn_id=turn_id,
+            now="2026-06-01T10:00:00.000000+00:00",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=sid,
+            initial_delivery_id="m_h1",
+            state="starting",
+            backend="codex",
+            now="2026-06-01T10:00:00.000000+00:00",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="m_h1",
+            expected_attempt_id=attempt_id,
+            accepted_turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        ) is not None
         _evt(conn, scope, sid, eid="e_s1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
         _evt(conn, scope, sid, eid="e_s2", created_at="2026-06-01T10:00:02Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
-        # The invisible marker (type='silent', empty text) written at the chokepoint.
-        _msg(conn, scope, sid, mid="m_sil1", mtype="silent", author="agent", created_at="2026-06-01T10:00:03.000000+00:00", text="")
+        message_deliveries.terminalize_turn(
+            conn,
+            turn_id,
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="test_replyless_completion",
+        )
 
     with engine.connect() as conn:
         groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
     assert len(groups) == 1
     g = groups[0]
     assert g["status"] == "done"
-    assert g["anchor_message_id"] == "m_h1"  # visible trigger, not the invisible marker
+    assert g["anchor_message_id"] == "m_h1"
     assert g["anchor_position"] == "after"
     assert g["open"] is False
     assert g["steps"] == 2

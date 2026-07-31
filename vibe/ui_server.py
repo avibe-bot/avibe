@@ -236,71 +236,6 @@ def _recover_stale_session_status(session_id: str) -> bool:
     return changed
 
 
-def _recover_stale_pending_messages() -> dict[str, int]:
-    """Repair hidden ``pending`` send reservations left behind by UI interruption.
-
-    Ordinary Chat rows are made visible without redispatching. Harness-owned rows
-    stay ``pending`` because no startup queue drain owns them; their originating
-    event can retry the same reservation and start the turn. Rows whose session is
-    missing or archived are deleted.
-    """
-
-    from core.services import sessions as workbench_sessions_service
-    from storage import messages_service
-
-    summary = {"promoted": 0, "deleted": 0, "skipped": 0}
-    engine = _projects_engine()
-    try:
-        with engine.connect() as conn:
-            pending_rows = messages_service.list_recoverable_pending(conn)
-
-        for row in pending_rows:
-            session_id = str(row.get("session_id") or "").strip()
-            with engine.begin() as conn:
-                session = None
-                if session_id:
-                    try:
-                        session = workbench_sessions_service.get_session(conn, session_id)
-                    except LookupError:
-                        pass
-                if not session or session.get("status") == "archived":
-                    if messages_service.delete_pending(conn, str(row["id"])):
-                        summary["deleted"] += 1
-                    continue
-                target_type = messages_service.pending_message_target_type(
-                    row.get("author"),
-                    row.get("source"),
-                    row.get("author_name"),
-                )
-                if target_type in {
-                    messages_service.HARNESS_TYPE,
-                    messages_service.ANNOTATION_TYPE,
-                }:
-                    summary["skipped"] += 1
-                    continue
-                promoted = messages_service.promote_pending(
-                    conn,
-                    str(row["id"]),
-                    target_type,
-                )
-            if not promoted:
-                summary["skipped"] += 1
-                continue
-            settled = _load_session_message(session_id, str(row["id"]))
-            if settled is None or settled.get("type") != target_type:
-                summary["skipped"] += 1
-                continue
-            summary["promoted"] += 1
-            _publish_visible_input_message(
-                settled,
-                session_id=session_id,
-                scope_id=session.get("scope_id"),
-            )
-    finally:
-        engine.dispose()
-    return summary
-
-
 def _is_continuation_line(line: str, previous_message: str | None = None) -> bool:
     stripped = line.lstrip()
     return (
@@ -6528,8 +6463,10 @@ async def sessions_bootstrap(session_id: str):
             types=messages_service.TRANSCRIPT_TYPES,
             tail=True,
         )
-        queued = messages_service.list_queued(conn, session_id)
-        draft = messages_service.get_draft(conn, session_id)
+        from storage import message_deliveries
+
+        queued = message_deliveries.list_queued(conn, session_id)
+        draft = message_deliveries.get_draft(conn, session_id)
 
     try:
         agents_payload = vibe_api.get_vibe_agents(include_disabled=False)
@@ -8012,35 +7949,6 @@ def _publish_visible_input_message(
     return row
 
 
-def _promote_and_publish_pending_user_message(
-    row: dict[str, Any],
-    *,
-    session_id: str,
-    scope_id: str | None,
-    activity_event: str = "user_message",
-) -> dict[str, Any] | None:
-    """Settle one reserved row without publishing a stale or pending snapshot."""
-    from storage import messages_service
-    from vibe.sse_broker import broker
-
-    with _projects_engine().begin() as conn:
-        promoted = messages_service.promote_pending(conn, row["id"], "user")
-    settled = _load_session_message(session_id, row["id"])
-    if settled is None:
-        return None
-    if settled.get("type") == messages_service.QUEUED_TYPE:
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
-        return settled
-    if promoted and settled.get("type") == "user":
-        return _publish_visible_input_message(
-            settled,
-            session_id=session_id,
-            scope_id=scope_id,
-            activity_event=activity_event,
-        )
-    return settled
-
-
 @app.route("/api/sessions/<session_id>/messages", methods=["POST"])
 async def sessions_messages_create(session_id: str):
     """Persist a user message and fire-and-forget the agent turn.
@@ -8121,59 +8029,60 @@ async def sessions_messages_create(session_id: str):
             )
 
     def _persist_user_row() -> dict | None:
-        """Reserve the user's row as ``pending`` (hidden from transcript/queue/
-        inbox) + clear any saved draft, WITHOUT publishing. This locks the row's
-        ``(created_at, id)`` BEFORE the turn dispatches (so a fast reply can't
-        sort ahead of its prompt) yet keeps it invisible during the dispatch
-        window, so another tab can't briefly see it as a sent prompt (Codex P2).
-        The caller promotes it (→ user / queued) once the outcome is known.
-        Returns ``None`` if the session was archived in the meantime."""
+        """Atomically persist one unaccepted submission as a Delivery."""
+        from storage import message_deliveries
+        from storage.agent_session_rows import reserve_write_lock
+
         with engine.begin() as conn:
-            # Re-check archive ATOMICALLY with the reservation: a concurrent archive
-            # may have committed since the pre-flight check above, and the session
-            # must stay terminal — no new row, no turn.
+            reserve_write_lock(conn)
             if workbench_sessions_service.is_session_archived(conn, session_id):
                 return None
-            row = messages_service.append(
+            delivery_id = message_deliveries.new_delivery_id()
+            row = message_deliveries.insert_delivery(
                 conn,
-                scope_id=session["scope_id"],
+                delivery_id=delivery_id,
                 session_id=session_id,
-                platform="avibe",
-                author="user",
-                source="user",
-                message_type=messages_service.PENDING_TYPE,
-                text=text if isinstance(text, str) else None,
-                content=content if isinstance(content, dict) else None,
-                metadata={
-                    **(payload.get("metadata") or {}),
-                    "_web_push_user_key": web_push_user_key,
-                },
-                author_id=web_push_user_key,
-                author_name=payload.get("author_name"),
+                priority="p3",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=session["scope_id"],
+                    session_id=session_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    text=text if isinstance(text, str) else None,
+                    content=content if isinstance(content, dict) else None,
+                    metadata={
+                        **(payload.get("metadata") or {}),
+                        "_web_push_user_key": web_push_user_key,
+                    },
+                    author_id=web_push_user_key,
+                    author_name=payload.get("author_name"),
+                ),
+                dispatch_text=dispatch_text,
+                history_event={"kind": "admission", "priority": "p3", "state": "reserved"},
             )
-            # A quick-reply click is a side action, not the user submitting their
-            # composer text — keep any saved draft intact for it.
             if not quick_reply_for:
-                messages_service.clear_draft(conn, session_id)
+                message_deliveries.set_draft(conn, session_id, None)
             workbench_sessions_service.touch_session(conn, session_id)
-        return row
+        return message_deliveries.delivery_payload(row)
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
         return _session_archived_response()
-    # No text AND no attachments: nothing for the agent to act on, so just
-    # promote + publish the row, no turn. Attachments WITHOUT text still run a
-    # turn (the agent reads the files), so they aren't caught here.
     if not dispatch_text.strip() and not attachment_specs:
-        return jsonify(
-            _promote_and_publish_pending_user_message(
-                message,
-                session_id=session_id,
-                scope_id=session["scope_id"],
+        from storage import message_deliveries
+
+        with engine.begin() as conn:
+            message_deliveries.retire_not_written(
+                conn,
+                session_id,
+                str(message["id"]),
+                reason="empty_submission",
             )
-        ), 201
+        return jsonify({"error": "empty submission"}), 400
     # Session/page-scoped model (the web Chat): fire-and-forget the turn; the
     # reply arrives over ``message.new``. The controller atomically either lets
     # the turn start (we then promote the row to user) or — if a turn is already
@@ -8184,32 +8093,41 @@ async def sessions_messages_create(session_id: str):
         "text": dispatch_text,
         "scope_id": session["scope_id"],
         "user_message_id": message.get("id"),
+        "display_text": message.get("text") or "",
+        "content": content if isinstance(content, dict) else None,
+        "metadata": payload.get("metadata") or {},
+        "author_id": web_push_user_key,
+        "author_name": payload.get("author_name"),
         "files": attachment_specs,
     }
+
+    def _current_delivery_response() -> dict:
+        from storage import message_deliveries
+
+        with engine.connect() as conn:
+            current = message_deliveries.get_delivery(conn, str(message["id"]))
+        if current is None:
+            return dict(message)
+        payload = message_deliveries.delivery_payload(current)
+        if current["state"] == "queued":
+            payload["type"] = "queued"
+            payload["queued"] = True
+        return payload
+
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerTimeout as exc:
-        observed = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
         return jsonify(
             {
-                **observed,
+                **_current_delivery_response(),
                 "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
         ), 504
     except internal_client.InternalServerUnavailable as exc:
-        published = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
         return jsonify(
             {
-                **published,
+                **message,
                 "dispatch_error": "internal_unavailable",
                 "detail": str(exc),
             }
@@ -8221,14 +8139,9 @@ async def sessions_messages_create(session_id: str):
             exc,
             exc_info=True,
         )
-        observed = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
         return jsonify(
             {
-                **observed,
+                **_current_delivery_response(),
                 "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
@@ -8242,40 +8155,25 @@ async def sessions_messages_create(session_id: str):
     if status == 202 and quick_reply_for:
         with engine.begin() as conn:
             messages_service.set_quick_reply_chosen(conn, session_id, quick_reply_for, dispatch_text)
-    if status == 202 and body.get("drained"):
-        # The row joined an idle pre-existing queue and was synchronously merged
-        # before acceptance returned. ``flush_queue`` already published the
-        # freshly ordered replacement; do not append the retired reservation.
-        return jsonify({"drained": True}), 202
-    if status == 202 and body.get("queued"):
-        # Enqueued behind a running turn: the controller already promoted the
-        # row pending→queued, so it stays OUT of the transcript (no
-        # message.new); show it above the composer via queue.updated.
-        queued = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
-        return jsonify({**queued, "queued": True}), 202
     if status == 202:
-        # Turn started: the caller owns the rendering transition, while the
-        # unified manager owns only the turn/queue decision.
-        settled = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
-        return jsonify(
-            settled
-        ), 201
-    published = _promote_and_publish_pending_user_message(
-        message,
-        session_id=session_id,
-        scope_id=session["scope_id"],
-    ) or message
+        delivery_state = str(body.get("delivery_state") or "")
+        current = _current_delivery_response()
+        if delivery_state == "accepted":
+            with engine.connect() as conn:
+                accepted = messages_service.get_message(conn, str(message["id"]))
+            if accepted is None:
+                return jsonify(
+                    {
+                        **current,
+                        **body,
+                        "dispatch_error": "dispatch_pending",
+                    }
+                ), 502
+            return jsonify({**accepted, **body}), 201
+        return jsonify({**current, **body}), 202
     return jsonify(
         {
-            **published,
+            **message,
             "dispatch_error": "dispatch_failed",
             "detail": body,
         }
@@ -8387,24 +8285,26 @@ async def sessions_turn_state(session_id: str):
 @app.route("/api/sessions/<session_id>/queue", methods=["GET"])
 def sessions_queue_list(session_id: str):
     """Pending send-while-busy messages for a session (shown above the composer)."""
-    from storage import messages_service
+    from storage import message_deliveries
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
     return jsonify({"queued": queued})
 
 
 @app.route("/api/sessions/<session_id>/queue/<message_id>", methods=["DELETE"])
 def sessions_queue_remove(session_id: str, message_id: str):
     """Drop one queued message (the per-item delete in the queue strip)."""
-    from storage import messages_service
+    from storage import message_deliveries
+    from storage.agent_session_rows import reserve_write_lock
     from storage.background import run_update_event_transaction
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
     with run_update_event_transaction(engine) as conn:
-        removed = messages_service.remove_queued(conn, session_id, message_id)
+        reserve_write_lock(conn)
+        removed = message_deliveries.retire_queued_with_run(conn, session_id, message_id)
     if removed:
         broker.publish("queue.updated", {"session_id": session_id})
     return jsonify({"removed": bool(removed)})
@@ -8430,11 +8330,11 @@ async def sessions_queue_send_now(session_id: str, message_id: str):
 @app.route("/api/sessions/<session_id>/draft", methods=["GET"])
 def sessions_draft_get(session_id: str):
     """The session's saved unsent compose text (restored on open / device switch)."""
-    from storage import messages_service
+    from storage import message_deliveries
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        draft = messages_service.get_draft(conn, session_id)
+        draft = message_deliveries.get_draft(conn, session_id)
     return jsonify({"text": (draft or {}).get("text") or ""})
 
 
@@ -8442,7 +8342,7 @@ def sessions_draft_get(session_id: str):
 def sessions_draft_set(session_id: str):
     """Upsert the session's draft (debounced from the composer). Blank clears it."""
     from core.services import sessions as workbench_sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
 
     payload = request.json or {}
     text = payload.get("text")
@@ -8455,8 +8355,10 @@ def sessions_draft_set(session_id: str):
             # recreate a draft on a session whose drafts were just reclaimed.
             if session.get("status") == "archived":
                 return jsonify({"ok": True})
-            messages_service.set_draft(
-                conn, scope_id=session["scope_id"], session_id=session_id, text=text if isinstance(text, str) else None
+            message_deliveries.set_draft(
+                conn,
+                session_id,
+                text if isinstance(text, str) else None,
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -9679,7 +9581,6 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
 async def _run_show_event_dispatch(
     event_payload: dict[str, Any],
 ) -> _ShowEventDispatchOutcome:
-    from storage import messages_service
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
@@ -9693,13 +9594,13 @@ async def _run_show_event_dispatch(
     ):
         return _ShowEventDispatchOutcome.FAILED
 
-    message = event_payload.get("message")
-    if not isinstance(message, dict):
+    delivery = event_payload.get("delivery")
+    if not isinstance(delivery, dict):
         return _ShowEventDispatchOutcome.FAILED
-    message_type = message.get("type")
-    if message_type in _ACCEPTED_RESERVATION_TYPES:
+    delivery_state = str(delivery.get("state") or "")
+    if delivery_state == "accepted":
         return _ShowEventDispatchOutcome.ACCEPTED
-    if message_type != messages_service.PENDING_TYPE:
+    if delivery_state != "reserved":
         return _ShowEventDispatchOutcome.FAILED
 
     dispatch_text = _show_event_dispatch_text(event_payload)
@@ -9710,7 +9611,10 @@ async def _run_show_event_dispatch(
         "session_id": session_id,
         "text": dispatch_text,
         "scope_id": scope_id,
-        "user_message_id": message["id"],
+        "user_message_id": delivery["id"],
+        "display_text": delivery.get("text") or "",
+        "content": delivery.get("content") or {},
+        "metadata": delivery.get("metadata") or {},
         "show_event_id": event_id,
         "files": [],
     }
@@ -9751,7 +9655,17 @@ async def _run_show_event_dispatch(
         )
         return _ShowEventDispatchOutcome.FAILED
     settled = _settle_show_event_message(event_payload)
-    if settled and settled.get("type") in _ACCEPTED_RESERVATION_TYPES:
+    state = str((settled or {}).get("state") or body.get("delivery_state") or "")
+    if state in {
+        "accepted",
+        "queued",
+        "pending_steer",
+        "steering",
+        "start_attempting",
+        "reconciling_start",
+        "reconciling_steer",
+        "interrupt_waiting",
+    }:
         return _ShowEventDispatchOutcome.ACCEPTED
     return _ShowEventDispatchOutcome.FAILED
 
@@ -9760,9 +9674,6 @@ def _settle_show_event_message(
     event_payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     from core.show_session_events import ShowSessionEventStore
-    from sqlalchemy import select
-    from storage import messages_service
-    from storage.models import messages, show_session_events
 
     session_id = event_payload.get("session_id")
     event_id = event_payload.get("id")
@@ -9771,42 +9682,6 @@ def _settle_show_event_message(
     if not isinstance(event_id, str) or not event_id:
         return None
 
-    with _projects_engine().begin() as conn:
-        message_id = conn.execute(
-            select(messages.c.id)
-            .select_from(
-                show_session_events.join(
-                    messages,
-                    messages.c.id == show_session_events.c.message_id,
-                )
-            )
-            .where(
-                show_session_events.c.id == event_id,
-                show_session_events.c.session_id == session_id,
-            )
-        ).scalar_one_or_none()
-        row = (
-            messages_service.get_message(
-                conn,
-                str(message_id),
-                session_id=session_id,
-            )
-            if message_id
-            else None
-        )
-        promoted = bool(
-            row
-            and messages_service.promote_pending(
-                conn,
-                str(row["id"]),
-                messages_service.pending_message_target_type(
-                    row.get("author"),
-                    row.get("source"),
-                    row.get("author_name"),
-                ),
-            )
-        )
-
     store = ShowSessionEventStore()
     try:
         settled_event = store.get_event(session_id, event_id)
@@ -9814,27 +9689,9 @@ def _settle_show_event_message(
         store.close()
     if settled_event is None:
         return None
-    message = settled_event.get("message")
-    if not isinstance(message, dict):
-        return None
-
-    event_payload["message_id"] = message["id"]
-    event_payload["message"] = message
-    if promoted and message.get("type") in {
-        messages_service.HARNESS_TYPE,
-        messages_service.ANNOTATION_TYPE,
-    }:
-        _publish_visible_input_message(
-            message,
-            session_id=session_id,
-            scope_id=(
-                str(event_payload["scope_id"])
-                if isinstance(event_payload.get("scope_id"), str)
-                else None
-            ),
-            activity_event="show_event",
-        )
-    elif message.get("type") == messages_service.QUEUED_TYPE:
+    event_payload.update(settled_event)
+    delivery = settled_event.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("state") == "queued":
         from vibe.sse_broker import broker
 
         broker.publish(
@@ -9844,7 +9701,7 @@ def _settle_show_event_message(
                 "scope_id": event_payload.get("scope_id"),
             },
         )
-    return message
+    return delivery if isinstance(delivery, dict) else None
 
 
 def _show_event_dispatch_error() -> ShowSessionEventError:
@@ -9872,24 +9729,9 @@ def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | 
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
-    from storage import messages_service
-
-    message = event_payload.get("message")
-    if not isinstance(message, dict):
-        return ""
-    metadata = message.get("metadata")
-    if not isinstance(metadata, dict):
-        return ""
-    if messages_service.QUEUED_DISPATCH_TEXT_KEY in metadata:
-        return str(
-            metadata.get(messages_service.QUEUED_DISPATCH_TEXT_KEY) or ""
-        ).strip()
-
-    # Pre-upgrade reservations stored the machine prompt on the Show event.
-    # Current annotation rows must never replay their stripped display body.
-    content = message.get("content")
-    if isinstance(content, dict) and isinstance(content.get("annotation"), dict):
-        return ""
+    delivery = event_payload.get("delivery")
+    if isinstance(delivery, dict):
+        return str(delivery.get("dispatch_text") or "").strip()
     return _legacy_show_event_dispatch_text(event_payload)
 
 
@@ -11236,27 +11078,6 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
-async def _recover_stale_pending_messages_on_startup() -> None:
-    start = time.monotonic()
-    try:
-        summary = await asyncio.to_thread(_recover_stale_pending_messages)
-    except Exception:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("Pending-message recovery raised after %sms", duration_ms, exc_info=True)
-        return
-    duration_ms = int((time.monotonic() - start) * 1000)
-    if any(summary.values()):
-        logger.info(
-            "Recovered stale pending messages in %sms: promoted=%s deleted=%s skipped=%s",
-            duration_ms,
-            summary["promoted"],
-            summary["deleted"],
-            summary["skipped"],
-        )
-    else:
-        logger.info("No stale pending messages to recover (%sms)", duration_ms)
-
-
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -11271,7 +11092,6 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
-app.add_event_handler("startup", _recover_stale_pending_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

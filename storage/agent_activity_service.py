@@ -34,8 +34,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import select
+
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
+from storage.models import session_turns
 from vibe.message_types import spec_for, types_with
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
@@ -210,7 +213,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 # so a group closing on it must anchor to the (visible) turn trigger
                 # rather than the marker itself; ``terminal_status`` is resolved here so
                 # ``notify`` failure/normal is decided with its metadata in hand.
-                "is_silent": mtype == messages_service.SILENT_TYPE,
+                "is_silent": False,
                 "terminal_status": _terminal_status(mtype, metadata) if kind == "terminal" else None,
             }
         )
@@ -238,6 +241,40 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "mtype": "tool_call",
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
+            }
+        )
+    for turn in conn.execute(
+        select(
+            session_turns.c.id,
+            session_turns.c.terminal_outcome,
+            session_turns.c.terminal_at,
+        )
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.state == "terminal")
+        .where(session_turns.c.terminal_at.is_not(None))
+        .order_by(session_turns.c.terminal_at.desc(), session_turns.c.id.desc())
+        .limit(MESSAGE_SCAN_LIMIT)
+    ).mappings():
+        terminal_ts = _parse_ts(turn["terminal_at"])
+        items.append(
+            {
+                "ts": terminal_ts,
+                "sort": int(terminal_ts.timestamp() * 1_000_000),
+                "rank": _PHASE_RANK["terminal"],
+                "created_at": turn["terminal_at"],
+                "kind": "terminal",
+                "id": f"turn-terminal:{turn['id']}",
+                "mtype": "turn_terminal",
+                "row_kind": "turn_terminal",
+                "text": None,
+                "is_silent": True,
+                "terminal_status": (
+                    "failed"
+                    if turn["terminal_outcome"] == "failed"
+                    else "interrupted"
+                    if turn["terminal_outcome"] in {"canceled", "not_written"}
+                    else "done"
+                ),
             }
         )
     # Sort by decoded emission microsecond (true cross-table order); the phase rank

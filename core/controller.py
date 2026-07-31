@@ -225,6 +225,9 @@ class Controller:
         from core.session_turns import SessionTurnManager
 
         self.session_turns = SessionTurnManager(self)
+        # Durable Delivery recovery must not classify a Turn before backend
+        # adapters have restored their restart-stable native identities.
+        self._delivery_recovery_barrier = asyncio.Event()
 
         self._init_model_hub()
 
@@ -934,7 +937,10 @@ class Controller:
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
-        await self._restore_active_polls(workbench_platforms)
+        try:
+            await self._restore_active_polls(workbench_platforms)
+        finally:
+            self._delivery_recovery_barrier.set()
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:

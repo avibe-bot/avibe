@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
+import hashlib
 import json
 import re
 import sqlite3
@@ -28,10 +29,7 @@ from vibe.message_types import build_partial_index_predicate
 
 HEAD_REVISION = "20260731_0043"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
-    "ix_messages_inbox_activity": (
-        "session_id is not null and type not in "
-        "('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
-    ),
+    "ix_messages_inbox_activity": "session_id is not null",
     "ix_messages_inbox_agent_reply": (
         "session_id is not null and type in ('result', 'notify', 'error')"
     ),
@@ -129,7 +127,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
                 content_text, content_json, metadata_json, created_at, updated_at,
                 delivered_at, read_at
             ) values (
-                'msg_fsm', null, 'ses_fsm', 'avibe', 'user', 'pending', null,
+                'msg_fsm', null, 'ses_fsm', 'avibe', 'user', 'queued', null,
                 null, 'user', null, null, 'hello', '{"text":"hello"}', '{}',
                 ?, ?, null, null
             )
@@ -148,15 +146,18 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             row[1] for row in conn.execute("pragma table_info(session_turns)")
         }
         delivery_columns = {
-            row[1] for row in conn.execute("pragma table_info(session_deliveries)")
+            row[1] for row in conn.execute("pragma table_info(message_deliveries)")
         }
         existing = conn.execute(
             "select content_text, type from messages where id = 'msg_fsm'"
         ).fetchone()
+        delivery = conn.execute(
+            "select state, dispatch_text, snapshot_json from message_deliveries where id = 'msg_fsm'"
+        ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
-    assert {"session_turns", "session_deliveries"}.issubset(tables)
+    assert {"session_turns", "message_deliveries"}.issubset(tables)
     assert {
-        "start_attempt_id",
+        "initial_delivery_id",
         "runtime_turn_id",
         "native_turn_id",
         "terminal_outcome",
@@ -166,15 +167,16 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         "message_id",
         "dispatch_text",
         "priority",
-        "target_turn_id",
-        "successor_turn_id",
-        "steer_attempt_id",
-        "expected_native_turn_id",
-        "receipt_outcome",
-        "receipt_body_json",
+        "current_target_turn_id",
+        "current_attempt_id",
+        "current_expected_native_turn_id",
+        "current_receipt_outcome",
+        "delivery_history_json",
         "version",
     }.issubset(delivery_columns)
-    assert existing == ("hello", "pending")
+    assert existing is None
+    assert delivery[0:2] == ("queued", "hello")
+    assert json.loads(delivery[2])["content_text"] == "hello"
     assert version == (HEAD_REVISION,)
 
     command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
@@ -188,9 +190,106 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert "session_turns" not in tables
-    assert "session_deliveries" not in tables
-    assert existing == ("hello", "pending")
+    assert "message_deliveries" not in tables
+    assert existing == ("hello", "queued")
     assert version == ("20260729_0042",)
+
+
+def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collisions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260729_0042")
+    now = "2026-07-31T00:00:00Z"
+    tool_message_id = "msg_tool_collision"
+    silent_message_id = "msg_silent_existing"
+    tool_event_id = (
+        "evt_legacy_"
+        + hashlib.sha256(f"tool_call:{tool_message_id}".encode()).hexdigest()[:24]
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, is_private, supports_threads,
+                metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values ('scope_fsm_trace', 'avibe', 'project', 'trace', 0, 0,
+                '{}', ?, ?, ?)
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values ('ses_fsm_trace', 'scope_fsm_trace', 'codex', 'codex',
+                'codex', 'trace', '/tmp', '', 'active', 'foreground', 0,
+                'idle', '{}', ?, ?, ?)
+            """,
+            (now, now, now),
+        )
+        conn.executemany(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, content_text,
+                content_json, metadata_json, created_at, updated_at
+            ) values (?, 'scope_fsm_trace', 'ses_fsm_trace', 'avibe', 'agent',
+                ?, ?, '{}', '{}', ?, ?)
+            """,
+            (
+                (tool_message_id, "tool_call", "tool trace", now, now),
+                (silent_message_id, "silent", "silent trace", now, now),
+            ),
+        )
+        conn.executemany(
+            """
+            insert into agent_events (
+                id, scope_id, session_id, platform, event_type, visibility,
+                content_json, metadata_json, created_at, updated_at
+            ) values (?, 'scope_fsm_trace', 'ses_fsm_trace', 'avibe', ?,
+                'trace', '{}', ?, ?, ?)
+            """,
+            (
+                (tool_event_id, "unrelated", "{}", now, now),
+                (
+                    "evt_existing_silent",
+                    "legacy_silent_terminal",
+                    json.dumps({"legacy_message_id": silent_message_id}),
+                    now,
+                    now,
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        pseudo_count = conn.execute(
+            "select count(*) from messages where id in (?, ?)",
+            (tool_message_id, silent_message_id),
+        ).fetchone()[0]
+        tool_events = conn.execute(
+            "select id from agent_events where event_type = 'tool_call' "
+            "and json_extract(metadata_json, '$.legacy_message_id') = ?",
+            (tool_message_id,),
+        ).fetchall()
+        silent_events = conn.execute(
+            "select id from agent_events where event_type = 'legacy_silent_terminal' "
+            "and json_extract(metadata_json, '$.legacy_message_id') = ?",
+            (silent_message_id,),
+        ).fetchall()
+        collision = conn.execute(
+            "select event_type from agent_events where id = ?",
+            (tool_event_id,),
+        ).fetchone()
+    assert pseudo_count == 0
+    assert tool_events == [(f"{tool_event_id}_1",)]
+    assert silent_events == [("evt_existing_silent",)]
+    assert collision == ("unrelated",)
 
 
 def test_upgrade_keeps_historical_conflated_callback_rows_sent(
@@ -363,7 +462,12 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_messages_inbox_activity" in message_indexes
         assert "ix_messages_inbox_agent_reply" in message_indexes
         assert "ix_messages_inbox_user_send" in message_indexes
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "session_id is not null" in _index_sql(
+            conn, "ix_messages_inbox_activity"
+        )
+        assert "harness_dedupe" not in _index_sql(
+            conn, "ix_messages_inbox_activity"
+        )
         assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
         assert "uq_vault_secrets_name_folded" in vault_secret_indexes
         assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
@@ -546,8 +650,17 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 ")"
             ).fetchall()
         }
+        retryable_trace = conn.execute(
+            "select event_type, json_extract(metadata_json, '$.legacy_message_id') "
+            "from agent_events where json_extract(metadata_json, '$.legacy_message_id') "
+            "= 'msg_upgrade_retryable'"
+        ).fetchone()
+        chat_trace = conn.execute(
+            "select event_type, json_extract(metadata_json, '$.legacy_message_id') "
+            "from agent_events where json_extract(metadata_json, '$.legacy_message_id') "
+            "= 'msg_upgrade_chat'"
+        ).fetchone()
         for message_id, message_type, event_id in (
-            ("msg_pending_show", "pending", "show_evt_pending"),
             ("msg_accepted_show", "harness", "show_evt_accepted"),
         ):
             conn.execute(
@@ -563,10 +676,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 """,
                 (message_id, message_type, event_id, now, now),
             )
-        for event_id, message_id in (
-            ("show_evt_pending", "msg_pending_show"),
-            ("show_evt_accepted", "msg_accepted_show"),
-        ):
+        for event_id, message_id in (("show_evt_accepted", "msg_accepted_show"),):
             conn.execute(
                 """
                 insert into show_session_events (
@@ -591,13 +701,8 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         "show_annotation",
         "show_evt_upgrade_accepted",
     )
-    assert upgraded_messages["msg_upgrade_retryable"] == (
-        "harness",
-        "pending",
-        "harness",
-        "show_intent",
-        "show_evt_upgrade_retryable",
-    )
+    assert "msg_upgrade_retryable" not in upgraded_messages
+    assert retryable_trace == ("tool_call", "msg_upgrade_retryable")
     assert upgraded_messages["msg_upgrade_visible"] == (
         "harness",
         "harness",
@@ -612,13 +717,8 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         None,
         None,
     )
-    assert upgraded_messages["msg_upgrade_chat"] == (
-        "user",
-        "pending",
-        None,
-        None,
-        None,
-    )
+    assert "msg_upgrade_chat" not in upgraded_messages
+    assert chat_trace == ("tool_call", "msg_upgrade_chat")
 
     command.downgrade(migrations.alembic_config(db_path), "20260726_0036")
 
@@ -626,7 +726,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         downgraded = dict(
             conn.execute(
                 "select id, dispatch_state from show_session_events "
-                "where id in ('show_evt_legacy', 'show_evt_pending', 'show_evt_accepted')"
+                "where id in ('show_evt_legacy', 'show_evt_accepted')"
             ).fetchall()
         )
         downgraded_messages = {
@@ -634,26 +734,18 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
             for row in conn.execute(
                 "select id, author, type, source, author_name, author_id "
                 "from messages "
-                "where id in ('msg_pending_show', 'msg_accepted_show')"
+                "where id = 'msg_accepted_show'"
             ).fetchall()
         }
 
     assert json.loads(downgraded["show_evt_legacy"]) == {"state": "accepted"}
     assert json.loads(downgraded["show_evt_accepted"]) == {"state": "accepted"}
-    assert json.loads(downgraded["show_evt_pending"]) == {"state": "none"}
-    assert downgraded_messages["msg_pending_show"] == (
-        "user",
-        "pending",
-        None,
-        None,
-        None,
-    )
     assert downgraded_messages["msg_accepted_show"] == (
-        "user",
-        "user",
-        None,
-        None,
-        None,
+        "harness",
+        "harness",
+        "harness",
+        "show_annotation",
+        "show_evt_accepted",
     )
 
 
@@ -1185,7 +1277,12 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
     assert "ix_messages_inbox_agent_reply" in message_indexes
     assert "ix_messages_inbox_user_send" in message_indexes
     with sqlite3.connect(db_path) as conn:
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "session_id is not null" in _index_sql(
+            conn, "ix_messages_inbox_activity"
+        )
+        assert "harness_dedupe" not in _index_sql(
+            conn, "ix_messages_inbox_activity"
+        )
         assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
     assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
 
@@ -1617,7 +1714,8 @@ def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
-        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "session_id is not null" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "harness_dedupe" not in _index_sql(conn, "ix_messages_inbox_activity")
         assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
 
 
@@ -2134,13 +2232,10 @@ def test_run_migrations_deletes_historical_message_tool_calls(tmp_path: Path) ->
 
 def test_run_migrations_deletes_tool_calls_when_stamping_unversioned_head_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    engine = create_sqlite_engine(db_path)
-    try:
-        metadata.create_all(engine)
-    finally:
-        engine.dispose()
+    run_migrations(db_path, revision="20260729_0042")
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("drop table alembic_version")
         conn.execute(
             """
             insert into scopes (
@@ -2418,24 +2513,10 @@ def test_background_tables_ready_requires_messages_type(tmp_path: Path) -> None:
     must report NOT ready so SQLiteBackgroundTaskStore triggers the migration;
     otherwise messages_service.append would write a column that doesn't exist."""
     db_path = tmp_path / "vibe.sqlite"
-    engine = create_sqlite_engine(db_path)
-    try:
-        metadata.create_all(engine)
-    finally:
-        engine.dispose()
+    run_migrations(db_path, revision="20260530_0009")
 
     with sqlite3.connect(db_path) as conn:
-        conn.execute("drop index if exists ix_messages_session_type")
-        conn.execute("drop index if exists ix_messages_session_type_created_id")
-        conn.execute("drop index if exists ix_messages_unread_session")
-        conn.execute("drop index if exists ix_messages_inbox_activity")
-        conn.execute("drop index if exists ix_messages_inbox_agent_reply")
-        conn.execute("drop index if exists ix_messages_inbox_user_send")
-        conn.execute('alter table "messages" drop column "type"')
-        conn.execute("create table if not exists alembic_version (version_num varchar(32) not null)")
-        conn.execute("delete from alembic_version")
-        conn.execute("insert into alembic_version values ('20260530_0009')")
-        conn.commit()
+        assert "type" not in {row[1] for row in conn.execute("pragma table_info(messages)")}
 
     assert background_tables_ready(db_path) is False
 

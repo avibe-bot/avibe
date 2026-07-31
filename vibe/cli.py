@@ -5404,7 +5404,7 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
 
 def cmd_session_queue_list(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
     try:
@@ -5425,7 +5425,7 @@ def cmd_session_queue_list(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            result = messages_service.list_queued_page(
+            result = message_deliveries.list_queued_page(
                 conn,
                 session_id,
                 page_request=page_request,
@@ -5464,7 +5464,7 @@ def cmd_session_queue_list(args):
 
 def cmd_session_queue_remove(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
     from storage.background import run_update_event_transaction
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
@@ -5472,6 +5472,9 @@ def cmd_session_queue_remove(args):
     try:
         engine = _open_session_engine()
         with run_update_event_transaction(engine) as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
             sessions_service.get_active_session(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
@@ -5483,7 +5486,7 @@ def cmd_session_queue_remove(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            removed = messages_service.remove_queued(
+            removed = message_deliveries.retire_queued_with_run(
                 conn,
                 session_id,
                 message_id,
@@ -11391,8 +11394,6 @@ def _resolve_show_event_after_ambiguous_live_timeout(
 ) -> dict | None:
     """Wait for acceptance, then let the caller replay the same reservation."""
     from core.show_session_events import ShowSessionEventStore
-    from storage import messages_service
-
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -11403,11 +11404,8 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             event = store.get_event(session_id, event_id)
             if event is None:
                 return None
-            message = event.get("message")
-            if (
-                isinstance(message, dict)
-                and message.get("type") != messages_service.PENDING_TYPE
-            ):
+            delivery = event.get("delivery")
+            if isinstance(delivery, dict) and delivery.get("state") != "reserved":
                 return event
             if time.monotonic() >= deadline:
                 return None

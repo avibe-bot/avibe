@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,9 +21,8 @@ from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 from vibe.message_types import spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
-# ``silent`` is the invisible completion marker (messages_service.SILENT_TYPE): a turn
-# that finished with no user-visible reply is still TERMINAL, so a fork created after
-# it must not trim/roll back the completed turn as if it were still running.
+# Turn settlement is read from ``session_turns`` below, so a reply-less completion
+# cannot be mistaken for a still-running input.
 TERMINAL_AGENT_OUTPUT_TYPES = {
     message_type
     for message_type in types_with("activityRole")
@@ -601,16 +601,12 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import select
 
-    from storage.models import messages
+    from storage.models import messages, session_turns
 
     row = conn.execute(
-        select(messages.c.id, messages.c.author, messages.c.type)
+        select(messages.c.id, messages.c.author, messages.c.type, messages.c.created_at)
         .where(
             messages.c.session_id == source_session_id,
-            # Include the invisible ``silent`` completion marker so a turn that
-            # finished silently is the anchor (a terminal, NOT a running input),
-            # otherwise the anchor falls back to the input row and the fork treats
-            # the completed turn as still running and trims/rolls it back.
             messages.c.type.in_(_FORK_ANCHOR_TYPES),
         )
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
@@ -618,6 +614,34 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
     ).mappings().first()
     if row is None:
         return SourceMessageAnchor()
+    latest_turn = conn.execute(
+        select(
+            session_turns.c.state,
+            session_turns.c.terminal_outcome,
+            session_turns.c.terminal_at,
+        )
+        .where(session_turns.c.session_id == source_session_id)
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    terminal_after_message = False
+    if latest_turn is not None and latest_turn["state"] == "terminal":
+        try:
+            message_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+            terminal_at = datetime.fromisoformat(
+                str(latest_turn["terminal_at"]).replace("Z", "+00:00")
+            )
+            terminal_after_message = terminal_at >= message_at
+        except (TypeError, ValueError):
+            terminal_after_message = False
+    if terminal_after_message:
+        return SourceMessageAnchor(
+            message_id=str(row["id"]) if row["id"] else None,
+            author="agent",
+            message_type=(
+                "error" if latest_turn["terminal_outcome"] == "failed" else "result"
+            ),
+        )
     return SourceMessageAnchor(
         message_id=str(row["id"]) if row["id"] else None,
         author=str(row["author"] or "").strip() or None,

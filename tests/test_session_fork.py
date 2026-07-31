@@ -23,7 +23,7 @@ from core.vibe_agents import VibeAgentStore
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
-from storage import messages_service
+from storage import message_deliveries, messages_service
 from storage.models import agent_runs, agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
@@ -76,6 +76,48 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
             )
     finally:
         engine.dispose()
+
+
+def _seed_started_delivery(conn, *, scope_id: str, session_id: str, text: str) -> str:
+    delivery_id = message_deliveries.new_delivery_id()
+    turn_id = message_deliveries.new_turn_id()
+    attempt_id = message_deliveries.new_attempt_id()
+    message_deliveries.insert_delivery(
+        conn,
+        delivery_id=delivery_id,
+        session_id=session_id,
+        priority="p3",
+        state="start_attempting",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type="user",
+            text=text,
+        ),
+        dispatch_text=text,
+        current_attempt_id=attempt_id,
+        current_attempt_kind="start",
+        current_target_turn_id=turn_id,
+    )
+    message_deliveries.insert_turn(
+        conn,
+        turn_id=turn_id,
+        session_id=session_id,
+        initial_delivery_id=delivery_id,
+        state="starting",
+        backend="codex",
+    )
+    assert message_deliveries.materialize_acceptance(
+        conn,
+        delivery_id=delivery_id,
+        expected_attempt_id=attempt_id,
+        accepted_turn_id=turn_id,
+        evidence={"kind": "test_native_acceptance"},
+    ) is not None
+    return turn_id
 
 
 def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path) -> None:
@@ -1240,16 +1282,22 @@ def test_fork_source_state_ignores_operational_rows_after_anchor(
                 message_type="user",
                 text="do the long task",
             )
-            for message_type in ("queued", "pending", "draft", "notify"):
-                messages_service.append(
-                    conn,
-                    scope_id=row["scope_id"],
-                    session_id=source_id,
-                    platform="avibe",
-                    author="agent",
-                    message_type=message_type,
-                    text=message_type,
-                )
+            message_deliveries.enqueue_queued(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                text="queued",
+            )
+            message_deliveries.set_draft(conn, source_id, "draft")
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="notify",
+            )
 
         state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
 
@@ -1422,9 +1470,7 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
 
 
 def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: Path) -> None:
-    """A codex/opencode source whose latest turn completed SILENTLY (the invisible
-    ``silent`` marker follows its input + activity) is TERMINAL — the fork must not
-    trim/roll back the completed turn as if it were still running."""
+    """A reply-less durable terminal snapshot prevents running-Turn trimming."""
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)  # agent_backend='codex'
     engine = create_sqlite_engine(db_path)
@@ -1433,17 +1479,22 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).mappings().one()["scope_id"]
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="user", message_type="user", text="do the thing",
+            turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="do the thing",
             )
             messages_service.append(
                 conn, scope_id=scope_id, session_id=source_id, platform="avibe",
                 author="agent", message_type="assistant", text="working",
             )
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="agent", message_type=messages_service.SILENT_TYPE, text="",
+            message_deliveries.terminalize_turn(
+                conn,
+                turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="test_replyless_completion",
             )
     finally:
         engine.dispose()

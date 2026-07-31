@@ -989,10 +989,8 @@ def test_avibe_inbound_is_noop(isolated_state):
     assert rows == []
 
 
-def test_silent_completion_marker_persisted_but_invisible(isolated_state):
-    """``persist_silent_completion_marker`` writes an agent-authored ``silent`` row
-    (empty text, content.kind='silent') that is EXCLUDED from the transcript allowlist
-    and from the inbox conversation clock, so the last visible message is unchanged."""
+def test_silent_completion_refreshes_without_pseudo_message(isolated_state):
+    """Reply-less completion refreshes Inbox without writing transcript state."""
     engine = create_sqlite_engine()
     now = "2026-05-30T12:00:00Z"
     with engine.begin() as conn:
@@ -1025,18 +1023,8 @@ def test_silent_completion_marker_persisted_but_invisible(isolated_state):
             conn, session_id="ses_sil", limit=50, tail=True, types=messages_service.TRANSCRIPT_TYPES
         )["messages"]
 
-    silent_rows = [r for r in rows if r["type"] == "silent"]
-    assert len(silent_rows) == 1  # persisted
-    assert silent_rows[0]["author"] == "agent"
-    assert (silent_rows[0]["content_text"] or "") == ""
-    assert json.loads(silent_rows[0]["content_json"]).get("kind") == "silent"
-
-    # Invisible: excluded from the transcript allowlist; last visible row unchanged.
-    assert "silent" not in [m["type"] for m in transcript]
+    assert [row["id"] for row in rows] == ["m_vis"]
     assert transcript[-1]["type"] == "result" and transcript[-1]["text"] == "the visible answer"
-    # And kept out of the inbox conversation clock (never bumps last-activity/author).
-    assert messages_service.SILENT_TYPE in messages_service.NON_CONVERSATION_TYPES
-    assert messages_service.SILENT_TYPE not in messages_service.TRANSCRIPT_TYPES
 
 
 def test_silent_completion_marker_publishes_inbox_update_not_message(isolated_state):

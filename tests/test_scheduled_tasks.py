@@ -47,6 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from modules.im import MessageContext
+from storage import message_deliveries
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import (
@@ -1814,14 +1815,13 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             text="persisted successor",
             metadata={
                 SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
@@ -1878,7 +1878,7 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
         assert await controller.session_turns.recover_persisted_agent_run_queue() == []
         assert started == []
         with engine.connect() as conn:
-            assert len(messages_service.list_queued(conn, session_id)) == 1
+            assert len(message_deliveries.list_queued(conn, session_id)) == 1
 
         request_store.complete(older, ok=True)
         assert await controller.session_turns.recover_persisted_agent_run_queue(
@@ -1892,7 +1892,7 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
         assert started == [successor.id]
         assert request_store.get_run(successor.id)["status"] == "succeeded"
         with engine.connect() as conn:
-            assert messages_service.list_queued(conn, session_id) == []
+            assert message_deliveries.list_queued(conn, session_id) == []
 
         assert await controller.session_turns.recover_persisted_agent_run_queue(
             session_id
@@ -1916,7 +1916,7 @@ def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> No
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
@@ -1936,7 +1936,7 @@ def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> No
 
     assert asyncio.run(manager.recover_persisted_agent_run_queue()) == []
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
             "kept after explicit stop"
         ]
     engine.dispose()
@@ -1981,20 +1981,19 @@ def test_restart_does_not_flush_user_queue_ahead_of_held_agent_run(
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
             text="kept after explicit stop",
         )
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             text="held successor",
             metadata={
                 SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
@@ -2021,7 +2020,7 @@ def test_restart_does_not_flush_user_queue_ahead_of_held_agent_run(
     with engine.connect() as conn:
         assert [
             row["text"]
-            for row in messages_service.list_queued(conn, session_id)
+            for row in message_deliveries.list_queued(conn, session_id)
         ] == ["kept after explicit stop", "held successor"]
     engine.dispose()
 
@@ -3740,25 +3739,24 @@ def test_sweep_retires_the_queue_segment_of_the_run_it_expired(
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             text="held behind a gate that never reopened",
             native_message_id=f"agent_run:{held}",
         )
-        assert len(messages_service.list_queued(conn, session_id)) == 1
+        assert len(message_deliveries.list_queued(conn, session_id)) == 1
     service = _sweep_service(tmp_path, request_store)
 
     service._sweep_stale_runs()
 
     assert request_store.get_run(held)["metadata"]["interrupt_reason"] == "queue_hold_expired"
     with create_sqlite_engine().connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
 def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monkeypatch) -> None:
@@ -4113,8 +4111,7 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
     request_store.recover_processing()
 
-    from storage import messages_service
-    from storage.models import agent_sessions, messages
+    from storage.models import agent_sessions
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -4124,14 +4121,13 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
         assert session is not None
         scope_id = session["scope_id"]
         for run_id in run_ids:
-            messages_service.append(
+            message_deliveries.enqueue_queued(
                 conn,
                 scope_id=scope_id,
                 session_id=session_id,
-                platform="avibe",
                 author="harness",
                 source="harness",
-                message_type=messages_service.QUEUED_TYPE,
+                message_type="harness",
                 text=f"stale queued row for {run_id}",
                 native_message_id=f"agent_run:{run_id}",
             )
@@ -4139,13 +4135,6 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     submitted: list[str] = []
 
     async def _submit_scheduled(_sid, ctx, text):
-        with engine.connect() as conn:
-            if messages_service.native_message_exists(
-                conn,
-                platform="avibe",
-                native_message_id=ctx.message_id,
-            ):
-                return "duplicate"
         submitted.append(text)
         return "ran"
 
@@ -4172,13 +4161,15 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     assert "coalesced prompt 1" in submitted[0]
     assert "coalesced prompt 2" in submitted[0]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-        dedupe_rows = conn.execute(
-            select(messages.c.native_message_id, messages.c.type)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
-        ).all()
-    assert {row.native_message_id for row in dedupe_rows} == {f"agent_run:{run_ids[1]}"}
+        assert message_deliveries.list_queued(conn, session_id) == []
+        retained = [
+            message_deliveries.get_delivery_by_dedupe(
+                conn,
+                f"avibe:agent_run:{run_id}",
+            )
+            for run_id in run_ids
+        ]
+    assert all(row is not None and row["state"] == "retired" for row in retained)
     stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
     assert stored[run_ids[0]]["status"] == "running"
     assert stored[run_ids[1]]["status"] == "queued"
@@ -4659,30 +4650,22 @@ def test_silent_terminal_skips_callback_and_keeps_directed_run(
                 agent_events.c.content_text,
             ).where(agent_events.c.session_id == target_session_id)
         ).mappings().all()
-    assert [row["author"] for row in target_messages] == [
-        "harness",
-        "agent",
-        "agent",
-    ]
+    assert [row["author"] for row in target_messages] == ["harness", "agent"]
     assert [row["type"] for row in target_messages] == [
         "harness",
         "assistant",
-        "silent",
     ]
     assert [row["source"] for row in target_messages] == [
         "harness",
-        "agent",
         "agent",
     ]
     assert [row["native_message_id"] for row in target_messages] == [
         f"agent_run:{request.id}",
         preamble_output.native_message_id(context),
-        None,
     ]
     assert [row["content_text"] for row in target_messages] == [
         "escalation prompt",
         "裁决如下：",
-        "",
     ]
     assert all(row["author"] != "user" and row["type"] != "user" for row in target_messages)
     assert tool_events == [

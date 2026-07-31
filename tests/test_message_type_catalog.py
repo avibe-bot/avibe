@@ -102,7 +102,7 @@ def test_searchable_types_match_current_default_query() -> None:
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    expected = ("queued", "draft", "pending", "harness_dedupe", "silent")
+    expected = ()
     assert types_without("inboxActivity") == expected
     assert messages_service.NON_CONVERSATION_TYPES == expected
 
@@ -113,7 +113,7 @@ def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     current_query_sets = _message_type_sequences(connection.statements[-1])
 
     expected_preview = ("result", "notify", "error")
-    expected_settlement = ("result", "notify", "error", "silent")
+    expected_settlement = ("result", "notify", "error")
     expected_unread = ("result",)
     assert types_with("inboxPreview") == expected_preview
     assert types_with("inboxSettlesReply") == expected_settlement
@@ -180,7 +180,6 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         "result",
         "notify",
         "error",
-        "silent",
         "assistant",
     )
     assert derived_relevant == set(expected_relevant)

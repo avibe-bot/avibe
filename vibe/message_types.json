@@ -75,27 +75,6 @@
     "assistant": {
       "activityRole": "activity",
       "render": "activity"
-    },
-    "tool_call": {
-      "render": "activity"
-    },
-    "queued": {
-      "inboxActivity": false,
-      "acceptedReservation": true
-    },
-    "draft": {
-      "inboxActivity": false
-    },
-    "pending": {
-      "inboxActivity": false
-    },
-    "harness_dedupe": {
-      "inboxActivity": false
-    },
-    "silent": {
-      "inboxActivity": false,
-      "inboxSettlesReply": true,
-      "activityRole": "terminal"
     }
   }
 }

@@ -2913,10 +2913,10 @@ class SQLiteBackgroundTaskStore:
                     and isinstance(metadata, dict)
                     and metadata.get("workbench_queue_holds_run") is True
                 ):
-                    from storage import messages_service
+                    from storage import message_deliveries
 
                     session_id = str(row["session_id"] or "").strip()
-                    if messages_service.delete_queued_agent_run(
+                    if message_deliveries.retire_queued_agent_run(
                         conn,
                         session_id=session_id,
                         run_id=run_id,

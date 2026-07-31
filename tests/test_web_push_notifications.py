@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core import web_push_notifications
-from storage import messages_service, web_push_service
+from storage import message_deliveries, messages_service, web_push_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions
@@ -642,16 +642,22 @@ def test_send_to_enabled_subscriptions_ignores_queued_owner(monkeypatch, tmp_pat
                 last_active_at=now,
             )
         )
-        messages_service.append(
+        message_deliveries.insert_delivery(
             conn,
-            scope_id=scope_id,
+            delivery_id="msg_queued_owner",
             session_id="ses_queued_owner",
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.QUEUED_TYPE,
-            metadata={"_web_push_user_key": "remote:user-b"},
-            text="queued while prior turn runs",
+            priority="p3",
+            state="queued",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_queued_owner",
+                platform="avibe",
+                author="user",
+                source="user",
+                metadata={"_web_push_user_key": "remote:user-b"},
+                text="queued while prior turn runs",
+            ),
+            dispatch_text="queued while prior turn runs",
         )
         message = messages_service.append(
             conn,

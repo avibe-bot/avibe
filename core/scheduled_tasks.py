@@ -52,6 +52,7 @@ from modules.im import MessageContext
 from storage.agent_session_rows import (
     INBOX_SESSION_VISIBILITIES,
     WORKSPACE_NOTICE_SESSION_ID,
+    reserve_write_lock,
     session_is_runtime_owned,
 )
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
@@ -985,44 +986,23 @@ def _retire_stale_agent_run_queue_rows(
     if not session_id or not normalized_ids:
         return 0
 
-    from storage import messages_service
-    from storage.models import messages
+    from storage import message_deliveries
 
     native_ids = [f"agent_run:{execution_id}" for execution_id in normalized_ids]
-    primary_native_id = native_ids[0]
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        rows = list(
-            conn.execute(
-                select(messages.c.id, messages.c.native_message_id)
-                .where(messages.c.session_id == session_id)
-                .where(messages.c.platform == "avibe")
-                .where(messages.c.type == messages_service.QUEUED_TYPE)
-                .where(messages.c.native_message_id.in_(native_ids))
+        reserve_write_lock(conn)
+        rows = [
+            row
+            for row in message_deliveries.list_queued(conn, session_id)
+            if str(row.get("native_message_id") or "") in native_ids
+        ]
+        retired = 0
+        for row in rows:
+            retired += int(
+                message_deliveries.retire_queued(conn, session_id, str(row["id"]))
             )
-        )
-        primary_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") == primary_native_id]
-        marker_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") != primary_native_id]
-        if marker_row_ids:
-            conn.execute(
-                messages.update()
-                .where(messages.c.id.in_(marker_row_ids))
-                .values(
-                    author="harness",
-                    source="harness",
-                    type=messages_service.HARNESS_DEDUPE_TYPE,
-                    content_text="",
-                    content_json=json.dumps({"text": ""}),
-                    metadata_json=json.dumps({"coalesced_from": primary_native_id, "recovered_queue_row": True}),
-                    updated_at=_utc_now_iso(),
-                )
-            )
-        row_ids = primary_row_ids + marker_row_ids
-        if not row_ids:
-            return 0
-        if primary_row_ids:
-            messages_service.delete_queued(conn, primary_row_ids)
-        return len(row_ids)
+        return retired
 
 
 class ScheduledTaskStore:
