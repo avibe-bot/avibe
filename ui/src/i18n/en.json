@@ -741,11 +741,6 @@
         "runtime": "Model service is not ready",
         "runtimeAction": "Resolve"
       },
-      "emptySelection": {
-        "title": "No model selected",
-        "body": "This agent has no current model and needs one before its next run.",
-        "action": "Choose model"
-      },
       "routes": {
         "title": "Supply method",
         "global": "Follow {{backend}}'s source order",

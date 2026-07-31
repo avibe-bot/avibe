@@ -741,11 +741,6 @@
         "runtime": "模型服务未就绪",
         "runtimeAction": "去处理"
       },
-      "emptySelection": {
-        "title": "尚未选择型号",
-        "body": "这个 Agent 现在没有当前型号，下一次运行前需要选择。",
-        "action": "选择型号"
-      },
       "routes": {
         "title": "供给方式",
         "global": "跟随 {{backend}} 来源顺序",
