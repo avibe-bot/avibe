@@ -16,6 +16,10 @@ export type ModelChainRequest = {
 export const modelChainKey = (backend: AgentBackend, modelId: string): string =>
   `${backend}\u0000${modelId}`;
 
+/** Lazy-start idleness is runnable-on-demand; only actual failures block Hub rows. */
+export const runtimeHealthNeedsAttention = (health: RuntimeDependency['status']['health']): boolean =>
+  health !== 'ok' && health !== 'not_started';
+
 /** Manual inventory is a credential-backed capability; subscriptions are read-only. */
 export function manualModelSources(sources: Source[]): Source[] {
   return sources.filter((source) => source.kind === 'api_key');
@@ -104,7 +108,7 @@ export function modelNeedsAttention(
   if (read?.kind === 'error') return true;
   if (read?.kind === 'ready') {
     const head = read.chain.chain.find((link) => link.runnable);
-    if (head?.channel === 'hub' && runtime && runtime.status.health !== 'ok') return true;
+    if (head?.channel === 'hub' && runtime && runtimeHealthNeedsAttention(runtime.status.health)) return true;
     return read.chain.supply_state !== 'ok';
   }
   return agent.model_supply?.find((model) => model.model_id === modelId)?.chain_length === 0;

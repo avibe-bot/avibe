@@ -55,6 +55,7 @@ const read = (over: Partial<Extract<ModelChainRead, { kind: 'ready' }>['chain']>
 });
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
+  contract_version: 4,
   manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a', assets: [] },
   status: { health, verified: health === 'ok' },
 });
@@ -170,6 +171,7 @@ describe('model row projection', () => {
 
   it('attributes runtime failure only to a model whose current head uses the managed channel', () => {
     expect(modelNeedsAttention(agent(), 'builtin-model', read(), runtime('down'))).toBe(true);
+    expect(modelNeedsAttention(agent(), 'builtin-model', read(), runtime('not_started'))).toBe(false);
     const native = read({ chain: [{
       source_id: 'src_native',
       channel: 'native_cli',

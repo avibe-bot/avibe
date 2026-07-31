@@ -7,6 +7,7 @@ capability:
     - tests/test_model_hub_config.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
+    - tests/test_model_hub_runtime.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
 status_legend:
@@ -14,6 +15,12 @@ status_legend:
   partial: unit or contract coverage exists but the cross-lane loop is incomplete
   gap: owned by a later lane or integration pass
 scenarios:
+  - id: MH-RUNTIME-001
+    name: Service restart reports an installed engine as idle until first demand
+    status: partial
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

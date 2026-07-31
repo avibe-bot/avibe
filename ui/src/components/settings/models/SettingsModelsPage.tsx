@@ -1,7 +1,7 @@
 // Model-centric settings surface. The page reads model chains from the server,
 // hosts shared source repair journeys, and serializes Agent writes by backend.
 import * as React from 'react';
-import { CheckCircle2, ListFilter, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, ListFilter, LoaderCircle, Play, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -32,7 +32,7 @@ import {
 } from './eventFeed';
 import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
-import { modelsApi } from './modelsApi';
+import { modelsApi, type ModelsApi } from './modelsApi';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import {
   manualModelSources,
@@ -66,6 +66,108 @@ const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick
     </Button>
   );
 };
+
+export const RuntimeNotStartedAction: React.FC<{
+  starting: boolean;
+  showIdleCopy?: boolean;
+  onStart: () => void;
+}> = ({
+  starting,
+  showIdleCopy = true,
+  onStart,
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 text-[13px] text-muted sm:max-w-none">
+      {showIdleCopy && <span>{t('settings.models.runtime.notStarted')}</span>}
+      <Button variant="secondary" size="xs" onClick={onStart} disabled={starting}>
+        {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
+        {t(starting ? 'settings.models.runtime.starting' : 'settings.models.runtime.startNow')}
+      </Button>
+    </div>
+  );
+};
+
+export const ModelsPageActions: React.FC<{
+  runtimeHealth: RuntimeDependency['status']['health'] | null;
+  runtimeRecoveryPending?: boolean;
+  startingRuntime: boolean;
+  issueCount: number;
+  issuesOnly: boolean;
+  onStartRuntime: () => void;
+  onFocusIssues: () => void;
+}> = ({
+  runtimeHealth,
+  runtimeRecoveryPending = false,
+  startingRuntime,
+  issueCount,
+  issuesOnly,
+  onStartRuntime,
+  onFocusIssues,
+}) => {
+  const runtimeNotStarted = runtimeHealth === 'not_started';
+  const runtimeStartable = runtimeRecoveryPending
+    || runtimeNotStarted
+    || runtimeHealth === 'not_installed'
+    || runtimeHealth === 'down'
+    || runtimeHealth === 'degraded';
+  if (!runtimeStartable) {
+    return <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />;
+  }
+  return (
+    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 sm:max-w-none">
+      {issueCount > 0 && (
+        <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />
+      )}
+      <RuntimeNotStartedAction
+        starting={startingRuntime}
+        showIdleCopy={runtimeNotStarted}
+        onStart={onStartRuntime}
+      />
+    </div>
+  );
+};
+
+export async function startRuntimeWithStatusRefresh(
+  api: Pick<ModelsApi, 'startRuntime' | 'getRuntimeStatus'>,
+): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
+  try {
+    const runtime = await api.startRuntime();
+    return { runtime, failed: runtime.status.health !== 'ok' };
+  } catch {
+    // A failed start changes supervisor health. Read that authoritative state
+    // back so the persistent page does not keep presenting lazy-start idleness.
+    const runtime = await api.getRuntimeStatus().catch(() => null);
+    return { runtime, failed: runtime?.status.health !== 'ok' };
+  }
+}
+
+export function pollRuntimeStatus(
+  api: Pick<ModelsApi, 'getRuntimeStatus'>,
+  onRuntime: (runtime: RuntimeDependency) => void,
+  intervalMs = 5_000,
+): () => void {
+  let active = true;
+  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const schedule = () => {
+    timeout = globalThis.setTimeout(() => void refresh(), intervalMs);
+  };
+  const refresh = async () => {
+    try {
+      const runtime = await api.getRuntimeStatus();
+      if (active) onRuntime(runtime);
+    } catch {
+      // Keep the last authoritative snapshot and try again on the next tick.
+    } finally {
+      if (active) schedule();
+    }
+  };
+  schedule();
+  return () => {
+    active = false;
+    if (timeout !== undefined) globalThis.clearTimeout(timeout);
+  };
+}
 
 const CHAIN_READ_CONCURRENCY = 6;
 
@@ -117,6 +219,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
+  const [startingRuntime, setStartingRuntime] = React.useState(false);
+  const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
@@ -168,6 +272,21 @@ export const SettingsModelsPage: React.FC = () => {
       aliveRef.current = false;
     };
   }, []);
+
+  const runtimeHealth = runtime?.status.health ?? null;
+  React.useEffect(() => {
+    const runtimeCanRecover = runtimeRecoveryPending
+      || runtimeHealth === 'not_started'
+      || runtimeHealth === 'not_installed'
+      || runtimeHealth === 'down'
+      || runtimeHealth === 'degraded';
+    if (!runtimeCanRecover || startingRuntime) return undefined;
+    return pollRuntimeStatus(modelsApi, (nextRuntime) => {
+      if (!aliveRef.current) return;
+      setRuntime(nextRuntime);
+      setRuntimeRecoveryPending(false);
+    });
+  }, [runtimeHealth, runtimeRecoveryPending, startingRuntime]);
 
   // 最近切换 is re-read here with the rows, because the writes this refresh exists
   // for are the writes that FILE events: a failing 试跑 cools its head down through
@@ -411,6 +530,20 @@ export const SettingsModelsPage: React.FC = () => {
     requestAnimationFrame(() => agentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   };
 
+  const startRuntime = async () => {
+    setStartingRuntime(true);
+    setRuntimeRecoveryPending(false);
+    try {
+      const result = await startRuntimeWithStatusRefresh(modelsApi);
+      if (!aliveRef.current) return;
+      setRuntime(result.runtime);
+      setRuntimeRecoveryPending(result.runtime === null);
+      if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
+    } finally {
+      if (aliveRef.current) setStartingRuntime(false);
+    }
+  };
+
   return (
     <SettingsPageShell
       activeTab="models"
@@ -418,7 +551,15 @@ export const SettingsModelsPage: React.FC = () => {
       subtitle={t('settings.models.subtitle')}
       actions={
         !loading && !loadError ? (
-          <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={focusIssues} />
+          <ModelsPageActions
+            runtimeHealth={runtimeHealth}
+            runtimeRecoveryPending={runtimeRecoveryPending}
+            startingRuntime={startingRuntime}
+            issueCount={issueCount}
+            issuesOnly={issuesOnly}
+            onStartRuntime={() => void startRuntime()}
+            onFocusIssues={focusIssues}
+          />
         ) : undefined
       }
     >

@@ -31,7 +31,7 @@ from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.client import EngineClient, EngineClientError
+from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
@@ -430,6 +430,34 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     ).ensure()
     assert rejected["ok"] is False
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
+
+
+def test_engine_status_rehashes_binary_only_after_file_identity_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    installed = manager.ensure()
+    binary_path = Path(installed["path"])
+    original_file_sha256 = managed_runtime.file_sha256
+    hashed_paths: list[Path] = []
+
+    def tracked_file_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(managed_runtime, "file_sha256", tracked_file_sha256)
+
+    assert manager.status()["installed"] is True
+    assert manager.status()["installed"] is True
+    assert hashed_paths == [binary_path]
+
+    binary_path.write_bytes(binary_path.read_bytes() + b"\n# tampered\n")
+
+    assert manager.status()["installed"] is False
+    assert hashed_paths == [binary_path, binary_path]
 
 
 def test_engine_version_check_uses_minimal_environment(
@@ -941,6 +969,60 @@ def _fixture_supervisor(
     )
 
 
+@pytest.mark.parametrize(
+    ("installed", "start_attempted", "running", "healthy", "expected"),
+    [
+        (False, False, False, False, "not_installed"),
+        (False, True, False, False, "down"),
+        (True, False, False, False, "not_started"),
+        (True, True, False, False, "down"),
+        (True, True, True, False, "degraded"),
+        (True, True, True, True, "ok"),
+    ],
+)
+def test_supervisor_status_distinguishes_all_runtime_health_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+    start_attempted: bool,
+    running: bool,
+    healthy: bool,
+    expected: str,
+) -> None:
+    installer = SimpleNamespace(
+        status=lambda: {"installed": installed, "version": "v7.2.95" if installed else None},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "v7.2.95", "assets": []},
+    )
+    supervisor = EngineSupervisor(
+        installer=installer,
+        state_store=EngineStateStore(tmp_path / expected),
+    )
+    supervisor._start_attempted = start_attempted
+    if running:
+        supervisor._process = SimpleNamespace(poll=lambda: None)
+        supervisor._connection = EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+    monkeypatch.setattr(supervisor, "_healthy_locked", lambda: healthy)
+
+    assert supervisor.status()["status"]["health"] == expected
+
+
+def test_supervisor_failed_first_install_reports_down(tmp_path: Path) -> None:
+    installer = SimpleNamespace(
+        ensure=lambda: {"ok": False, "reason": "fixture_install_failed"},
+        status=lambda: {"installed": False, "version": None},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "v7.2.95", "assets": []},
+    )
+    supervisor = EngineSupervisor(
+        installer=installer,
+        state_store=EngineStateStore(tmp_path / "failed-install"),
+    )
+
+    with pytest.raises(EngineUnavailableError, match="models.engine.install_failed"):
+        supervisor.ensure_running()
+
+    assert supervisor.status()["status"]["health"] == "down"
+
+
 def test_supervisor_starts_checks_health_and_stops_mock_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -959,6 +1041,7 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
 
+    assert supervisor.status()["status"]["health"] == "not_started"
     first = supervisor.ensure_running()
     assert first.base_url.startswith("http://127.0.0.1:")
     assert "MANAGEMENT_PASSWORD" not in captured_env
@@ -978,6 +1061,27 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert second.gateway_token == first.gateway_token
     assert second.management_key == first.management_key
     supervisor.stop()
+
+
+def test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started(
+    tmp_path: Path,
+) -> None:
+    """MH-RUNTIME-001: a service restart restores lazy-start idleness, never down."""
+
+    before_restart, store = _fixture_supervisor(tmp_path)
+    before_restart.ensure_running()
+    observed_health = [before_restart.status()["status"]["health"]]
+    before_restart.stop()
+
+    after_restart = EngineSupervisor(
+        installer=before_restart.installer,
+        state_store=store,
+        startup_timeout=5,
+    )
+    observed_health.append(after_restart.status()["status"]["health"])
+
+    assert observed_health == ["ok", "not_started"]
+    assert "down" not in observed_health
 
 
 def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> None:

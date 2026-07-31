@@ -138,6 +138,7 @@ export type ModelsApi = {
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
+  startRuntime(): Promise<RuntimeDependency>;
   /** `experimentalConsent` MUST be true for a consent-gated hub-held
    *  subscription connect, or the server returns consent_required. */
   startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
@@ -393,6 +394,7 @@ const liveApi: ModelsApi = {
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
     ).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
+  startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startOAuth: (vendor, channel, experimentalConsent) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',
@@ -985,6 +987,12 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
+  startRuntime() {
+    this.runtime.status.health = 'ok';
+    this.runtime.status.listening = { host: '127.0.0.1', port: 15220 };
+    return delay(structuredClone(this.runtime));
+  }
+
   startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean) {
     // Mirror the server: a hub-held subscription connect requires recorded consent.
     if (channel === 'hub' && !experimentalConsent) throw new ApiCallError('consent_required');
@@ -1225,6 +1233,7 @@ const mockApi: ModelsApi = {
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit, before) => mockStore.listEvents(limit, before),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
+  startRuntime: () => mockStore.startRuntime(),
   startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),

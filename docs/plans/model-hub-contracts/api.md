@@ -42,7 +42,8 @@ responses without changing the envelope version.
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources}` | Imported sources auto-join eligible follow orders; custom orders stay frozen. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime` | → `RuntimeDependency` status | Managed engine status. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v4; `not_started` is installed lazy-start idleness, not an alarm. |
+| POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 
 The removed global route `PUT /api/models/priority` has no v3 replacement.
 Ordering is backend-owned through the sources routes.

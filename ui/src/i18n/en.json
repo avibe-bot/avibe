@@ -689,7 +689,13 @@
         "direct": "Direct"
       },
       "errors": {
-        "engineDown": "Model engine is not ready yet; try again shortly"
+        "engineDown": "Model engine is not ready yet; try again shortly",
+        "startFailed": "Model engine could not be started"
+      },
+      "runtime": {
+        "notStarted": "Not started · starts automatically on first use",
+        "startNow": "Start now",
+        "starting": "Starting"
       },
       "experimental": "Experimental",
       "agents": {

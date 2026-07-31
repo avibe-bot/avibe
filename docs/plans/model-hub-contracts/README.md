@@ -126,6 +126,14 @@ order after any mutation; clients never compute partial reorders.
   discriminator into both producers, and audits every remaining contract file.
   It is evidence-pinned, delivered into the implementing lane rather than by
   chat, and remains owner-vetoable.
+- **Targeted v4 process instance trail — entry 5 (engine health honesty).** The
+  2026-07-31 restart incident proved that `runtime-dependency.status.health`
+  collapsed an installed runtime that had never been demanded into `down`. The
+  orchestrator authorized this owner-vetoable amendment: the nested runtime
+  object now carries `contract_version: 4`, adds `not_started`, and exposes a
+  CSRF-guarded explicit start route without making the status read mutate state.
+  Existing v3 clients with exhaustive health switches fall through their
+  unknown-value/default branch until upgraded; no boot-time eager start is added.
 - Contract tests (implementation plan §5) validate both directions against
   these schemas.
 
