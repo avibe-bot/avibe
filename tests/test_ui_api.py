@@ -2800,7 +2800,7 @@ def test_vibe_agent_api_delete_archives_and_hides_agent(tmp_path, monkeypatch):
 
     assert removed["ok"] is True
     assert removed["removed_agent"] == "reviewer"
-    assert removed["archived_agent"]["name"].startswith("_archived_")
+    assert removed["archived_agent"]["name"].startswith("_reviewer-")
     assert removed["archived_agent"]["display_name"] == "reviewer"
     assert removed["archived_agent"]["archived"] is True
     assert "reviewer" not in [agent["name"] for agent in api.get_vibe_agents(include_disabled=True)["agents"]]

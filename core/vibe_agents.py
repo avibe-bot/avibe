@@ -29,7 +29,10 @@ DEFAULT_AGENT_META_KEY = "default_agent_name"
 BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "lock_delete": True}
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
 AGENT_ARCHIVE_METADATA_KEY = "_avibe_archive"
-ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
+ARCHIVED_AGENT_NAME_PREFIX = "_"
+LEGACY_ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
+ARCHIVED_AGENT_SLUG_LENGTH = 12
+ARCHIVED_AGENT_TOKEN_LENGTH = 4
 SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
 RECOMMENDED_AGENT_MODELS = {
     "claude": "claude-opus-5",
@@ -444,7 +447,10 @@ class VibeAgentStore:
                 select(agents).where(agents.c.normalized_name == normalized).limit(1)
             ).mappings().first()
             if row is None:
-                return None
+                legacy = self._legacy_archive_for_original_name(conn, normalized)
+                if legacy is None:
+                    return None
+                return self._compact_legacy_archive(conn, legacy, now=now)
             agent = self._from_row(row)
             if is_builtin_default_agent(agent):
                 raise AgentArchiveError(
@@ -452,6 +458,8 @@ class VibeAgentStore:
                     code="agent_builtin",
                 )
             if agent.archived_at is not None:
+                if agent.name.startswith(LEGACY_ARCHIVED_AGENT_NAME_PREFIX):
+                    return self._compact_legacy_archive(conn, agent, now=now)
                 raise AgentArchiveError(
                     f"agent '{agent.name}' is already archived",
                     code="agent_already_archived",
@@ -467,13 +475,10 @@ class VibeAgentStore:
                         code="agent_no_default_replacement",
                     )
 
-            archived_name = f"{ARCHIVED_AGENT_NAME_PREFIX}{uuid4().hex}"
-            archived_normalized = normalize_agent_name(archived_name)
-            while conn.execute(
-                select(agents.c.id).where(agents.c.normalized_name == archived_normalized).limit(1)
-            ).first() is not None:
-                archived_name = f"{ARCHIVED_AGENT_NAME_PREFIX}{uuid4().hex}"
-                archived_normalized = normalize_agent_name(archived_name)
+            archived_name, archived_normalized = self._available_archive_name(
+                conn,
+                normalized_name=agent.normalized_name,
+            )
 
             references = self._reference_counts(conn, agent.name)
             archive_metadata = {
@@ -521,6 +526,79 @@ class VibeAgentStore:
                 references=references,
                 default_agent_name=replacement.name if replacement is not None else default_name,
             )
+
+    @staticmethod
+    def _available_archive_name(conn: Any, *, normalized_name: str) -> tuple[str, str]:
+        slug = str(normalized_name or "agent").strip("-_")[:ARCHIVED_AGENT_SLUG_LENGTH] or "agent"
+        while True:
+            token = uuid4().hex[:ARCHIVED_AGENT_TOKEN_LENGTH]
+            archived_name = f"{ARCHIVED_AGENT_NAME_PREFIX}{slug}-{token}"
+            archived_normalized = normalize_agent_name(archived_name)
+            collision = conn.execute(
+                select(agents.c.id).where(agents.c.normalized_name == archived_normalized).limit(1)
+            ).first()
+            if collision is None:
+                return archived_name, archived_normalized
+
+    @staticmethod
+    def _legacy_archive_for_original_name(conn: Any, normalized_name: str) -> Optional[VibeAgent]:
+        rows = conn.execute(
+            select(agents)
+            .where(agents.c.archived_at.is_not(None))
+            .order_by(agents.c.updated_at.desc())
+        ).mappings()
+        for row in rows:
+            agent = VibeAgentStore._from_row(row)
+            if not agent.name.startswith(LEGACY_ARCHIVED_AGENT_NAME_PREFIX):
+                continue
+            original_name = archived_agent_original_name(agent)
+            if original_name and normalize_agent_name(original_name) == normalized_name:
+                return agent
+        return None
+
+    def _compact_legacy_archive(
+        self,
+        conn: Any,
+        agent: VibeAgent,
+        *,
+        now: str,
+    ) -> AgentArchiveResult:
+        original_name = archived_agent_original_name(agent) or agent.name
+        archived_name, archived_normalized = self._available_archive_name(
+            conn,
+            normalized_name=normalize_agent_name(original_name),
+        )
+        references = self._reference_counts(conn, agent.name)
+        conn.execute(
+            agents.update()
+            .where(agents.c.id == agent.id)
+            .values(
+                name=archived_name,
+                normalized_name=archived_normalized,
+                updated_at=now,
+            )
+        )
+        self._rewrite_references(
+            conn,
+            old_name=agent.name,
+            new_name=archived_name,
+            revision=now,
+        )
+        archived_agent = VibeAgent(
+            **{
+                **asdict(agent),
+                "name": archived_name,
+                "normalized_name": archived_normalized,
+                "updated_at": now,
+            }
+        )
+        return AgentArchiveResult(
+            agent=archived_agent,
+            original_name=original_name,
+            archived_name=archived_name,
+            references=references,
+            default_agent_name=self._default_agent_name(conn),
+        )
 
     def remove(self, name: str) -> bool:
         agent = self.get(name)

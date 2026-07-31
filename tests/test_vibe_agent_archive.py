@@ -5,9 +5,14 @@ import json
 import pytest
 from sqlalchemy import select, update
 
-from core.vibe_agents import AgentUnavailableError, VibeAgentStore
+from core.vibe_agents import (
+    AGENT_ARCHIVE_METADATA_KEY,
+    AgentUnavailableError,
+    VibeAgentStore,
+    normalize_agent_name,
+)
 from storage.background import DefinitionWriteExpectation, definition_state_unchanged
-from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
+from storage.models import agent_runs, agent_sessions, agents, run_definitions, scope_settings, scopes
 
 
 NOW = "2026-07-31T14:00:00+00:00"
@@ -124,7 +129,8 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
 
         assert result is not None
         assert result.original_name == "pm"
-        assert result.archived_name.startswith("_archived_")
+        assert result.archived_name.startswith("_pm-")
+        assert len(result.archived_name) == len("_pm-") + 4
         assert result.references == {"scopes": 1, "sessions": 1, "definitions": 1}
         assert result.default_agent_name == "claude-fallback"
         assert store.get_default_agent_name() == "claude-fallback"
@@ -269,6 +275,57 @@ def test_archive_invalidates_stale_definition_writes_for_direct_and_snapshot_bin
             json.loads(stored["task_snapshot"]["metadata_json"])["session_settings_snapshot"]["agent_name"]
             == archived.archived_name
         )
+    finally:
+        store.close()
+
+
+def test_remove_compacts_legacy_archive_name_and_moves_its_references(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="pm", backend="claude")
+        _seed_references(store, original.name)
+        legacy_name = "_archived_500f78fda90b4b06920bf89f187fb47d"
+        archive_metadata = {
+            "original_name": original.name,
+            "archived_at": NOW,
+            "was_enabled": True,
+        }
+        with store.engine.begin() as conn:
+            conn.execute(
+                agents.update()
+                .where(agents.c.id == original.id)
+                .values(
+                    name=legacy_name,
+                    normalized_name=normalize_agent_name(legacy_name),
+                    enabled=0,
+                    metadata_json=json.dumps({AGENT_ARCHIVE_METADATA_KEY: archive_metadata}),
+                    archived_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+            store._rewrite_references(
+                conn,
+                old_name=original.name,
+                new_name=legacy_name,
+                revision=NOW,
+            )
+
+        compacted = store.archive("pm")
+
+        assert compacted is not None
+        assert compacted.original_name == "pm"
+        assert compacted.archived_name.startswith("_pm-")
+        assert len(compacted.archived_name) == len("_pm-") + 4
+        assert compacted.references == {"scopes": 1, "sessions": 1, "definitions": 1}
+        assert store.get(legacy_name) is None
+        assert store.require(compacted.archived_name).to_dict()["display_name"] == "pm"
+        with store.engine.connect() as conn:
+            assert conn.execute(
+                select(agent_sessions.c.id).where(agent_sessions.c.agent_name == legacy_name)
+            ).first() is None
+            assert conn.execute(
+                select(run_definitions.c.id).where(run_definitions.c.agent_name == legacy_name)
+            ).first() is None
     finally:
         store.close()
 

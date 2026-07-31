@@ -8,7 +8,7 @@ Make Agent deletion preserve every durable reference while removing the Agent fr
 
 - User-created and imported Agent names cannot start with `_`; that namespace is reserved for Avibe internals.
 - Deleting a non-built-in Agent is one SQLite transaction that:
-  - renames the Agent to an opaque `_archived_<id>` name;
+  - renames the Agent to a short internal name such as `_pm-a1b2`;
   - disables it and records `archived_at` plus its original display name;
   - rewrites scope, Session, and task/watch definition references to the archived name;
   - rewrites nonterminal Agent Run references so queued work keeps its exact Agent configuration;

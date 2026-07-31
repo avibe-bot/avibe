@@ -110,7 +110,7 @@ def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
 
         payload = json.loads(capsys.readouterr().out)
         assert payload["removed_agent"] == "worker"
-        assert payload["archived_agent"]["name"].startswith("_archived_")
+        assert payload["archived_agent"]["name"].startswith("_worker-")
         assert payload["archived_agent"]["display_name"] == "worker"
         assert agent_store.get("worker") is None
     finally:
