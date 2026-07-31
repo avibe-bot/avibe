@@ -77,12 +77,14 @@ def fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | None:
 
 
 def queued_message_ids(conn: Connection, session_id: str) -> set[str]:
+    """Message ids whose durable owner still controls a queued projection."""
+
     return {
         str(value)
         for value in conn.execute(
             select(session_deliveries.c.message_id)
             .where(session_deliveries.c.session_id == session_id)
-            .where(session_deliveries.c.state == "queued")
+            .where(session_deliveries.c.state.in_(("queued", "steering", "reconciling")))
             .where(session_deliveries.c.message_id.is_not(None))
         ).scalars()
         if value

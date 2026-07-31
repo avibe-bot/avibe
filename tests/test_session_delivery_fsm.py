@@ -645,6 +645,37 @@ def test_legacy_queue_drain_excludes_durable_owned_messages(managers) -> None:
     assert len(starts) == 2
 
 
+def test_legacy_queue_drain_excludes_empty_p1_steering_owner(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="steer once"),
+            context=_context(),
+        )
+    )
+    manager._active_identity = lambda _backend, _session, logical: (
+        logical,
+        "native-t1",
+    )
+
+    async def unknown_after_legacy_probe(_backend, request):
+        assert request.expected_logical_turn_id == turn_id
+        assert not await manager.flush_queue("ses_fsm")
+        return steer_result(SteerOutcome.UNKNOWN, reason="receipt unavailable")
+
+    manager._steer = unknown_after_legacy_probe
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1"),
+            context=_context(),
+        )
+    )
+    assert result.delivery_id == queued.delivery_id
+    row = next(item for item in _delivery_rows(engine) if item["id"] == queued.delivery_id)
+    assert row["state"] == "reconciling"
+
+
 def test_concurrent_p0_successors_claim_one_owner_and_retain_the_other(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
 
