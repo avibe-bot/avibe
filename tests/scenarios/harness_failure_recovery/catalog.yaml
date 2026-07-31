@@ -2683,6 +2683,31 @@ scenarios:
     # the recreated session.
     # tests/test_internal_server.py::test_release_for_teardown_does_not_flush_a_pending_send_now_queue
     test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_stop_path_cleanup_does_not_release_the_manager_turn
+  - id: HFR-127
+    name: a cancelled run an Activity still owns keeps its terminal intent parked
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 1. _terminalize_cancelled_request deferred and then settled
+    # unconditionally, which is the one thing the defer/settle pair exists to avoid:
+    # settle_activity_runs consults has_blocking_run_activity / has_pending_run_output
+    # before settling, and the cancellation lane did not. An eviction landing on a run
+    # that owns a live background Activity therefore terminalized the row while the
+    # Activity was still working -- the callback drain could discover a finished run
+    # and tell the user the work ended, and the Activity's own output then arrived
+    # against a closed run. The method's own docstring already claimed this behaviour
+    # ("a row an Activity still owns must keep its intent parked until that lifecycle
+    # ends"); the code did not implement it.
+    # FIX: the SQLite branch consults the same two registry predicates and SKIPS
+    # settle_deferred_run when either holds. Nothing is lost -- the defer already
+    # parked status, copy and interrupt_reason durably, so the Activity lifecycle
+    # (settle_activity_runs on the Activity's terminal, _recover_activity_lifecycle at
+    # startup) applies the intent with the cancellation's own cause.
+    # The file-store branch is deliberately unchanged: defer_run_terminal and
+    # settle_deferred_run both answer False there, so settle_activity_runs is inert
+    # against it and there is no parked intent for any lifecycle to apply.
+    test: tests/test_scheduled_tasks.py::test_cancelled_run_with_blocking_activity_keeps_its_terminal_intent_parked
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

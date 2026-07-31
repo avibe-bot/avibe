@@ -5655,7 +5655,11 @@ class ScheduledTaskService:
                 # TERMINAL path — no backend is left on the old requeue behaviour —
                 # and it carries the same cause on the same statement. It settles the
                 # claim as a whole, which is all that store can express: coalesced
-                # fan-outs are a SQLite-only feature.
+                # fan-outs are a SQLite-only feature. The Activity check below does
+                # not belong here either: ``defer_run_terminal`` /
+                # ``settle_deferred_run`` both return ``False`` on this store, so
+                # ``settle_activity_runs`` is inert against it and there is no parked
+                # intent for an Activity lifecycle to apply later.
                 self.request_store.complete(
                     request,
                     ok=False,
@@ -5667,6 +5671,9 @@ class ScheduledTaskService:
                 )
                 self._drain_dirty = True
                 return
+            registry = self._activity_registry()
+            has_blocker = getattr(registry, "has_blocking_run_activity", None)
+            has_pending_output = getattr(registry, "has_pending_run_output", None)
             for run_id in run_ids:
                 self.request_store.defer_run_terminal(
                     run_id,
@@ -5674,6 +5681,21 @@ class ScheduledTaskService:
                     error=error_text,
                     metadata=metadata,
                 )
+                # PARK, DON'T SETTLE, WHILE AN ACTIVITY STILL OWNS THE ROW — the same
+                # test ``settle_activity_runs`` makes, for the same reason. A
+                # background Activity is still running inside this run, or has output
+                # not yet delivered; terminalizing the row here makes its callback
+                # discoverable by the drain before that lifecycle finishes, so the
+                # user is told the run ended while its Activity is still working and
+                # its output arrives against a closed run. The defer above already
+                # wrote the status, error and ``interrupt_reason`` durably, so nothing
+                # is lost: the Activity lifecycle (``settle_activity_runs`` on the
+                # Activity's own terminal, ``_recover_activity_lifecycle`` at startup)
+                # applies the parked intent with THIS cause when it ends.
+                if callable(has_blocker) and has_blocker(run_id):
+                    continue
+                if callable(has_pending_output) and has_pending_output(run_id):
+                    continue
                 if self.request_store.settle_deferred_run(run_id):
                     self._drain_dirty = True
         except Exception:
@@ -5685,7 +5707,7 @@ class ScheduledTaskService:
             )
             return
         logger.warning(
-            "Claimed request %s was cancelled (%s); settled %s run(s) %s",
+            "Claimed request %s was cancelled (%s); %s intent recorded for run(s) %s",
             request.id,
             settled_by,
             terminal_status,

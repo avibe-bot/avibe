@@ -2806,6 +2806,91 @@ def test_cancellation_settles_coalesced_sibling_runs(
     assert request_store.list_pending() == []
 
 
+def test_cancelled_run_with_blocking_activity_keeps_its_terminal_intent_parked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-127: cancellation records the cause; the Activity lifecycle applies it.
+
+    A run can own a background Activity that outlives the turn that started it. The
+    defer/settle pair exists precisely so a row an Activity still owns keeps its
+    terminal intent PARKED until that lifecycle ends — ``settle_activity_runs`` makes
+    exactly this check before settling. The cancellation path deferred and then
+    settled unconditionally, so an eviction terminalized the row while its Activity
+    was still running: the callback drain could discover a finished run, tell the
+    user the work ended, and the Activity's own output would then arrive against a
+    closed run.
+
+    Nothing is lost by parking. The defer already wrote the status, the settlement
+    copy and ``interrupt_reason`` durably, so when the Activity finishes the run
+    settles with THIS cancellation's cause rather than an invented one.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="starts a background Activity and is then evicted",
+        agent_name="codex",
+    )
+
+    registry = SessionActivityRegistry()
+    turn_started, on_turn = _hanging_turn()
+    controller = _SettlementControllerDouble(on_turn=on_turn)
+    controller.agent_service = SimpleNamespace(activities=registry)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        # The turn spawned a background Activity that owns this run.
+        registry.start(
+            backend="codex",
+            runtime_key="runtime-127",
+            session_id="target-session",
+            activity_id="bg-127",
+            kind="background_task",
+            run_id=request.id,
+        )
+        execution = service._inflight_executions[request.id]
+        assert service._cancel_execution(request.id, SETTLED_BY_EVICTED) is True
+        await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    parked = request_store.get_run(request.id)
+    assert parked is not None
+    # Still open: the Activity owns the row, so nothing terminal is visible yet.
+    assert parked["status"] == "running"
+    assert parked["completed_at"] is None
+    payload = parked["result_payload"]
+    assert payload["deferred_terminal_status"] == "failed"
+    assert payload["deferred_terminal_error"]
+    assert payload["deferred_terminal_metadata"] == {"interrupt_reason": "evicted"}
+
+    # The Activity ends; its own lifecycle applies the parked intent.
+    activity = registry.complete(
+        backend="codex",
+        runtime_key="runtime-127",
+        activity_id="bg-127",
+        status="failed",
+    )
+    assert activity is not None
+    assert service.settle_activity_runs(activity) == [request.id]
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    # The cancellation's cause survived the park, so the notice lane still names the
+    # eviction rather than the Activity that happened to release the row.
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
 def test_file_store_cancellation_terminalizes_via_complete(tmp_path: Path) -> None:
     """HFR-112: the legacy backend has one terminal path, and it must be taken.
 
