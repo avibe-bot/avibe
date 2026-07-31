@@ -424,7 +424,7 @@ class MockStore {
   // Every read of an agent re-derives what the real server derives: the
   // per-backend order (recommended under `follow`, pruned under `custom`),
   // eligibility, and the supply rollup. That is what makes a drag-reorder or a
-  // source deletion move 使用中 in the demo instead of leaving it stale.
+  // source deletion update supply status in the demo instead of leaving it stale.
   private syncAgents() {
     for (const a of this.agents) {
       if (a.mode === 'direct') {
@@ -449,7 +449,6 @@ class MockStore {
    *  runnability (not blocked), then the rollup over the resulting chain. */
   private deriveSupply(a: AgentSupply) {
     if (a.mode === 'direct') {
-      a.current = null;
       a.selected_model_id = null;
       a.selected_model_explicit = false;
       a.selected_by_agent = null;
@@ -470,18 +469,15 @@ class MockStore {
     }
     const selected = a.selected_model_id ?? null;
     if (!selected) {
-      a.current = null;
       a.supply_status = null;
     } else {
       const chain = chainFor(selected);
       const head = chain.find(isRunnable) ?? null;
       const blocked = chain.filter((s) => !isRunnable(s));
       if (!head) {
-        a.current = null;
         a.supply_status =
           chain.length > 0 && blocked.every((s) => s.state.status === 'cooldown') ? 'waiting' : 'interrupted';
       } else {
-        a.current = { model_id: selected, source_id: head.id, channel: head.supply_channel };
         a.supply_status = head.id === chain[0]?.id && blocked.length === 0 ? 'ok' : 'degraded';
       }
     }
@@ -827,7 +823,7 @@ class MockStore {
     agent.mode = mode;
     if (mode === 'hub') {
       // Rejoining the hub starts on the recommendation, and picks up whatever
-      // model the backend defaults to (first built-in / first supplied id).
+      // model selected for the Agent (first built-in / first supplied id in mock mode).
       agent.sources = { policy: 'follow', order: [], eligibility: null };
       agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
       // The server's default comes from the STORED per-backend request, so a

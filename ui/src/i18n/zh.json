@@ -648,7 +648,6 @@
         "reorder": "拖动排序",
         "oauthSignedOut": "CLI 订阅未登录"
       },
-      "current": "当前",
       "order": {
         "title": "来源顺序 · {{backend}}",
         "subtitle": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。这里的顺序只影响 {{backend}}。",
@@ -666,8 +665,8 @@
         "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用"
       },
       "billing": {
-        "monthly": "包月",
-        "metered": "按量"
+        "monthly": "订阅",
+        "metered": "按量付费"
       },
       "state": {
         "active": "正常",
@@ -2612,7 +2611,6 @@
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
-      "modelDefault": "使用后端默认",
       "effort": "推理强度",
       "systemPrompt": "系统提示词",
       "systemPromptCount": "~{{count}} tokens",

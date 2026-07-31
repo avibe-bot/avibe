@@ -276,38 +276,19 @@ export const REPAIR_TOAST: Record<RepairOutcome['kind'], { key: string; tone: 's
 
 // ── 试跑 (dry run) ───────────────────────────────────────────────────────
 
-/**
- * Whether a dry run has anything real to run for this Agent.
- *
- * `none` covers direct mode (no `src_*` identity to report — the route refuses
- * with `direct_mode`, AC-7) and a null `current`, which is precisely
- * waiting/interrupted: there is no head, the page already says so with the
- * remedy attached, and a probe would only re-report it as a failure.
- *
- * No `model` in the request on purpose. `current.model_id` is the RESOLVED id
- * (post-mapping), while the route treats its `model` argument as the REQUESTED
- * one and maps it again — passing the head back would resolve twice and probe a
- * different model than the drawer displays. Omitted, the server uses the very
- * `_requested_model(agent)` that produced `current`, so the probe and the row
- * agree by construction rather than by a client-side guess.
- *
- * Note there is no `native` branch: 「don't fake a native test」 is honoured by
- * the SERVER, which answers a native_cli head with its CLI readiness and
- * `latency_ms: null` instead of sending a request. A client-side branch would
- * have to invent that readiness — the copy keys on the null latency instead.
- */
 export type DryRunPlan = { kind: 'probe'; backend: AgentBackend } | { kind: 'none' };
 
-/** A source's name for copy, falling back to its id — the same tolerance
- *  `chainChips` keeps for an id that no longer resolves. */
-const nameOf = (sources: Source[], id: string): string =>
-  sources.find((s) => s.id === id)?.display_name || id;
-
+/** A dry run exists only while a managed Agent has a runnable supply rollup. */
 export function dryRunPlan(agent: AgentSupply): DryRunPlan {
   if (agent.mode !== 'hub') return { kind: 'none' };
-  if (!agent.current) return { kind: 'none' };
+  if (agent.supply_status !== 'ok' && agent.supply_status !== 'degraded') return { kind: 'none' };
   return { kind: 'probe', backend: agent.backend };
 }
+
+/** A source's name for copy, falling back to its id — the same tolerance
+ *  the source rows keep for an id that no longer resolves. */
+const nameOf = (sources: Source[], id: string): string =>
+  sources.find((s) => s.id === id)?.display_name || id;
 
 /**
  * The identity of the chain a 试跑 report is ABOUT, so that a report outlives every
@@ -398,8 +379,8 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  *   一次试跑; the cost of being narrow is a sentence that answers for a supplier
  *   chain that no longer exists. Only one of those two is a wrong answer.
  *
- * Excluded on purpose: `agent.current` and everything else about head health. The
- * head moving is what a failing report is FOR.
+ * Excluded on purpose: resolved-head state and everything else about health. A
+ * head moving is what a failing report is for.
  */
 export const dryRunChainKey = (
   agent: AgentSupply,
@@ -560,7 +541,7 @@ export type ProbeAnswer =
 export type ProbeArrival = {
   /** Whether this answer is still the answer to what the row is asking. */
   report: boolean;
-  /** Whether the source rows and ● 当前 behind this sheet are now stale. */
+  /** Whether the source rows and serving-chain status are now stale. */
   reread: boolean;
 };
 
@@ -572,37 +553,13 @@ export const probeArrival = (answer: ProbeAnswer, stillCurrent: boolean): ProbeA
       : mayHaveWritten(answer) || disprovedDrawnHead(answer.code),
 });
 
-/**
- * What the 试跑 row IS right now — which is not the same question as what the
- * chain is, because the row outlives the chain it reported on.
- *
- * Two rules, and neither is visible from `dryRunPlan` alone:
- *
- *  1. A REPORT survives losing its head. 试跑 is what takes the head away:
- *     probing the chain's last runnable source and failing cools that source
- *     down (`probeWroteState`), so the re-read that failure demands comes back
- *     with `current: null` and the plan turns `none`. Dropping the row there
- *     erases the sentence the click produced — making the failing run, the one
- *     the user most needs to read, the only one whose answer flashes past. So
- *     the CONTROL goes (there is nothing runnable to reach, and the page states
- *     that one level up with the remedy attached) while the LINE stays.
- *  2. The control waits for the drawer's save. That PUT is optimistic: the list
- *     — and the chain key the report is filed under — have already moved to the
- *     order the user dropped while the server still answers for the old one. A
- *     probe launched in that window reports on the superseded chain under the
- *     new one's key, and the key cannot clear it because it IS already the new
- *     key. Every other control in this drawer is disabled for that window; this
- *     one is not special.
- */
 export type DryRunRowView = {
-  /** The backend to probe, or `null` when there is nothing runnable to reach. */
   backend: AgentBackend | null;
-  /** Whether the control may be pressed now. */
   enabled: boolean;
-  /** Whether the last answer is still worth drawing. */
   report: boolean;
 };
 
+/** Keep a completed report visible even when its probe changes supply health. */
 export const dryRunRowView = (
   plan: DryRunPlan,
   row: { line: string | null; saving: boolean; running: boolean },

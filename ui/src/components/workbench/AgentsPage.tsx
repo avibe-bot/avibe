@@ -50,10 +50,6 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 
-// Sentinel option that clears the model override back to the backend default
-// (a combobox can't submit an empty value, so this is the explicit clear path).
-const MODEL_DEFAULT_OPTION = '__default__';
-
 type AgentsTabKey = 'definitions' | 'running';
 const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
 
@@ -928,18 +924,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. The
-          leading "backend default" option lets the user clear the override
-          back to model: null (a combobox can't otherwise submit an empty
-          value, so picking it is the only clear path). */}
+      {/* Model — Combobox with chevron + searchable + custom values. */}
       <Field label={t('agents.detail.model')}>
         <Combobox
-          options={[{ value: MODEL_DEFAULT_OPTION, label: t('agents.detail.modelDefault') }, ...modelOptions]}
+          options={modelOptions}
           value={model}
           onValueChange={(next) => {
-            const value = next === MODEL_DEFAULT_OPTION ? '' : next;
+            const value = next.trim();
+            if (!value) return;
             setModel(value);
-            const patch: Partial<VibeAgentFull> = { model: value.trim() || null };
+            const patch: Partial<VibeAgentFull> = { model: value };
             // If the new model can't use the current effort, fall back to a
             // valid one and persist it in the same patch — otherwise the record
             // keeps an effort the model can't run (Codex P2).
