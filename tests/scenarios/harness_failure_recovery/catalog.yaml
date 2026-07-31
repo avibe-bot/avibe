@@ -3408,6 +3408,69 @@ scenarios:
     # core/handlers/command_handlers.py never references session_turns at all -- there is
     # no second un-awaited manager cancel on that path.
     test: tests/test_running_agents_service.py::test_end_awaits_the_stopped_turn_before_reconciling_and_teardown
+  - id: HFR-334
+    name: >-
+      Codex transport eviction holds session admission until the transport is gone,
+      then drains
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: codex
+    # PR2 review round 11. HFR-330 established the teardown admission hold and HFR-332
+    # gave it the drain it owes, but only the Claude entries were wired: the audit of
+    # EVERY teardown entry (rg for admission_holds / teardown_*_session_runs callers)
+    # found four, and only two carried the stack.
+    # HAD IT: SessionHandler.cleanup_session and the Claude idle-eviction loop -- an
+    # ExitStack spanning runtime removal, with hold_session_admission(admission_holds=
+    # stack) registering the drain-on-release hold inside teardown_runtime_session_runs.
+    # LACKED IT: (1) modules/agents/codex/agent.py evict_idle_transports -- THE FINDING;
+    # (2) core/controller.py's shutdown settlement; (3) End's teardown leg in
+    # core/services/running_agents.py, which uses the split cancel/reconcile pieces.
+    # THE BUG (1): the eviction called teardown_runtime_session_runs with NO stack, so
+    # the only guard was release_for_teardown's own narrow hold, which ends when the
+    # awaited cancel returns. The transport is still registered at that moment and the
+    # window that follows is the WIDEST of any teardown: transport.stop() (a real
+    # app-server kill, SIGTERM/SIGKILL ladder included), the _transports/activity/inode
+    # pops, the model-hub scope retirement, and the per-session stuck-turn settlement.
+    # _run's finally had already popped in_flight, so the session read IDLE throughout
+    # and a message typed there DISPATCHED onto the app-server being killed. Pre-fix red
+    # is exactly that: the racer's route is "ran". The narrow hold also requests no
+    # drain (correctly -- its exit is still inside the window), so a message that DID
+    # get refused was then stranded in the durable queue with nothing to dequeue it.
+    # FIX: one ExitStack per cwd-eviction, entered inside the per-cwd lock before the
+    # teardown loop over sessions_for_cwd and exited after the whole convergence block,
+    # so it covers the stop-failure convergence path (HFR-326) and both branches (idle
+    # and force-evicted stuck-active) alike. It asks for the drain, because its release
+    # IS the first honest moment: the transport is gone and a replacement can be built
+    # for this cwd.
+    # PER-SITE DECISIONS, deliberately NOT uniform -- the semantics differ:
+    # (2) CONTROLLER SHUTDOWN: hold, NO drain. The window is real (each settlement pops
+    # its turn's in_flight while cleanup_sync has yet to dismantle the backends), and
+    # closing admission is safe because submit folds a held admission into "busy" and
+    # ENQUEUES rather than rejecting. But drain_on_release would schedule a fresh turn
+    # inside an exiting process against dying backends. One stack for the whole loop,
+    # holds taken lazily per session and none released until the loop ends. Residual:
+    # the stack cannot span cleanup_sync (a sync method past the loop teardown); the
+    # remaining tail has no awaits in it.
+    # (3) END: hold, NO drain. Same window -- the stop cancels and (since HFR-333)
+    # AWAITS the manager turn, whose finally pops in_flight, and the backend teardown
+    # runs after. Draining would contradict Stop's explicit no-flush contract by
+    # starting the work the user just stopped. Spans both branches and the scheduler-
+    # lane cancel; released on every early return.
+    # hold_session_admission grew drain_on_release (default True) to express this; the
+    # default is what every eviction/cleanup caller wants and nothing changed for them.
+    # Driven through the REAL evict_idle_transports, the real teardown_runtime_session_
+    # runs/hold_session_admission pair and a real SessionTurnManager over a real durable
+    # queue; only the settlement service is a double, performing the manager release the
+    # real one performs. The racer is submitted from inside transport.stop() and is the
+    # ONLY one, so it lands past the narrow hold against an EMPTY queue -- a second
+    # racer would be enqueued by the ordinary non-empty-queue rule instead of by the
+    # hold under test. Companion legs: tests/test_session_teardown.py::
+    # test_teardown_holds_can_decline_the_drain_they_normally_owe and
+    # ::test_controller_shutdown_settlement_holds_admission_without_draining, and
+    # tests/test_running_agents_service.py::
+    # test_end_holds_admission_through_the_backend_teardown_without_draining.
+    test: tests/test_internal_server.py::test_codex_eviction_holds_admission_and_drains_after_transport_removal
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

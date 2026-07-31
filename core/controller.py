@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import logging
 import threading
+from contextlib import ExitStack
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -29,7 +30,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT, SETTLED_BY_RESTARTED
-from core.session_teardown import teardown_session_runs
+from core.session_teardown import hold_session_admission, teardown_session_runs
 from core.runtime_commands import RuntimeCommandWatcher
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
@@ -1596,8 +1597,42 @@ class Controller:
             "Settling %d in-flight session turn(s) as restarted before backend teardown",
             len(session_ids),
         )
-        for session_id in session_ids:
-            await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
+        # THE HOLD IS TAKEN, THE DRAIN IS DECLINED (HFR-334).
+        #
+        # Same window as every other teardown: each settlement below pops its turn's
+        # ``in_flight`` entry inside the awaited cancel, and the backends those turns
+        # ran in are not dismantled until ``cleanup_sync``. A message arriving in
+        # between reads the session as idle and dispatches onto a backend that is
+        # about to die. Closing admission makes it take the durable send-while-busy
+        # queue instead — a rejection is not the alternative; ``submit`` folds a held
+        # admission into ``busy`` and enqueues.
+        #
+        # But NOT ``drain_on_release``, which every other caller of this helper wants.
+        # Reopening here would schedule a fresh turn inside a process that is exiting,
+        # against backends being torn down — the exact dispatch this hold exists to
+        # prevent, one layer later. A message queued during shutdown correctly waits
+        # for the next start, where restart recovery and the ordinary queue drain own
+        # it.
+        #
+        # ONE STACK FOR THE WHOLE LOOP, not one per session: the window is open for
+        # every session from its own settlement until the process is gone, so a
+        # per-session hold released at the top of the next iteration would reopen
+        # sessions the shutdown has already passed.
+        #
+        # RESIDUAL, accepted and bounded: the stack releases when this returns, while
+        # ``cleanup_sync`` still has backends to stop. Spanning that is not possible
+        # from here — it is a synchronous method on the other side of the loop
+        # teardown — and the remaining gap is a shutdown tail with no awaits in it,
+        # against the same durable queue.
+        with ExitStack() as admission_holds:
+            for session_id in session_ids:
+                hold_session_admission(
+                    self,
+                    session_id,
+                    admission_holds=admission_holds,
+                    drain_on_release=False,
+                )
+                await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
 
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""

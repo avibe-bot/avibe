@@ -31,12 +31,14 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, Optional
 
 from core.run_settlement import SETTLED_BY_STOPPED
 from core.session_teardown import (
     SchedulerLaneCancellation,
     cancel_session_scheduler_lane,
+    hold_session_admission,
     reconcile_session_runs,
     resolve_teardown_session_ids,
     split_composite_session_key,
@@ -1404,149 +1406,175 @@ async def end_running_agent(
         base_session_id=base_session_id,
         backend=backend,
     )
-    # ...BUT IT IS STILL SCOPED TO THE CLICKED BACKEND (HFR-327).
+    # THE TEARDOWN HOLDS THIS SESSION'S ADMISSION, AND DOES NOT DRAIN (HFR-334).
     #
-    # "Unconditional" above means "not gated on the live-state READ", which is the
-    # race being closed. It never meant "cancel whatever else holds this session".
-    # A session id can outlive the backend that was running under it, and the
-    # Running tab hands us stale rows by construction: ``_choose_session_meta``
-    # falls back to the most recent ``agent_sessions`` row when none matches the
-    # clicked row's live backend, so a dead Codex row can carry the session id of a
-    # conversation that has since moved to Claude. The lock owner for that id is
-    # then the HEALTHY Claude execution, and cancelling it kills the user's working
-    # turn because they tidied up a dead row.
+    # End has the same reopen window every other runtime teardown has. The stop
+    # below cancels the manager turn and — since HFR-333 — AWAITS it, and that
+    # await runs the turn's ``finally``, whose first act is to pop ``in_flight``.
+    # The backend teardown that actually removes the runtime runs after. Between
+    # them the session reads IDLE with a live client still registered, so a message
+    # arriving there dispatches onto the runtime being ended.
     #
-    # HFR-324 fixed only the reconcile half of this shape (manager ids no longer
-    # ride into the claim). The cancel half reaches whatever the lock owner names.
+    # THE DRAIN IS DECLINED, unlike the eviction/cleanup callers. End is a user
+    # Stop, and Stop's contract is explicitly not to flush: draining on release
+    # would start the queued work the user just stopped, immediately, on a fresh
+    # runtime. The refused message stays durably queued and waits for the next
+    # thing the user actually sends.
     #
-    # CANCEL ONLY WHAT THIS ROW CAN BE SHOWN TO OWN (HFR-328). A positive mismatch
-    # skips, and so does a lane that is HELD but names no owning backend at all —
-    # round 7 found that the second case was not the rare nullable-column edge the
-    # first version assumed but the normal state of the scheduler lane, so treating
-    # it as permission to cancel made the scoping a no-op for the common case. An
-    # EMPTY lane still cancels: there is nothing foreign to protect, and this call is
-    # how the active branch below learns its manager-lane ownership.
-    #
-    # When it skips, the whole call is skipped — cancel AND claim — which leaves
-    # ``claimed_run_ids`` empty, and both reconcile sites are already no-ops on an
-    # empty set (``reconcile_session_runs`` returns before touching the store). End
-    # still runs its normal state branch and tears down the clicked row's own
-    # runtime; it simply stops speaking for a lane that is not provably its own.
-    scheduler_lane = SchedulerLaneCancellation(frozenset(), frozenset())
-    if _scheduler_lane_is_this_rows_business(controller, teardown_session_id, backend):
-        scheduler_lane = await cancel_session_scheduler_lane(
-            controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
-        )
-    claimed_run_ids = scheduler_lane.claimed_run_ids
-
-    if state == "active":
-        # Capture the Claude OS pid BEFORE the stop disconnects the client — once
-        # the SDK client is gone the pid is no longer resolvable.
-        claude_pid = (
-            _claude_pid_for(controller, composite_key, base_session_id) if backend == "claude" else None
-        )
-        stop_result = await _stop_active_agent(
+    # SPANS BOTH BRANCHES because both reach a backend teardown — the active
+    # branch through its stop, the idle branch directly — and both leave the same
+    # gap. It also spans the scheduler-lane cancel, which is part of the same
+    # settlement. Released on every path, including the early returns below.
+    with ExitStack() as admission_holds:
+        hold_session_admission(
             controller,
-            backend=backend,
-            session_id=session_id,
-            composite_key=composite_key,
-            base_session_id=base_session_id,
+            teardown_session_id,
+            admission_holds=admission_holds,
+            drain_on_release=False,
         )
-        stop_ok = bool(stop_result.get("ok"))
-        # Both lanes have now settled and been awaited, so anything still ``running``
-        # in this session is a claim neither reached. Reconcile BEFORE the teardown,
-        # for the same reason the whole ordering exists.
+        # ...BUT IT IS STILL SCOPED TO THE CLICKED BACKEND (HFR-327).
         #
-        # THE MANAGER LANE IS CLAIMED HERE AND ONLY HERE (HFR-324). The cancel above
-        # left that lane alone precisely so this stop could own it, and the stop has
-        # now run — against a turn the live-state recheck already confirmed belongs to
-        # THIS row, since a turn it could not attribute is what makes the state idle.
-        # So its runs are this End's interrupted work, and the reconcile is their
-        # backstop for the case the stop interrupted the turn without its own
-        # settlement running (HFR-107). The idle branch below has no such stop and
-        # claims nothing from that lane: the live turn there is somebody else's.
+        # "Unconditional" above means "not gated on the live-state READ", which is the
+        # race being closed. It never meant "cancel whatever else holds this session".
+        # A session id can outlive the backend that was running under it, and the
+        # Running tab hands us stale rows by construction: ``_choose_session_meta``
+        # falls back to the most recent ``agent_sessions`` row when none matches the
+        # clicked row's live backend, so a dead Codex row can carry the session id of a
+        # conversation that has since moved to Claude. The lock owner for that id is
+        # then the HEALTHY Claude execution, and cancelling it kills the user's working
+        # turn because they tidied up a dead row.
+        #
+        # HFR-324 fixed only the reconcile half of this shape (manager ids no longer
+        # ride into the claim). The cancel half reaches whatever the lock owner names.
+        #
+        # CANCEL ONLY WHAT THIS ROW CAN BE SHOWN TO OWN (HFR-328). A positive mismatch
+        # skips, and so does a lane that is HELD but names no owning backend at all —
+        # round 7 found that the second case was not the rare nullable-column edge the
+        # first version assumed but the normal state of the scheduler lane, so treating
+        # it as permission to cancel made the scoping a no-op for the common case. An
+        # EMPTY lane still cancels: there is nothing foreign to protect, and this call is
+        # how the active branch below learns its manager-lane ownership.
+        #
+        # When it skips, the whole call is skipped — cancel AND claim — which leaves
+        # ``claimed_run_ids`` empty, and both reconcile sites are already no-ops on an
+        # empty set (``reconcile_session_runs`` returns before touching the store). End
+        # still runs its normal state branch and tears down the clicked row's own
+        # runtime; it simply stops speaking for a lane that is not provably its own.
+        scheduler_lane = SchedulerLaneCancellation(frozenset(), frozenset())
+        if _scheduler_lane_is_this_rows_business(controller, teardown_session_id, backend):
+            scheduler_lane = await cancel_session_scheduler_lane(
+                controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
+            )
+        claimed_run_ids = scheduler_lane.claimed_run_ids
+
+        if state == "active":
+            # Capture the Claude OS pid BEFORE the stop disconnects the client — once
+            # the SDK client is gone the pid is no longer resolvable.
+            claude_pid = (
+                _claude_pid_for(controller, composite_key, base_session_id) if backend == "claude" else None
+            )
+            stop_result = await _stop_active_agent(
+                controller,
+                backend=backend,
+                session_id=session_id,
+                composite_key=composite_key,
+                base_session_id=base_session_id,
+            )
+            stop_ok = bool(stop_result.get("ok"))
+            # Both lanes have now settled and been awaited, so anything still ``running``
+            # in this session is a claim neither reached. Reconcile BEFORE the teardown,
+            # for the same reason the whole ordering exists.
+            #
+            # THE MANAGER LANE IS CLAIMED HERE AND ONLY HERE (HFR-324). The cancel above
+            # left that lane alone precisely so this stop could own it, and the stop has
+            # now run — against a turn the live-state recheck already confirmed belongs to
+            # THIS row, since a turn it could not attribute is what makes the state idle.
+            # So its runs are this End's interrupted work, and the reconcile is their
+            # backstop for the case the stop interrupted the turn without its own
+            # settlement running (HFR-107). The idle branch below has no such stop and
+            # claims nothing from that lane: the live turn there is somebody else's.
+            await reconcile_session_runs(
+                controller,
+                teardown_session_id,
+                settled_by=SETTLED_BY_STOPPED,
+                claimed_run_ids=claimed_run_ids | scheduler_lane.manager_lane_run_ids,
+            )
+            # The canonical stop interrupts the turn (and releases its runtime gate via
+            # the turn's own context — verified in Incus) but does NOT free the rest of
+            # the runtime. Finish the teardown so the row clears instead of forcing a
+            # second Disconnect.
+            #
+            # TEARDOWN RUNS WHETHER OR NOT THE STOP SUCCEEDED, for every backend. A
+            # stale-active row whose turn can no longer be interrupted (app-server died,
+            # transport gone) must still be clearable from the tab, or End is useless in
+            # exactly the situation a user reaches for it.
+            teardown: dict[str, Any] = {"ok": True}
+            if backend == "codex":
+                teardown = await _end_codex(controller, base_session_id)
+            elif backend == "opencode":
+                teardown = await _end_opencode(controller, base_session_id)
+            elif backend == "claude":
+                if stop_ok:
+                    # Convergence, not a special case: the stop path already removed the
+                    # client, so the session is ALREADY absent and that counts as torn
+                    # down. Calling ``_end_claude`` here would find nothing and report
+                    # ``session_not_live``, degrading a successful End. Only the leftover
+                    # CLI subprocess is still there to free.
+                    if isinstance(claude_pid, int):
+                        try:
+                            from modules.agents.claude_process_reaper import _reap_pid_set
+
+                            if (await _reap_pid_set({claude_pid}, terminate_timeout=2.0, logger=logger)) > 0:
+                                teardown = {"ok": True, "process_killed": True}
+                        except Exception:  # noqa: BLE001
+                            logger.debug("end: claude reap after stop failed for %s", claude_pid, exc_info=True)
+                else:
+                    teardown = await _end_claude(controller, composite_key, base_session_id)
+            if not isinstance(teardown, dict):
+                teardown = {"ok": True}
+            # Precedence: the stop's own outcome is authoritative. A teardown failure is
+            # logged and becomes the endpoint's error only when the stop failed too —
+            # otherwise a successful settlement would be reported as a failure because a
+            # process the user cannot see refused to die.
+            if stop_ok:
+                result = dict(stop_result)
+                if teardown.get("process_killed"):
+                    result["process_killed"] = True
+                if not teardown.get("ok"):
+                    logger.warning(
+                        "end: %s teardown failed after a successful stop for %s: %s",
+                        backend,
+                        base_session_id or session_id,
+                        teardown.get("error"),
+                    )
+                return result
+            if teardown.get("ok"):
+                result = {"ok": True, "action": "ended", "backend": backend}
+                if teardown.get("process_killed"):
+                    result["process_killed"] = True
+                return result
+            return teardown or stop_result
+
         await reconcile_session_runs(
             controller,
             teardown_session_id,
             settled_by=SETTLED_BY_STOPPED,
-            claimed_run_ids=claimed_run_ids | scheduler_lane.manager_lane_run_ids,
+            claimed_run_ids=claimed_run_ids,
         )
-        # The canonical stop interrupts the turn (and releases its runtime gate via
-        # the turn's own context — verified in Incus) but does NOT free the rest of
-        # the runtime. Finish the teardown so the row clears instead of forcing a
-        # second Disconnect.
-        #
-        # TEARDOWN RUNS WHETHER OR NOT THE STOP SUCCEEDED, for every backend. A
-        # stale-active row whose turn can no longer be interrupted (app-server died,
-        # transport gone) must still be clearable from the tab, or End is useless in
-        # exactly the situation a user reaches for it.
-        teardown: dict[str, Any] = {"ok": True}
-        if backend == "codex":
-            teardown = await _end_codex(controller, base_session_id)
+
+        if backend == "claude":
+            result = await _end_claude(controller, composite_key, base_session_id)
+        elif backend == "codex":
+            result = await _end_codex(controller, base_session_id)
         elif backend == "opencode":
-            teardown = await _end_opencode(controller, base_session_id)
-        elif backend == "claude":
-            if stop_ok:
-                # Convergence, not a special case: the stop path already removed the
-                # client, so the session is ALREADY absent and that counts as torn
-                # down. Calling ``_end_claude`` here would find nothing and report
-                # ``session_not_live``, degrading a successful End. Only the leftover
-                # CLI subprocess is still there to free.
-                if isinstance(claude_pid, int):
-                    try:
-                        from modules.agents.claude_process_reaper import _reap_pid_set
+            result = await _end_opencode(controller, base_session_id)
+        elif isinstance(pid, int):
+            # Fallback: a pid-only target with no backend is treated as an orphan kill.
+            return await _end_orphan_pid(pid)
+        else:
+            return {"ok": False, "error": "unknown_target"}
 
-                        if (await _reap_pid_set({claude_pid}, terminate_timeout=2.0, logger=logger)) > 0:
-                            teardown = {"ok": True, "process_killed": True}
-                    except Exception:  # noqa: BLE001
-                        logger.debug("end: claude reap after stop failed for %s", claude_pid, exc_info=True)
-            else:
-                teardown = await _end_claude(controller, composite_key, base_session_id)
-        if not isinstance(teardown, dict):
-            teardown = {"ok": True}
-        # Precedence: the stop's own outcome is authoritative. A teardown failure is
-        # logged and becomes the endpoint's error only when the stop failed too —
-        # otherwise a successful settlement would be reported as a failure because a
-        # process the user cannot see refused to die.
-        if stop_ok:
-            result = dict(stop_result)
-            if teardown.get("process_killed"):
-                result["process_killed"] = True
-            if not teardown.get("ok"):
-                logger.warning(
-                    "end: %s teardown failed after a successful stop for %s: %s",
-                    backend,
-                    base_session_id or session_id,
-                    teardown.get("error"),
-                )
-            return result
-        if teardown.get("ok"):
-            result = {"ok": True, "action": "ended", "backend": backend}
-            if teardown.get("process_killed"):
-                result["process_killed"] = True
-            return result
-        return teardown or stop_result
-
-    await reconcile_session_runs(
-        controller,
-        teardown_session_id,
-        settled_by=SETTLED_BY_STOPPED,
-        claimed_run_ids=claimed_run_ids,
-    )
-
-    if backend == "claude":
-        result = await _end_claude(controller, composite_key, base_session_id)
-    elif backend == "codex":
-        result = await _end_codex(controller, base_session_id)
-    elif backend == "opencode":
-        result = await _end_opencode(controller, base_session_id)
-    elif isinstance(pid, int):
-        # Fallback: a pid-only target with no backend is treated as an orphan kill.
-        return await _end_orphan_pid(pid)
-    else:
-        return {"ok": False, "error": "unknown_target"}
-
-    return result
+        return result
 
 
 def snapshot_running_agents(controller: "Controller") -> dict[str, Any]:

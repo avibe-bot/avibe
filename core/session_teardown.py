@@ -202,6 +202,7 @@ def hold_session_admission(
     session_id: str,
     *,
     admission_holds: Optional[ExitStack],
+    drain_on_release: bool = True,
 ) -> None:
     """Extend one session's teardown admission hold onto the CALLER's scope (HFR-330).
 
@@ -229,6 +230,26 @@ def hold_session_admission(
     ``release_for_teardown``'s own narrower hold asks for nothing, since its exit is
     still inside the window.
 
+    ...BUT NOT EVERY RUNTIME REMOVAL WANTS THE QUEUE BACK (HFR-334). The drain is the
+    DEFAULT because the callers that motivated it — Claude cleanup/eviction, Codex
+    transport eviction — all reclaim a session that is expected to keep serving its
+    conversation, so a queued row has a replacement runtime to land on and running it
+    is the user's evident intent. ``drain_on_release=False`` is for the two callers
+    where reopening onto a fresh runtime would be WRONG rather than merely early:
+
+    - CONTROLLER SHUTDOWN. A drain would start a brand-new turn inside a process that
+      is exiting, against backends ``cleanup_sync`` is about to dismantle. The queue is
+      durable, so the honest answer is to leave the row for the next start.
+    - THE RUNNING TAB'S END. Stop semantics are explicitly "do not flush" — End is a
+      user saying stop, and draining afterwards would start the very work they just
+      stopped.
+
+    Both still WANT the hold: refusing admission during their teardown is what keeps a
+    racing message off the runtime being dismantled. They only decline the second half
+    of the contract, and they can, because for them the durable queue's own backstops
+    (the next submission, restart recovery) are the correct owner rather than a
+    stopgap.
+
     Defensive like everything else in this module: a controller with no turn manager
     (headless runs, the test doubles) is a silent no-op, never an exception on a path
     already tearing something down.
@@ -244,7 +265,9 @@ def hold_session_admission(
     if not callable(hold):
         return
     try:
-        admission_holds.enter_context(hold(resolved, drain_on_release=True))
+        admission_holds.enter_context(
+            hold(resolved, drain_on_release=drain_on_release)
+        )
     except Exception:
         logger.warning(
             "Session teardown: holding admission for session %s failed",

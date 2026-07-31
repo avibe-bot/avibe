@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
@@ -690,85 +691,107 @@ class CodexAgent(BaseAgent):
                 else:
                     logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
 
-                # SETTLE BEFORE STOPPING THE TRANSPORT. Everything below this point
-                # dismantles the runtime, and once the app-server is gone no run
-                # executing through it can ever be settled by its own turn — the
-                # generic teardown defect, reached here through Codex's own idle
-                # sweep. The cause is ``evicted`` for the same reason the Claude idle
-                # sweep uses it: nobody asked for these runs to end and their
-                # definitions are fine.
+                # THE ADMISSION HOLD SPANS THE WHOLE CONVERGENCE (HFR-334).
                 #
-                # Wired here rather than at the controller's periodic sweep because
-                # this is the only layer that knows WHICH sessions the evicted cwd
-                # covers; the shared helper it calls owns everything after that.
-                for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    await teardown_runtime_session_runs(
-                        getattr(self, "controller", None),
-                        session_anchor=base_session_id,
-                        workdir=cwd,
-                        # The transport being evicted is a Codex one, so a candidate
-                        # row on another backend is not this runtime's to cancel
-                        # (HFR-128).
-                        agent_backend="codex",
-                        settled_by=SETTLED_BY_EVICTED,
-                    )
-                try:
-                    await transport.stop()
-                except Exception as exc:
-                    # CONVERGE ANYWAY — do NOT preserve state for a retry (HFR-326).
+                # Everything from here to the end of this block dismantles the
+                # runtime, and the settlement below pops the turn's ``in_flight``
+                # entry at its very start — inside ``release_for_teardown``'s awaited
+                # cancel. That hold ends when the cancel returns; the transport is
+                # still registered, still being stopped, and its mappings still
+                # stand. A message arriving anywhere in the remainder reads the
+                # session as IDLE and dispatches onto the app-server being killed.
+                #
+                # So the stack is entered HERE and exits only after the mappings are
+                # gone, on every path including the stop-failure convergence
+                # (HFR-326) — the same shape ``SessionHandler.cleanup_session`` and
+                # the Claude idle-eviction loop already use. Its release is also the
+                # first honest moment a queued message may run, so the hold this
+                # registers owes the drain (HFR-332): by then the transport is gone
+                # and a replacement can be created for this cwd.
+                with ExitStack() as admission_holds:
+                    # SETTLE BEFORE STOPPING THE TRANSPORT. Everything below this point
+                    # dismantles the runtime, and once the app-server is gone no run
+                    # executing through it can ever be settled by its own turn — the
+                    # generic teardown defect, reached here through Codex's own idle
+                    # sweep. The cause is ``evicted`` for the same reason the Claude idle
+                    # sweep uses it: nobody asked for these runs to end and their
+                    # definitions are fine.
                     #
-                    # The runs above are already settled ``evicted`` and their manager
-                    # turns already cancelled, and neither is reversible. Keeping the
-                    # transport and its mappings registered would leave a LIVE backend
-                    # whose rows are terminal: its eventual real result has no owner and
-                    # ``settle_run_terminal`` is scoped to queued|running, so it could
-                    # never take those rows back. The settle-first ordering exists
-                    # because a torn-down backend cannot settle its own turn; a backend
-                    # that REFUSES to tear down is the opposite case, but by this point
-                    # its waiters are gone either way, so the only consistent state is
-                    # to treat the transport as gone.
-                    #
-                    # Deferring the settlement until a successful stop is not an
-                    # alternative: the manager-turn cancel cannot be undone, and a
-                    # transport whose ``stop()`` always raises would stay wedged
-                    # forever — the wedge class this work exists to remove.
-                    #
-                    # NO HARDER KILL IS ATTEMPTED because none exists to attempt.
-                    # ``CodexTransport.stop()`` is the only teardown entry point and it
-                    # already contains the full escalation ladder internally (close
-                    # stdin -> wait -> SIGTERM the process tree -> wait -> SIGKILL the
-                    # process tree -> wait), so a ``stop()`` that raises is that ladder
-                    # having failed, not a soft attempt worth escalating from here.
-                    #
-                    # RESIDUAL: a process that refuses to die may outlive this eviction
-                    # until process-level reaping. That is accepted. State is left
-                    # consistent, the runs are settled, and the mappings are dropped so
-                    # a NEW transport can be created for this cwd.
-                    logger.warning(
-                        "Failed to stop Codex transport for cwd=%s: %s; converging anyway "
-                        "(its runs are already settled and its turns cancelled)",
-                        cwd,
-                        exc,
-                    )
+                    # Wired here rather than at the controller's periodic sweep because
+                    # this is the only layer that knows WHICH sessions the evicted cwd
+                    # covers; the shared helper it calls owns everything after that.
+                    for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                        await teardown_runtime_session_runs(
+                            getattr(self, "controller", None),
+                            session_anchor=base_session_id,
+                            workdir=cwd,
+                            # The transport being evicted is a Codex one, so a candidate
+                            # row on another backend is not this runtime's to cancel
+                            # (HFR-128).
+                            agent_backend="codex",
+                            settled_by=SETTLED_BY_EVICTED,
+                            # Registered where the runtime identity has just become a
+                            # session id, and released by the stack above once this
+                            # transport is truly gone (HFR-334).
+                            admission_holds=admission_holds,
+                        )
+                    try:
+                        await transport.stop()
+                    except Exception as exc:
+                        # CONVERGE ANYWAY — do NOT preserve state for a retry (HFR-326).
+                        #
+                        # The runs above are already settled ``evicted`` and their manager
+                        # turns already cancelled, and neither is reversible. Keeping the
+                        # transport and its mappings registered would leave a LIVE backend
+                        # whose rows are terminal: its eventual real result has no owner and
+                        # ``settle_run_terminal`` is scoped to queued|running, so it could
+                        # never take those rows back. The settle-first ordering exists
+                        # because a torn-down backend cannot settle its own turn; a backend
+                        # that REFUSES to tear down is the opposite case, but by this point
+                        # its waiters are gone either way, so the only consistent state is
+                        # to treat the transport as gone.
+                        #
+                        # Deferring the settlement until a successful stop is not an
+                        # alternative: the manager-turn cancel cannot be undone, and a
+                        # transport whose ``stop()`` always raises would stay wedged
+                        # forever — the wedge class this work exists to remove.
+                        #
+                        # NO HARDER KILL IS ATTEMPTED because none exists to attempt.
+                        # ``CodexTransport.stop()`` is the only teardown entry point and it
+                        # already contains the full escalation ladder internally (close
+                        # stdin -> wait -> SIGTERM the process tree -> wait -> SIGKILL the
+                        # process tree -> wait), so a ``stop()`` that raises is that ladder
+                        # having failed, not a soft attempt worth escalating from here.
+                        #
+                        # RESIDUAL: a process that refuses to die may outlive this eviction
+                        # until process-level reaping. That is accepted. State is left
+                        # consistent, the runs are settled, and the mappings are dropped so
+                        # a NEW transport can be created for this cwd.
+                        logger.warning(
+                            "Failed to stop Codex transport for cwd=%s: %s; converging anyway "
+                            "(its runs are already settled and its turns cancelled)",
+                            cwd,
+                            exc,
+                        )
 
-                self._transports.pop(cwd, None)
-                self._transport_last_activity.pop(cwd, None)
-                self._cwd_inodes().pop(cwd, None)
-                self._retire_model_hub_process_scope(cwd)
+                    self._transports.pop(cwd, None)
+                    self._transport_last_activity.pop(cwd, None)
+                    self._cwd_inodes().pop(cwd, None)
+                    self._retire_model_hub_process_scope(cwd)
 
-                for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    # A force-evicted stuck-active turn never emitted a terminal
-                    # result, so the Workbench status and SSE/runtime gate are
-                    # still owned by that turn. Settle it through the same
-                    # terminal-result path as normal completions before dropping
-                    # turn state. No-op for sessions with no active turn.
-                    await self._settle_stuck_active_request(base_session_id)
-                    # Keep the persisted thread mapping so a later transport restart
-                    # can resume the same Codex conversation for this Slack thread.
-                    self._session_mgr.invalidate_thread(base_session_id)
-                    self._turn_registry.clear_session(base_session_id)
-                    self._session_locks.pop(base_session_id, None)
-                    self._clear_thread_developer_instructions(base_session_id)
+                    for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                        # A force-evicted stuck-active turn never emitted a terminal
+                        # result, so the Workbench status and SSE/runtime gate are
+                        # still owned by that turn. Settle it through the same
+                        # terminal-result path as normal completions before dropping
+                        # turn state. No-op for sessions with no active turn.
+                        await self._settle_stuck_active_request(base_session_id)
+                        # Keep the persisted thread mapping so a later transport restart
+                        # can resume the same Codex conversation for this Slack thread.
+                        self._session_mgr.invalidate_thread(base_session_id)
+                        self._turn_registry.clear_session(base_session_id)
+                        self._session_locks.pop(base_session_id, None)
+                        self._clear_thread_developer_instructions(base_session_id)
 
                 evicted += 1
 

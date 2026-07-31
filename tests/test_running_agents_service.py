@@ -1926,3 +1926,81 @@ def test_end_refuses_to_cancel_an_unprovable_scheduler_lane(tmp_path, monkeypatc
     # ...and End still completed and tore down the clicked row's own runtime.
     assert cleared.get("clr") == "codex-base"
     assert cleared.get("treg") == "codex-base"
+
+
+def test_end_holds_admission_through_the_backend_teardown_without_draining(monkeypatch):
+    """HFR-334: End closes the same reopen window, and deliberately does not drain.
+
+    The audit that found the Codex eviction's missing hold found this leg too. End's
+    stop cancels the manager turn and — since HFR-333 — awaits it, and that await runs
+    the turn's ``finally``, whose first act is popping ``in_flight``. The runtime is
+    not actually removed until the backend teardown below, so between the two the
+    session reads IDLE with a live client still registered: a message arriving there
+    dispatches onto the runtime being ended.
+
+    THE DRAIN IS DECLINED, which is the difference from every eviction/cleanup caller.
+    End is a user Stop, and Stop's contract is explicitly not to flush ("不清空"), so
+    reopening onto a fresh runtime and immediately running the queued row would start
+    the very work the user just stopped. The row stays durably queued for whatever
+    they send next.
+
+    Asserted where it matters — INSIDE the backend teardown, the last thing End does
+    to the runtime — rather than on the call shape alone.
+    """
+    from core.session_teardown import hold_session_admission
+    from core.session_turns import SessionTurnManager
+
+    manager = SessionTurnManager(types.SimpleNamespace())
+    controller = _make_controller()
+    controller.session_turns = manager
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda anchor, **_kw: ["sess-end"]
+    )
+
+    observed = {}
+
+    async def _cleanup(*_args, **_kwargs):
+        # The runtime is being dropped right now: admission must still be shut.
+        observed["closed_during_teardown"] = manager.is_teardown_admission_closed(
+            "sess-end"
+        )
+
+    client = types.SimpleNamespace(interrupt=_AsyncFlag(), _fake_pid=4321)
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions={"slack_1:/w": client}, cleanup_session=_cleanup
+    )
+    monkeypatch.setattr(
+        "modules.agents.claude_process_reaper._reap_pid_set", _AsyncFlag(ret=0)
+    )
+
+    recorded = []
+    real_hold = hold_session_admission
+
+    def _spy(controller_arg, session_id, *, admission_holds, drain_on_release=True):
+        recorded.append((session_id, drain_on_release))
+        return real_hold(
+            controller_arg,
+            session_id,
+            admission_holds=admission_holds,
+            drain_on_release=drain_on_release,
+        )
+
+    monkeypatch.setattr(running_agents, "hold_session_admission", _spy)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="claude", composite_key="slack_1:/w"
+        )
+    )
+
+    assert res["ok"] is True
+    # The hold is taken against the session End resolved, and it opts out of the drain.
+    assert recorded == [("sess-end", False)]
+    assert observed["closed_during_teardown"] is True, (
+        "admission reopened before End had removed the runtime it was ending"
+    )
+    # Released on the way out — a leaked hold is a permanently wedged session.
+    assert manager.is_teardown_admission_closed("sess-end") is False
+    # ...and nothing was drained: Stop does not flush the queue it left behind.
+    assert manager._teardown_drain_owed == set()
+    assert manager._teardown_drain_tasks == {}

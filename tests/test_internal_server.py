@@ -3052,6 +3052,244 @@ def test_reopening_teardown_admission_declines_to_drain_under_the_callers_own_tu
     )
 
 
+def test_codex_eviction_holds_admission_and_drains_after_transport_removal(
+    monkeypatch, tmp_path
+):
+    """HFR-334: Codex transport eviction owes the same hold Claude's teardowns take.
+
+    Every OTHER runtime-removing teardown already carries the HFR-330/332 stack —
+    ``SessionHandler.cleanup_session`` and the Claude idle-eviction loop both wrap an
+    ``ExitStack`` around "settle, then drop the runtime" and hand it to
+    ``teardown_runtime_session_runs``. Codex's ``evict_idle_transports`` called the
+    same helper with NO stack, so the only guard left was
+    ``release_for_teardown``'s own narrower hold, which ends inside the awaited
+    cancel — while the transport is still registered and the mappings still stand.
+
+    That window is wider here than in the Claude case, because more happens inside
+    it: ``transport.stop()`` (a real app-server shutdown, including the
+    SIGTERM/SIGKILL ladder), the ``_transports`` / activity / inode pops, the model
+    hub scope retirement, and the per-session stuck-turn settlement. A message typed
+    at any point in there read the session as IDLE — ``_run``'s ``finally`` popped
+    ``in_flight`` back in the cancel — and dispatched onto the app-server being
+    killed. And because Codex's hold requested no drain either, a message that DID
+    get refused had nothing to dequeue it afterwards.
+
+    THE RACER IS SUBMITTED FROM INSIDE ``transport.stop()``, deliberately, and it is
+    the only one. A racer fired at ``turn.end`` instead lands INSIDE
+    ``release_for_teardown``'s own hold, which already refuses it — so pre-fix it
+    merely strands (queued, with nothing left to dequeue it), and post-fix any later
+    racer would be enqueued by the ordinary non-empty-queue rule rather than by the
+    hold under test. Submitting once, past the awaited cancel and against an EMPTY
+    queue, isolates the window this finding is about: pre-fix the session reads idle
+    and the message dispatches onto the app-server being killed.
+
+    Driven through the REAL ``CodexAgent.evict_idle_transports``, the real
+    ``teardown_runtime_session_runs`` / ``hold_session_admission`` pair, and a real
+    ``SessionTurnManager`` over a real durable queue. Only the settlement service is
+    a double, and a faithful one: its ``teardown_session_runs`` performs the manager
+    release the real service performs, which is the act that opens the window. The
+    anchor and the Avibe session id are deliberately DIFFERENT strings, so the test
+    also proves the resolve hop the hold depends on.
+    """
+
+    from unittest.mock import patch
+
+    from core.services import sessions as sessions_service
+    from modules.agents.codex import agent as codex_agent_module
+    from modules.agents.codex.agent import CodexAgent
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_codex_eviction_hold",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="codex", agent_name="worker"
+        )
+    session_id = session["id"]
+    anchor = "slack_C1_T1"
+    cwd = "/tmp/work"
+
+    dispatched: list[str] = []
+    first_started = asyncio.Event()
+
+    async def long_handler(ctx, text):
+        dispatched.append(text)
+        if text == "first":
+            # Only the evicted turn is held open; the queued racers must be able to
+            # finish so the drain's own FIFO can proceed.
+            first_started.set()
+            await asyncio.sleep(30)
+
+    controller = _build_controller_double(handler=long_handler)
+    ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+    ctx.platform_specific = {
+        "agent_session_id": session_id,
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+    manager = session_turns.SessionTurnManager(controller, build_context=lambda _sid: ctx)
+    controller.session_turns = manager
+
+    resolve_calls: list[tuple] = []
+
+    def _find_session_ids_for_anchor(resolved_anchor, *, workdir=None, agent_backend=None):
+        resolve_calls.append((resolved_anchor, workdir, agent_backend))
+        if resolved_anchor == anchor and agent_backend == "codex":
+            return [session_id]
+        return []
+
+    controller.sessions = SimpleNamespace(
+        find_session_ids_for_anchor=_find_session_ids_for_anchor
+    )
+
+    async def _teardown_session_runs(resolved_session_id, *, settled_by, include_manager_lane=True):
+        # What the real ScheduledTaskService does on the leg that matters here: it
+        # releases the manager turn, whose ``finally`` pops ``in_flight``.
+        await manager.release_for_teardown(resolved_session_id, settled_by=settled_by)
+        return SimpleNamespace(cancelled_count=1, reconciled_count=0)
+
+    controller.scheduled_task_service = SimpleNamespace(
+        teardown_session_runs=_teardown_session_runs
+    )
+
+    observed: dict = {}
+
+    agent = object.__new__(CodexAgent)
+    agent.controller = controller
+
+    async def _stop_transport():
+        # Mid-teardown, and the loudest part of the window: the app-server is being
+        # killed right now.
+        observed["admission_closed_during_stop"] = manager.is_teardown_admission_closed(
+            session_id
+        )
+        # A message arriving HERE is the sharper half of the finding. It is past
+        # ``release_for_teardown``'s own narrow hold — that one ended when the awaited
+        # cancel returned — so with no caller-scoped hold the session reads IDLE and
+        # this dispatches straight onto the transport being stopped.
+        observed["stop_racer"] = await manager.submit(
+            session_id, ctx, "racer-during-stop", enqueue=_enqueue("racer-during-stop")
+        )
+
+    agent._transports = {cwd: SimpleNamespace(stop=_stop_transport)}
+    agent._transport_last_activity = {cwd: 0.0}
+    agent._transport_locks = {cwd: asyncio.Lock()}
+    agent._session_locks = {anchor: asyncio.Lock()}
+    agent._session_mgr = SimpleNamespace(
+        sessions_for_cwd=lambda resolved_cwd: [anchor] if resolved_cwd == cwd else [],
+        invalidate_thread=lambda _base: None,
+    )
+    agent._turn_registry = SimpleNamespace(
+        get_active_turn=lambda _base: None,
+        has_pending_turn_start=lambda _base: False,
+        get_request_for_turn=lambda _turn: None,
+        get_latest_request=lambda _base: None,
+        clear_session=lambda _base: None,
+    )
+    agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+
+    def _retire(resolved_cwd):
+        # Runs immediately after the ``_transports`` / activity / inode pops, so this
+        # is the "registry is now empty" observation point.
+        observed["transports_after_pop"] = dict(agent._transports)
+        observed["admission_closed_after_registry_removal"] = (
+            manager.is_teardown_admission_closed(session_id)
+        )
+
+    agent._retire_model_hub_process_scope = _retire
+
+    def _enqueue(text: str):
+        def _write() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn, scope_id=scope_id, session_id=session_id, text=text
+                )
+            return True
+
+        return _write
+
+    async def _go():
+        try:
+            first = await manager.submit(
+                session_id, ctx, "first", enqueue=_enqueue("first")
+            )
+            assert first.route == "ran"
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            with patch.object(codex_agent_module.time, "monotonic", return_value=2000.0):
+                observed["evicted"] = await agent.evict_idle_transports(600)
+
+            observed["dispatched_at_eviction_return"] = list(dispatched)
+            observed["queued_at_eviction_return"] = _queued_texts(engine, session_id)
+            observed["admission_open_after"] = not manager.is_teardown_admission_closed(
+                session_id
+            )
+            # Nothing flushes by hand: the reopening owes the drain (HFR-332). This is
+            # the assertion that used to be masked by tests performing that flush
+            # themselves — nothing in production does.
+            for _ in range(300):
+                if "racer-during-stop" in dispatched:
+                    break
+                await asyncio.sleep(0.01)
+            observed["queued_after"] = _queued_texts(engine, session_id)
+        finally:
+            for turn in list(manager.in_flight.values()):
+                turn.task.cancel()
+            await asyncio.gather(
+                *(t.task for t in manager.in_flight.values()), return_exceptions=True
+            )
+
+    asyncio.run(_go())
+
+    assert observed["evicted"] == 1
+    assert resolve_calls == [(anchor, cwd, "codex")], (
+        "the eviction must resolve its runtime identity to the Avibe session id once"
+    )
+    # THE HOLD SPANS THE WHOLE CONVERGENCE, not just the awaited cancel.
+    assert observed["admission_closed_during_stop"] is True, (
+        "admission reopened while the Codex app-server was still being stopped"
+    )
+    assert observed["transports_after_pop"] == {}
+    assert observed["admission_closed_after_registry_removal"] is True, (
+        "admission reopened before the transport registry entry was gone"
+    )
+
+    stop_racer = observed["stop_racer"]
+    assert stop_racer.route == "enqueued", (
+        "a message admitted while the Codex transport was being stopped dispatched "
+        "onto the transport being evicted"
+    )
+    assert stop_racer.queue_persisted is True
+    assert observed["dispatched_at_eviction_return"] == ["first"], (
+        "nothing may reach the dying Codex transport between the cancel and its removal"
+    )
+    assert observed["queued_at_eviction_return"] == ["racer-during-stop"], (
+        "the refused message is not dropped — it takes the durable queue"
+    )
+
+    # ...and the reopening hands the queue back, because by then the transport is gone
+    # and a replacement can be created for this cwd.
+    assert observed["admission_open_after"] is True, (
+        "a leaked hold is a permanently wedged session"
+    )
+    assert dispatched == ["first", "racer-during-stop"], (
+        "the refused message must run once the eviction is over, not wait for an "
+        "unrelated later submission or a restart"
+    )
+    assert observed["queued_after"] == []
+
+
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
     tmp_path, monkeypatch
 ):

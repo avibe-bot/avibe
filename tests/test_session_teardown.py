@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,6 +24,7 @@ from config.v2_sessions import SessionsStore
 from core.run_settlement import SETTLED_BY_EVICTED
 from core.scheduled_tasks import ScheduledTaskService
 from core.session_teardown import (
+    hold_session_admission,
     resolve_teardown_session_ids,
     split_composite_session_key,
     teardown_composite_session_runs,
@@ -495,3 +498,111 @@ def test_teardown_settles_a_session_whose_workdir_contains_a_colon(
         ) == [owner_id]
     finally:
         store.close()
+
+
+def test_teardown_holds_can_decline_the_drain_they_normally_owe() -> None:
+    """HFR-334: the drain is the default, and two audited callers opt out of it.
+
+    ``hold_session_admission`` has always requested ``drain_on_release`` because the
+    callers that motivated it — Claude cleanup/eviction, and now Codex transport
+    eviction — reclaim a session that keeps serving its conversation, so a message
+    refused mid-teardown has a replacement runtime to land on the moment the hold
+    lets go (HFR-332).
+
+    The audit of every teardown entry found two where that is the wrong promise:
+    controller SHUTDOWN, where reopening would schedule a fresh turn inside a process
+    that is exiting against backends about to be dismantled, and the Running tab's
+    END, where Stop's contract is explicitly not to flush and a drain would start the
+    very work the user just stopped. Both still take the HOLD — refusing admission is
+    what keeps a racing message off the dying runtime — and decline only its second
+    half, which they can, because the durable queue's own backstops (the next
+    submission, restart recovery) are the correct owner there rather than a stopgap.
+
+    Asserted against the real manager state the flag drives, not the call: what
+    matters is whether the session is recorded as OWING a drain while held.
+    """
+
+    manager = SessionTurnManager(SimpleNamespace())
+    controller = SimpleNamespace(session_turns=manager)
+
+    with ExitStack() as holds:
+        hold_session_admission(controller, "sess-drains", admission_holds=holds)
+        hold_session_admission(
+            controller, "sess-quiet", admission_holds=holds, drain_on_release=False
+        )
+
+        # Both are CLOSED — the protection is identical, only the reopening differs.
+        assert manager.is_teardown_admission_closed("sess-drains") is True
+        assert manager.is_teardown_admission_closed("sess-quiet") is True
+        assert manager._teardown_drain_owed == {"sess-drains"}
+
+    assert manager.is_teardown_admission_closed("sess-drains") is False
+    assert manager.is_teardown_admission_closed("sess-quiet") is False
+    # Nothing is left owed on either path; a leaked marker would drain a session at
+    # some unrelated later teardown's expense.
+    assert manager._teardown_drain_owed == set()
+    # The opted-out session scheduled no drain at all, so no turn was started against
+    # a backend that is going away.
+    assert "sess-quiet" not in manager._teardown_drain_tasks
+
+
+def test_controller_shutdown_settlement_holds_admission_without_draining() -> None:
+    """HFR-334: shutdown closes the same window, and refuses the same drain.
+
+    ``_settle_inflight_turns_for_shutdown`` tears down every live turn and then hands
+    off to ``cleanup_sync``, which dismantles the backends. Each settlement pops its
+    turn's ``in_flight`` entry inside the awaited cancel, so without a hold the
+    sessions in between read IDLE with live clients still registered.
+
+    ONE STACK FOR THE WHOLE LOOP is the part worth pinning. Each session's hold is
+    taken lazily, immediately before its own settlement — which is when its window
+    opens, since until then its live turn makes ``submit`` see it as busy anyway —
+    but NONE of them is released until the whole loop is done. A per-session ``with``
+    would reopen each session at the top of the next iteration, while the process is
+    still exiting and its backend is still to be torn down.
+    """
+
+    from core.controller import Controller
+    from core.run_settlement import SETTLED_BY_RESTARTED
+
+    manager = SessionTurnManager(SimpleNamespace())
+    settled: list[tuple[str, str, bool, bool]] = []
+
+    async def _teardown_session_runs(controller, session_id, *, settled_by, **_kwargs):
+        # Observed from INSIDE the settlement: every session is held for the whole
+        # loop, not just its own turn.
+        settled.append(
+            (
+                session_id,
+                settled_by,
+                manager.is_teardown_admission_closed("sess-a"),
+                manager.is_teardown_admission_closed("sess-b"),
+            )
+        )
+        return 1
+
+    # The shutdown path enumerates the busy set off the MANAGER, and resolves the
+    # hold off the controller — both are this one real manager.
+    manager.busy_session_ids = lambda: {"sess-a", "sess-b"}
+    fake_controller = SimpleNamespace(session_turns=manager)
+
+    with patch("core.controller.teardown_session_runs", _teardown_session_runs):
+        asyncio.run(Controller._settle_inflight_turns_for_shutdown(fake_controller))
+
+    assert [row[0] for row in settled] == ["sess-a", "sess-b"]
+    assert {row[1] for row in settled} == {SETTLED_BY_RESTARTED}
+    # Each session is held for its OWN settlement...
+    assert settled[0][2] is True
+    assert settled[1][3] is True
+    # ...and the hold taken in the first iteration is STILL held during the second.
+    # This is what the shared stack buys: sess-a does not reopen while the shutdown
+    # is still working through the rest of the list.
+    assert settled[1][2] is True
+
+    # Released on the way out...
+    assert manager.is_teardown_admission_closed("sess-a") is False
+    assert manager.is_teardown_admission_closed("sess-b") is False
+    # ...and NOTHING was drained: a shutdown must not start fresh turns against
+    # backends ``cleanup_sync`` is about to tear down.
+    assert manager._teardown_drain_owed == set()
+    assert manager._teardown_drain_tasks == {}
