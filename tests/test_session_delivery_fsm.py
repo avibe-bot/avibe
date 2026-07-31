@@ -277,6 +277,34 @@ def test_lost_accepted_receipt_restarts_in_reconciliation_without_resteer(
     assert row["target_turn_id"] == turn_id
 
 
+def test_adapter_error_persists_reconciliation_without_retry(managers) -> None:
+    manager, restarted, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    manager._steer = AsyncMock(side_effect=ConnectionError("receipt unavailable"))
+
+    outcome = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="do not retry unknown steer",
+            ),
+            context=_context(),
+        )
+    )
+    asyncio.run(restarted.recover_durable_delivery_state())
+
+    row = next(
+        item
+        for item in _delivery_rows(engine)
+        if item["id"] == outcome.delivery_id
+    )
+    assert outcome.state == "reconciling"
+    assert row["state"] == "reconciling"
+    assert row["receipt_outcome"] == "unknown"
+    manager._steer.assert_awaited_once()
+
+
 def test_definitive_refusal_racing_idle_drain_starts_same_message_once(managers) -> None:
     """Scenario: MESSAGE-DELIVERY-012"""
     manager, drainer, engine, _engine_b, starts = managers

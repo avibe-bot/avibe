@@ -42,6 +42,7 @@ from core.services.agent_steering import (
     SteerOutcome,
     SteerRequest,
     active_steer_identity,
+    result as steer_result,
     steer_active_turn,
 )
 from storage import messages_service
@@ -1135,6 +1136,21 @@ class SessionTurnManager:
     async def _steer(self, backend: str, request: SteerRequest):
         return await steer_active_turn(self.controller, backend, request)
 
+    async def _attempt_steer(self, backend: str, request: SteerRequest):
+        try:
+            return await self._steer(backend, request)
+        except Exception as exc:
+            logger.exception(
+                "native steering outcome is unknown for Session=%s Turn=%s",
+                request.target_session_id,
+                request.expected_logical_turn_id,
+            )
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="adapter_error",
+                error_type=type(exc).__name__,
+            )
+
     def _observe_active_delivery_turn(
         self,
         session_id: str,
@@ -1355,7 +1371,7 @@ class SessionTurnManager:
         if state == "starting" and turn_id:
             await self._start_persisted_turn(turn_id, context=context)
         elif state == "steering" and turn_id and steer_attempt_id and expected_native_id:
-            receipt = await self._steer(
+            receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
                     target_session_id=request.session_id,
@@ -1459,7 +1475,7 @@ class SessionTurnManager:
             message = str(observed_head.get("message_id") or "")
             with self._sqlite_engine().connect() as conn:
                 row = messages_service.get_message(conn, message, session_id=session_id)
-            receipt = await self._steer(
+            receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
                     target_session_id=session_id,
