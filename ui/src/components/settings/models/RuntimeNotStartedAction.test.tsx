@@ -86,6 +86,19 @@ describe('installed but not-started Model Hub runtime', () => {
     });
   });
 
+  it('treats an unhealthy successful start response as failed', async () => {
+    const api = {
+      startRuntime: vi.fn().mockResolvedValue(runtime('degraded')),
+      getRuntimeStatus: vi.fn(),
+    };
+
+    await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({
+      runtime: runtime('degraded'),
+      failed: true,
+    });
+    expect(api.getRuntimeStatus).not.toHaveBeenCalled();
+  });
+
   it('surfaces an automatic runtime transition on the next idle poll', async () => {
     vi.useFakeTimers();
     try {
@@ -152,23 +165,47 @@ describe('installed but not-started Model Hub runtime', () => {
     expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
   });
 
-  it('keeps the explicit start action after a failed attempt', () => {
+  it('keeps the explicit start action after an unhealthy attempt', () => {
+    for (const health of ['down', 'degraded'] as const) {
+      const html = renderToStaticMarkup(
+        <I18nextProvider i18n={i18n}>
+          <ModelsPageActions
+            runtimeHealth={health}
+            startingRuntime={false}
+            issueCount={2}
+            issuesOnly={false}
+            onStartRuntime={vi.fn()}
+            onFocusIssues={vi.fn()}
+          />
+        </I18nextProvider>,
+      );
+
+      expect(html).toContain(zh.settings.models.runtime.startNow);
+      expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
+      expect(html).not.toContain(zh.settings.models.runtime.notStarted);
+    }
+  });
+
+  it('keeps retry and recovery wiring when both start requests fail', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={i18n}>
         <ModelsPageActions
-          runtimeHealth="down"
+          runtimeHealth={null}
+          runtimeRecoveryPending
           startingRuntime={false}
-          issueCount={2}
+          issueCount={0}
           issuesOnly={false}
           onStartRuntime={vi.fn()}
           onFocusIssues={vi.fn()}
         />
       </I18nextProvider>,
     );
+    const here = dirname(fileURLToPath(import.meta.url));
+    const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
 
     expect(html).toContain(zh.settings.models.runtime.startNow);
-    expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
-    expect(html).not.toContain(zh.settings.models.runtime.notStarted);
+    expect(html).not.toContain(zh.settings.models.status.allHealthy);
+    expect(page).toMatch(/runtimeRecoveryPending\n\s+\|\| runtimeHealth === 'not_started'/);
   });
 
   it('wires idle and down runtime states to the POST-backed start action', () => {
@@ -176,7 +213,7 @@ describe('installed but not-started Model Hub runtime', () => {
     const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
     const api = readFileSync(join(here, 'modelsApi.ts'), 'utf8');
 
-    expect(page).toMatch(/runtimeNotStarted \|\| runtimeHealth === 'down'/);
+    expect(page).toMatch(/runtimeNotStarted\n\s+\|\| runtimeHealth === 'down'/);
     expect(page).toMatch(/startRuntimeWithStatusRefresh\(modelsApi\)/);
     expect(api).toMatch(/'\/api\/models\/runtime\/start', jsonInit\('POST'\)/);
   });

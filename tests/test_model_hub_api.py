@@ -436,6 +436,13 @@ def test_runtime_start_sync_failure_is_reported_as_down(tmp_path):
     assert adapter.start_calls == 0
     assert runtime["status"]["health"] == "down"
 
+    adapter.fail_sync = False
+    config = store.load()
+    asyncio.run(service._commit_synced(config, service._clone_config(config)))
+
+    recovered = asyncio.run(service.runtime_status())
+    assert recovered["status"]["health"] == "not_started"
+
 
 def test_runtime_start_in_progress_remains_not_started(tmp_path):
     class IdleAdapter(FakeAdapter):

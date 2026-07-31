@@ -100,7 +100,7 @@ class EngineSupervisor:
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
             else:
-                health = "not_installed"
+                health = "down" if self._start_attempted else "not_installed"
             return {
                 "manifest": self.installer.contract_manifest(),
                 "status": {

@@ -519,8 +519,10 @@ class ModelHubService:
             source.supply_channel == "hub" for source in config.sources
         )
         if not bindings and not force_empty and not has_hub_sources:
+            self._engine_preparation_failed = False
             return
         await self._engine_call(self.adapter.sync_sources(bindings))
+        self._engine_preparation_failed = False
 
     async def _commit_synced(self, previous: ModelHubConfig, updated: ModelHubConfig) -> None:
         """Persist the authoritative config before updating its engine projection."""

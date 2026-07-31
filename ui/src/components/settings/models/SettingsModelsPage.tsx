@@ -90,6 +90,7 @@ export const RuntimeNotStartedAction: React.FC<{
 
 export const ModelsPageActions: React.FC<{
   runtimeHealth: RuntimeDependency['status']['health'] | null;
+  runtimeRecoveryPending?: boolean;
   startingRuntime: boolean;
   issueCount: number;
   issuesOnly: boolean;
@@ -97,6 +98,7 @@ export const ModelsPageActions: React.FC<{
   onFocusIssues: () => void;
 }> = ({
   runtimeHealth,
+  runtimeRecoveryPending = false,
   startingRuntime,
   issueCount,
   issuesOnly,
@@ -104,7 +106,10 @@ export const ModelsPageActions: React.FC<{
   onFocusIssues,
 }) => {
   const runtimeNotStarted = runtimeHealth === 'not_started';
-  const runtimeStartable = runtimeNotStarted || runtimeHealth === 'down';
+  const runtimeStartable = runtimeRecoveryPending
+    || runtimeNotStarted
+    || runtimeHealth === 'down'
+    || runtimeHealth === 'degraded';
   if (!runtimeStartable) {
     return <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />;
   }
@@ -126,7 +131,8 @@ export async function startRuntimeWithStatusRefresh(
   api: Pick<ModelsApi, 'startRuntime' | 'getRuntimeStatus'>,
 ): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
   try {
-    return { runtime: await api.startRuntime(), failed: false };
+    const runtime = await api.startRuntime();
+    return { runtime, failed: runtime.status.health !== 'ok' };
   } catch {
     // A failed start changes supervisor health. Read that authoritative state
     // back so the persistent page does not keep presenting lazy-start idleness.
@@ -213,6 +219,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
+  const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
@@ -267,12 +274,17 @@ export const SettingsModelsPage: React.FC = () => {
 
   const runtimeHealth = runtime?.status.health ?? null;
   React.useEffect(() => {
-    const runtimeCanRecover = runtimeHealth === 'not_started' || runtimeHealth === 'down';
+    const runtimeCanRecover = runtimeRecoveryPending
+      || runtimeHealth === 'not_started'
+      || runtimeHealth === 'down'
+      || runtimeHealth === 'degraded';
     if (!runtimeCanRecover || startingRuntime) return undefined;
     return pollRuntimeStatus(modelsApi, (nextRuntime) => {
-      if (aliveRef.current) setRuntime(nextRuntime);
+      if (!aliveRef.current) return;
+      setRuntime(nextRuntime);
+      setRuntimeRecoveryPending(false);
     });
-  }, [runtimeHealth, startingRuntime]);
+  }, [runtimeHealth, runtimeRecoveryPending, startingRuntime]);
 
   // 最近切换 is re-read here with the rows, because the writes this refresh exists
   // for are the writes that FILE events: a failing 试跑 cools its head down through
@@ -518,10 +530,12 @@ export const SettingsModelsPage: React.FC = () => {
 
   const startRuntime = async () => {
     setStartingRuntime(true);
+    setRuntimeRecoveryPending(false);
     try {
       const result = await startRuntimeWithStatusRefresh(modelsApi);
       if (!aliveRef.current) return;
       setRuntime(result.runtime);
+      setRuntimeRecoveryPending(result.runtime === null);
       if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setStartingRuntime(false);
@@ -537,6 +551,7 @@ export const SettingsModelsPage: React.FC = () => {
         !loading && !loadError ? (
           <ModelsPageActions
             runtimeHealth={runtimeHealth}
+            runtimeRecoveryPending={runtimeRecoveryPending}
             startingRuntime={startingRuntime}
             issueCount={issueCount}
             issuesOnly={issuesOnly}

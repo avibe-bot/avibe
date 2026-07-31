@@ -945,6 +945,7 @@ def _fixture_supervisor(
     ("installed", "start_attempted", "running", "healthy", "expected"),
     [
         (False, False, False, False, "not_installed"),
+        (False, True, False, False, "down"),
         (True, False, False, False, "not_started"),
         (True, True, False, False, "down"),
         (True, True, True, False, "degraded"),
@@ -975,6 +976,23 @@ def test_supervisor_status_distinguishes_all_runtime_health_states(
     monkeypatch.setattr(supervisor, "_healthy_locked", lambda: healthy)
 
     assert supervisor.status()["status"]["health"] == expected
+
+
+def test_supervisor_failed_first_install_reports_down(tmp_path: Path) -> None:
+    installer = SimpleNamespace(
+        ensure=lambda: {"ok": False, "reason": "fixture_install_failed"},
+        status=lambda: {"installed": False, "version": None},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "v7.2.95", "assets": []},
+    )
+    supervisor = EngineSupervisor(
+        installer=installer,
+        state_store=EngineStateStore(tmp_path / "failed-install"),
+    )
+
+    with pytest.raises(EngineUnavailableError, match="models.engine.install_failed"):
+        supervisor.ensure_running()
+
+    assert supervisor.status()["status"]["health"] == "down"
 
 
 def test_supervisor_starts_checks_health_and_stops_mock_engine(
