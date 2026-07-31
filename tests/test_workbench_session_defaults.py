@@ -103,6 +103,31 @@ def test_explicit_agent_name_derives_backend_on_create(engine, tmp_path):
     assert session["agent_variant"] == "codex"
 
 
+def test_archived_project_default_is_not_inherited_by_new_session(engine, tmp_path):
+    _ensure_agent("retired-default", "claude")
+    created = _project_with_default(
+        engine,
+        tmp_path,
+        agent_name="retired-default",
+    )
+    store = VibeAgentStore()
+    try:
+        archived = store.archive("retired-default")
+        assert archived is not None
+    finally:
+        store.close()
+
+    with engine.begin() as conn:
+        session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=created["scope_id"],
+            agent_backend="",
+        )
+
+    assert session["agent_name"] is None
+    assert (session["agent_backend"] or "") == ""
+
+
 def test_agent_name_update_derives_backend(engine, tmp_path):
     _ensure_agent("reviewer", "codex")
     created = _project_with_default(engine, tmp_path)

@@ -6328,6 +6328,11 @@ def sessions_create():
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            if payload.get("agent_name"):
+                workbench_sessions_service.require_enabled_agent_backend(
+                    conn,
+                    str(payload["agent_name"]),
+                )
             session = workbench_sessions_service.create_session(
                 conn,
                 scope_id=scope_id,
@@ -6761,7 +6766,7 @@ async def sessions_update(session_id: str):
     if "agent_name" in updatable and "agent_backend" not in updatable:
         try:
             with engine.connect() as conn:
-                requested_backend = workbench_sessions_service.derive_backend_for_agent_name(
+                requested_backend = workbench_sessions_service.require_enabled_agent_backend(
                     conn,
                     str(updatable.get("agent_name") or ""),
                 )
@@ -6798,6 +6803,11 @@ async def sessions_update(session_id: str):
 
     try:
         with engine.begin() as conn:
+            if updatable.get("agent_name"):
+                workbench_sessions_service.require_enabled_agent_backend(
+                    conn,
+                    str(updatable["agent_name"]),
+                )
             previous_session = (
                 workbench_sessions_service.get_session(conn, session_id)
                 if {"visibility", "scope_id"}.intersection(updatable)

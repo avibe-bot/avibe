@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from core.vibe_agents import AgentUnavailableError, VibeAgentStore
-from storage.models import agent_sessions, run_definitions, scope_settings, scopes
+from storage.background import DefinitionWriteExpectation, definition_state_unchanged
+from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
 
 NOW = "2026-07-31T14:00:00+00:00"
@@ -92,6 +93,18 @@ def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
                     ),
                 )
             )
+        for status in ("pending", "queued", "processing", "running", "succeeded", "failed", "canceled"):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=f"run_{status}",
+                    run_type="agent",
+                    status=status,
+                    agent_name=agent_name,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json="{}",
+                )
+            )
 
 
 def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> None:
@@ -136,6 +149,7 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             scope = conn.execute(select(scope_settings)).mappings().one()
             session = conn.execute(select(agent_sessions)).mappings().one()
             definitions = conn.execute(select(run_definitions).order_by(run_definitions.c.id)).mappings().all()
+            runs = conn.execute(select(agent_runs.c.status, agent_runs.c.agent_name)).mappings().all()
         assert scope["agent_name"] == result.archived_name
         assert json.loads(scope["settings_json"])["routing"] == {
             "agent_name": result.archived_name,
@@ -147,6 +161,16 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             json.loads(row["metadata_json"])["session_settings_snapshot"]["agent_name"]
             for row in definitions
         } == {result.archived_name}
+        assert {
+            row["agent_name"]
+            for row in runs
+            if row["status"] in {"pending", "queued", "processing", "running"}
+        } == {result.archived_name}
+        assert {
+            row["agent_name"]
+            for row in runs
+            if row["status"] in {"succeeded", "failed", "canceled"}
+        } == {"pm"}
 
         replacement = store.create(name="pm", backend="claude")
         assert replacement.id != original.id
@@ -171,6 +195,80 @@ def test_rename_moves_references_and_default_without_changing_agent_identity(tmp
             "definitions": 1,
         }
         assert store.get("pm") is None
+        with store.engine.connect() as conn:
+            runs = conn.execute(select(agent_runs.c.status, agent_runs.c.agent_name)).mappings().all()
+        assert {
+            row["agent_name"]
+            for row in runs
+            if row["status"] in {"pending", "queued", "processing", "running"}
+        } == {"project-manager"}
+        assert {
+            row["agent_name"]
+            for row in runs
+            if row["status"] in {"succeeded", "failed", "canceled"}
+        } == {"pm"}
+    finally:
+        store.close()
+
+
+def test_archive_invalidates_stale_definition_writes_for_direct_and_snapshot_bindings(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        store.create(name="pm", backend="claude")
+        rows = (
+            {"id": "task_direct", "agent_name": "pm", "metadata_json": "{}"},
+            {
+                "id": "task_snapshot",
+                "agent_name": None,
+                "metadata_json": json.dumps(
+                    {
+                        "session_settings_snapshot": {
+                            "agent_name": "pm",
+                            "captured_at": NOW,
+                        }
+                    }
+                ),
+            },
+        )
+        expectations: dict[str, DefinitionWriteExpectation] = {}
+        with store.engine.begin() as conn:
+            for row in rows:
+                conn.execute(
+                    run_definitions.insert().values(
+                        id=row["id"],
+                        definition_type="scheduled",
+                        name=row["id"],
+                        agent_name=row["agent_name"],
+                        enabled=0,
+                        created_at=NOW,
+                        updated_at=NOW,
+                        metadata_json=row["metadata_json"],
+                    )
+                )
+                expectations[row["id"]] = DefinitionWriteExpectation.from_read(
+                    enabled=False,
+                    metadata=json.loads(row["metadata_json"]),
+                )
+
+        archived = store.archive("pm")
+        assert archived is not None
+
+        with store.engine.begin() as conn:
+            for row in rows:
+                stale_write = conn.execute(
+                    update(run_definitions)
+                    .where(run_definitions.c.id == row["id"])
+                    .where(*definition_state_unchanged(expectations[row["id"]]))
+                    .values(agent_name=row["agent_name"], metadata_json=row["metadata_json"])
+                )
+                assert stale_write.rowcount == 0
+
+            stored = {row["id"]: row for row in conn.execute(select(run_definitions)).mappings().all()}
+        assert stored["task_direct"]["agent_name"] == archived.archived_name
+        assert (
+            json.loads(stored["task_snapshot"]["metadata_json"])["session_settings_snapshot"]["agent_name"]
+            == archived.archived_name
+        )
     finally:
         store.close()
 

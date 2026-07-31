@@ -319,7 +319,14 @@ def create_session(
             )
             .select_from(
                 scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
-                .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+                .outerjoin(
+                    agents,
+                    and_(
+                        agents.c.name == scope_settings.c.agent_name,
+                        agents.c.enabled == 1,
+                        agents.c.archived_at.is_(None),
+                    ),
+                )
             )
             .where(scopes.c.id == scope_id)
         ).mappings().first()
@@ -705,6 +712,23 @@ def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
         return ""
     backend = conn.execute(select(agents.c.backend).where(agents.c.name == cleaned)).scalar_one_or_none()
     return str(backend or "")
+
+
+def require_enabled_agent_backend(conn: Connection, agent_name: str) -> str:
+    """Validate a newly assigned Agent and return its backend."""
+
+    cleaned = str(agent_name or "").strip()
+    if not cleaned:
+        return ""
+    backend = conn.execute(
+        select(agents.c.backend)
+        .where(agents.c.name == cleaned)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+    ).scalar_one_or_none()
+    if backend is None:
+        raise LookupError(f"Agent not found or disabled: {cleaned}")
+    return str(backend)
 
 
 def derive_backend_for_agent_name(conn: Connection, agent_name: str) -> str:

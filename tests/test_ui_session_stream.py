@@ -82,6 +82,17 @@ def _make_session(tmp_path: Path) -> tuple[str, str]:
     return scope_id, session["id"]
 
 
+def _ensure_vibe_agent(name: str, backend: str) -> None:
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        if store.get(name) is None:
+            store.create(name=name, backend=backend)
+    finally:
+        store.close()
+
+
 def _seed_opencode_messages(xdg_home: Path, native_session_id: str, roles: list[str]) -> None:
     db_path = xdg_home / "opencode" / "opencode.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -484,6 +495,56 @@ def test_create_session_without_backend_defers_to_default_agent(isolated_state, 
     assert not response.get_json().get("agent_backend")
 
 
+def test_create_and_patch_session_reject_archived_agent(isolated_state, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from vibe.ui_server import app
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, folder_path=str(tmp_path))
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="retired-reviewer", backend="codex")
+        archived = store.archive("retired-reviewer")
+        assert archived is not None
+    finally:
+        store.close()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    create_response = client.post(
+        "/api/sessions",
+        json={
+            "project_id": project["id"],
+            "agent_backend": "codex",
+            "agent_name": archived.archived_name,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 404
+    assert "not found or disabled" in create_response.get_json()["error"]
+
+    session_response = client.post(
+        "/api/sessions",
+        json={"project_id": project["id"]},
+        headers=headers,
+    )
+    session_id = session_response.get_json()["id"]
+    patch_response = client.patch(
+        f"/api/sessions/{session_id}",
+        json={
+            "agent_backend": "codex",
+            "agent_name": archived.archived_name,
+        },
+        headers=headers,
+    )
+    assert patch_response.status_code == 404
+    assert "not found or disabled" in patch_response.get_json()["error"]
+
+
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
     """POST /api/sessions/<id>/fork reserves a new Avibe Session row that is
     ready for the native backend fork on the first turn, and returns the row the
@@ -701,6 +762,7 @@ def test_patch_rejects_backend_switch_for_pending_fork(isolated_state, tmp_path)
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
+    _ensure_vibe_agent("codex", "codex")
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -1101,6 +1163,7 @@ def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_p
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
+    _ensure_vibe_agent("codex", "codex")
 
     in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
     with patch("vibe.internal_client.turn_state", in_flight):
@@ -1373,6 +1436,7 @@ def test_patch_same_backend_change_skips_in_flight_gate(isolated_state, tmp_path
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
+    _ensure_vibe_agent("claude-pro", "claude")
 
     gate = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
     with patch("vibe.internal_client.turn_state", gate):
@@ -1395,6 +1459,7 @@ def test_patch_backend_switch_allowed_when_idle(isolated_state, tmp_path):
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
+    _ensure_vibe_agent("codex", "codex")
 
     idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
     with patch("vibe.internal_client.turn_state", idle):
@@ -1418,6 +1483,7 @@ def test_patch_backend_switch_falls_back_to_row_guard_when_controller_down(isola
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
+    _ensure_vibe_agent("codex", "codex")
 
     async def unavailable(session_id_inner):
         raise internal_client.InternalServerUnavailable("socket missing")

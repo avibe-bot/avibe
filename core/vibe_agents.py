@@ -19,7 +19,8 @@ from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
-from storage.models import agent_sessions, agents, run_definitions, scope_settings, state_meta
+from storage.models import agent_runs, agent_sessions, agents, run_definitions, scope_settings, state_meta
+from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -126,14 +127,25 @@ def _rewrite_scope_agent_name(raw: str | None, old_name: str, new_name: str) -> 
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
 
 
-def _rewrite_definition_agent_name(raw: str | None, old_name: str, new_name: str) -> tuple[str, bool]:
+def _rewrite_definition_agent_name(
+    raw: str | None,
+    old_name: str,
+    new_name: str,
+    *,
+    direct_binding_changed: bool,
+    revision: str,
+) -> tuple[str, bool]:
     payload = _json_loads(raw, {})
     if not isinstance(payload, dict):
-        return raw or "{}", False
+        payload = {}
+    changed = direct_binding_changed
     snapshot = payload.get("session_settings_snapshot")
-    if not isinstance(snapshot, dict) or snapshot.get("agent_name") != old_name:
+    if isinstance(snapshot, dict) and snapshot.get("agent_name") == old_name:
+        snapshot["agent_name"] = new_name
+        changed = True
+    if not changed:
         return raw or "{}", False
-    snapshot["agent_name"] = new_name
+    payload[DEFINITION_AGENT_BINDING_REVISION_KEY] = revision
     return _json_dumps(payload), True
 
 
@@ -412,7 +424,12 @@ class VibeAgentStore:
                     .where(agents.c.id == agent.id)
                     .values(name=raw_new_name, normalized_name=new_normalized, updated_at=now)
                 )
-                self._rewrite_references(conn, old_name=agent.name, new_name=raw_new_name)
+                self._rewrite_references(
+                    conn,
+                    old_name=agent.name,
+                    new_name=raw_new_name,
+                    revision=now,
+                )
                 if self._default_agent_name(conn) == agent.name:
                     self._write_default_agent_name(conn, raw_new_name, now=now)
         except IntegrityError as exc:
@@ -477,7 +494,12 @@ class VibeAgentStore:
                     updated_at=now,
                 )
             )
-            self._rewrite_references(conn, old_name=agent.name, new_name=archived_name)
+            self._rewrite_references(
+                conn,
+                old_name=agent.name,
+                new_name=archived_name,
+                revision=now,
+            )
             if replacement is not None:
                 self._write_default_agent_name(conn, replacement.name, now=now)
 
@@ -542,10 +564,22 @@ class VibeAgentStore:
         }
 
     @staticmethod
-    def _rewrite_references(conn: Any, *, old_name: str, new_name: str) -> None:
+    def _rewrite_references(
+        conn: Any,
+        *,
+        old_name: str,
+        new_name: str,
+        revision: str,
+    ) -> None:
         conn.execute(
             agent_sessions.update()
             .where(agent_sessions.c.agent_name == old_name)
+            .values(agent_name=new_name)
+        )
+        conn.execute(
+            agent_runs.update()
+            .where(agent_runs.c.agent_name == old_name)
+            .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
             .values(agent_name=new_name)
         )
 
@@ -571,9 +605,16 @@ class VibeAgentStore:
         ).mappings().all()
         for row in definition_rows:
             values = {}
-            if row["agent_name"] == old_name:
+            direct_binding_changed = row["agent_name"] == old_name
+            if direct_binding_changed:
                 values["agent_name"] = new_name
-            metadata, changed = _rewrite_definition_agent_name(row["metadata_json"], old_name, new_name)
+            metadata, changed = _rewrite_definition_agent_name(
+                row["metadata_json"],
+                old_name,
+                new_name,
+                direct_binding_changed=direct_binding_changed,
+                revision=revision,
+            )
             if changed:
                 values["metadata_json"] = metadata
             if values:

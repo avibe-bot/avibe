@@ -46,7 +46,10 @@ from storage.migrations import (
 from storage.models import agent_runs, agent_sessions, messages, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
-from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+from storage.session_reclaim import (
+    DEFINITION_AGENT_BINDING_REVISION_KEY,
+    SESSION_SETTINGS_SNAPSHOT_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +263,10 @@ class DefinitionWriteExpectation:
       snapshot is what a later ``create_once`` rebind reads to carry the old
       workdir / agent / model forward, so restoring the pre-teardown metadata sends
       the task back on the wrong route (D3) with every other guard satisfied.
+    * the Agent binding revision -- rename/archive stamps this dedicated marker
+      whenever it rewrites either the direct Agent or the reclaim snapshot. It
+      catches stale pre-rewrite payloads without treating ordinary internal
+      rebinds or run-result stamps as conflicts.
 
     DELIBERATELY NOT ``updated_at``, and not the whole row. A row-version guard
     would refuse every benign concurrent write -- a run result landing while the
@@ -274,6 +281,7 @@ class DefinitionWriteExpectation:
     #: ``session_settings_snapshot.captured_at`` as read, ``None``/"" when the
     #: definition carried no reclaim snapshot.
     snapshot_captured_at: Optional[str] = None
+    agent_binding_revision: Optional[str] = None
 
     @classmethod
     def from_read(
@@ -291,6 +299,7 @@ class DefinitionWriteExpectation:
             enabled=bool(enabled),
             deleted_at=str(deleted_at) if deleted_at else None,
             snapshot_captured_at=reclaim_snapshot_marker(metadata),
+            agent_binding_revision=definition_agent_binding_revision(metadata),
         )
 
 
@@ -311,6 +320,15 @@ def reclaim_snapshot_marker(metadata: Any) -> Optional[str]:
     return str(captured_at) if captured_at else None
 
 
+def definition_agent_binding_revision(metadata: Any) -> Optional[str]:
+    """Rename/archive revision carried by definition metadata, if present."""
+
+    if not isinstance(metadata, dict):
+        return None
+    revision = metadata.get(DEFINITION_AGENT_BINDING_REVISION_KEY)
+    return str(revision) if revision else None
+
+
 #: ``captured_at`` of the reclaim snapshot, read in SQL. Guarded by ``json_valid``
 #: because ``metadata_json`` is user-visible text on legacy rows: a bare
 #: ``json_extract`` over a malformed blob raises, which would turn "this row has no
@@ -321,6 +339,17 @@ _RECLAIM_SNAPSHOT_MARKER_SQL = case(
         func.json_extract(
             run_definitions.c.metadata_json,
             f"$.{SESSION_SETTINGS_SNAPSHOT_KEY}.captured_at",
+        ),
+    ),
+    else_=None,
+)
+
+_AGENT_BINDING_REVISION_SQL = case(
+    (
+        func.json_valid(run_definitions.c.metadata_json) == 1,
+        func.json_extract(
+            run_definitions.c.metadata_json,
+            f"$.{DEFINITION_AGENT_BINDING_REVISION_KEY}",
         ),
     ),
     else_=None,
@@ -342,6 +371,7 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
         run_definitions.c.enabled == (1 if expect.enabled else 0),
         unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
         unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+        unchanged_text(_AGENT_BINDING_REVISION_SQL, expect.agent_binding_revision),
     ]
 
 
@@ -2114,7 +2144,8 @@ def upsert_definition_in_connection(
     # best-effort runtime stamp).
     logger.warning(
         "Refused a stale full-row write for %s %s: its Session binding, enabled "
-        "state, deletion or reclaim snapshot changed after the payload was read",
+        "state, deletion, reclaim snapshot or Agent binding revision changed after "
+        "the payload was read",
         definition_type,
         values["id"],
     )
