@@ -6787,7 +6787,10 @@ async def sessions_update(session_id: str):
     identity_requested = "agent_id" in updatable or "agent_name" in updatable
     if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
         try:
-            with engine.connect() as conn:
+            with engine.begin() as conn:
+                from storage.agent_session_rows import reserve_write_lock
+
+                reserve_write_lock(conn)
                 identity = workbench_sessions_service.require_enabled_agent_identity(
                     conn,
                     agent_id=updatable.get("agent_id"),
