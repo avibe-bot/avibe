@@ -11,6 +11,7 @@ cancel work in.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,6 +185,154 @@ def test_teardown_does_not_cancel_a_foreign_scope_sharing_the_anchor(
         assert manager.in_flight[foreign_workdir_id].cancel_settled_by is None
     finally:
         store.close()
+
+
+def test_teardown_refuses_ambiguous_exact_anchor_candidates(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """HFR-323: same anchor, same backend, same workdir is not the same runtime.
+
+    HFR-128 narrowed the resolve by backend and by exact workdir, which removes the
+    candidates a runtime provably cannot own. It cannot remove the ones it MIGHT: the
+    unique key is ``(scope_id, session_anchor)``, so two live conversations can hold
+    one anchor with the same backend and the same working directory — shared default
+    workdirs make that ordinary. Backend and workdir equality is not evidence of
+    ownership, and the teardown callers cancel every id the resolve returns, so a
+    two-candidate answer means interrupting a healthy turn belonging to a scope that
+    had nothing to do with this eviction.
+
+    Nothing in memory can break the tie: ``in_flight`` and the scheduler's lock caches
+    are keyed by session id and can legitimately be occupied for BOTH candidates —
+    which is exactly this test's arrangement, and exactly the case a signal that can
+    be true for both cannot decide. So the resolve refuses: no ids, a warning naming
+    the anchor and the count, and the runs left for restart recovery and the sweep. An
+    unsettled run is recoverable; a wrongly cancelled live turn is not.
+    """
+
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        workdir = str(tmp_path / "shared")
+        first_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_first",
+            agent_backend="claude",
+            workdir=workdir,
+        )
+        second_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_second",
+            agent_backend="claude",
+            workdir=workdir,
+        )
+        assert first_id != second_id
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        composite_key = f"{ANCHOR}:{workdir}"
+
+        with caplog.at_level(logging.WARNING, logger="core.session_teardown"):
+            assert (
+                resolve_teardown_session_ids(
+                    controller,
+                    session_anchor=ANCHOR,
+                    workdir=workdir,
+                    agent_backend="claude",
+                )
+                == []
+            )
+        refusals = [
+            record.getMessage()
+            for record in caplog.records
+            if "refusing to cancel" in record.getMessage()
+        ]
+        assert len(refusals) == 1
+        assert ANCHOR in refusals[0]
+        assert "2 live sessions" in refusals[0]
+
+        async def _exercise() -> tuple[bool, bool]:
+            first_task = _live_turn(manager, first_id, "claude")
+            second_task = _live_turn(manager, second_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                return first_task.done(), second_task.done()
+            finally:
+                for task in (first_task, second_task):
+                    task.cancel()
+                await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+        first_done, second_done = asyncio.run(_exercise())
+
+        # Neither live turn was interrupted, and neither carries a settlement cause.
+        assert first_done is False
+        assert second_done is False
+        assert manager.in_flight[first_id].cancel_settled_by is None
+        assert manager.in_flight[second_id].cancel_settled_by is None
+        assert manager.in_flight[first_id].stop_no_flush is False
+        assert manager.in_flight[second_id].stop_no_flush is False
+    finally:
+        store.close()
+
+    # Companion: the refusal is about AMBIGUITY, not about anchors. One exact match
+    # still resolves and is still torn down, or the fix would have disabled teardown.
+    single_store = SessionsStore(tmp_path / "sessions-single.json")
+    try:
+        only_id = _seed_session(
+            single_store,
+            legacy_scope_key="slack::C_only",
+            agent_backend="claude",
+            workdir=str(tmp_path / "solo"),
+        )
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(single_store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        assert resolve_teardown_session_ids(
+            controller,
+            session_anchor=ANCHOR,
+            workdir=str(tmp_path / "solo"),
+            agent_backend="claude",
+        ) == [only_id]
+
+        async def _exercise_single() -> tuple[bool, str | None]:
+            task = _live_turn(manager, only_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    f"{ANCHOR}:{tmp_path / 'solo'}",
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                turn = manager.in_flight.get(only_id)
+                return task.done(), getattr(turn, "cancel_settled_by", None)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        done, cause = asyncio.run(_exercise_single())
+        assert done is True
+        assert cause == SETTLED_BY_EVICTED
+    finally:
+        single_store.close()
 
 
 def test_anchor_resolve_still_accepts_a_null_workdir_row_when_nothing_matches_exactly(

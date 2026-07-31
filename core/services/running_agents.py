@@ -805,6 +805,10 @@ def _teardown_session_id(
     session it is about to cancel work in, and an anchor can be shared across scopes;
     the backend is the one thing the Running-tab row always knows about the runtime
     it is ending, so a row belonging to a different backend is never a candidate.
+
+    ``candidates[0]`` is never an arbitrary pick: the resolve refuses an ambiguous
+    answer outright and returns nothing (HFR-323), so the list is one id or empty,
+    and empty means End settles no runs rather than ending somebody else's session.
     """
 
     resolved = str(session_id or "").strip()

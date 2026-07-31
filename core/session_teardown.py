@@ -131,6 +131,33 @@ def resolve_teardown_session_ids(
     predicate rather than used to pick a winner afterwards: an ambiguous list is not
     inspected here, it is CANCELLED, so the narrowing has to happen before the rows
     become ids.
+
+    WHAT REMAINS AMBIGUOUS IS REFUSED, NOT CANCELLED (HFR-323). ``(scope_id,
+    session_anchor)`` is the unique key, so several live scopes can still share
+    anchor + backend + workdir — shared default working directories make that
+    ordinary rather than exotic — and backend/workdir equality is not evidence of
+    runtime OWNERSHIP. The callers cancel every id this returns, so handing back two
+    candidates means interrupting a healthy turn in a conversation that had nothing
+    to do with this teardown. When more than one candidate survives the narrowing,
+    this returns NOTHING and says so: an unsettled run is recoverable (restart
+    recovery and the staleness sweep both pick it up), a wrongly cancelled live turn
+    is not.
+
+    NO IN-PROCESS SIGNAL IS CONSULTED TO BREAK THE TIE, because none is decisive.
+    ``SessionTurnManager.in_flight`` and the scheduler's session lock caches are
+    keyed by session id and can legitimately be occupied for BOTH candidates at once
+    — precisely the case that must not be resolved by guessing — and the activity
+    registry's runtime-key map holds one last-writer-wins entry per composite key, so
+    it names the most recent scope rather than the owning one. The two facts that
+    WOULD be decisive are not available here: ``agent_sessions.native_session_id`` is
+    write-once and would identify the runtime exactly, but no lookup by it exists and
+    it is empty for a session reserved and not yet dispatched; and the scope key
+    makes the row unique by construction, but the runtime teardown paths do not carry
+    one (which is why this function exists at all). Plumbing either through is a
+    behaviour change for another change than a safety fix.
+
+    Residual, deliberately accepted: runs inside genuinely same-everything scopes are
+    not settled at teardown time. Restart recovery and the sweep are the backstop.
     """
 
     anchor = str(session_anchor or "").strip()
@@ -153,7 +180,18 @@ def resolve_teardown_session_ids(
             exc_info=True,
         )
         return []
-    return [str(session_id) for session_id in (resolved or []) if session_id]
+    session_ids = [str(session_id) for session_id in (resolved or []) if session_id]
+    if len(session_ids) > 1:
+        logger.warning(
+            "Session teardown: anchor %s still names %d live sessions after backend "
+            "and working-directory narrowing; refusing to cancel any of them because "
+            "none of them is provably the runtime being reclaimed. Their runs stay "
+            "open for restart recovery and the staleness sweep.",
+            anchor,
+            len(session_ids),
+        )
+        return []
+    return session_ids
 
 
 async def teardown_session_runs(
@@ -283,18 +321,18 @@ async def teardown_runtime_session_runs(
     """:func:`teardown_session_runs` for callers that hold a runtime identity.
 
     Resolves the anchor (plus working dir and backend, when known) to session ids and
-    settles each one. Every id the resolve returns is torn down rather than just the
-    newest: a genuinely ambiguous anchor gives no way to pick, and the reconciler's
-    ownership intersection makes a wrong guess inert on the RECONCILE leg — it can
-    only fail to find rows, never settle a run this process did not claim.
+    settles each one. In practice that is one id or none: the resolve narrows by
+    backend and working directory and then REFUSES anything still ambiguous
+    (HFR-323), so this loop never cancels a candidate on the strength of a guess.
 
-    THAT PROTECTION DOES NOT COVER THE CANCEL LEG, which is why the resolve must be
-    narrow rather than generous. ``cancel_session_executions`` and
-    ``release_for_teardown`` actively interrupt whatever each candidate is running,
-    with no ownership intersection in front of them: a foreign scope's live turn gets
-    cancelled by another scope's eviction. ``agent_backend`` — which every runtime
-    caller knows about itself — keeps the candidate set to sessions this runtime could
-    plausibly own.
+    THE RESOLVE MUST BE NARROW BECAUSE THE CANCEL LEG HAS NO OWNERSHIP CHECK. The
+    reconciler intersects with the pre-cancel ownership snapshot, so a wrong id is
+    inert THERE — it can only fail to find rows. ``cancel_session_executions`` and
+    ``release_for_teardown`` have no such guard: they interrupt whatever each
+    candidate is running, so a foreign scope's live turn would be cancelled by
+    another scope's eviction. ``agent_backend`` — which every runtime caller knows
+    about itself — keeps the candidate set to sessions this runtime could plausibly
+    own, and the refusal covers what that still cannot separate.
     """
 
     session_ids = resolve_teardown_session_ids(

@@ -2891,6 +2891,45 @@ scenarios:
     # for the staleness sweep / PR7 recovery -- deliberate, because a recoverable
     # unsettled run beats a permanently wrong terminal status.
     test: tests/test_claude_receiver_result_settle.py::ResultSettlesTurnOnEmitFailureTests::test_buffered_primary_result_survives_receiver_failure_cleanup
+  - id: HFR-323
+    name: an ambiguous anchor resolve refuses instead of cancelling every candidate
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # PR2 review round 4, and what HFR-128's narrowing could not reach.
+    # find_session_ids_for_anchor returns the whole exact-match list, and the unique
+    # key is (scope_id, session_anchor) -- so several live scopes can share
+    # anchor + backend + workdir (shared default workdirs make this ordinary), and
+    # teardown_runtime_session_runs cancels EVERY id returned. Backend and workdir
+    # equality is not evidence of runtime ownership, so a two-candidate answer means
+    # interrupting a healthy turn in a conversation that had nothing to do with the
+    # eviction. The reconcile leg is protected by the ownership snapshot; the cancel
+    # leg is not.
+    # OWNERSHIP-SIGNAL INVESTIGATION (why the fix is a refusal and not a tiebreak):
+    # nothing decisive is available at this layer. SessionTurnManager.in_flight and
+    # ScheduledTaskService._session_lock_cache / _session_lock_owners are keyed by
+    # session id and can legitimately be occupied for BOTH candidates at once -- a
+    # signal that can be true for both is not decisive, it IS the unsafe case. The
+    # activity registry's (backend, runtime_key) -> session_id map is
+    # last-writer-wins per composite key, so it names the most recent scope rather
+    # than the owning one. Two facts WOULD be decisive and neither is reachable here:
+    # agent_sessions.native_session_id is write-once and would identify the runtime
+    # exactly, but no lookup by it exists and it is empty for a session reserved and
+    # never dispatched; and the scope key makes the row unique by construction, but
+    # the runtime teardown paths do not carry one -- which is why this resolve exists
+    # at all. Plumbing either is a behaviour change, not a safety fix.
+    # FIX: the refusal lives in core/session_teardown.resolve_teardown_session_ids --
+    # one visible place, inherited by both callers, so
+    # core.services.running_agents._teardown_session_id (which consumes candidates[0])
+    # gets an empty list and settles nothing rather than picking arbitrarily. More
+    # than one surviving candidate -> return [] and log a warning naming the anchor
+    # and the count. The storage resolver keeps HFR-128 semantics untouched: single
+    # exact match resolves, NULL-workdir fallback only when no exact match exists.
+    # RESIDUAL: runs inside genuinely same-everything scopes are not settled at
+    # teardown; restart recovery and the staleness sweep are the backstop. An
+    # unsettled run is recoverable, a wrongly cancelled live turn is not.
+    test: tests/test_session_teardown.py::test_teardown_refuses_ambiguous_exact_anchor_candidates
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
