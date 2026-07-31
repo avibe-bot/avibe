@@ -727,8 +727,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if not model_str:
                 model_str = server.get_agent_model_from_config(agent_to_use)
             opencode_cfg = getattr(self.controller.config, "opencode", None)
-            if not model_str:
-                model_str = getattr(opencode_cfg, "default_model", None)
             model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
             if model_hub_runtime is not None and model_str:
                 model_hub_launch = await resolve_opencode_overlay_launch(

@@ -983,23 +983,21 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("available_models", "configured_model", "runtime_model", "expected_model"),
+    ("available_models", "runtime_model", "expected_model"),
     [
-        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, "gpt-5.4", None, "gpt-5.4"),
-        ({"gpt-5.3-chat-latest": {}}, "gpt-5.4-new", None, "gpt-5.4-new"),
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None, "gpt-5.3-chat-latest"),
+        ({"gpt-5.3-chat-latest": {}}, None, "gpt-5.3-chat-latest"),
         (
             {"gpt-5.3-chat-latest": {}, "gpt-5.4": {}, "gpt-5.4-runtime": {}},
-            "gpt-5.4",
             "openai/gpt-5.4-runtime",
             "gpt-5.4-runtime",
         ),
     ],
 )
-def test_opencode_provider_catalog_prefers_configured_agent_default_model(
+def test_opencode_provider_catalog_prefers_runtime_agent_model(
     monkeypatch,
     tmp_path,
     available_models,
-    configured_model,
     runtime_model,
     expected_model,
 ):
@@ -1045,7 +1043,6 @@ def test_opencode_provider_catalog_prefers_configured_agent_default_model(
             agents=SimpleNamespace(
                 opencode=SimpleNamespace(
                     default_provider="openai",
-                    default_model=configured_model,
                 )
             )
         ),
@@ -2115,8 +2112,6 @@ def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch
             },
         },
     )
-    monkeypatch.setattr(api, "_backend_default_model", lambda config, backend: "claude-opus-4-8")
-
     result = api.agent_model_options("claude")
 
     assert result["ok"] is True
@@ -2127,8 +2122,8 @@ def test_agent_model_options_claude_strips_default_and_marks_default(monkeypatch
     assert by_value["claude-opus-4-8"]["reasoning_efforts"] == ["low", "max"]
     assert by_value["claude-opus-4-8"]["label"] == "claude-opus-4-8 [1M]"
     assert by_value["claude-sonnet-4-6"]["label"] == "claude-sonnet-4-6"
-    assert by_value["claude-opus-4-8"]["default"] is True
-    assert by_value["claude-sonnet-4-6"]["default"] is False
+    assert "default" not in by_value["claude-opus-4-8"]
+    assert "default" not in by_value["claude-sonnet-4-6"]
 
 
 def test_agent_model_options_unknown_backend():
@@ -2161,7 +2156,6 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
         },
     }
     monkeypatch.setattr(api, "opencode_options", lambda cwd: fake_opencode)
-    monkeypatch.setattr(api, "_backend_default_model", lambda config, backend: None)
     monkeypatch.setattr(opencode_config, "read_opencode_custom_providers", lambda **kw: {"deepseek": {}})
 
     result = api.agent_model_options("opencode")

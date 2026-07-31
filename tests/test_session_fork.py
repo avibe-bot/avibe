@@ -1490,11 +1490,12 @@ def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
 
     agent_store = VibeAgentStore(db_path)
     try:
-        # Pins neither a model nor an effort, exactly like the session below.
+        # The Agent model is explicit by invariant; the session below pins it away.
         source_agent = agent_store.create(name="nightly", backend="claude")
     finally:
         agent_store.close()
-    assert source_agent.model is None and source_agent.reasoning_effort is None
+    assert source_agent.model == "claude-opus-5"
+    assert source_agent.reasoning_effort is None
 
     engine = create_sqlite_engine(db_path)
     with engine.begin() as conn:

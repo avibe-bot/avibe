@@ -315,10 +315,9 @@ export const SettingsModelsPage: React.FC = () => {
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
-      // What the PATCH echo means is a rule, not an ad-hoc read of one field —
-      // see connectOutcome, which exists because `current: null` conflates four
-      // unrelated states and the copy behind it promised a Direct fallback the
-      // resolver does not perform.
+      // What the PATCH echo means is a rule, not an ad-hoc read of one field.
+      // `connectOutcome` combines mode and supply status so the copy never
+      // promises a Direct fallback the resolver does not perform.
       const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
       const outcome = connectOutcome(echoed, sources);
       await agentSaved(echoed);

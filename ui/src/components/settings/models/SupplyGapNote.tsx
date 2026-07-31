@@ -4,7 +4,7 @@
 // says why that naming matters: 「删除后 pm 将没有可用来源」 is actionable where a
 // bare (backend, model) pair is not. So this renders the Agents first and the
 // model second, and falls back to the backend only when no named Agent runs the
-// pair — which is a real case (the backend default supplies it) and not a reason
+// pair — which is a real case (a mapping or Agent selection supplies it) and not a reason
 // to drop the entry.
 //
 // One component for all three sites — the forced-delete confirm, the forced

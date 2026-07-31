@@ -437,7 +437,6 @@ const buildConfigPayload = (data: any) => {
         enabled: agents.opencode?.enabled ?? true,
         cli_path: agents.opencode?.cli_path || 'opencode',
         default_agent: data.opencode_default_agent ?? agents.opencode?.default_agent ?? null,
-        default_model: data.opencode_default_model ?? agents.opencode?.default_model ?? null,
         default_reasoning_effort:
           data.opencode_default_reasoning_effort ?? agents.opencode?.default_reasoning_effort ?? null,
       },
@@ -445,13 +444,11 @@ const buildConfigPayload = (data: any) => {
         ...agents.claude,
         enabled: agents.claude?.enabled ?? true,
         cli_path: agents.claude?.cli_path || 'claude',
-        default_model: data.claude_default_model ?? agents.claude?.default_model ?? null,
       },
       codex: {
         ...agents.codex,
         enabled: agents.codex?.enabled ?? false,
         cli_path: agents.codex?.cli_path || 'codex',
-        default_model: data.codex_default_model ?? agents.codex?.default_model ?? null,
       },
     },
     gateway: data.gateway,

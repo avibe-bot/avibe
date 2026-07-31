@@ -136,6 +136,7 @@ class NativeOAuthScenarioHarness:
             oauth_flows=OAuthFlowRegistry(state_dir / "oauth_flows.json"),
             revocations=CredentialRevocationJournal(state_dir / "revocations.json"),
             now=lambda: datetime(2026, 7, 25, 0, 0, tzinfo=timezone.utc),
+            requested_model_override=self.store.requested_model,
         )
 
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 
 const leaves = (node: unknown): string[] =>
@@ -13,6 +14,11 @@ describe('Models page vocabulary', () => {
   it('contains none of the retired user-facing terms', () => {
     const copy = leaves(zh.settings.models).join('\n');
     expect(copy).not.toMatch(/菜单固定|跟随推荐|中枢 Hub|按量\s*\$|映射|供给引擎|自定义顺序/);
+    expect(copy).not.toMatch(/按量(?!付费)/);
+    expect(zh.settings.models.billing.monthly).toBe('订阅');
+    expect(zh.settings.models.billing.metered).toBe('按量付费');
+    expect(en.settings.models.billing.monthly).toBe('Subscription');
+    expect(en.settings.models.billing.metered).toBe('Pay as you go');
     expect(zh.settings.models.order.customized).toBe('已改为手动');
     expect(zh.settings.models.order.restore).toBe('恢复默认');
   });

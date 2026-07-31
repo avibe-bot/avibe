@@ -881,7 +881,7 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
     assert fake.inactive_calls == ["sess_probe"]
 
 
-def test_opencode_provider_test_prefers_configured_agent_default_model(
+def test_opencode_provider_test_uses_provider_catalog_without_agent_model(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _FakeOpencodeServer()
@@ -914,7 +914,6 @@ def test_opencode_provider_test_prefers_configured_agent_default_model(
         "_resolve_backend_config",
         lambda backend: SimpleNamespace(
             default_provider="openai",
-            default_model="gpt-5.4",
         )
         if backend == "opencode"
         else None,
@@ -923,10 +922,10 @@ def test_opencode_provider_test_prefers_configured_agent_default_model(
     result = _run(service.test_opencode_provider("openai"))
 
     assert result["ok"] is True
-    assert result["model"] == "gpt-5.4"
+    assert result["model"] == "gpt-5.3-chat-latest"
     assert fake.prompt_calls[-1]["model"] == {
         "providerID": "openai",
-        "modelID": "gpt-5.4",
+        "modelID": "gpt-5.3-chat-latest",
     }
 
 

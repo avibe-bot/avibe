@@ -1772,7 +1772,7 @@ function deliveryLabel(postTo: string | null | undefined, t: (k: string) => stri
 
 // Agent executor: name + resolved backend·model·effort, with a jump to the
 // Agents page. agent_name can be null (the definition inherits the scope /
-// global default); model/effort can be null (backend default).
+// global default); model/effort can be null in legacy or partial records.
 const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }> = ({ agentName, agent }) => {
   const { t } = useTranslation();
   if (!agentName) {

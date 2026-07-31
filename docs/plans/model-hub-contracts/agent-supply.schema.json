@@ -15,29 +15,15 @@
     "menu_kind": { "enum": ["fixed", "open"] },
     "selected_by_agent": {
       "type": ["string", "null"],
-      "description": "v2 (07-29, review round 4): the Vibe Agent whose `model` produced `selected_model_id`, by name — or null when the value came from the backend default (`agents.<backend>.default_model`) because that Agent pins no model. WHY THIS EXISTS: model selection does not live at the backend grain. Several enabled Vibe Agents can share one backend and each carry their own `model` (SQLite `agents.backend` + `agents.model`; on this machine today three enabled Agents share backend `claude` with three different models), and routing follows the selected Vibe Agent, not the backend (AGENTS.md → Agent routing model). The shipped projection already resolves ONE Agent — the global default, and only if its backend matches (`core/controller.py::default_vibe_agent_model`) — so this record has always answered for exactly one route while looking like it answered for the backend. Naming the Agent makes that scope readable instead of implied: a caller can see whose model it is, and knows it is not a claim about every turn on this backend. A per-Agent answer for any OTHER Agent is obtained the way every other model-scoped question already is — by passing that Agent's model explicitly to `GET /chain?model=` or `POST /probe {model}` (api.md → grain of the agent record). Derived, never persisted; null while mode=direct.",
+      "description": "The Vibe Agent whose explicit `model` produced `selected_model_id`, by name. Model selection does not live at the backend grain: several enabled Vibe Agents can share one backend and each carry a different model. Derived, never persisted; null while mode=direct or when no routed Agent is projected.",
       "examples": ["pm", "evm-contract-audit"]
     },
     "selected_model_id": {
       "type": ["string", "null"],
-      "description": "v2 (07-29, review round 3): THE SELECTED MODEL of the route named by `selected_by_agent`, as the caller-facing MENU identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. NOT a backend-wide fact (grain corrected 07-29, review round 4): it is the routed Vibe Agent's `model`, falling back to the backend default when that Agent pins none, and a different enabled Agent on the same backend can request a different model on its very next turn. Every projection below that depends on a model — `current`, `supply_status`, and the probe's default — therefore inherits that scope and answers for this route alone. Hoisted out of `current` in round 3, where round 2 had put it as `menu_model_id`. The bug was not merely that the selection was nested: `current` is null whenever nothing is runnable (`waiting` / `interrupted`), so the selection vanished from the payload in exactly the two states where the UI needs it most — 「当前无可用来源」 has to name the model it is talking about, the chain drill-in has to query one, and the probe has to default to one. A client would have had to remember the last non-null `current` and hope, or issue a second call. The two fields answer different questions and have different lifetimes: this one is a persisted user CHOICE that survives every supply state, while `current` is a momentary fact about the next turn. Nesting a choice inside a fact made the choice inherit the fact's nullability. null only when mode=direct (no hub selection exists). OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional). Absent from this file's `examples` on purpose — they round-trip byte-faithfully through the shipped v1 serializer, which has no such field; the worked v2 payload including the `current: null` case lives in api.md.",
+      "description": "The selected model of the route named by `selected_by_agent`, in the caller-facing menu identifier namespace. It is the routed Vibe Agent's explicit model, never a backend-wide fallback. A different Agent on the same backend may request a different model on its next turn. null in direct mode or when no routed Agent is projected. OPTIONAL here and required at the API boundary.",
       "examples": ["claude-opus-4-6", "zhipuai/glm-5.2"]
     },
     "selected_model_explicit": { "type": "boolean", "description": "TRUE iff `selected_model_id` originates from the user's explicit configuration request; FALSE means no explicit model selection, including a resolver-picked value or no selected model." },
-    "current": {
-      "type": ["object", "null"],
-      "description": "What the next turn of THIS ROUTE would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for `selected_model_id`, which is the model of the Agent named by `selected_by_agent`. Inherits that grain: a different enabled Vibe Agent on the same backend requesting a different model has a different chain, and this field does not describe it (round 4). NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded. Carries only facts about that candidate — the selection itself is `selected_model_id`, one level up, because it outlives every one of these three nulls.",
-      "required": ["model_id", "source_id", "channel"],
-      "additionalProperties": false,
-      "properties": {
-        "model_id": {
-          "type": "string",
-          "description": "The RESOLVED upstream model id — what actually gets sent (e.g. `glm-5.2` or `claude-opus-4-5-20251101`). A property of this attempt, not of the selection, which is why it stays here while the selection moved out. NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), while a fixed-menu native alias may be source-specific, so passing this value through would miss. Use the top-level `selected_model_id` for that. It equals `selected_model_id` only when neither an explicit mapping nor built-in native alias resolution changes the upstream id. Native alias resolution is automatic supply truth and does not create a mapping entry."
-        },
-        "source_id": { "type": "string" },
-        "channel": { "enum": ["native_cli", "hub"] }
-      }
-    },
     "sources": {
       "type": ["object", "null"],
       "description": "This backend's source order — the ordered SUBSET of sources it spends, plus the policy that governs the order (spec §4.2). Replaces the removed global priority contract. Optional in this schema only because the frozen legacy examples predate it; it is REQUIRED at the API boundary. null while mode=direct.",
@@ -107,7 +93,7 @@
               },
               "in_current_model_chain": {
                 "type": ["boolean", "null"],
-                "description": "Membership in the CAPABILITY chain for this AgentSupply record's `selected_model_id`, at the same routed-Agent grain as `current`. true includes blocked members because availability does not change capability; false is the explicit not-supplying-current-model flag that keeps a source visible to the drawer; null exactly when `selected_model_id` is null. OPTIONAL here and REQUIRED at the API boundary with the serializer, so frozen v1 examples remain byte-faithful."
+                "description": "Membership in the CAPABILITY chain for this AgentSupply record's `selected_model_id`, at the same routed-Agent grain. true includes blocked members because availability does not change capability; false is the explicit not-supplying-selected-model flag that keeps a source visible to the drawer; null exactly when `selected_model_id` is null. OPTIONAL here and REQUIRED at the API boundary with the serializer, so frozen v1 examples remain byte-faithful."
               },
               "process_availability_reason": {
                 "enum": ["native_cli_unavailable", null],
@@ -177,7 +163,7 @@
     },
     "named_agents": {
       "type": "array",
-      "description": "v3 read-only projection of every enabled named Vibe Agent on this backend. It is derived live from each Agent's pinned model, falling back to the backend default when the Agent inherits. The distinct name avoids collision with SupplyGap.agents, whose items are bare names inside a mutation-refusal payload.",
+      "description": "Read-only projection of every enabled named Vibe Agent on this backend, derived live from each Agent's explicit model. The distinct name avoids collision with SupplyGap.agents, whose items are bare names inside a mutation-refusal payload.",
       "items": {
         "type": "object",
         "required": ["name", "effective_model_id", "supply_status"],
@@ -186,7 +172,7 @@
           "name": { "type": "string", "minLength": 1 },
           "effective_model_id": {
             "type": ["string", "null"],
-            "description": "The Agent's pinned model, or the inherited backend default, in the caller-facing menu identifier namespace. null means no selection exists."
+            "description": "The Agent's explicit model in the caller-facing menu identifier namespace. null is retained only for compatibility with isolated callers that do not project the Agent catalog."
           },
           "supply_status": {
             "enum": ["ok", "degraded", "waiting", "interrupted", null],
@@ -218,7 +204,6 @@
         "properties": {
           "selected_model_id": { "type": "null" },
           "selected_by_agent": { "type": "null" },
-          "current": { "type": "null" },
           "sources": { "type": "null" },
           "supply_status": { "type": "null" },
           "model_supply": { "type": "null" },
@@ -232,7 +217,7 @@
       }
     },
     {
-      "$comment": "v3 Hub-mode half. `sources`, `model_supply`, and `named_agents` are non-null when present. Presence is deliberately enforced at the API boundary rather than here so the two frozen legacy examples, which predate these projections, remain valid. The selection fields are deliberately NOT constrained non-null: Hub with no explicit Vibe-Agent model and no backend default has no pinned selection. In that state each turn resolves the model carried by the request itself, so inventing a menu selection would be false state.",
+      "$comment": "v4 Hub-mode half. `sources`, `model_supply`, and `named_agents` are non-null when present. Presence is deliberately enforced at the API boundary rather than here so the frozen legacy examples remain valid. The selection fields are deliberately NOT constrained non-null because isolated service callers may not project the Vibe Agent catalog.",
       "if": { "properties": { "mode": { "const": "hub" } }, "required": ["mode"] },
       "then": {
         "properties": {
@@ -269,10 +254,9 @@
         "required": ["selected_model_id"]
       },
       "then": {
-        "required": ["selected_by_agent", "current", "supply_status"],
+        "required": ["selected_by_agent", "supply_status"],
         "properties": {
           "selected_by_agent": { "type": "null" },
-          "current": { "type": "null" },
           "supply_status": { "type": "null" }
         }
       }
@@ -302,32 +286,6 @@
           "supply_status": {
             "enum": ["ok", "degraded", "waiting", "interrupted"]
           }
-        }
-      }
-    },
-    {
-      "$comment": "v2 (07-29, review round 4): the two BLOCKED rollup values guarantee nothing is runnable, so `current` — 'what the next turn would use' — has nothing true to say and must be null. Round 3 documented this as three cases the serializer MUST honour and left all three writable; a stale `current` surviving into `waiting` renders 使用中 for a source that will not be called, which is the single lie the whole taxonomy was built to prevent (spec §4.5: `current` is null in both states, so neither ever renders a stale 使用中).",
-      "if": { "properties": { "supply_status": { "enum": ["waiting", "interrupted"] } }, "required": ["supply_status"] },
-      "then": { "properties": { "current": { "type": "null" } } }
-    },
-    {
-      "$comment": "v2 (07-29, review round 4): and the converse the field already claimed ('Non-null ⇒ supply_status is ok or degraded'), plus the mode half. A record that names a serving source while reporting a blocked rollup is contradictory in the other direction, and either half alone leaves that payload writable. PRESENCE DELIBERATELY NOT REQUIRED here (07-29, review round 5), the one declared exception to the rule that a non-null `then` constraint must also require its field: this file's frozen examples carry `current` with no `supply_status` at all — they round-trip byte-faithfully through the SHIPPED v1 serializer, which has no such field — so `required: [\"supply_status\"]` would fail the contract gate rather than strengthen it. The obligation moves to the API boundary, where the v2 serializer emits it (README → required-vs-optional). Absence is also the fail-safe direction: no rollup means no claim about health and no action-required claim, whereas the dangerous absences (`severity` on a needs_action event, `current` under an ok rollup) are all required above. The exception is enforced as a declared entry in the round-5 presence checker, so 'missing on purpose' cannot decay into 'missing by accident' (api.md → Serializer completeness).",
-      "if": { "properties": { "current": { "type": "object" } }, "required": ["current"] },
-      "then": {
-        "properties": {
-          "supply_status": { "enum": ["ok", "degraded"] },
-          "mode": { "const": "hub" }
-        }
-      }
-    },
-    {
-      "$comment": "v2 (07-29, review round 5): the RUNNABLE half of the rollup ⇒ `current`, which round 4 left open at both ends. It pinned 'blocked ⇒ current null' and 'current non-null ⇒ not blocked', and those two together still admit `supply_status: \"ok\"` with `current: null` — a record claiming 正在从链首供给 while refusing to name the source doing it. That is not a hypothetical shape: it is what a serializer produces the moment the rollup and the candidate are computed by different code paths and one of them returns early, and the drawer would render 使用中 with an empty source row. `ok` and `degraded` are DEFINED by something being served (§4.5: serving from the head of the chain / serving via a fallback), so the candidate exists by construction and the payload must carry it. `required` is part of the fix, not decoration: draft-07 `properties` only validates fields that are PRESENT, so a `then` naming `current` without requiring it passes any record that just omits the key — which is how the whole class of round-4 conditionals ended up weaker than it read. With this member the pair `supply_status` × `current` is total: each of the four rollup values determines whether a candidate is named, in both directions.",
-      "if": { "properties": { "supply_status": { "enum": ["ok", "degraded"] } }, "required": ["supply_status"] },
-      "then": {
-        "required": ["current"],
-        "properties": {
-          "current": { "type": "object" },
-          "mode": { "const": "hub" }
         }
       }
     },
@@ -379,7 +337,6 @@
       "backend": "claude",
       "mode": "hub",
       "menu_kind": "fixed",
-      "current": { "model_id": "claude-opus-4-6", "source_id": "src_claudepro1", "channel": "native_cli" },
       "mappings": [ { "builtin_id": "claude-opus-4-6", "target_model_id": "glm-5.2", "enabled": false } ],
       "menu": null,
       "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
@@ -389,7 +346,6 @@
       "backend": "opencode",
       "mode": "hub",
       "menu_kind": "open",
-      "current": { "model_id": "glm-5.2", "source_id": "src_zhipukey01", "channel": "hub" },
       "mappings": [],
       "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] },
       "builtin_models": null,

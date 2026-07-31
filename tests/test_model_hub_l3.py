@@ -208,13 +208,15 @@ def _service(
     sources: list[ModelHubSourceConfig],
     outcomes: list[RawCallOutcome] | None = None,
 ) -> ModelHubService:
+    store = MemoryStore(_config(sources))
     return ModelHubService(
-        store=MemoryStore(_config(sources)),
+        store=store,
         adapter=ProbeAdapter(outcomes or []),
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: NOW,
+        requested_model_override=store.requested_model,
     )
 
 

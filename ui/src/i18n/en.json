@@ -649,7 +649,6 @@
         "reorder": "Reorder",
         "oauthSignedOut": "CLI subscription is signed out"
       },
-      "current": "Current",
       "order": {
         "title": "Source order · {{backend}}",
         "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
@@ -667,8 +666,8 @@
         "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
       },
       "billing": {
-        "monthly": "Monthly",
-        "metered": "Metered"
+        "monthly": "Subscription",
+        "metered": "Pay as you go"
       },
       "state": {
         "active": "Healthy",
@@ -2614,7 +2613,6 @@
       "model": "Model",
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
-      "modelDefault": "Backend default",
       "effort": "Reasoning effort",
       "systemPrompt": "System prompt",
       "systemPromptCount": "~{{count}} tokens",

@@ -93,6 +93,10 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
     assert original.show_duration is True
     assert original.include_time_info is True
     assert original.update.auto_update is False
+    assert all(
+        not hasattr(getattr(original.agents, backend), "default_model")
+        for backend in ("claude", "codex", "opencode")
+    )
 
     updated = api.save_config({"show_duration": False, "include_time_info": False, "update": {"auto_update": True}})
 
@@ -105,7 +109,7 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
     assert updated.runtime.default_cwd == "/tmp/workdir"
 
 
-def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypatch, tmp_path):
+def test_save_config_seeds_default_and_drops_retired_model_key(monkeypatch, tmp_path):
     """Regression: a fresh install (no config file yet) must accept the wizard's
     reused provider-config modal POSTing only ``{"agents": ...}``.
 
@@ -127,7 +131,7 @@ def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypa
     # The partial save merges onto the workbench-only default and persists.
     assert created.mode == "self_host"
     assert created.agents.claude.enabled is True
-    assert created.agents.claude.default_model == "sonnet"
+    assert not hasattr(created.agents.claude, "default_model")
     # Configuring a provider mid-wizard must not complete setup...
     assert created.setup_completed is False
     assert created.setup_state()["needs_setup"] is True

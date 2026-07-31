@@ -156,20 +156,6 @@ class V2ModelHubConfigStore:
             config.model_hub = model_hub
             config.save()
 
-    def requested_model(self, backend: str) -> str:
-        try:
-            config = V2Config.load()
-        except FileNotFoundError:
-            config = default_config()
-        backend_config = getattr(config.agents, backend, None)
-        model = str(getattr(backend_config, "default_model", None) or "").strip()
-        if backend == "opencode" and model and "/" not in model:
-            provider = str(getattr(backend_config, "default_provider", None) or "").strip()
-            if provider:
-                return f"{provider}/{model}"
-        return model
-
-
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
 
@@ -461,11 +447,7 @@ class ModelHubService:
             ).strip()
             if requested_model:
                 return requested_model
-        return self._backend_default_model(agent.backend)
-
-    def _backend_default_model(self, backend: str) -> str:
-        getter = getattr(self.store, "requested_model", None)
-        return str(getter(backend) if callable(getter) else "").strip()
+        return ""
 
     def _unavailable_native_sources(
         self,
@@ -1755,11 +1737,9 @@ class ModelHubService:
             if named_agent is not None and named_agent not in names:
                 names.append(named_agent)
 
-        default_model = self._backend_default_model(backend)
-        add(default_model)
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                add(str(pinned_model or "").strip() or default_model, name)
+                add(pinned_model, name)
         if agent.menu_kind == "open" and agent.menu is not None:
             for identifier in agent.menu.checked:
                 add(identifier)
@@ -2074,15 +2054,6 @@ class ModelHubService:
             now=self.now(),
             unavailable_source_ids=unavailable_source_ids,
         )
-        current = (
-            {
-                "model_id": resolution.target_model,
-                "source_id": resolution.source.id,
-                "channel": resolution.source.supply_channel,
-            }
-            if resolution.source is not None
-            else None
-        )
         menu_model_ids = (
             builtin_models if builtin_models is not None else list(agent.menu.checked if agent.menu else ())
         )
@@ -2146,9 +2117,7 @@ class ModelHubService:
         named_agents = []
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                requested = str(pinned_model or "").strip() or self._backend_default_model(
-                    backend
-                )
+                requested = str(pinned_model or "").strip()
                 named_resolution = resolve_model_hub_turn(
                     config,
                     backend,
@@ -2172,7 +2141,6 @@ class ModelHubService:
             "selected_by_agent": selected_by_agent,
             "selected_model_id": selected_model_id,
             "selected_model_explicit": selected_model_explicit,
-            "current": current,
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
