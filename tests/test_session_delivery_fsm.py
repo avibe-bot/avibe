@@ -1446,6 +1446,69 @@ def test_restored_terminal_result_resumes_durable_fifo(managers) -> None:
     assert len(starts) == 2
 
 
+def test_terminal_resume_selects_oldest_combined_fifo_head(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    dispatched: list[str] = []
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        durable = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="older durable row",
+            ),
+            context=_context(),
+        )
+        assert durable.state == "queued"
+        with engine.begin() as conn:
+            legacy = messages_service.enqueue_queued(
+                conn,
+                scope_id=None,
+                session_id="ses_fsm",
+                text="newer legacy row",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == legacy["id"])
+                .values(created_at="9999-12-31T23:59:59Z")
+            )
+
+        async def capture_run(_session_id, _context_value, text, **_kwargs):
+            dispatched.append(text)
+
+        manager._run = capture_run
+        terminal_resume = manager.on_native_terminal(context, outcome="completed")
+        assert terminal_resume is not None
+        await terminal_resume
+        return durable, turn_id
+
+    durable, turn_id = asyncio.run(run())
+    assert dispatched == ["older durable row"]
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, turn_id)
+        resumed = delivery_store.get_delivery(conn, str(durable.delivery_id))
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert terminal is not None
+    assert terminal["state"] == "terminal"
+    assert resumed is not None
+    assert resumed["state"] == "starting"
+    assert [row["text"] for row in queued] == ["newer legacy row"]
+
+
+def test_busy_sessions_include_restored_durable_owner_without_runtime_task(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+
+    assert manager.in_flight == {}
+    assert manager.busy_session_ids() == {"ses_fsm"}
+
+    with manager._sqlite_engine().connect() as conn:
+        owner = delivery_store.active_turn(conn, "ses_fsm")
+    assert owner is not None
+    assert owner["id"] == turn_id
+
+
 def test_p0_latches_until_starting_turn_binds_native_identity(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 

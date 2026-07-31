@@ -945,13 +945,17 @@ class SessionTurnManager:
         this, a legitimate Workbench turn lasting longer than the hold TTL had its own
         queued follower failed underneath it (Codex P2).
 
-        ``in_flight`` is the right predicate because it is the same map
-        ``submit``/``submit_scheduled`` consult before answering ``enqueued`` — the very
-        decision that created the hold. Sinks are not unioned in here: they are keyed by
-        session KEY, not session id, and a streaming turn always has an ``in_flight``
-        entry anyway.
+        ``in_flight`` covers live tasks in this process. A restored native runtime can
+        instead be owned only by ``session_turns``; ``submit`` treats that durable owner
+        as busy too, so the sweep projection must use the same combined predicate.
+        Sinks are not unioned in here: they are keyed by session KEY, not session id,
+        and a streaming turn always has one of those two owners.
         """
-        return {session_id for session_id in list(self.in_flight) if session_id}
+        busy = {session_id for session_id in list(self.in_flight) if session_id}
+        if self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                busy |= delivery_store.session_ids_with_live_turns(conn)
+        return busy
 
     def model_hub_turn_id_for_task(
         self,
@@ -2495,13 +2499,24 @@ class SessionTurnManager:
             await self.drain_delivery_queue(session_id)
 
     async def _resume_post_terminal(self, session_id: str) -> None:
-        with self._sqlite_engine().connect() as conn:
+        drain_durable = False
+        drain_legacy = False
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
             owner = delivery_store.active_turn(conn, session_id)
+            if owner is None:
+                durable_head, legacy_head = self._queue_heads(conn, session_id)
+                drain_legacy = self._legacy_queue_precedes(
+                    durable_head,
+                    legacy_head,
+                )
+                drain_durable = durable_head is not None and not drain_legacy
         if owner is not None:
             await self._resume_durable_session(session_id)
-            return
-        if not await self.flush_queue(session_id):
-            await self._resume_durable_session(session_id)
+        elif drain_legacy:
+            await self.flush_queue(session_id)
+        elif drain_durable:
+            await self.drain_delivery_queue(session_id)
 
     async def submit(
         self,
