@@ -866,6 +866,7 @@ def test_restart_reconciles_unrecorded_p0_interrupt_without_retry(managers) -> N
 def test_missing_runtime_owner_persists_p0_reconciliation(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     asyncio.run(_activate(manager))
+    manager._active_identity = lambda *_args: None
     result = asyncio.run(
         manager.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p0"),
@@ -1617,6 +1618,34 @@ def test_restart_consumes_pending_p0_after_native_evidence_rebind(managers) -> N
     restored.controller.command_handler.handle_stop.assert_awaited_once()
 
 
+def test_p0_interrupts_exact_restored_owner_without_in_flight_task(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+
+    replacement = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replace restored owner",
+            ),
+            context=_context(),
+        )
+    )
+
+    assert replacement.state == "waiting_terminal"
+    manager.controller.command_handler.handle_stop.assert_awaited_once()
+    stop_context = manager.controller.command_handler.handle_stop.await_args.args[0]
+    assert stop_context.platform_specific["turn_token"] == turn_id
+    assert stop_context.platform_specific["agent_runtime_turn_key"] == "runtime-key"
+    assert stop_context.platform_specific["agent_runtime_turn_token"] == "runtime-token"
+    with engine.connect() as conn:
+        owner = delivery_store.get_delivery(conn, str(replacement.delivery_id))
+    assert owner is not None
+    assert owner["state"] == "waiting_terminal"
+    assert owner["target_turn_id"] == turn_id
+
+
 def test_empty_p1_promotes_fifo_with_persisted_dispatch_text(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     with engine.begin() as conn:
@@ -1654,6 +1683,45 @@ def test_empty_p1_promotes_fifo_with_persisted_dispatch_text(managers) -> None:
     assert promoted.state == "attached"
     request = manager._steer.await_args.args[1]
     assert request.text == "attachment-enriched FIFO text"
+
+
+def test_empty_p1_promotes_oldest_legacy_row_before_durable_fifo(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        await _activate(manager)
+        with engine.begin() as conn:
+            legacy = messages_service.enqueue_queued(
+                conn,
+                scope_id=None,
+                session_id="ses_fsm",
+                text="older legacy row",
+            )
+        durable = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="newer durable row",
+            ),
+            context=_context(),
+        )
+        manager._steer = AsyncMock(
+            return_value=steer_result(SteerOutcome.ACCEPTED)
+        )
+        promoted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1"),
+            context=_context(),
+        )
+        return legacy, durable, promoted
+
+    legacy, durable, promoted = asyncio.run(run())
+    assert promoted.state == "attached"
+    assert promoted.message_id == legacy["id"]
+    assert manager._steer.await_args.args[1].text == "older legacy row"
+    with engine.connect() as conn:
+        newer = delivery_store.get_delivery(conn, str(durable.delivery_id))
+    assert newer is not None
+    assert newer["state"] == "queued"
 
 
 def test_archive_retires_durable_owners_before_clearing_queue(managers) -> None:
@@ -1864,6 +1932,45 @@ def test_stop_terminal_result_preserves_canceled_turn_and_accepted_receipt(
     assert delivery is not None
     assert delivery["state"] == "starting"
     assert delivery["receipt_outcome"] == "accepted"
+
+
+def test_stopping_agent_initiated_turn_preserves_durable_queue(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+
+    async def run():
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        context = _context()
+        context.platform_specific.update(
+            {
+                "turn_token": "trn-agent-initiated",
+                "agent_runtime_turn_key": "agent-initiated-key",
+                "agent_runtime_turn_token": "agent-initiated-token",
+            }
+        )
+        assert manager.register_agent_initiated_turn(context)
+        await asyncio.sleep(0)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="stay queued after Stop",
+            ),
+            context=_context(),
+        )
+        holder = manager.in_flight["ses_fsm"].task
+        stopped = await manager.cancel("ses_fsm")
+        await asyncio.gather(holder, return_exceptions=True)
+        return queued, stopped
+
+    queued, stopped = asyncio.run(run())
+    assert stopped["status"] == "cancel_requested"
+    assert starts == []
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(queued.delivery_id))
+        active = delivery_store.active_turn(conn, "ses_fsm")
+    assert delivery is not None
+    assert delivery["state"] == "queued"
+    assert active is None
 
 
 def test_backend_drain_defers_durable_successor_start_attempt(managers) -> None:

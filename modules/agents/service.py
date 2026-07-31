@@ -671,7 +671,12 @@ class AgentService:
         bind_terminal = getattr(manager, "on_native_terminal", None)
         try:
             if callable(bind_terminal):
-                bind_terminal(context, outcome="terminal")
+                try:
+                    bind_terminal(context, outcome="terminal")
+                except Exception:
+                    logger.exception(
+                        "native terminal ownership reconciliation failed after output delivery"
+                    )
         finally:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 

@@ -1155,8 +1155,12 @@ class SessionTurnManager:
             str(legacy_head.get("id") or ""),
         )
         durable_key = (
-            str(durable_head.get("created_at") or ""),
-            str(durable_head.get("id") or ""),
+            str(
+                durable_head.get("fifo_created_at")
+                or durable_head.get("created_at")
+                or ""
+            ),
+            str(durable_head.get("fifo_id") or durable_head.get("id") or ""),
         )
         return legacy_key <= durable_key
 
@@ -1453,12 +1457,23 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         with self._sqlite_engine().connect() as conn:
-            observed_head = delivery_store.fifo_head(conn, session_id)
-        if observed_head is None:
+            observed_head, observed_legacy_head = self._queue_heads(conn, session_id)
+            observed_legacy_first = self._legacy_queue_precedes(
+                observed_head,
+                observed_legacy_head,
+            )
+        if observed_head is None and observed_legacy_head is None:
             return DeliveryResult(None, None, "empty")
+        observed_owner_id = str(
+            (
+                observed_legacy_head
+                if observed_legacy_first
+                else observed_head
+            )["id"]
+        )
         observed_turn, identity = self._observe_active_delivery_turn(session_id)
         observed_turn_id = str((observed_turn or {}).get("id") or "") or None
-        delivery_id = str(observed_head["id"])
+        delivery_id = str(observed_head["id"]) if not observed_legacy_first else ""
         turn_id: str | None = None
         attempt_id: str | None = None
         native_id: str | None = None
@@ -1466,9 +1481,51 @@ class SessionTurnManager:
         steer_backend = backend
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
-            current_head = delivery_store.fifo_head(conn, session_id)
-            if current_head is None or str(current_head["id"]) != delivery_id:
-                return DeliveryResult(delivery_id, observed_head.get("message_id"), "refused", reason="stale_head")
+            current_head, current_legacy_head = self._queue_heads(conn, session_id)
+            current_legacy_first = self._legacy_queue_precedes(
+                current_head,
+                current_legacy_head,
+            )
+            current_owner = current_legacy_head if current_legacy_first else current_head
+            if current_owner is None or str(current_owner["id"]) != observed_owner_id:
+                return DeliveryResult(
+                    delivery_id or None,
+                    str(
+                        (
+                            observed_legacy_head
+                            if observed_legacy_first
+                            else observed_head or {}
+                        ).get("message_id")
+                        or observed_owner_id
+                    ),
+                    "refused",
+                    reason="stale_head",
+                )
+            if current_legacy_first:
+                delivery_id = delivery_store.new_delivery_id()
+                current_head = delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=session_id,
+                    message_id=observed_owner_id,
+                    dispatch_text=str(
+                        (current_legacy_head.get("metadata") or {}).get(
+                            QUEUED_DISPATCH_TEXT_KEY
+                        )
+                        or current_legacy_head.get("text")
+                        or ""
+                    ),
+                    priority="p3",
+                    state="queued",
+                    now=str(current_legacy_head.get("created_at") or "") or None,
+                )
+            elif current_head is None or str(current_head["id"]) != delivery_id:
+                return DeliveryResult(
+                    delivery_id,
+                    str((observed_head or {}).get("message_id") or "") or None,
+                    "refused",
+                    reason="stale_head",
+                )
             current_turn = delivery_store.active_turn(conn, session_id)
             if current_turn is None:
                 turn_id = delivery_store.new_turn_id()
@@ -1799,12 +1856,63 @@ class SessionTurnManager:
         delivery_id: str,
     ) -> dict[str, Any]:
         turn = self.in_flight.get(session_id)
+        runtime_turn = turn
         if (
             turn is None
             or not logical_turn_id
             or turn.logical_turn_id != logical_turn_id
             or turn.task.done()
         ):
+            runtime_turn = None
+        stop_context = runtime_turn.context if runtime_turn is not None else None
+        unavailable_reason = "runtime_owner_unavailable"
+        if stop_context is None and logical_turn_id:
+            with self._sqlite_engine().connect() as conn:
+                durable_turn = delivery_store.get_turn(conn, logical_turn_id)
+                active_turn = delivery_store.active_turn(conn, session_id)
+            exact_owner = bool(
+                durable_turn is not None
+                and active_turn is not None
+                and str(active_turn["id"]) == logical_turn_id
+                and durable_turn["state"] == "active"
+                and str(durable_turn.get("native_turn_id") or "").strip()
+            )
+            identity = (
+                self._active_identity(
+                    str(durable_turn["backend"]),
+                    session_id,
+                    logical_turn_id,
+                )
+                if exact_owner
+                else None
+            )
+            if identity == (
+                logical_turn_id,
+                str((durable_turn or {}).get("native_turn_id") or "").strip(),
+            ):
+                try:
+                    stop_context = self._delivery_context(session_id)
+                except Exception:
+                    logger.exception(
+                        "failed to rebuild restored interrupt context for Session=%s",
+                        session_id,
+                    )
+                    unavailable_reason = "runtime_context_unavailable"
+                else:
+                    if stop_context.platform_specific is None:
+                        stop_context.platform_specific = {}
+                    stop_context.platform_specific.update(
+                        {
+                            "turn_token": logical_turn_id,
+                            "agent_runtime_turn_key": str(
+                                durable_turn.get("runtime_key") or ""
+                            ),
+                            "agent_runtime_turn_token": str(
+                                durable_turn.get("runtime_turn_id") or ""
+                            ),
+                        }
+                    )
+        if stop_context is None:
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
                 delivery = delivery_store.get_delivery(conn, delivery_id)
@@ -1820,7 +1928,7 @@ class SessionTurnManager:
                             "state": "reconciling",
                             "receipt_outcome": "unknown",
                             "receipt_body_json": json.dumps(
-                                {"reason": "runtime_owner_unavailable"},
+                                {"reason": unavailable_reason},
                                 sort_keys=True,
                             ),
                         },
@@ -1831,19 +1939,22 @@ class SessionTurnManager:
                     "state": str(delivery.get("state") or "reconciling")
                     if delivery["state"] != "interrupting"
                     else "reconciling",
-                    "reason": "runtime_owner_unavailable",
+                    "reason": unavailable_reason,
                 }
-        if turn.context.platform_specific is None:
-            turn.context.platform_specific = {}
-        turn.context.platform_specific["suppress_stop_no_active_notice"] = True
-        turn.cancel_settled_by = SETTLED_BY_STOPPED
+        if stop_context.platform_specific is None:
+            stop_context.platform_specific = {}
+        stop_context.platform_specific["suppress_stop_no_active_notice"] = True
+        if runtime_turn is not None:
+            runtime_turn.cancel_settled_by = SETTLED_BY_STOPPED
         try:
-            stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
+            stopped = bool(
+                await self.controller.command_handler.handle_stop(stop_context)
+            )
         except Exception:
             logger.exception("durable P0 interrupt failed for Session=%s", session_id)
             stopped = False
-        if not stopped:
-            turn.cancel_settled_by = None
+        if not stopped and runtime_turn is not None:
+            runtime_turn.cancel_settled_by = None
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             delivery = delivery_store.get_delivery(conn, delivery_id)
@@ -3822,7 +3933,7 @@ class SessionTurnManager:
                         await self.flush_queue(session_id)
                     except Exception:
                         logger.debug("agent-initiated turn: flush_queue failed", exc_info=True)
-                if durable_turn_registered:
+                if durable_turn_registered and should_flush:
                     await self._resume_durable_session(session_id)
 
         try:

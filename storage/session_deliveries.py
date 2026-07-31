@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.engine import Connection
 
 from storage.models import messages, session_deliveries, session_turns
@@ -66,10 +66,24 @@ def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
 def fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,
-        select(session_deliveries)
+        select(
+            *session_deliveries.c,
+            func.coalesce(messages.c.created_at, session_deliveries.c.created_at).label(
+                "fifo_created_at"
+            ),
+            func.coalesce(session_deliveries.c.message_id, session_deliveries.c.id).label(
+                "fifo_id"
+            ),
+        )
+        .select_from(
+            session_deliveries.outerjoin(
+                messages,
+                messages.c.id == session_deliveries.c.message_id,
+            )
+        )
         .where(session_deliveries.c.session_id == session_id)
         .where(session_deliveries.c.state == "queued")
-        .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
+        .order_by("fifo_created_at", "fifo_id")
         .limit(1),
     )
 

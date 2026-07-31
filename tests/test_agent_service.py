@@ -942,7 +942,7 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     assert gate.runtime_started is False
 
 
-def test_agent_service_releases_terminal_gate_when_owner_binding_fails() -> None:
+def test_agent_service_contains_terminal_owner_failure_after_releasing_gate() -> None:
     async def _run():
         controller = _Controller()
 
@@ -965,8 +965,7 @@ def test_agent_service_releases_terminal_gate_when_owner_binding_fails() -> None
             }
         )
 
-        with pytest.raises(RuntimeError, match="terminal owner write failed"):
-            service.release_runtime_turn(context)
+        service.release_runtime_turn(context)
 
         assert not gate.lock.locked()
         assert gate.token == ""
