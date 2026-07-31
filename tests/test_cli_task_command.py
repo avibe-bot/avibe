@@ -3207,11 +3207,20 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
             "hello",
         ]
     )
+    task_store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    original_add_task = task_store.add_task
+    captured: dict[str, object] = {}
+
+    def add_task(**kwargs):
+        captured.update(kwargs)
+        return original_add_task(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=task_store),
+        patch.object(task_store, "add_task", side_effect=add_task),
     ):
         result = cli.cmd_task_add(args)
 
@@ -3219,6 +3228,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:

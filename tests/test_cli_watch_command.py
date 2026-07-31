@@ -302,12 +302,26 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
             "echo done",
         ]
     )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    original_add_watch = store.add_watch
+    captured: dict[str, object] = {}
+
+    def add_watch(**kwargs):
+        captured.update(kwargs)
+        return original_add_watch(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2])),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(store, "add_watch", side_effect=add_watch),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2]),
+        ),
     ):
         result = cli.cmd_watch_add(args)
 
@@ -315,6 +329,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:

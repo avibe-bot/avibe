@@ -591,6 +591,10 @@ class VibeAgentStore:
 
             default_name = self._default_agent_name(conn)
             effective_default = self._effective_default_agent(conn)
+            explicit_default_matches = (
+                default_name is not None
+                and normalize_agent_name(default_name) == agent.normalized_name
+            )
             replacement = None
             if effective_default is not None and effective_default.id == agent.id:
                 replacement = self._archive_default_replacement(conn, agent)
@@ -599,6 +603,8 @@ class VibeAgentStore:
                         "the default Agent cannot be archived without another enabled Agent",
                         code="agent_no_default_replacement",
                     )
+            elif explicit_default_matches:
+                replacement = effective_default
 
             archived_name, archived_normalized = self._available_archive_name(
                 conn,
@@ -633,6 +639,12 @@ class VibeAgentStore:
             )
             if replacement is not None:
                 self._write_default_agent_name(conn, replacement.name, now=now)
+                remaining_default_name = replacement.name
+            elif explicit_default_matches:
+                conn.execute(state_meta.delete().where(state_meta.c.key == DEFAULT_AGENT_META_KEY))
+                remaining_default_name = None
+            else:
+                remaining_default_name = default_name
 
             archived_agent = VibeAgent(
                 **{
@@ -650,7 +662,7 @@ class VibeAgentStore:
                 original_name=agent.name,
                 archived_name=archived_name,
                 references=references,
-                default_agent_name=replacement.name if replacement is not None else default_name,
+                default_agent_name=remaining_default_name,
             )
 
     @staticmethod

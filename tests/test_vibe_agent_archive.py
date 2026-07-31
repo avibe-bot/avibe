@@ -649,6 +649,46 @@ def test_archive_persists_replacement_for_the_effective_fallback_default(tmp_pat
         store.close()
 
 
+def test_archive_replaces_disabled_explicit_default_pointer(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="alpha", backend="codex")
+        replacement = store.create(name="beta", backend="claude")
+        store.set_default_agent_name(original.name)
+        store.set_enabled(original.name, False)
+        assert store.get_default_agent().id == replacement.id
+
+        result = store.archive(original.name)
+
+        assert result is not None
+        assert result.default_agent_name == replacement.name
+        assert store.get_default_agent_name() == replacement.name
+        recreated = store.create(name=original.name, backend="opencode")
+        assert store.get_default_agent().id == replacement.id
+        assert store.get_default_agent().id != recreated.id
+    finally:
+        store.close()
+
+
+def test_archive_clears_disabled_explicit_default_without_fallback(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="alpha", backend="codex")
+        store.set_default_agent_name(original.name)
+        store.set_enabled(original.name, False)
+        assert store.get_default_agent() is None
+
+        result = store.archive(original.name)
+
+        assert result is not None
+        assert result.default_agent_name is None
+        assert store.get_default_agent_name() is None
+        store.create(name=original.name, backend="opencode")
+        assert store.get_default_agent_name() is None
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     "stored_name",
     ("project-manager", "PROJECT-MANAGER", "Project Manager", "Project.Manager"),

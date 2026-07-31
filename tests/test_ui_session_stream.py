@@ -38,7 +38,12 @@ def isolated_state(monkeypatch, tmp_path):
     yield tmp_path
 
 
-def _make_session(tmp_path: Path) -> tuple[str, str]:
+def _make_session(
+    tmp_path: Path,
+    *,
+    agent_name: str = "worker",
+    agent_backend: str = "claude",
+) -> tuple[str, str]:
     """Create a real avibe project + session row so the route handler
     can find it. Returns ``(scope_id, session_id)``.
     """
@@ -46,6 +51,7 @@ def _make_session(tmp_path: Path) -> tuple[str, str]:
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
 
+    agent = _ensure_vibe_agent(agent_name, agent_backend)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = upsert_scope(
@@ -76,19 +82,22 @@ def _make_session(tmp_path: Path) -> tuple[str, str]:
         session = sessions_service.create_session(
             conn,
             scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
+            agent_backend=agent.backend,
+            agent_id=agent.id,
+            agent_name=agent.name,
         )
     return scope_id, session["id"]
 
 
-def _ensure_vibe_agent(name: str, backend: str) -> None:
+def _ensure_vibe_agent(name: str, backend: str):
     from core.vibe_agents import VibeAgentStore
 
     store = VibeAgentStore()
     try:
-        if store.get(name) is None:
-            store.create(name=name, backend=backend)
+        agent = store.get(name)
+        if agent is None:
+            agent = store.create(name=name, backend=backend)
+        return agent
     finally:
         store.close()
 
@@ -703,7 +712,11 @@ def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path, mo
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "native-source-1", ["user", "assistant", "user"])
-    scope_id, session_id = _make_session(tmp_path)
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode",
+        agent_backend="opencode",
+    )
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -796,7 +809,11 @@ def test_fork_session_trims_post_accept_open_code_before_native_turn_starts(isol
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "native-source-1", ["user"])
-    _, session_id = _make_session(tmp_path)
+    _, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode",
+        agent_backend="opencode",
+    )
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         conn.execute(

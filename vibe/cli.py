@@ -2459,6 +2459,11 @@ class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
 
 
+class _AgentTargetResolution(NamedTuple):
+    agent: Optional[VibeAgent]
+    requires_enabled_write_guard: bool
+
+
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
         return _ScopeRoutingTarget(None)
@@ -2491,14 +2496,14 @@ def _resolve_scope_agent_name(session_key: str) -> Optional[str]:
     return _resolve_scope_routing_target(session_key).agent_name
 
 
-def _resolve_agent_for_target(
+def _resolve_agent_target(
     *,
     agent_name: Optional[str],
     session_id: Optional[str],
     session_key: str,
     help_command: str,
     existing_agent_reference: bool = False,
-):
+) -> _AgentTargetResolution:
     store = _agent_store()
     try:
         requested = None
@@ -2536,19 +2541,43 @@ def _resolve_agent_for_target(
                     },
                     help_command=help_command,
                 )
-            return session_agent or requested
+            return _AgentTargetResolution(
+                session_agent or requested,
+                requested is not None and not existing_agent_reference,
+            )
 
         if requested is not None:
-            return requested
+            return _AgentTargetResolution(requested, not existing_agent_reference)
 
         if session_key:
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
-                return store.require_reference(scope_target.agent_name)
+                return _AgentTargetResolution(
+                    store.require_reference(scope_target.agent_name),
+                    False,
+                )
 
-        return store.get_default_agent()
+        default_agent = store.get_default_agent()
+        return _AgentTargetResolution(default_agent, default_agent is not None)
     finally:
         store.close()
+
+
+def _resolve_agent_for_target(
+    *,
+    agent_name: Optional[str],
+    session_id: Optional[str],
+    session_key: str,
+    help_command: str,
+    existing_agent_reference: bool = False,
+):
+    return _resolve_agent_target(
+        agent_name=agent_name,
+        session_id=session_id,
+        session_key=session_key,
+        help_command=help_command,
+        existing_agent_reference=existing_agent_reference,
+    ).agent
 
 
 def _resolve_agent_for_session_reservation(
@@ -2918,15 +2947,18 @@ def cmd_task_add(args):
             scoped_session=_has_modern_scope_target(args),
             help_command="vibe task add --help",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe task add --help",
         )
+        agent = agent_resolution.agent
         agent_name = agent.name if agent else None
         expected_enabled_agent_id = (
-            agent.id if agent is not None and bool((getattr(args, "agent", None) or "").strip()) else None
+            agent.id
+            if agent is not None and agent_resolution.requires_enabled_write_guard
+            else None
         )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
@@ -3366,6 +3398,7 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -3374,25 +3407,28 @@ def cmd_task_update(args):
             # future fire onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe task update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe task update --help",
                 existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         expected_enabled_agent_id = (
-            _agent_store().require_enabled(agent_name).id
-            if explicit_agent_requested and agent_name
+            agent_resolution.agent.id
+            if agent_resolution.agent is not None
+            and agent_resolution.requires_enabled_write_guard
             else None
         )
         if session_policy == "create_once" and (
@@ -8425,15 +8461,18 @@ def cmd_watch_add(args):
             required=session_policy == "existing",
             help_command="vibe watch add --help",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe watch add --help",
         )
+        agent = agent_resolution.agent
         agent_name = agent.name if agent else None
         expected_enabled_agent_id = (
-            agent.id if agent is not None and bool((getattr(args, "agent", None) or "").strip()) else None
+            agent.id
+            if agent is not None and agent_resolution.requires_enabled_write_guard
+            else None
         )
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         session_workdir = (
@@ -8812,6 +8851,7 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -8820,25 +8860,28 @@ def cmd_watch_update(args):
             # future watch hook onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe watch update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe watch update --help",
                 existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         expected_enabled_agent_id = (
-            _agent_store().require_enabled(agent_name).id
-            if explicit_agent_requested and agent_name
+            agent_resolution.agent.id
+            if agent_resolution.agent is not None
+            and agent_resolution.requires_enabled_write_guard
             else None
         )
         if session_policy == "create_once" and (

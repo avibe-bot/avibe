@@ -157,6 +157,7 @@ def reserve_forked_session(
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
     from storage.session_reclaim import reconcile_explicit_overrides
+    from storage.workbench_sessions_service import require_enabled_agent_identity
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -213,9 +214,35 @@ def reserve_forked_session(
                     "agent backend does not match the source session backend"
                 )
 
-            target_agent_id = override_agent.id if override_agent else row["agent_id"]
-            target_agent_name = override_agent.name if override_agent else row["agent_name"]
-            target_backend = override_agent.backend if override_agent else source_backend
+            inherited_agent = None
+            if override_agent is None and (row["agent_id"] or row["agent_name"]):
+                try:
+                    inherited_agent = require_enabled_agent_identity(
+                        conn,
+                        agent_id=row["agent_id"],
+                        agent_name=row["agent_name"],
+                    )
+                except LookupError as exc:
+                    raise SessionForkError(
+                        "source session Agent is unavailable; choose an enabled Agent override"
+                    ) from exc
+                if inherited_agent["backend"] != source_backend:
+                    raise SessionForkError(
+                        "source session Agent backend does not match the session backend"
+                    )
+
+            if override_agent is not None:
+                target_agent_id = override_agent.id
+                target_agent_name = override_agent.name
+                target_backend = override_agent.backend
+            elif inherited_agent is not None:
+                target_agent_id = inherited_agent["id"]
+                target_agent_name = inherited_agent["name"]
+                target_backend = inherited_agent["backend"]
+            else:
+                target_agent_id = None
+                target_agent_name = None
+                target_backend = source_backend
             target_variant = target_backend if override_agent else str(row["agent_variant"] or target_backend)
             now = utc_now_iso()
             target_model = _clean_optional(model) if model is not None else row["model"]
