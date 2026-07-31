@@ -1156,3 +1156,33 @@ def test_concurrent_p0_successors_claim_one_owner_and_retain_the_other(managers)
     assert owner is not None
     assert starts.count(str(owner["id"])) == 1
     assert pending == []
+
+
+def test_session_delete_cascades_owners_and_preserves_message(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="preserve immutable content",
+            ),
+            context=_context(),
+        )
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.delete().where(agent_sessions.c.id == "ses_fsm")
+        )
+
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+        delivery = delivery_store.get_delivery(conn, str(admitted.delivery_id))
+        message = conn.execute(
+            select(messages).where(messages.c.id == admitted.message_id)
+        ).mappings().one()
+    assert turn is None
+    assert delivery is None
+    assert message["session_id"] is None
+    assert message["content_text"] == "preserve immutable content"
