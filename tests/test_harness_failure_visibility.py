@@ -637,6 +637,148 @@ def test_user_cancel_beats_a_parked_interruption_cause(tmp_path: Path) -> None:
     assert health["consecutive_failures"] == 0
 
 
+def test_a_losing_park_does_not_relabel_the_incumbent_intent(tmp_path: Path) -> None:
+    """HFR-338 — a parked terminal intent is ONE unit, not four independent fields.
+
+    ``defer_run_terminal`` arbitrated the STATUS through ``_stronger_terminal_status``
+    and then decided the error, the result text and the metadata each on its own. So a
+    second park that TIED on status still wrote its own metadata onto the incumbent's
+    intent: the Activity's ordinary failure kept the status it won, and the eviction
+    that arrived after it attached ``interrupt_reason=evicted`` to that failure. At
+    settlement the equality rule (HFR-329/331) sees ``failed == failed``, agrees to
+    merge, and the row settles as an infrastructure interruption — the interruption
+    notice identity for a fault the definition really had, and the run REMOVED from the
+    definition's own failure history by ``RUN_INTERRUPTION_REASONS`` membership. The
+    same inversion HFR-329/331 name, arriving from the park side instead of the
+    settlement side.
+
+    The rule: the incoming intent either wins the arbitration outright and replaces the
+    whole unit, or it changes nothing. Ties keep the first writer's unit.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-mixed", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-mixed")
+    assert requests.claim(run.id) is not None
+
+    # The Activity's own failure, parked because something still owns the row.
+    assert sqlite.defer_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="the task's own command exited 1",
+    )
+    # The eviction, arriving after it. Same status, so it does not win the arbitration
+    # and may not contribute ANY part of its intent.
+    assert (
+        sqlite.defer_run_terminal(
+            run.id,
+            terminal_status="failed",
+            error="the session was reclaimed mid-turn",
+            metadata={"interrupt_reason": "evicted"},
+        )
+        is False
+    ), "a tie changes nothing, so the call reports that it wrote nothing"
+
+    parked = sqlite.get_run(run.id)
+    assert parked["status"] == "running"
+    assert parked["result_payload"]["deferred_terminal_status"] == "failed"
+    assert parked["result_payload"]["deferred_terminal_error"] == (
+        "the task's own command exited 1"
+    )
+    assert "deferred_terminal_metadata" not in parked["result_payload"], (
+        "the loser's cause must not be grafted onto the incumbent's intent"
+    )
+
+    assert sqlite.settle_deferred_run(run.id) is True
+
+    settled = sqlite.get_run(run.id)
+    assert settled["status"] == "failed"
+    assert settled["error"] == "the task's own command exited 1"
+    assert "interrupt_reason" not in (settled.get("metadata") or {}), (
+        "the Activity's failure won the tie; an eviction's cause describing it inverts "
+        "both the notice identity and the definition's health accounting"
+    )
+    notice = settled["metadata"][OWED_FAILURE_NOTICE_KEY]
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["failure_id"] == run.id, (
+        "the ordinary-failure identity; the interruption lane's "
+        "``interrupt:{run}:{reason}`` belongs to a cause that did not win here"
+    )
+    assert notice["interrupt_reason"] is None
+    assert not [
+        key
+        for key in (settled.get("result_payload") or {})
+        if key.startswith("deferred_terminal_")
+    ]
+    # The seam HFR-329 measures: this failure is the definition's own and stays in its
+    # history rather than being excused as infrastructure.
+    health = sqlite.definition_health("task-mixed")
+    assert health["recent_failures"] == 1
+    assert health["consecutive_failures"] == 1
+
+
+def test_a_winning_park_replaces_the_whole_incumbent_intent(tmp_path: Path) -> None:
+    """HFR-338, companion — the winner brings its own unit, and only its own.
+
+    The mirror of the test above. ``_stronger_terminal_status`` ranks ``failed`` above
+    ``canceled`` above ``succeeded``, so an eviction's ``failed`` intent outranks a
+    parked ``succeeded`` one (the shape ``_settle_activity_without_output`` parks). When
+    it wins, it replaces the WHOLE unit: a field the winner did not carry is cleared
+    rather than inherited from the loser, because a blend of two intents is exactly the
+    row HFR-338 is about — one author's status wearing another author's description.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-replaced", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-replaced")
+    assert requests.claim(run.id) is not None
+
+    # The weaker intent: an Activity finishing without a fault, with its text.
+    assert sqlite.defer_run_terminal(
+        run.id,
+        terminal_status="succeeded",
+        result_text="the Activity's last words",
+    )
+    # The eviction outranks it and replaces the intent whole.
+    assert sqlite.defer_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="the session was reclaimed mid-turn",
+        metadata={"interrupt_reason": "evicted"},
+    )
+
+    parked = sqlite.get_run(run.id)
+    assert parked["result_payload"]["deferred_terminal_status"] == "failed"
+    assert parked["result_payload"]["deferred_terminal_error"] == (
+        "the session was reclaimed mid-turn"
+    )
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+    assert "deferred_terminal_result_text" not in parked["result_payload"], (
+        "the loser's copy is not part of the winner's intent"
+    )
+
+    assert sqlite.settle_deferred_run(run.id) is True
+
+    settled = sqlite.get_run(run.id)
+    assert settled["status"] == "failed"
+    assert settled["error"] == "the session was reclaimed mid-turn"
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+    assert not str(settled.get("result_text") or "").strip(), (
+        "a success's user-visible text must not survive onto the failure that replaced it"
+    )
+    notice = settled["metadata"][OWED_FAILURE_NOTICE_KEY]
+    assert notice["failure_id"] == f"interrupt:{run.id}:evicted"
+    assert not [
+        key
+        for key in (settled.get("result_payload") or {})
+        if key.startswith("deferred_terminal_")
+    ]
+    health = sqlite.definition_health("task-replaced")
+    assert health["recent_failures"] == 0
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 

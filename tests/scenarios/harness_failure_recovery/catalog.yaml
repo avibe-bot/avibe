@@ -3676,6 +3676,56 @@ scenarios:
     # (the stamp and the lane entry land together) and
     # ::test_session_bound_default_routed_lane_resolves_through_its_session.
     test: tests/test_running_agents_service.py::test_default_routed_definition_lane_is_identifiable_to_end
+  - id: HFR-338
+    name: >-
+      a parked terminal intent is one atomic unit, so a losing park cannot relabel the
+      outcome that won
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 13. The park-side twin of HFR-329/331, which fixed the SETTLEMENT
+    # side of the same inversion and left the writer that fills the payload unfixed.
+    # THE BUG: defer_run_terminal arbitrated only the STATUS through
+    # _stronger_terminal_status, then decided deferred_terminal_error /
+    # _result_text / _metadata each on its own terms (error: first non-empty wins;
+    # result_text and metadata: last writer wins). So the four fields of one parked
+    # intent could come from two different authors. The field case: an Activity's
+    # ordinary failure parks `failed` + its error and NO metadata, blocked from settling
+    # because something still owns the row; a later eviction parks `failed` +
+    # interrupt_reason=evicted. failed == failed is a TIE, so the incumbent keeps the
+    # status -- and the newcomer's metadata is written anyway, onto an outcome it did not
+    # win. At settlement the equality rule (HFR-329/331) compares failed to failed, sees
+    # agreement, and merges the cause. Both user-visible systems those scenarios name go
+    # wrong at once: the notice takes the interruption identity
+    # interrupt:{run}:{reason} instead of the ordinary run id, and RUN_INTERRUPTION_
+    # REASONS membership REMOVES the run from the definition's own failure history --
+    # a real fault excused as infrastructure, in the health badge and the auto-pause
+    # streak. HFR-329's own rule ("a cause that lost the arbitration must not describe
+    # the outcome that won it") was being violated by the writer that produced the
+    # payload the settlement then correctly trusted.
+    # THE RULE: status, error, result_text and metadata are ONE intent and move
+    # together under one arbitration. Incoming strictly outranks the parked status ->
+    # the whole unit is REPLACED, and a field the winner does not carry is CLEARED
+    # rather than inherited (a blend is the very row this scenario is about). Incoming
+    # ties or loses -> nothing lands at all, first writer wins. First park -> write the
+    # unit. The old no-op short-circuit (HFR-110) is subsumed rather than removed: an
+    # identical re-park ties, so the call still answers False without writing, and every
+    # surviving write path changes the status.
+    # CALLER AUDIT, for a path that legitimately ADDED fields across two equal-status
+    # parks and would now lose the addition -- none found. settle_activity_runs parks
+    # status-only and supplies its error to settle_deferred_run(error=...) at SETTLE
+    # time, not as a second park, and settle_deferred_run still falls back to that
+    # parameter when the parked unit carries no error. _settle_activity_without_output
+    # parks status-only. _park_or_settle_run (the one copy shared by
+    # _terminalize_cancelled_request and _settle_agent_run_without_result) and the
+    # dispatcher's _record_agent_run_terminal_for_ids each pass their whole intent in
+    # one call. TaskExecutionStore.defer_run_terminal is a pass-through and the file
+    # backend has no deferred lane at all.
+    # Companion: ::test_a_winning_park_replaces_the_whole_incumbent_intent (the
+    # replacement direction -- a loser's result_text does not survive onto the failure
+    # that outranked it).
+    test: tests/test_harness_failure_visibility.py::test_a_losing_park_does_not_relabel_the_incumbent_intent
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

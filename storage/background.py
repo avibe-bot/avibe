@@ -3822,6 +3822,19 @@ class SQLiteBackgroundTaskStore:
         ``result_payload_json`` beside the other deferred fields, it survives the
         gap and :meth:`settle_deferred_run` folds it into the SAME guarded UPDATE
         that transitions the status.
+
+        THE PARKED INTENT IS ONE UNIT (HFR-338). ``deferred_terminal_status`` /
+        ``_error`` / ``_result_text`` / ``_metadata`` describe a SINGLE author's
+        outcome and are never mixed from two of them: they are arbitrated together
+        by ``_stronger_terminal_status`` and move together. Deciding each field on
+        its own let a second park that merely TIED on status graft its own cause
+        onto the incumbent's outcome — an eviction's ``interrupt_reason`` landing on
+        an Activity's ordinary failure, which the settlement equality rule
+        (HFR-329/331) then accepts because ``failed == failed``. That row is
+        reported as an infrastructure interruption and is EXCLUDED from the
+        definition's health by ``RUN_INTERRUPTION_REASONS`` membership: both the
+        notice identity and the health accounting inverted, by a writer that won
+        nothing.
         """
 
         now = updated_at or _utc_now_iso()
@@ -3835,40 +3848,32 @@ class SQLiteBackgroundTaskStore:
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):
                 result_payload = {}
-            normalized = _stronger_terminal_status(
-                result_payload.get("deferred_terminal_status"),
-                terminal_status,
-            )
-            status_changed = result_payload.get("deferred_terminal_status") != normalized
-            error_text = str(error) if error is not None else None
-            error_changed = bool(
-                error_text is not None
-                and not result_payload.get("deferred_terminal_error")
-            )
-            deferred_result_text = str(result_text) if result_text is not None else None
-            result_text_changed = bool(
-                deferred_result_text is not None
-                and result_payload.get("deferred_terminal_result_text") != deferred_result_text
-            )
-            deferred_metadata = dict(metadata) if metadata else None
-            metadata_changed = bool(
-                deferred_metadata is not None
-                and result_payload.get("deferred_terminal_metadata") != deferred_metadata
-            )
-            if (
-                not status_changed
-                and not error_changed
-                and not result_text_changed
-                and not metadata_changed
-            ):
+            parked_status = result_payload.get("deferred_terminal_status")
+            has_parked_intent = bool(str(parked_status or "").strip())
+            normalized = _stronger_terminal_status(parked_status, terminal_status)
+            if has_parked_intent and normalized == normalize_run_status(parked_status):
+                # The incoming intent LOST or TIED the arbitration, so none of it lands:
+                # first writer wins on a tie, and a loser contributes no field (HFR-338).
+                # This also subsumes the older no-op short-circuit (HFR-110): a re-park
+                # of an identical intent ties, so the call still answers ``False``
+                # without writing, and the only surviving write path changes the status.
                 return False
+            # The incoming intent WON (or is the first park): its whole unit replaces
+            # whatever was parked. A field it does not carry is CLEARED rather than
+            # inherited — an intent it never authored is not part of its outcome.
             result_payload["deferred_terminal_status"] = normalized
-            if error_changed:
-                result_payload["deferred_terminal_error"] = error_text
-            if result_text_changed:
-                result_payload["deferred_terminal_result_text"] = deferred_result_text
-            if metadata_changed:
-                result_payload["deferred_terminal_metadata"] = deferred_metadata
+            if error is not None:
+                result_payload["deferred_terminal_error"] = str(error)
+            else:
+                result_payload.pop("deferred_terminal_error", None)
+            if result_text is not None:
+                result_payload["deferred_terminal_result_text"] = str(result_text)
+            else:
+                result_payload.pop("deferred_terminal_result_text", None)
+            if metadata:
+                result_payload["deferred_terminal_metadata"] = dict(metadata)
+            else:
+                result_payload.pop("deferred_terminal_metadata", None)
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
