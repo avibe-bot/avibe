@@ -4,7 +4,6 @@ import {
   ArrowDownUp,
   ChevronDown,
   ChevronRight,
-  CircleAlert,
   Loader2,
   Plus,
   Settings2,
@@ -30,7 +29,6 @@ import { serverText } from './serverCopy';
 import { ModelRoutePicker } from './ModelRoutePicker';
 import { useAnnounceEnrollment } from './menus/enrollment';
 import {
-  agentNeedsModelSelection,
   listedModelIds,
   modelChainKey,
   modelHasOffOrderSupplier,
@@ -461,44 +459,6 @@ const ModelRow: React.FC<{
   );
 };
 
-const EmptySelectionRow: React.FC<{
-  agent: AgentSupply;
-  pending: boolean;
-  onOpenModels: (agent: AgentSupply) => void;
-}> = ({
-  agent,
-  pending,
-  onOpenModels,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/[0.035] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5" data-model-issue>
-      <span className="flex min-w-0 items-start gap-2.5">
-        <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
-        <span>
-          <span className="block text-[12.5px] font-semibold text-foreground">{t('settings.models.emptySelection.title')}</span>
-          <span className="mt-0.5 block text-[11.5px] text-muted">{t('settings.models.emptySelection.body')}</span>
-        </span>
-      </span>
-      {agent.menu_kind === 'open' ? (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-9 shrink-0"
-          onClick={() => onOpenModels(agent)}
-          disabled={pending}
-        >
-          {t('settings.models.emptySelection.action')}
-        </Button>
-      ) : (
-        <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
-          <Link to="/agents">{t('settings.models.emptySelection.action')}</Link>
-        </Button>
-      )}
-    </div>
-  );
-};
-
 const AgentModelCard: React.FC<{
   agent: AgentSupply;
   sources: Source[];
@@ -530,8 +490,7 @@ const AgentModelCard: React.FC<{
   const models = issuesOnly
     ? allModels.filter((modelId) => modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime))
     : allModels;
-  const emptySelection = agentNeedsModelSelection(agent);
-  if (issuesOnly && !emptySelection && models.length === 0) return null;
+  if (issuesOnly && models.length === 0) return null;
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-background">
@@ -582,32 +541,9 @@ const AgentModelCard: React.FC<{
         )}
       </div>
 
-      {emptySelection && (
-        <EmptySelectionRow agent={agent} pending={props.pending} onOpenModels={props.onOpenModels} />
-      )}
-
-      {models.length === 0 && !emptySelection ? (
-        <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">
+      {models.length === 0 ? (
+        <div className="px-4 py-10 text-center sm:px-5">
           <p className="text-[12.5px] text-muted">{t('settings.models.agents.emptyModels')}</p>
-          {agent.menu_kind === 'open' ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-9"
-              onClick={() => props.onOpenModels(agent)}
-              disabled={props.pending}
-            >
-              <Plus />
-              {t('settings.models.emptySelection.action')}
-            </Button>
-          ) : (
-            <Button asChild variant="outline" size="sm" className="h-9">
-              <Link to="/agents">
-                <Plus />
-                {t('settings.models.emptySelection.action')}
-              </Link>
-            </Button>
-          )}
         </div>
       ) : (
         models.map((modelId) => (
@@ -683,7 +619,6 @@ export const AgentCard: React.FC<{
         />
       ))}
       {props.issuesOnly && !agents.some((agent) => {
-        if (agentNeedsModelSelection(agent)) return true;
         return listedModelIds(agent).some((modelId) =>
           modelNeedsAttention(agent, modelId, props.chains[modelChainKey(agent.backend, modelId)], props.runtime),
         );

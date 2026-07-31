@@ -114,10 +114,6 @@ export function modelNeedsAttention(
   return agent.model_supply?.find((model) => model.model_id === modelId)?.chain_length === 0;
 }
 
-export function agentNeedsModelSelection(agent: AgentSupply): boolean {
-  return agent.mode === 'hub' && !agent.selected_model_id;
-}
-
 export function modelIssueCount(
   agents: AgentSupply[],
   chains: ModelChainIndex,
@@ -127,6 +123,6 @@ export function modelIssueCount(
     const modelIssues = listedModelIds(agent).filter((modelId) =>
       modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime),
     ).length;
-    return count + modelIssues + (agentNeedsModelSelection(agent) ? 1 : 0);
+    return count + modelIssues;
   }, 0);
 }
