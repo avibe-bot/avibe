@@ -33,9 +33,10 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     create_default_service,
 )
-from vibe.model_hub_client import ModelHubRemoteService, _decode
+from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
+from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.ui_server import app
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -105,11 +106,13 @@ class FakeAdapter:
         self.orphan_cleanup_calls = []
         self.orphan_cleanup_succeeds = False
         self.cancel_disposition = RetainedMaterialDisposition.NONE
+        self.start_calls = 0
 
     async def ensure_installed(self):
         return await self.status()
 
     async def start(self):
+        self.start_calls += 1
         return await self.status()
 
     async def stop(self):
@@ -328,6 +331,204 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
     ]
 
 
+def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
+    service, _store, adapter = _service(tmp_path)
+
+    runtime = asyncio.run(service.runtime_start())
+
+    assert adapter.start_calls == 1
+    assert runtime["contract_version"] == 4
+    assert runtime["status"]["health"] == "ok"
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
+    class OrderedAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        async def sync_sources(self, bindings):
+            self.calls.append("sync")
+            await super().sync_sources(bindings)
+
+        async def start(self):
+            self.calls.append("start")
+            return await super().start()
+
+    store = MemoryStore()
+    store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_runtime01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Runtime source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="gpt-5", provenance="manual")],
+            credential_ref="cred_runtime01",
+        )
+    )
+    adapter = OrderedAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    async def start_then_enter_normal_gateway_path():
+        runtime = await service.runtime_start()
+        await service._ensure_engine_synced()
+        return runtime
+
+    runtime = asyncio.run(start_then_enter_normal_gateway_path())
+
+    assert runtime["status"]["health"] == "ok"
+    assert adapter.calls == ["sync", "start"]
+    assert [binding.source_id for binding in adapter.synced[0]] == ["src_runtime01"]
+
+
+@pytest.mark.parametrize(
+    ("idle_health", "installed_version", "verified", "recovered_health"),
+    [
+        (EngineHealth.NOT_STARTED, "v7.2.95", True, "not_started"),
+        (EngineHealth.NOT_INSTALLED, None, False, "not_installed"),
+    ],
+)
+def test_runtime_start_sync_failure_is_reported_as_down(
+    tmp_path,
+    idle_health,
+    installed_version,
+    verified,
+    recovered_health,
+):
+    class IdleAdapter(FakeAdapter):
+        async def status(self):
+            return EngineStatus(
+                health=idle_health,
+                installed_version=installed_version,
+                verified=verified,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    store = MemoryStore()
+    store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_runtime01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Runtime source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="gpt-5", provenance="manual")],
+            credential_ref="cred_runtime01",
+        )
+    )
+    adapter = IdleAdapter()
+    adapter.fail_sync = True
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError, match="engine_down"):
+        asyncio.run(service.runtime_start())
+    runtime = asyncio.run(service.runtime_status())
+
+    assert adapter.start_calls == 0
+    assert runtime["status"]["health"] == "down"
+
+    adapter.fail_sync = False
+    config = store.load()
+    asyncio.run(service._commit_synced(config, service._clone_config(config)))
+
+    recovered = asyncio.run(service.runtime_status())
+    assert recovered["status"]["health"] == recovered_health
+
+
+def test_runtime_start_in_progress_remains_not_started(tmp_path):
+    class IdleAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.started = False
+
+        async def start(self):
+            self.started = True
+            return await super().start()
+
+        async def status(self):
+            return EngineStatus(
+                health=(EngineHealth.OK if self.started else EngineHealth.NOT_STARTED),
+                installed_version="v7.2.95",
+                verified=True,
+                listen_host="127.0.0.1",
+                listen_port=15220 if self.started else None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=IdleAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    async def status_while_start_waits_for_sync():
+        await service._mutation_lock.acquire()
+        start = asyncio.create_task(service.runtime_start())
+        await asyncio.sleep(0)
+        assert not start.done()
+        pending = await service.runtime_status()
+        service._mutation_lock.release()
+        started = await start
+        return pending, started
+
+    pending, started = asyncio.run(status_while_start_waits_for_sync())
+
+    assert pending["status"]["health"] == "not_started"
+    assert started["status"]["health"] == "ok"
+
+
+def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"contract_version": 4, "status": {"health": "ok"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    runtime = asyncio.run(ModelHubRemoteService().runtime_start())
+
+    assert runtime["status"]["health"] == "ok"
+    assert calls == [("runtime_start", None)]
+
+
+def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, adapter = _service(tmp_path)
+
+    runtime = asyncio.run(dispatch_model_hub_rpc(service, "runtime_start", {}))
+
+    assert runtime["status"]["health"] == "ok"
+    assert adapter.start_calls == 1
+
+
 def test_runtime_status_reports_observed_not_installed_state(tmp_path):
     class NotInstalledAdapter(FakeAdapter):
         async def start(self):
@@ -542,6 +743,7 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("POST", "/api/models/migration/scan"),
         ("POST", "/api/models/migration/apply"),
         ("GET", "/api/models/runtime/status"),
+        ("POST", "/api/models/runtime/start"),
     ],
 )
 def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtime_work(
@@ -3079,6 +3281,44 @@ def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tm
 
     assert model_response.status_code == config_response.status_code == 403
     assert model_response.get_json() == config_response.get_json()
+
+
+def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, tmp_path):
+    service, _, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    rejected = client.post("/api/models/runtime/start", base_url=base_url)
+
+    assert rejected.status_code == 403
+    assert adapter.start_calls == 0
+
+    accepted = client.post(
+        "/api/models/runtime/start",
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert accepted.status_code == 200
+    runtime = accepted.get_json()["runtime"]
+    assert adapter.start_calls == 1
+    assert runtime["contract_version"] == 4
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_start_route_requires_remote_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    response = app.test_client().post(
+        "/api/models/runtime/start",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
 
 
 def test_native_source_configuration_does_not_require_l1_engine(tmp_path):

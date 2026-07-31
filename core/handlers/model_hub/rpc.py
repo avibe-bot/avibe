@@ -79,4 +79,6 @@ async def dispatch_model_hub_rpc(
         return await service.migration_apply(payload.get("item_ids"))
     if operation == "runtime_status":
         return await service.runtime_status()
+    if operation == "runtime_start":
+        return await service.runtime_start()
     raise ModelHubError("source_not_found", status=404)

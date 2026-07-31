@@ -462,9 +462,10 @@ export type OAuthFlow = {
 };
 
 // ── runtime-dependency.schema.json ──────────────────────────────────────
-export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_installed';
+export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed';
 
 export type RuntimeDependency = {
+  contract_version: 4;
   manifest: {
     name: 'cliproxyapi';
     version: string;
