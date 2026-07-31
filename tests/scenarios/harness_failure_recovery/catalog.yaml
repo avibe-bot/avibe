@@ -2773,6 +2773,50 @@ scenarios:
     # POSIX test host:
     # tests/test_session_teardown.py::test_composite_key_split_preserves_windows_drive_paths
     test: tests/test_session_teardown.py::test_teardown_settles_a_session_whose_workdir_contains_a_colon
+  - id: HFR-320
+    name: in-dispatch runtime recreation is not killed by its own session teardown
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: claude
+    # PR2 review round 3, and the FIRST id from PR2's overflow block (320...349) --
+    # the main block (100...129) is exhausted.
+    # release_for_teardown had no self-task guard, and the caller that needs one is
+    # ordinary in-dispatch cleanup rather than an exotic re-entrancy: a Workbench
+    # turn's dispatch calls get_or_create_claude_session, whose
+    # _reuse_cached_claude_session_if_available finds a cached client whose launch
+    # inputs no longer match (system prompt / caller env / Git PATH / Model Hub
+    # channel) and tears the runtime down so a replacement can be built --
+    # cleanup_session -> teardown_composite_session_runs (manager lane included by
+    # default; only the stop path opts out, HFR-126) -> cancel_session_executions ->
+    # _release_manager_turn -> release_for_teardown. The turn it finds in in_flight
+    # for that session is THE CALLING TASK.
+    # The damage is a WEDGE, not a mislabelling: the method cancels and then awaits
+    # asyncio.gather(turn.task), so the task waits on itself and Task.cancel recurses
+    # through the gather future's child to RecursionError -- the cancellation never
+    # lands, the coroutine never resumes, the replacement client is never created and
+    # the user's run never settles at all, holding its session lock forever. Both
+    # regressions reproduce exactly that pre-fix ("Task cancelling ...
+    # wait_for=<_GatheringFuture pending>"), so they poll for completion instead of
+    # awaiting: any cancel of a self-awaiting task recurses, so wait_for would hang
+    # the suite rather than fail it. Even a non-awaiting release would be wrong --
+    # the cancel detonates at the next await and _run's finally fails the brand-new
+    # run as backend_refresh before its prompt was ever sent.
+    # FIX: turn.task is asyncio.current_task() -> debug log and return False, placed
+    # immediately after the turn is resolved and BEFORE any mutation. The ordering is
+    # part of the fix: a pre-stamped cancel_settled_by is read by _run's finally off
+    # the popped Turn, so it would mislabel the turn's eventual REAL settlement long
+    # after the recreation succeeded, and stop_no_flush / flush_on_cancel would
+    # rewrite a still-running turn's flush intent.
+    # SYMMETRY: the scheduler lane already exempts itself the same way -- _cancel
+    # inside cancel_session_executions skips a task that is current_task, as
+    # _begin_stop does. This is the turn lane's half of that guard, reached through
+    # the same call.
+    # A second test carries this same id, the direct twin of the scheduler-lane guard
+    # test, asserting the turn is left untouched (no cancel, no cancel_settled_by, no
+    # stop_no_flush / flush_on_cancel, no idle stamp) and settles by its own outcome:
+    # tests/test_internal_server.py::test_release_for_teardown_skips_the_callers_own_turn
+    test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_in_dispatch_client_recreation_survives_its_own_teardown
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

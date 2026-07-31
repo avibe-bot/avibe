@@ -1861,6 +1861,39 @@ class SessionTurnManager:
         settlement has run and a caller may safely tear the backend down — a
         dismantled backend can no longer settle its own turn. Returns whether a turn
         was found and released.
+
+        THE CALLER'S OWN TURN IS EXEMPT, and the exemption is checked before anything
+        is written to the ``Turn`` (HFR-320). The reaching call is IN-DISPATCH
+        CLEANUP, not an exotic re-entrancy: a Workbench turn's dispatch calls
+        ``get_or_create_claude_session``, whose
+        ``_reuse_cached_claude_session_if_available`` finds a cached client whose
+        launch inputs no longer match (system prompt, caller env, Git PATH, Model Hub
+        channel) and tears the runtime down so a replacement can be created —
+        ``cleanup_session`` -> ``teardown_composite_session_runs`` (manager lane
+        included by default; only the stop path opts out) -> here. The turn found in
+        ``in_flight`` for that session is the calling task itself.
+
+        Releasing it does not merely interrupt the wrong thing, it WEDGES: this
+        method cancels and then awaits ``asyncio.gather(turn.task)``, so the task
+        waits on itself, ``Task.cancel`` recurses through the gather future's child
+        until ``RecursionError``, the cancellation never lands and the coroutine
+        never resumes. The replacement client is never built and the user's run never
+        settles at all. Even a hypothetical non-awaiting version would be wrong: the
+        cancel detonates at the next await and ``_run``'s ``finally`` fails the user's
+        brand-new run as ``backend_refresh`` before its prompt was ever sent.
+
+        The scheduler lane makes exactly this exemption — ``_cancel`` inside
+        ``ScheduledTaskService.cancel_session_executions`` skips a task that ``is
+        current_task``, as ``_begin_stop`` does — and this is the turn lane's half of
+        the same guard, reached through the same ``cancel_session_executions`` call.
+
+        It precedes the mutations rather than merely skipping the cancel because the
+        mutations are not neutral: a pre-stamped ``cancel_settled_by`` is read by
+        ``_run``'s ``finally`` off the popped ``Turn``, so it would mislabel this
+        turn's eventual REAL settlement as ``backend_refresh`` long after the
+        recreation succeeded, and ``stop_no_flush`` / ``flush_on_cancel`` would
+        silently rewrite the still-running turn's flush intent. A turn that is not
+        being released must leave here untouched.
         """
 
         resolved = str(session_id or "").strip()
@@ -1868,6 +1901,13 @@ class SessionTurnManager:
             return False
         turn = self.in_flight.get(resolved)
         if turn is None:
+            return False
+        if turn.task is asyncio.current_task():
+            logger.debug(
+                "Session teardown for %s skipped its own Workbench turn (%s)",
+                resolved,
+                settled_by,
+            )
             return False
         turn.stop_no_flush = True
         # A torn-down session must not flush its durable send-while-busy queue into a

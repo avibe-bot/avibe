@@ -2500,6 +2500,99 @@ def test_release_for_teardown_does_not_flush_a_pending_send_now_queue(monkeypatc
     assert transcript["messages"] == [], "teardown must not flush into a dying runtime"
 
 
+def test_release_for_teardown_skips_the_callers_own_turn():
+    """HFR-320: a teardown reached from INSIDE the turn it would release is a no-op.
+
+    Not a hypothetical re-entrancy: it is the ordinary in-dispatch cleanup shape. A
+    Workbench turn's dispatch calls ``get_or_create_claude_session``, whose
+    ``_reuse_cached_claude_session_if_available`` finds a cached client whose launch
+    inputs (system prompt, caller env, Git PATH, Model Hub channel) no longer match
+    and tears the runtime down so a replacement can be created —
+    ``cleanup_session`` -> ``teardown_composite_session_runs`` (manager lane
+    included by default) -> ``cancel_session_executions`` ->
+    ``release_for_teardown``. The turn it finds in ``in_flight`` for that session is
+    the caller's OWN task.
+
+    What that costs is worse than a mislabelled settlement. ``release_for_teardown``
+    cancels and then AWAITS — ``asyncio.gather(turn.task)`` on the very next line —
+    so the task ends up awaiting itself: the task's waiter is the gather future whose
+    only child is the task, and ``Task.cancel()`` recurses through
+    ``child.cancel()`` until ``RecursionError``. The cancellation never lands, the
+    gather never resolves, and the turn WEDGES: the dispatch never reaches the
+    replacement client, the run never settles at all, and the session lock is held
+    forever. Even had it merely cancelled, ``_run``'s ``finally`` would settle the
+    user's brand-new run as ``backend_refresh`` with no prompt ever sent.
+
+    The scheduler lane already exempts itself the same way: ``_cancel`` inside
+    ``cancel_session_executions`` skips a task that ``is current_task``. This is the
+    turn lane's half of that guard, and it must run BEFORE any mutation — a
+    pre-stamped ``cancel_settled_by`` would mislabel the turn's eventual real
+    settlement even if nothing were cancelled.
+    """
+
+    from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    statuses = []
+    controller.set_agent_status = lambda session_id, status: statuses.append((session_id, status))
+    observed: dict = {}
+
+    async def _go():
+        async def _busy():
+            # Stands in for the dispatch body: the in-flight turn's own task reaches
+            # a teardown of the session it is running in.
+            observed["released"] = await manager.release_for_teardown(
+                "ses_self", settled_by=SETTLED_BY_BACKEND_REFRESH
+            )
+            live = manager.in_flight.get("ses_self")
+            observed["still_in_flight"] = live is not None
+            observed["cancel_settled_by"] = getattr(live, "cancel_settled_by", "<gone>")
+            observed["stop_no_flush"] = getattr(live, "stop_no_flush", "<gone>")
+            observed["flush_on_cancel"] = getattr(live, "flush_on_cancel", "<gone>")
+            # The work the teardown must not have interrupted: after the nested
+            # cleanup the dispatch goes on to build the replacement client.
+            await asyncio.sleep(0)
+            observed["replacement_built"] = True
+            return "own-outcome"
+
+        task = asyncio.create_task(_busy())
+        ctx = MessageContext(user_id="U", channel_id="ses_self", platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": "ses_self",
+            "agent_session_target": {"agent_backend": "claude"},
+        }
+        turn = session_turns.Turn(task=task, context=ctx)
+        manager.in_flight["ses_self"] = turn
+        # Polled rather than awaited (or ``wait_for``-ed): against the pre-fix code
+        # the turn is wedged awaiting itself, and cancelling it — which is all
+        # ``wait_for``'s timeout can do — recurses to ``RecursionError`` inside a
+        # loop callback, so the test would hang instead of failing.
+        for _ in range(300):
+            if task.done():
+                break
+            await asyncio.sleep(0.01)
+        assert task.done(), "the teardown wedged the very turn that called it"
+        return task.result(), turn
+
+    outcome, turn = asyncio.run(_go())
+
+    assert observed["released"] is False, "the caller's own turn is not a release"
+    assert outcome == "own-outcome", "the turn must settle by its own real outcome"
+    assert observed["replacement_built"] is True
+    assert turn.task.cancelled() is False
+    # Untouched, all of it: the guard precedes every mutation.
+    assert observed["still_in_flight"] is True
+    assert observed["cancel_settled_by"] is None
+    assert observed["stop_no_flush"] is False
+    assert observed["flush_on_cancel"] is False
+    assert turn.cancel_settled_by is None
+    assert turn.stop_no_flush is False
+    assert turn.flush_on_cancel is False
+    # No idle stamp either: the agent is still working.
+    assert statuses == []
+
+
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
     tmp_path, monkeypatch
 ):

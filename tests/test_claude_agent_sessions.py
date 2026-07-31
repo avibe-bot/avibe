@@ -576,6 +576,140 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await turn_task
 
+    async def test_in_dispatch_client_recreation_survives_its_own_teardown(self):
+        """HFR-320: recreating a cached client INSIDE a turn must not kill that turn.
+
+        The real caller shape, not a synthetic re-entrancy. A Workbench turn's
+        dispatch calls ``get_or_create_claude_session``; its
+        ``_reuse_cached_claude_session_if_available`` finds a cached client whose
+        launch inputs no longer match — here the avibe system prompt, one of four
+        equivalent branches with Model Hub channel, caller env and Git PATH — and
+        calls ``cleanup_session`` so a replacement can be built. That reaches
+        ``teardown_composite_session_runs`` with the manager lane INCLUDED (the
+        default; only the stop path opts out, HFR-126), so the turn
+        ``release_for_teardown`` finds in ``in_flight`` for this session is the
+        dispatching task itself.
+
+        Pre-fix that was fatal rather than merely mislabelled: the release cancels
+        and then awaits ``asyncio.gather(turn.task)``, so the task waits on itself
+        and ``Task.cancel`` recurses to ``RecursionError``. The dispatch never
+        returns, the replacement client is never created, and the user's run never
+        settles at all. The guard in ``release_for_teardown`` — the turn lane's twin
+        of the ``task is current_task`` exemption in
+        ``cancel_session_executions._cancel`` — makes the nested release a no-op so
+        the recreation completes and the turn settles by its own outcome.
+        """
+
+        from core.handlers.session_handler import SessionHandler
+        from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+        from core.scheduled_tasks import ScheduledTaskService
+        from core.session_turns import SessionTurnManager, Turn
+        from modules.agents.model_hub import ModelHubLaunch
+        from modules.im import MessageContext
+
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        session_id = "ses_selfteardown_320"
+
+        class _Client:
+            def __init__(self, tag):
+                self.tag = tag
+                self.disconnected = False
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        controller.stored_session_mappings = {}
+        controller.sessions = SimpleNamespace(
+            find_session_ids_for_anchor=lambda anchor, workdir=None, **_kw: [session_id]
+        )
+        controller.set_agent_status = lambda *_args, **_kwargs: None
+        # Stores default to the per-test isolated ``AVIBE_HOME`` (tests/conftest.py).
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+
+        handler = SessionHandler(controller)
+        controller.session_handler = handler
+        # The system prompt this dispatch would use differs from the cached one, so
+        # the cached client must be torn down and rebuilt. Overriding the builder
+        # keeps the branch honest without dragging in prompt assembly.
+        handler._build_claude_system_prompt = lambda **_kwargs: "prompt-v2"
+        handler.claude_system_prompts[runtime_key] = "prompt-v1"
+
+        stale = _Client("stale")
+        controller.claude_sessions[runtime_key] = stale
+        launch = ModelHubLaunch("claude", "direct", "opus", "opus", "opus")
+
+        # Proof the nested teardown really reached the manager lane: a resolve miss
+        # would make every assertion below pass for the wrong reason.
+        released_calls: list = []
+        real_release = manager.release_for_teardown
+
+        async def _spy_release(sid, *, settled_by):
+            result = await real_release(sid, settled_by=settled_by)
+            released_calls.append((sid, settled_by, result))
+            return result
+
+        manager.release_for_teardown = _spy_release
+
+        turn_ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+        turn_ctx.platform_specific = {
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+        }
+
+        registered = asyncio.Event()
+        observed: dict = {}
+
+        async def _dispatch():
+            await registered.wait()
+            observed["reuse_returned"] = await handler._reuse_cached_claude_session_if_available(
+                composite_key=runtime_key,
+                base_session_id="wechat_o9",
+                working_path="/tmp/work",
+                context=turn_ctx,
+                session_key="wechat-user",
+                stored_claude_session_id=None,
+                current_model="opus",
+                agent_system_prompt=None,
+                model_hub_launch=launch,
+            )
+            # ``None`` is the recreate signal; this is the work the teardown must
+            # not have interrupted.
+            replacement = _Client("replacement")
+            controller.claude_sessions[runtime_key] = replacement
+            observed["replacement"] = replacement
+            return "terminal_result"
+
+        turn_task = asyncio.create_task(_dispatch())
+        turn = Turn(task=turn_task, context=turn_ctx)
+        manager.in_flight[session_id] = turn
+        registered.set()
+
+        # Polled, not awaited: pre-fix the turn is wedged awaiting itself and any
+        # cancel of it recurses, so a plain await would hang the suite.
+        for _ in range(300):
+            if turn_task.done():
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(
+            turn_task.done(), "the in-dispatch teardown wedged the turn that called it"
+        )
+
+        self.assertEqual(turn_task.result(), "terminal_result")
+        self.assertFalse(turn_task.cancelled())
+        self.assertIsNone(observed["reuse_returned"], "the caller must be told to recreate")
+        # The replacement client exists and is the one now registered.
+        self.assertIs(controller.claude_sessions[runtime_key], observed["replacement"])
+        self.assertTrue(stale.disconnected, "the stale runtime is still torn down")
+        # The nested release saw this very turn and declined it.
+        self.assertEqual(released_calls, [(session_id, SETTLED_BY_BACKEND_REFRESH, False)])
+        self.assertIs(manager.in_flight.get(session_id), turn)
+        self.assertIsNone(turn.cancel_settled_by, "no backend_refresh stamp on a live turn")
+        self.assertFalse(turn.stop_no_flush)
+        self.assertFalse(turn.flush_on_cancel)
+
     async def test_handle_stop_waits_for_in_flight_steering_write(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"
