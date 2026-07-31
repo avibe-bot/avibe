@@ -38,6 +38,7 @@ from core.session_teardown import (
     cancel_session_scheduler_lane,
     reconcile_session_runs,
     resolve_teardown_session_ids,
+    split_composite_session_key,
 )
 
 if TYPE_CHECKING:
@@ -79,12 +80,14 @@ def _base_from_composite(composite_key: str) -> str:
     """Recover ``base_session_id`` from a Claude composite key.
 
     Composite keys are ``f"{base_session_id}:{working_path}"``; subagent bases
-    themselves contain a colon (``{platform}_{thread}:{agent_name}``), so a
-    naive ``split(":")[0]`` is wrong. ``working_path`` is an absolute path with
-    no colon, so the base is everything before the LAST colon.
+    themselves contain a colon (``{platform}_{thread}:{agent_name}``) and the
+    working path may too (``C:\\repo``, ``/tmp/a:b``), so neither end of the key
+    can be found by counting colons. ``split_composite_session_key`` owns that
+    boundary for every caller; this snapshot must agree with it, because the
+    base it recovers is what End hands to the teardown resolve.
     """
-    base, sep, _workdir = composite_key.rpartition(":")
-    return base if sep else composite_key
+    base, _workdir = split_composite_session_key(composite_key)
+    return base
 
 
 def _split_scope_id(scope_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -159,9 +162,11 @@ def _collect_claude(
     turn_started = getattr(controller, "session_turn_started", {}) or {}
 
     for composite_key, client in _safe_items(sessions):
-        # composite_key is ``{base}:{abs_workdir}``; split once for both halves.
-        ck_base, ck_sep, ck_workdir = composite_key.rpartition(":")
-        base = getattr(client, "_vibe_runtime_base_session_id", None) or (ck_base if ck_sep else composite_key)
+        # composite_key is ``{base}:{abs_workdir}``; split once for both halves,
+        # through the shared splitter so a colon inside the path (``C:\repo``,
+        # ``/tmp/a:b``) does not truncate the workdir this row displays.
+        ck_base, ck_workdir = split_composite_session_key(composite_key)
+        base = getattr(client, "_vibe_runtime_base_session_id", None) or ck_base
         native = getattr(client, "_vibe_native_session_id", None)
         model = getattr(client, "_vibe_current_model", None)
         pid = get_claude_client_pid(client)
@@ -184,7 +189,7 @@ def _collect_claude(
                 state="active" if is_active else "idle",
                 base_session_id=base,
                 composite_key=composite_key,
-                workdir=(ck_workdir or None) if ck_sep else None,
+                workdir=ck_workdir or None,
                 pid=pid,
                 native_session_id=native,
                 model=model,
@@ -818,10 +823,16 @@ def _teardown_session_id(
 
 
 def _workdir_from_composite(composite_key: Optional[str]) -> Optional[str]:
+    """The working path half of a composite key, or ``None`` when it names none.
+
+    Delegates the boundary to :func:`split_composite_session_key`: this feeds End's
+    ``resolve_teardown_session_ids`` call, which matches ``agent_sessions.workdir``
+    exactly, so a truncated path here is a teardown that settles nothing.
+    """
     if not composite_key:
         return None
-    _base, sep, workdir = composite_key.rpartition(":")
-    return workdir if sep and workdir else None
+    _base, workdir = split_composite_session_key(composite_key)
+    return workdir or None
 
 
 def _live_workdir_for_backend(

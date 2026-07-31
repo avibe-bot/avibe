@@ -2741,6 +2741,38 @@ scenarios:
     # A second test carries this same id, pinning the leniency that must survive:
     # tests/test_session_teardown.py::test_anchor_resolve_still_accepts_a_null_workdir_row_when_nothing_matches_exactly
     test: tests/test_session_teardown.py::test_teardown_does_not_cancel_a_foreign_scope_sharing_the_anchor
+  - id: HFR-129
+    name: a composite session key splits at the separator the key added, not the last colon
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # PR2 review round 2. split_composite_session_key used rpartition(":") on
+    # f"{base_session_id}:{working_path}", which is correct only while the working
+    # path is colon-free. It is not: on native Windows it OPENS with a colon, so
+    # "{anchor}:C:\repo" split into anchor "{anchor}:C" and workdir "\repo", and a
+    # POSIX directory may legally contain one ("/tmp/a:b"). Both halves then name
+    # nothing real, resolve_teardown_session_ids matches no agent_sessions row, and
+    # Claude eviction / cleanup / shutdown read the empty resolve as "no runs to
+    # settle" -- the exact run-blind teardown this module exists to prevent, with the
+    # run left running and its session lock held.
+    # FIX, taken from how the key is BUILT rather than how it reads: an anchor never
+    # contains a filesystem path, and the path is appended exactly once and absolute,
+    # so the separator is the FIRST colon whose remainder starts like an absolute path
+    # (POSIX /, Windows \ or UNC \\, or a drive letter C:\ / C:/). Colons after it are
+    # inside the working directory; anchor colons (subagent/routing-agent suffixes,
+    # the superseded:<row_id> suffix) stay left of it because an agent name is not an
+    # absolute path. With no path marker anywhere the historical rpartition split is
+    # kept unchanged, so non-path keys ("a:b") answer exactly as before.
+    # REUSE: promoted to THE composite splitter -- core/services/running_agents.py
+    # _base_from_composite, _workdir_from_composite and the Claude snapshot row's
+    # inline split all delegate to it, so the Running tab's displayed workdir and
+    # End's teardown resolve agree with eviction's.
+    # A second test carries this same id, pinning the splitter itself against the
+    # Windows drive-letter and UNC forms that os.path.abspath cannot round-trip on a
+    # POSIX test host:
+    # tests/test_session_teardown.py::test_composite_key_split_preserves_windows_drive_paths
+    test: tests/test_session_teardown.py::test_teardown_settles_a_session_whose_workdir_contains_a_colon
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

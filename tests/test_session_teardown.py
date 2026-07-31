@@ -22,6 +22,7 @@ from core.run_settlement import SETTLED_BY_EVICTED
 from core.scheduled_tasks import ScheduledTaskService
 from core.session_teardown import (
     resolve_teardown_session_ids,
+    split_composite_session_key,
     teardown_composite_session_runs,
 )
 from core.session_turns import SessionTurnManager, Turn
@@ -216,5 +217,132 @@ def test_anchor_resolve_still_accepts_a_null_workdir_row_when_nothing_matches_ex
         assert resolve_teardown_session_ids(
             controller, session_anchor=ANCHOR, workdir=str(tmp_path / "owner")
         ) == [legacy_id]
+    finally:
+        store.close()
+
+
+def test_composite_key_split_preserves_windows_drive_paths() -> None:
+    """HFR-129: the composite separator is the one the KEY added, not the last colon.
+
+    ``f"{base_session_id}:{working_path}"`` is built once, with the working path
+    appended last — but the working path is not colon-free. On native Windows it
+    starts with a drive letter (``C:\\repo``), and even on POSIX a directory may
+    legally contain one (``/tmp/a:b``). ``rpartition`` splits at the LAST colon, which
+    for both of those lands INSIDE the path: the anchor grows a path fragment
+    (``…:C``) and the workdir shrinks to a tail (``\\repo``), so the row lookup that
+    every teardown depends on matches nothing.
+
+    The boundary rule is a property of how the key is built: an anchor never contains
+    a filesystem path, and the path is appended exactly once and absolute. So the
+    separator is the FIRST colon whose remainder looks like the start of an absolute
+    path, and every colon after it belongs to the working directory.
+    """
+
+    anchor = "slack_171717.123"
+
+    # Windows drive paths, in both slash conventions.
+    assert split_composite_session_key(f"{anchor}:C:\\repo") == (anchor, "C:\\repo")
+    assert split_composite_session_key(f"{anchor}:C:/repo") == (anchor, "C:/repo")
+    # A UNC / root-relative Windows path.
+    assert split_composite_session_key(f"{anchor}:\\\\host\\share") == (
+        anchor,
+        "\\\\host\\share",
+    )
+    # A POSIX directory that legally contains a colon.
+    assert split_composite_session_key("a:/tmp/x:y") == ("a", "/tmp/x:y")
+    # A subagent base — the anchor itself carries a colon, and it must survive.
+    assert split_composite_session_key("slack_T1:reviewer:/work") == (
+        "slack_T1:reviewer",
+        "/work",
+    )
+    assert split_composite_session_key(f"slack_T1:reviewer:C:\\work") == (
+        "slack_T1:reviewer",
+        "C:\\work",
+    )
+    # No separator at all: the whole key is the anchor.
+    assert split_composite_session_key(anchor) == (anchor, "")
+    assert split_composite_session_key(None) == ("", "")
+    assert split_composite_session_key("   ") == ("", "")
+    # No absolute-path marker anywhere: the historical last-colon split is kept.
+    assert split_composite_session_key("a:b") == ("a", "b")
+    assert split_composite_session_key("slack_T1:reviewer:relative") == (
+        "slack_T1:reviewer",
+        "relative",
+    )
+
+
+def test_teardown_settles_a_session_whose_workdir_contains_a_colon(
+    tmp_path: Path,
+) -> None:
+    """HFR-129: the split feeds the resolve, so a bad split silently skips teardown.
+
+    The failure is not cosmetic. ``teardown_composite_session_runs`` resolves the
+    anchor/workdir pair to ``agent_sessions`` rows; a key split inside the working
+    path resolves to NOTHING, and the caller — Claude eviction, cleanup, shutdown —
+    reads that as "no runs to settle" and dismantles the backend anyway, leaving the
+    in-flight turn ``running`` with nothing left alive to settle it.
+
+    The workdir here is an absolute POSIX path containing a colon rather than the
+    ``C:\\repo`` that motivated the fix, because ``agent_sessions`` stores workdirs
+    through ``normalize_workdir`` -> ``os.path.abspath``, which on POSIX rewrites a
+    literal drive path into ``<cwd>/C:\\repo`` and would make the row disagree with
+    the key for a reason that has nothing to do with the split. Same defect, same
+    ``rpartition`` landing inside the path; the drive-letter forms are pinned
+    directly on the splitter above.
+    """
+
+    workdir = str(tmp_path / "repo:v2")
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        owner_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_owner",
+            agent_backend="claude",
+            workdir=workdir,
+        )
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        composite_key = f"{ANCHOR}:{workdir}"
+
+        async def _exercise() -> tuple[bool, str | None]:
+            owner_task = _live_turn(manager, owner_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                owner_turn = manager.in_flight.get(owner_id)
+                return owner_task.done(), getattr(owner_turn, "cancel_settled_by", None)
+            finally:
+                owner_task.cancel()
+                await asyncio.gather(owner_task, return_exceptions=True)
+
+        owner_done, owner_cause = asyncio.run(_exercise())
+
+        # Pre-fix the key split inside the workdir, the anchor matched no row, and the
+        # turn was still in flight here while the backend went away underneath it.
+        assert owner_done is True
+        assert owner_cause == SETTLED_BY_EVICTED
+
+        # ...and the two halves the teardown resolved from are the ones the key names.
+        anchor, resolved_workdir = split_composite_session_key(composite_key)
+        assert (anchor, resolved_workdir) == (ANCHOR, workdir)
+        assert resolve_teardown_session_ids(
+            controller,
+            session_anchor=anchor,
+            workdir=resolved_workdir,
+            agent_backend="claude",
+        ) == [owner_id]
     finally:
         store.close()

@@ -28,9 +28,15 @@ settlement bookkeeping raised would be strictly worse than the bug being fixed.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# The remainder of a composite key, at the colon that separates anchor from working
+# path: a POSIX root (``/x``), a Windows root-relative or UNC path (``\x``,
+# ``\\host\share``), or a drive-qualified path (``C:\x`` / ``C:/x``).
+_WORKING_PATH_HEAD = re.compile(r"[A-Za-z]:[\\/]|[\\/]")
 
 __all__ = [
     "cancel_session_scheduler_lane",
@@ -46,15 +52,45 @@ __all__ = [
 def split_composite_session_key(composite_key: Optional[str]) -> tuple[str, str]:
     """Split ``f"{session_anchor}:{working_path}"`` back into its two halves.
 
-    ``rpartition`` rather than ``partition``: an anchor may itself contain colons
-    (``slack::channel::C123``-shaped keys do), while the working path is appended
-    last, so only the FINAL separator is the one this key added. Returns
-    ``(anchor, "")`` for a key with no separator at all.
+    THE ONE composite splitter (``core.services.running_agents`` delegates here):
+    getting the boundary wrong is not a formatting slip, it is a silent teardown
+    skip. The anchor half feeds ``resolve_teardown_session_ids``, so an anchor that
+    grew a path fragment matches no ``agent_sessions`` row, and Claude eviction /
+    cleanup / shutdown read the empty resolve as "nothing to settle" and dismantle
+    the backend with its runs still ``running``.
+
+    THE RULE, which comes from how the key is BUILT rather than from how it looks:
+    an anchor never contains a filesystem path (it is ``{platform}_{thread}``,
+    optionally suffixed ``:{subagent_or_routing_agent}`` and ``:superseded:{row_id}``),
+    and the working path is appended exactly once, absolute. So the separator is the
+    FIRST colon whose remainder starts like an absolute path — POSIX ``/``, Windows
+    ``\\`` or UNC ``\\\\host``, or a drive letter (``C:\\repo`` / ``C:/repo``) — and
+    every colon after it belongs to the working directory.
+
+    FIRST rather than LAST is the whole point. ``rpartition`` was correct only while
+    the working path was assumed colon-free, which it is not: on native Windows the
+    path OPENS with a colon (``{anchor}:C:\\repo`` split into ``{anchor}:C`` and
+    ``\\repo``), and even on POSIX a directory may legally contain one
+    (``/tmp/a:b``). Scanning from the left stops at the boundary the key added; every
+    later colon is inside the path where it belongs. Anchor colons stay left of it
+    because a subagent or routing-agent name is not an absolute path.
+
+    When NO absolute-path marker appears anywhere, the historical ``rpartition``
+    split is kept unchanged — a relative or otherwise unrecognizable tail is no
+    better identified from the left, and the fallback preserves today's answer for
+    non-path keys (``"a:b"`` -> ``("a", "b")``). Returns ``(anchor, "")`` for a key
+    with no separator at all.
     """
 
     resolved = str(composite_key or "").strip()
     if not resolved:
         return "", ""
+    separator_index = resolved.find(":")
+    while separator_index != -1:
+        working_path = resolved[separator_index + 1 :]
+        if _WORKING_PATH_HEAD.match(working_path):
+            return resolved[:separator_index], working_path
+        separator_index = resolved.find(":", separator_index + 1)
     anchor, separator, working_path = resolved.rpartition(":")
     if not separator:
         return resolved, ""
