@@ -950,7 +950,7 @@ def test_late_positive_native_evidence_rebinds_quarantined_turn(managers) -> Non
     assert terminal["state"] == "terminal"
 
 
-def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) -> None:
+def test_p1_during_unbound_start_steers_once_after_native_binding(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     admitted = asyncio.run(
         manager.deliver(
@@ -959,7 +959,7 @@ def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) 
         )
     )
     assert admitted.turn_id
-    steer = AsyncMock()
+    steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
     manager._steer = steer
 
     follow_up = asyncio.run(
@@ -970,11 +970,96 @@ def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) 
     )
 
     row = next(item for item in _delivery_rows(engine) if item["id"] == follow_up.delivery_id)
-    assert follow_up.state == "reconciling"
+    assert follow_up.state == "pending_steer"
     assert row["priority"] == "p1"
     assert row["target_turn_id"] == admitted.turn_id
-    assert row["receipt_outcome"] == "unknown"
+    assert row["receipt_outcome"] is None
     steer.assert_not_awaited()
+
+    async def bind_native() -> None:
+        context = _context()
+        context.platform_specific["turn_token"] = str(admitted.turn_id)
+        manager._active_identity = lambda _backend, _session, logical: (
+            logical,
+            "native-started",
+        )
+        task = manager.on_native_start(
+            context,
+            backend="codex",
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-turn",
+        )
+        assert task is not None
+        await task
+
+    asyncio.run(bind_native())
+    row = next(item for item in _delivery_rows(engine) if item["id"] == follow_up.delivery_id)
+    assert row["state"] == "attached"
+    assert row["receipt_outcome"] == "accepted"
+    steer.assert_awaited_once()
+
+
+def test_p1_pending_native_binding_falls_back_once_on_terminal_proof(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="starting"),
+            context=_context(),
+        )
+    )
+    steer = AsyncMock()
+    manager._steer = steer
+    follow_up = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="fallback once"),
+            context=_context(),
+        )
+    )
+
+    async def prove_terminal() -> None:
+        context = _context()
+        context.platform_specific["turn_token"] = str(admitted.turn_id)
+        task = manager.on_native_terminal(context, outcome="terminal")
+        assert task is not None
+        await task
+
+    asyncio.run(prove_terminal())
+    row = next(item for item in _delivery_rows(engine) if item["id"] == follow_up.delivery_id)
+    assert row["priority"] == "p3"
+    assert row["state"] == "starting"
+    assert row["receipt_outcome"] == "not_active"
+    assert row["target_turn_id"] != admitted.turn_id
+    assert len(starts) == 2
+    steer.assert_not_awaited()
+
+
+def test_restart_steers_prewrite_p1_once_after_exact_native_evidence(managers) -> None:
+    manager, restored, engine, _engine_b, _starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="starting"),
+            context=_context(),
+        )
+    )
+    follow_up = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="after restart"),
+            context=_context(),
+        )
+    )
+    restored._active_identity = lambda _backend, _session, logical: (
+        logical,
+        "native-restored",
+    )
+    restored._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    asyncio.run(restored.recover_durable_delivery_state("ses_fsm"))
+
+    row = next(item for item in _delivery_rows(engine) if item["id"] == follow_up.delivery_id)
+    assert row["state"] == "attached"
+    assert row["target_turn_id"] == admitted.turn_id
+    assert row["expected_native_turn_id"] == "native-restored"
+    restored._steer.assert_awaited_once()
 
 
 def test_definitive_context_failure_requeues_without_quarantining(managers) -> None:
@@ -2107,6 +2192,49 @@ def test_runtime_release_cannot_override_sink_terminal_outcome(managers) -> None
     assert turn["terminal_outcome"] == "completed"
 
 
+def test_runner_preserves_sink_error_outcome_when_it_terminalizes_first(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+
+    async def error_result(_controller, context, _text, **_kwargs):
+        done = asyncio.Event()
+        sink = {
+            "done_event": done,
+            "turn_token": context.platform_specific["turn_token"],
+        }
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        manager.controller.get_turn_sink = lambda _session_key: sink
+        manager.on_terminal_result(context, is_error=True)
+        sink["settled_by"] = "terminal_result"
+        done.set()
+        return SimpleNamespace(settled_by="terminal_result")
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        error_result,
+    )
+
+    async def run() -> str:
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="fails"),
+            context=_context(),
+        )
+        await manager.in_flight["ses_fsm"].task
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return str(admitted.turn_id)
+
+    turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "failed"
+
+
 def test_stop_terminal_result_preserves_canceled_turn_and_accepted_receipt(
     managers,
 ) -> None:
@@ -2242,6 +2370,13 @@ def test_agent_initiated_completion_resumes_oldest_combined_fifo_head(managers) 
             dispatched.append(text)
 
         manager._run = capture_run
+        terminalize = manager._terminalize_durable_turn
+
+        def commit_then_fail(turn_id, outcome):
+            terminalize(turn_id, outcome)
+            raise RuntimeError("terminal result owner became temporarily unavailable")
+
+        manager._terminalize_durable_turn = commit_then_fail
         holder = manager.in_flight["ses_fsm"].task
         sink = manager.get_turn_sink("avibe::ses_fsm")
         assert sink is not None
@@ -2259,6 +2394,56 @@ def test_agent_initiated_completion_resumes_oldest_combined_fifo_head(managers) 
     assert delivery["state"] == "starting"
     assert legacy_row is not None
     assert legacy_row["type"] == messages_service.QUEUED_TYPE
+
+
+def test_backend_refresh_releases_restored_durable_runtime_owner(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        delivery_store.insert_turn(
+            conn,
+            turn_id="trn-restored-runtime",
+            session_id="ses_fsm",
+            state="starting",
+            backend="codex",
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id="dlv-restored-runtime",
+            session_id="ses_fsm",
+            message_id=None,
+            dispatch_text="restored",
+            priority="p3",
+            state="starting",
+            target_turn_id="trn-restored-runtime",
+        )
+        bound = delivery_store.bind_native_start(
+            conn,
+            "trn-restored-runtime",
+            expected_version=1,
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        )
+        assert bound is not None
+
+    assert manager.active_runtime_session_ids_for_backend("codex") == {"ses_fsm"}
+    manager.begin_backend_drain("codex")
+    released = asyncio.run(
+        manager.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={"ses_fsm"},
+        )
+    )
+    assert released == 1
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, "trn-restored-runtime")
+        delivery = delivery_store.get_delivery(conn, "dlv-restored-runtime")
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "backend_refresh"
+    assert delivery is not None
+    assert delivery["state"] == "completed"
+    assert manager._deferred_restart_sessions["codex"] == {"ses_fsm"}
 
 
 def test_backend_drain_defers_durable_successor_start_attempt(managers) -> None:

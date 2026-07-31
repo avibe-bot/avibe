@@ -96,7 +96,11 @@ def queued_message_ids(conn: Connection, session_id: str) -> set[str]:
         for value in conn.execute(
             select(session_deliveries.c.message_id)
             .where(session_deliveries.c.session_id == session_id)
-            .where(session_deliveries.c.state.in_(("queued", "steering", "reconciling")))
+            .where(
+                session_deliveries.c.state.in_(
+                    ("queued", "pending_steer", "steering", "reconciling")
+                )
+            )
             .where(session_deliveries.c.message_id.is_not(None))
         ).scalars()
         if value
@@ -413,6 +417,27 @@ def terminalize_and_claim_successor(
     requeued_deliveries: list[str] = []
     for raw in owned:
         delivery = dict(raw)
+        if delivery["priority"] == "p1" and delivery["state"] == "pending_steer":
+            queued = cas_delivery(
+                conn,
+                str(delivery["id"]),
+                expected_version=int(delivery["version"]),
+                expected_states=("pending_steer",),
+                values={
+                    "priority": "p3",
+                    "state": "queued",
+                    "target_turn_id": None,
+                    "receipt_outcome": "not_active",
+                    "receipt_body_json": json.dumps(
+                        {"reason": "target_terminal_before_native_start"},
+                        sort_keys=True,
+                    ),
+                },
+            )
+            if queued is None:
+                raise RuntimeError("pre-steer P1 did not fall back after terminal proof")
+            requeued_deliveries.append(str(delivery["id"]))
+            continue
         successor_id = str(delivery.get("successor_turn_id") or "").strip()
         if successor_id and delivery["state"] in {
             "interrupt_pending",
@@ -617,12 +642,54 @@ def session_ids_with_turn_history(conn: Connection) -> set[str]:
     }
 
 
+def active_runtime_session_ids_for_backend(conn: Connection, backend: str) -> set[str]:
+    return {
+        str(value)
+        for value in conn.execute(
+            select(session_turns.c.session_id)
+            .where(session_turns.c.backend == backend)
+            .where(session_turns.c.state == "active")
+        ).scalars()
+        if value
+    }
+
+
+def live_turns_for_backend_sessions(
+    conn: Connection,
+    backend: str,
+    session_ids: Iterable[str],
+) -> list[dict[str, Any]]:
+    ids = tuple(str(value) for value in session_ids if value)
+    if not ids:
+        return []
+    query = (
+        select(session_turns)
+        .where(session_turns.c.backend == backend)
+        .where(session_turns.c.session_id.in_(ids))
+        .where(session_turns.c.state.in_(TURN_OWNER_STATES))
+        .order_by(session_turns.c.created_at, session_turns.c.id)
+    )
+    return [dict(row) for row in conn.execute(query).mappings()]
+
+
 def pending_interrupt_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:
     return _one(
         conn,
         select(session_deliveries)
         .where(session_deliveries.c.target_turn_id == turn_id)
         .where(session_deliveries.c.state == "interrupt_pending")
+        .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
+        .limit(1),
+    )
+
+
+def pending_steer_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:
+    return _one(
+        conn,
+        select(session_deliveries)
+        .where(session_deliveries.c.target_turn_id == turn_id)
+        .where(session_deliveries.c.priority == "p1")
+        .where(session_deliveries.c.state == "pending_steer")
         .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
         .limit(1),
     )

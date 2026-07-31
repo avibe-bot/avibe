@@ -744,6 +744,7 @@ class Turn:
     send_now_task: Optional[asyncio.Task[dict[str, Any]]] = None
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
+    terminal_is_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -1069,7 +1070,7 @@ class SessionTurnManager:
 
     def active_runtime_session_ids_for_backend(self, backend: str) -> set[str]:
         """Active Sessions that actually entered the old backend generation."""
-        return {
+        active = {
             session_id
             for session_id, turn in self.in_flight.items()
             if not turn.task.done()
@@ -1080,6 +1081,13 @@ class SessionTurnManager:
                 )
             )
         }
+        if self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                active |= delivery_store.active_runtime_session_ids_for_backend(
+                    conn,
+                    backend,
+                )
+        return active
 
     @staticmethod
     async def _noop_chunk(_envelope: dict) -> None:
@@ -1427,13 +1435,12 @@ class SessionTurnManager:
                     message_id=message_id,
                     dispatch_text=request.content,
                     priority="p1",
-                    state="reconciling",
+                    state="pending_steer",
                     target_turn_id=str(current["id"]),
-                    receipt_outcome="unknown",
-                    receipt_body={"reason": "native_identity_unavailable"},
+                    receipt_body={"reason": "awaiting_native_identity"},
                 )
                 turn_id = str(current["id"])
-                state = "reconciling"
+                state = "pending_steer"
 
         if state == "starting" and turn_id:
             await self._start_persisted_turn(turn_id, context=context)
@@ -2262,6 +2269,58 @@ class SessionTurnManager:
                 str(claimed["id"]),
             )
 
+    async def _run_pending_steers(
+        self,
+        session_id: str,
+        logical_turn_id: str,
+        context: "MessageContext",
+    ) -> None:
+        while True:
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                turn = delivery_store.get_turn(conn, logical_turn_id)
+                if (
+                    turn is None
+                    or turn["session_id"] != session_id
+                    or turn["state"] != "active"
+                    or delivery_store.pending_interrupt_for_turn(conn, logical_turn_id)
+                    is not None
+                ):
+                    return
+                native_turn_id = str(turn.get("native_turn_id") or "").strip()
+                pending = delivery_store.pending_steer_for_turn(conn, logical_turn_id)
+                if not native_turn_id or pending is None:
+                    return
+                claimed = delivery_store.cas_delivery(
+                    conn,
+                    str(pending["id"]),
+                    expected_version=int(pending["version"]),
+                    expected_states=("pending_steer",),
+                    values={
+                        "state": "steering",
+                        "steer_attempt_id": delivery_store.new_attempt_id(),
+                        "expected_native_turn_id": native_turn_id,
+                    },
+                )
+                if claimed is None:
+                    continue
+                steer_text = str(claimed.get("dispatch_text") or "")
+                if not steer_text:
+                    message = delivery_store.message_for_delivery(conn, claimed)
+                    steer_text = str((message or {}).get("text") or "")
+                backend = str(turn["backend"])
+                delivery_id = str(claimed["id"])
+            receipt = await self._attempt_steer(
+                backend,
+                SteerRequest(
+                    target_session_id=session_id,
+                    expected_logical_turn_id=logical_turn_id,
+                    expected_native_turn_id=native_turn_id,
+                    text=steer_text,
+                ),
+            )
+            await self._finish_steer(delivery_id, receipt, context=context)
+
     def on_native_start(
         self,
         context: "MessageContext",
@@ -2298,6 +2357,12 @@ class SessionTurnManager:
                     bound is not None
                     and delivery_store.pending_interrupt_for_turn(conn, logical_turn_id)
                 )
+                has_pending_steer = bool(
+                    bound is not None
+                    and native_turn_id
+                    and not has_pending_interrupt
+                    and delivery_store.pending_steer_for_turn(conn, logical_turn_id)
+                )
         except Exception:
             logger.exception(
                 "durable native start binding deferred to reconciliation for Turn=%s",
@@ -2308,6 +2373,11 @@ class SessionTurnManager:
             return asyncio.create_task(
                 self._run_pending_interrupt(session_id, logical_turn_id),
                 name=f"durable-interrupt:{session_id}",
+            )
+        if has_pending_steer:
+            return asyncio.create_task(
+                self._run_pending_steers(session_id, logical_turn_id, context),
+                name=f"durable-steer:{session_id}",
             )
         return None
 
@@ -2413,6 +2483,7 @@ class SessionTurnManager:
             turns = delivery_store.recovery_turns(conn, session_id)
         dispatchable: list[str] = []
         pending_interrupts: list[tuple[str, str]] = []
+        pending_steers: list[tuple[str, str]] = []
         recovered: list[str] = []
         retired_ownerless: set[str] = set()
         queued_without_owner: set[str] = set()
@@ -2442,6 +2513,11 @@ class SessionTurnManager:
                         recovered.append(target_session)
                         if delivery_store.pending_interrupt_for_turn(conn, turn_id):
                             pending_interrupts.append((target_session, turn_id))
+                        elif identity[1] and delivery_store.pending_steer_for_turn(
+                            conn,
+                            turn_id,
+                        ):
+                            pending_steers.append((target_session, turn_id))
                     continue
                 if not delivery_store.turn_has_delivery_owner(conn, turn_id):
                     retired = delivery_store.cas_turn(
@@ -2488,6 +2564,12 @@ class SessionTurnManager:
 
         for target_session, turn_id in pending_interrupts:
             await self._run_pending_interrupt(target_session, turn_id)
+        for target_session, turn_id in pending_steers:
+            await self._run_pending_steers(
+                target_session,
+                turn_id,
+                self._delivery_context(target_session),
+            )
         for target_session in sorted(retired_ownerless | queued_without_owner):
             await self._resume_post_terminal(target_session)
         for turn_id in dispatchable:
@@ -2799,6 +2881,9 @@ class SessionTurnManager:
                         and current.logical_turn_id == logical_turn_id
                         else None
                     )
+                    terminal_is_error = bool(
+                        turn is not None and turn.terminal_is_error
+                    )
                     if turn is not None:
                         self.in_flight.pop(session_id, None)
                     if turn is not None:
@@ -2856,9 +2941,10 @@ class SessionTurnManager:
                             # for startup reconciliation instead.
                             durable_terminal_result = self._terminalize_durable_turn(
                                 logical_turn_id,
-                                "canceled"
-                                if settled_by == SETTLED_BY_STOPPED
-                                else "completed",
+                                self._durable_terminal_outcome(
+                                    is_error=terminal_is_error,
+                                    settled_by=settled_by,
+                                ),
                             )
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
@@ -3452,7 +3538,7 @@ class SessionTurnManager:
         if not backend or not base_session_ids:
             return 0
 
-        released = 0
+        released_sessions: set[str] = set()
         tasks_to_settle: list[asyncio.Task] = []
         for session_id, turn in list(self.in_flight.items()):
             if session_id not in base_session_ids:
@@ -3484,9 +3570,32 @@ class SessionTurnManager:
                 self.controller.set_agent_status(session_id, "idle")
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
-            released += 1
+            released_sessions.add(session_id)
         if tasks_to_settle:
             await asyncio.gather(*tasks_to_settle, return_exceptions=True)
+        released_restored: set[str] = set()
+        restored_owners: list[dict[str, Any]] = []
+        if self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                restored_owners = delivery_store.live_turns_for_backend_sessions(
+                    conn,
+                    backend,
+                    base_session_ids,
+                )
+        for owner in restored_owners:
+            terminal = self._terminalize_durable_turn(
+                str(owner["id"]),
+                SETTLED_BY_BACKEND_REFRESH,
+            )
+            if terminal.get("changed"):
+                released_restored.add(str(owner["session_id"]))
+        for session_id in released_restored:
+            if self.controller is not None:
+                self.controller.set_agent_status(session_id, "idle")
+            if backend in self._draining_backends:
+                self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
+        released_sessions.update(released_restored)
+        released = len(released_sessions)
         if released:
             logger.info(
                 "Released %d active Workbench turn(s) for %s runtime refresh",
@@ -3822,6 +3931,8 @@ class SessionTurnManager:
         ).strip()
         if logical_turn_id:
             current = self.in_flight.get(session_id)
+            if current is not None and current.logical_turn_id == logical_turn_id:
+                current.terminal_is_error = current.terminal_is_error or is_error
             sink = None
             get_sink = getattr(self.controller, "get_turn_sink", None)
             get_key = getattr(self.controller, "_get_session_key", None)
@@ -3964,17 +4075,32 @@ class SessionTurnManager:
                 self.pop_turn_sink(session_key, done)
                 current = self.in_flight.get(session_id)
                 turn = current if current is not None and current.task is asyncio.current_task() else None
+                terminal_is_error = bool(
+                    turn is not None and turn.terminal_is_error
+                )
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:
                     bus.publish("turn.end", {"session_id": session_id})
                 if durable_turn_registered:
-                    self._terminalize_durable_turn(
-                        turn_token,
-                        "canceled"
-                        if cancelled or settled_by == SETTLED_BY_STOPPED
-                        else "completed",
-                    )
+                    try:
+                        self._terminalize_durable_turn(
+                            turn_token,
+                            self._durable_terminal_outcome(
+                                is_error=terminal_is_error,
+                                settled_by=(
+                                    SETTLED_BY_STOPPED
+                                    if cancelled
+                                    else settled_by or None
+                                ),
+                            ),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "agent-initiated durable terminal reconciliation deferred "
+                            "for Turn=%s",
+                            turn_token,
+                        )
                 # Flush the send-while-busy queue on NATURAL completion (mirrors
                 # ``_run``): a plain Stop keeps the queue, send_now opts back in.
                 should_flush = (not cancelled and not (turn is not None and turn.stop_no_flush)) or (
