@@ -2718,11 +2718,11 @@ def test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt(
 
 
 def test_auth_recovery_stays_on_for_every_other_caller() -> None:
-    """There is no bypass to forget, because the live path has no switch.
+    """Interactive callers keep auth recovery; Harness delivery stays durable.
 
-    Auth recovery is where a real 401 gets its reset-OAuth button, and every live
-    backend call site reaches it unconditionally. The drain does not decline it by
-    argument; it is a different emitter that never had it.
+    Auth recovery is where a real interactive 401 gets its reset-OAuth button. A
+    Harness run instead settles into its owed-notice row and lets that drain own the
+    single visible delivery, including recurring-streak suppression.
     """
 
     import inspect
@@ -2738,7 +2738,7 @@ def test_auth_recovery_stays_on_for_every_other_caller() -> None:
     replay_params = inspect.signature(emit_replayed_backend_failure).parameters
     assert "allow_auth_recovery" not in replay_params
 
-    # And the live path really does consult it, for any caller.
+    # The interactive live path really does consult it.
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     consulted: list[str] = []
 
@@ -2756,6 +2756,21 @@ def test_auth_recovery_stays_on_for_every_other_caller() -> None:
     handled = asyncio.run(emit_backend_failure(controller, context, "codex", "401 unauthorized"))
 
     assert handled is True and consulted == ["codex"]
+
+    harness_context = MessageContext(
+        user_id="u1",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={
+            "task_execution_id": "run-harness-auth",
+            "task_trigger_kind": "scheduled",
+        },
+    )
+    handled = asyncio.run(
+        emit_backend_failure(controller, harness_context, "codex", "401 unauthorized")
+    )
+    assert handled is False
+    assert consulted == ["codex"], "Harness failures must not bypass the durable notice policy"
 
 
 def test_the_owed_notice_lookup_does_not_scan_settled_history(tmp_path: Path) -> None:
@@ -3627,6 +3642,7 @@ def _workbench_session(
     *,
     project: str,
     status: str = "active",
+    visibility: str = "foreground",
 ) -> str:
     """One avibe project scope + one session row, in the MIGRATED WORKBENCH DB.
 
@@ -3659,7 +3675,7 @@ def _workbench_session(
                 session_anchor=f"avibe_{project}:{session_id}",
                 native_session_id=f"native-{session_id}",
                 status=status,
-                visibility="foreground",
+                visibility=visibility,
                 metadata_json="{}",
                 created_at=now,
                 updated_at=now,
@@ -3994,6 +4010,56 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
         assert get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None, (
             "and the session it was rerouted to does show one"
         )
+
+
+def test_a_background_session_notice_is_rerouted_to_the_workspace_inbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A hidden bound session cannot acknowledge a user-visible failure notice."""
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.background import NOTICE_SENT
+    from storage.db import get_cached_sqlite_engine
+    from storage.messages_service import get_inbox_session
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _workbench_session(
+        "sesBackgroundNotice",
+        project="proj-background-notice",
+        visibility="background",
+    )
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-background-notice", session_id="sesBackgroundNotice")
+    run = requests.enqueue_task_run("task-background-notice")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="backend exploded",
+        task_id="task-background-notice",
+    )
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [(target.to_key(), session_id) for target, session_id in rungs] == [
+        (
+            f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
+            WORKSPACE_NOTICE_SESSION_ID,
+        )
+    ], f"a background session must be omitted from both session-derived rungs: {rungs}"
+
+    asyncio.run(service._drain_failure_notices())
+
+    rows = _persisted_messages()
+    assert [row["session_id"] for row in rows] == [WORKSPACE_NOTICE_SESSION_ID], rows
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_SENT
+    with get_cached_sqlite_engine().begin() as conn:
+        assert get_inbox_session(conn, "sesBackgroundNotice") is None
+        assert get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None
 
 
 def _workspace_notice_session_rows() -> list[dict]:
@@ -5692,6 +5758,13 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-cb", deliver_key="slack::channel::C1")
     _callback_run(sqlite, "run-cb", "task-cb", status="pending")
+    callback = requests.enqueue_agent_run(
+        message="deliver the callback",
+        source_kind="callback",
+        parent_run_id="run-cb",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status("run-cb", status="sent", callback_run_id=callback.id)
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     import pytest as _pytest
@@ -5699,7 +5772,8 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
     with _pytest.MonkeyPatch.context() as patch:
         patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
 
-        # PASS 1: the callback is still pending, so the notice steps aside — no
+        # PASS 1: the parent has enqueued the callback child, but that child is still
+        # queued. Enqueue is not delivery, so the notice steps aside — no
         # message, no attempt consumed, and the deferral is durable (a real backoff
         # instant, so the row does not occupy the batch on every tick).
         asyncio.run(service._drain_failure_notices())
@@ -5716,9 +5790,11 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
         assert armed is not None  # a durable step-aside, not a Python-side continue
         assert DEFERRAL_RECHECK_SECONDS > 0
 
-        # The callback lands. The notice is now a duplicate of a message the user
-        # already has, and must say so terminally rather than staying eligible.
-        sqlite.update_callback_status("run-cb", status="sent", callback_run_id="cbrun-1")
+        # The callback child succeeds. Only now is the notice a duplicate of a
+        # message the user has, and it must settle terminally.
+        claimed_callback = requests.claim(callback.id)
+        assert claimed_callback is not None
+        requests.complete(claimed_callback, ok=True)
         sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
         asyncio.run(service._drain_failure_notices())
         notice = sqlite.owed_failure_notice("run-cb")
@@ -5753,7 +5829,23 @@ def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-cb-dead", deliver_key="slack::channel::C1")
-    _callback_run(sqlite, "run-cb-dead", "task-cb-dead", status="failed")
+    _callback_run(sqlite, "run-cb-dead", "task-cb-dead", status="pending")
+    dead_callback = requests.enqueue_agent_run(
+        message="deliver the callback",
+        source_kind="callback",
+        parent_run_id="run-cb-dead",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        "run-cb-dead", status="sent", callback_run_id=dead_callback.id
+    )
+    sqlite.update_run_status(
+        dead_callback.id,
+        status="failed",
+        updated_at="2026-07-27T00:00:01+00:00",
+        completed_at="2026-07-27T00:00:01+00:00",
+        error="callback delivery failed",
+    )
 
     _task(sqlite, "task-cb-binding", deliver_key="slack::channel::C2")
     _callback_run(sqlite, "run-cb-binding", "task-cb-binding", status="pending")
@@ -6143,19 +6235,13 @@ def test_a_suppressed_lane_reason_never_takes_the_interruption_identity_or_copy(
 def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
     tmp_path: Path,
 ) -> None:
-    """HFR-093 — the F1 × F3 interaction, pinned where it actually bites.
+    """HFR-093 — recurring live failures enter the durable policy before delivery.
 
-    HFR-091 made the drain's stamped ``failure_id`` authoritative, which is right and
-    turns the presence-based stamp into a user-visible duplicate: a
-    ``no_terminal_result`` failure is stamped ``interrupt:{run}:no_terminal_result``,
-    the live path keys the same failure by the run id, and the drain's
-    ``agent_message_exists`` lookup can no longer see the notification the live path
-    already persisted.
-
-    So this drives BOTH paths over one real failure and counts the durable rows the
-    user would see. Neither HFR-081 (identity equality, computed directly) nor
-    HFR-091 (interruption identity survives) can see it: one never runs the drain,
-    the other uses a reason that IS in the interruption set.
+    Two consecutive executions fail for the same definition. Each backend reports
+    its failure live, but that path owns settlement only; the owed-notice drain owns
+    visible delivery and can therefore send the first failure while suppressing the
+    rest of the streak. Delivering before settlement would produce two rows before
+    the drain had any opportunity to classify the streak.
     """
 
     from core.backend_failure import emit_backend_failure
@@ -6166,57 +6252,60 @@ def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-suppressed-dedup", deliver_key="slack::channel::C123")
-    run = requests.enqueue_task_run("task-suppressed-dedup")
-    requests.claim(run.id)
-    sqlite.settle_run_terminal(
-        run.id,
-        terminal_status="failed",
-        error="the turn ended without dispatching an agent",
-        metadata={"interrupt_reason": "no_terminal_result"},
-    )
-    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+    runs = []
+    for _index in range(2):
+        run = requests.enqueue_task_run("task-suppressed-dedup")
+        requests.claim(run.id)
+        sqlite.settle_run_terminal(
+            run.id,
+            terminal_status="failed",
+            error="backend failed",
+        )
+        assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+        runs.append(run)
 
     service = _drain_service(tmp_path, controller, sqlite, requests)
 
-    # The LIVE notification, through the context the harness itself builds for this
-    # run — the same builder the drain's replay goes through, so nothing about the
-    # delivery target or the persisted scope differs between the two paths. What is
-    # being compared is the IDENTITY each one keys its notification by.
     target = parse_session_key("slack::channel::C123")
-    live_context = asyncio.run(
-        service._build_context(
-            target,
-            delivery_target=target,
-            execution_id=run.id,
-            task_id="task-suppressed-dedup",
-            trigger_kind="scheduled",
+    for run in runs:
+        live_context = asyncio.run(
+            service._build_context(
+                target,
+                delivery_target=target,
+                execution_id=run.id,
+                task_id="task-suppressed-dedup",
+                trigger_kind="scheduled",
+            )
         )
-    )
-    asyncio.run(
-        emit_backend_failure(
-            controller,
-            live_context,
-            "harness",
-            "the turn ended without dispatching an agent",
-            display_text="the live notice",
+        asyncio.run(
+            emit_backend_failure(
+                controller,
+                live_context,
+                "harness",
+                "backend failed",
+                display_text="the live notice",
+            )
         )
-    )
     live_rows = [
         row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
     ]
-    assert len(live_rows) == 1, f"the live path must have told the user once: {live_rows}"
+    assert live_rows == [], (
+        "Harness live emitters settle only; visible delivery belongs to the durable "
+        f"notice policy: {live_rows}"
+    )
 
-    # …and then the drain replays the same failure off the durable row.
     asyncio.run(service._drain_failure_notices())
 
     rows = [
         row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
     ]
     assert len(rows) == 1, (
-        "the drain sent a SECOND notification for a failure the live path already "
-        f"delivered: {[row['native_message_id'] for row in rows]}"
+        "one recurring failure streak must produce one durable notification, got "
+        f"{[row['native_message_id'] for row in rows]}"
     )
-    assert rows[0]["native_message_id"].endswith(f"backend-failure:{run.id}")
+    assert rows[0]["native_message_id"].endswith(f"backend-failure:{runs[0].id}")
+    assert sqlite.owed_failure_notice(runs[0].id)["state"] == "sent"
+    assert sqlite.owed_failure_notice(runs[1].id)["state"] == "skipped"
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:

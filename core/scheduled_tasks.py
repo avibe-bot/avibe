@@ -48,7 +48,11 @@ from core.run_settlement import (
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
-from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, session_is_runtime_owned
+from storage.agent_session_rows import (
+    INBOX_SESSION_VISIBILITIES,
+    WORKSPACE_NOTICE_SESSION_ID,
+    session_is_runtime_owned,
+)
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
@@ -3694,15 +3698,17 @@ class ScheduledTaskService:
         where ``persist_agent_message`` looks the session's ``agent_sessions`` row up
         and takes that row's ``scope_id``.
 
-        AN ARCHIVED ROW IS NOT A DELIVERY SURFACE, and rung (5) is REROUTED when the
-        run names one — see ``_rung_five_session_id``. The previous revision claimed
+        AN ARCHIVED OR BACKGROUND ROW IS NOT A DELIVERY SURFACE, and rung (5) is
+        rerouted when the run names one — see ``_rung_five_session_id``. The previous
+        revision claimed
         the opposite ("the real difference between this rung and rung (2)": that
         ``_session_row`` has no status filter while ``resolve_session_id_target``
         refuses an archived session outright). The mechanism is real; the conclusion
         was wrong, and it is the round-13 P1 on this method (review thread
         3676292667). ``persist_agent_message`` does write the row, which is the
         workbench class's ack source, so the notice is stamped ``sent`` — while
-        ``list_inbox_sessions`` excludes archived sessions, so there is no card, no
+        ``list_inbox_sessions`` excludes archived and background sessions, so there
+        is no card, no
         ``inbox.session.updated`` and no push, and the acked notice is never retried.
         Same class as the round-12 reserved-session hole, opposite remedy: the
         reserved row is HEALED because nobody may archive it, whereas an ordinary
@@ -3785,16 +3791,16 @@ class ScheduledTaskService:
         # (1) the definition's delivery key.
         _add((task.deliver_key if task else None) or run.get("deliver_key"), None)
 
-        # (2) the bound session's scope, only while the session still resolves. An
-        # unresolvable binding is precisely the failure being reported, so this rung
-        # must not raise its way out of the ladder.
+        # (2) the bound session's scope, only while the session resolves to a visible
+        # delivery surface. Background sessions deliberately suppress delivery, so
+        # persisting and acknowledging a notice there would hide it permanently.
         session_id = str((task.session_id if task else None) or run.get("session_id") or "").strip()
         if session_id:
             try:
                 resolved = resolve_session_id_target(session_id)
             except Exception:
                 resolved = None
-            if resolved is not None:
+            if resolved is not None and not resolved.suppress_delivery:
                 _add(resolved.session_key.to_key(), session_id)
 
         # (3) caller provenance, written at definition creation.
@@ -3821,8 +3827,8 @@ class ScheduledTaskService:
         # receipt-only ack source measures, so a candidate for a deleted session
         # cannot pass itself off as a delivery.
         #
-        # An ARCHIVED row is the case that measurement CANNOT catch, so it is caught
-        # here instead: see ``_rung_five_session_id``.
+        # An archived or background row is the case that measurement CANNOT catch,
+        # so it is caught here instead: see ``_rung_five_session_id``.
         #
         # So this rung covers every definition that has ever had a session — every
         # ``create_once`` / ``create_per_run`` / session-bound definition — addressing
@@ -3951,8 +3957,8 @@ class ScheduledTaskService:
     def _rung_five_session_id(self, session_id: str) -> str:
         """Which session rung (5) may address: the run's own, or the workspace inbox.
 
-        THE ARCHIVED-SESSION REROUTE (round-13 P1, review thread 3676292667). An
-        archived ``agent_sessions`` row is a WRITABLE row that is not a VISIBLE surface,
+        THE INVISIBLE-SESSION REROUTE. An archived or background
+        ``agent_sessions`` row is WRITABLE but is not a VISIBLE delivery surface,
         and the notice machinery reads those two as one thing:
         ``persist_agent_message`` resolves the avibe scope through ``_session_row``,
         which has no status filter, so the message persists; a persisted receipt is the
@@ -3988,7 +3994,7 @@ class ScheduledTaskService:
           also kept for what it documents: rung (5) is a candidate by construction, and
           removing it here would hide the shape of the ladder from the ack policy that
           depends on it.
-        * row ARCHIVED: the reserved workspace-notifications session instead, so the
+        * row ARCHIVED OR HIDDEN: the reserved workspace-notifications session, so the
           notice lands somewhere ``list_inbox_sessions`` will show it. Returned as the
           bare CONSTANT — this method does not resolve or create the reserved row, so
           the reroute is a pure address change and the id it returns is identical to the
@@ -3997,13 +4003,12 @@ class ScheduledTaskService:
           actually be written is settled later, by the walk. If it cannot, the rung is
           skipped and the notice stays retryable rather than acking invisibly into the
           archived row — which is what keeping the caller's candidate here used to do.
-        * anything else (``active``, and any status a later migration adds): the
-          caller's candidate. The reroute is keyed on the ONE status every workbench read
-          path filters out, not on a whitelist of good ones, so a new status is treated
-          as deliverable until somebody teaches the read paths otherwise.
+        * an active row whose visibility is explicitly admitted by the inbox: the
+          caller's candidate. The visibility whitelist is shared with inbox queries,
+          so a future value stays hidden until both surfaces opt it in.
 
-        ONE READ, and the TOCTOU is real and bounded: a session archived between this
-        SELECT and ``persist_agent_message``'s write still acks into the archived row.
+        ONE READ, and the TOCTOU is real and bounded: a session archived or hidden
+        between this SELECT and ``persist_agent_message``'s write still acks there.
         The residual is ONE notice, not a class — the next notice re-reads and reroutes —
         and closing it would need the status check inside the persisting transaction,
         which is a writer-side change of a different shape. Not worth trading a
@@ -4012,20 +4017,25 @@ class ScheduledTaskService:
 
         try:
             with get_cached_sqlite_engine().begin() as conn:
-                status = conn.execute(
-                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-                ).scalar_one_or_none()
+                row = conn.execute(
+                    select(agent_sessions.c.status, agent_sessions.c.visibility).where(
+                        agent_sessions.c.id == session_id
+                    )
+                ).first()
         except Exception:
             logger.warning(
-                "failure notice: cannot read session %s status for rung (5)",
+                "failure notice: cannot read session %s status/visibility for rung (5)",
                 session_id,
                 exc_info=True,
             )
             return session_id
-        if status is None or str(status) != "archived":
+        if row is None:
+            return session_id
+        status, visibility = row
+        if str(status) != "archived" and str(visibility) in INBOX_SESSION_VISIBILITIES:
             return session_id
         logger.info(
-            "failure notice: session %s is archived, rerouting rung (5) to the "
+            "failure notice: session %s is archived or hidden, rerouting rung (5) to the "
             "workspace-notifications inbox",
             session_id,
         )

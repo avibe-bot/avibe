@@ -226,12 +226,15 @@ async def emit_backend_failure(
     failure_id: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> bool:
-    """Notify once, then settle one terminal backend failure silently.
+    """Settle one terminal backend failure, notifying live only outside Harness.
 
     Backend adapters own structured failure recognition. This helper owns the
     shared representation and keeps visible delivery separate from lifecycle
-    settlement. The return value is true when auth recovery supplied the visible
-    notification.
+    settlement. Harness executions already own a durable owed-notice row whose drain
+    applies streak suppression, callback coordination, claims, and retry policy. For
+    those runs this emitter settles only; the drain is the single delivery owner.
+    Non-Harness callers retain immediate auth recovery and notification. The return
+    value is true when auth recovery supplied that immediate notification.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
     proved. Nothing here can report that otherwise: this function DISCARDS the
@@ -244,14 +247,6 @@ async def emit_backend_failure(
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
     terminal = _terminal_output(request, output)
-    notification = backend_failure_notification_output(
-        context,
-        backend_name,
-        request=request,
-        output=terminal,
-        failure_id=failure_id,
-    )
-
     async def settle_terminal_failure() -> None:
         await controller.emit_agent_message(
             context,
@@ -263,10 +258,26 @@ async def emit_backend_failure(
             terminal_error=error,
         )
 
-    # Auth recovery is unconditional here, and there is no switch to turn it off.
-    # This function is the LIVE failure path: every caller is a backend reporting a
-    # failure as it happens, which is exactly where a 401 should offer its interactive
-    # "reset OAuth" affordance.
+    # A Harness run is durable before the backend executes. Its terminal settlement
+    # stamps the owed notice atomically, and that notice drain is the only layer with
+    # enough definition history to suppress a recurring failure streak correctly.
+    # Sending here as well creates two competing delivery owners and lets every live
+    # failure bypass that policy before the drain can classify it.
+    if _harness_run_identity(context, request):
+        await settle_terminal_failure()
+        return False
+
+    notification = backend_failure_notification_output(
+        context,
+        backend_name,
+        request=request,
+        output=terminal,
+        failure_id=failure_id,
+    )
+
+    # Auth recovery is unconditional for non-Harness live callers, and there is no
+    # switch to turn it off. A real interactive 401 should offer its reset-OAuth
+    # affordance immediately; a Harness failure is reported by the durable drain.
     #
     # The one caller that must not do that — the owed-notice drain, replaying a
     # possibly hours-old failure it read back from a durable row — does not call this

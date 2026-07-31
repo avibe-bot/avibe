@@ -2976,7 +2976,7 @@ class SQLiteBackgroundTaskStore:
         return None if row is None else str(row[0])
 
     def run_callback_state(self, run_id: str) -> Optional[str]:
-        """This run's callback delivery status, or ``None`` when it has no callback.
+        """This run's effective callback delivery state, or ``None`` without one.
 
         Read FRESH, at decision time, rather than trusted from the drain's listing:
         the owed-notice batch is listed once per pass and each row is then decided
@@ -2984,7 +2984,12 @@ class SQLiteBackgroundTaskStore:
         already have moved its callback from ``pending`` to ``sent`` — and the
         notice decision keyed on the stale copy would defer a row whose blocker is
         already resolved, or worse, deliver beside a callback that just landed.
-        Two narrow columns by primary key; the drain pays one indexed point read.
+        A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
+        callback child. The user has the callback only after that child succeeds, so
+        this read joins the child by ``callback_run_id`` and projects the state the
+        notice lane actually needs: queued/running is pending, succeeded is sent, and
+        failed/canceled (or a missing referenced child) releases the notice as failed.
+        The parent and child lookups are both primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
         is different from a callback whose status column is empty — a target with
@@ -2992,15 +2997,32 @@ class SQLiteBackgroundTaskStore:
         no-shield.
         """
 
+        parent = agent_runs.alias("callback_parent")
+        child = agent_runs.alias("callback_child")
         with self.engine.connect() as conn:
             row = conn.execute(
-                select(agent_runs.c.callback_session_id, agent_runs.c.callback_status)
-                .where(agent_runs.c.id == str(run_id))
+                select(
+                    parent.c.callback_session_id,
+                    parent.c.callback_status,
+                    parent.c.callback_run_id,
+                    child.c.status,
+                )
+                .select_from(parent.outerjoin(child, child.c.id == parent.c.callback_run_id))
+                .where(parent.c.id == str(run_id))
                 .limit(1)
             ).first()
         if row is None or not str(row[0] or "").strip():
             return None
-        return str(row[1] or "").strip() or None
+        callback_status = str(row[1] or "").strip() or None
+        callback_run_id = str(row[2] or "").strip()
+        if callback_status != "sent" or not callback_run_id:
+            return callback_status
+        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
+        if child_status in {"queued", "running"}:
+            return "pending"
+        if child_status == "succeeded":
+            return "sent"
+        return "failed"
 
     def update_callback_status(
         self,
