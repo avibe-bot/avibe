@@ -559,6 +559,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     ):
         serialized_source = serialized_hub["sources"][0]
         assert source_fields == set(serialized_source), label
+        assert serialized_source["last_discovered_at"] == source_example["last_discovered_at"], label
         assert source_state_fields == set(serialized_source["state"]), label
         assert source_usage_fields == set(serialized_source["usage"]), label
         assert source_model_fields == set(serialized_source["models"][0]), label
@@ -796,6 +797,10 @@ def test_source_optional_fields_reject_schema_invalid_values():
 
     invalid = json.loads(json.dumps(source))
     invalid["models"][0]["discovered_at"] = "2026-07-23T03:00:00"
+    invalid_sources.append(invalid)
+
+    invalid = json.loads(json.dumps(source))
+    invalid["last_discovered_at"] = "2026-07-23T03:00:00"
     invalid_sources.append(invalid)
 
     invalid = json.loads(json.dumps(source))

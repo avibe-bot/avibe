@@ -44,6 +44,12 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
+  - id: MH-SRC-REFRESH-001
+    name: Manual source refresh replaces discovery inventory and freshness timestamp
+    status: partial
+    kind: recovery
+    layer: unit_contract
+    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
   - id: MH-PRI-001
     name: Per-agent source-order mutations and follow restoration take effect immediately
     status: covered

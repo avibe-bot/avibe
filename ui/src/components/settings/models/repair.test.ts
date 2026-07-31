@@ -47,6 +47,7 @@ const source = (over: Partial<Source> = {}): Source => ({
   billing: 'metered',
   credential_ref: 'cred_a',
   state: { status: 'active' },
+  last_discovered_at: null,
   models: [],
   ...over,
 });
@@ -124,7 +125,7 @@ describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', ()
   });
 
   it('offers nothing to a native source with an upstream cause', () => {
-    // Nothing to re-discover (`POST …/test` rejects native), and NOT the re-login
+    // Nothing to re-discover (`POST …/refresh` rejects native), and NOT the re-login
     // that the unclassified case below gets: a native re-login invalidates the
     // working sign-in up front, so offering it for 账号被封 would charge the user
     // that price for a blocker it cannot clear. This is rule 3's boundary.
@@ -167,8 +168,8 @@ describe('model-row repair routing', () => {
     const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
 
     expect(card).toMatch(/repair\?\.kind === 'retest'[\s\S]*?onRetest\(repair\.source\)/);
-    expect(page).toMatch(/const retestSource = async \(source: Source\)[\s\S]*?modelsApi\.testSource\(source\.id\)/);
-    expect(page).toMatch(/onRetest=\{\(source\) => void retestSource\(source\)\}/);
+    expect(page).toMatch(/const refreshSource = async \(source: Source\)[\s\S]*?modelsApi\.refreshSource\(source\.id\)/);
+    expect(page).toMatch(/onRetest=\{\(source\) => void refreshSource\(source\)\}/);
   });
 });
 

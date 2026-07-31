@@ -635,6 +635,8 @@
         "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
         "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
         "modelCount": "{{count}} 个型号",
+        "lastDiscovery": "上次自动获取 {{time}}",
+        "neverDiscovered": "尚未自动获取",
         "addModel": "添加型号",
         "modelsEmpty": "还没有可供给的型号，请手动添加。",
         "modelsEmptySubscription": "还没有发现可供给的型号。"
@@ -1011,7 +1013,8 @@
       "sourceActions": {
         "more": "更多操作",
         "rename": "重命名",
-        "rediscover": "重新发现模型",
+        "refresh": "刷新模型",
+        "refreshing": "正在刷新模型",
         "reauth": "重新登录",
         "replaceKey": "更换 API Key",
         "delete": "删除来源",
@@ -1020,8 +1023,8 @@
         "renamePlaceholder": "例如 生产环境 Key",
         "renamed": "已重命名",
         "renameFailed": "重命名失败，请重试",
-        "rediscovered": "已重新发现 {{count}} 个模型",
-        "rediscoverFailed": "重新发现失败，请重试",
+        "refreshed": "已更新 {{count}} 个模型",
+        "refreshFailed": "未能获取最新模型，仍显示上次成功获取的清单。",
         "deleteTitle": "删除来源？",
         "deleteBody": "将从中枢移除「{{name}}」并撤销其凭证，此操作不可撤销。",
         "deleteConfirm": "删除",
@@ -1031,7 +1034,6 @@
         "deleted": "已删除来源",
         "deleteFailed": "删除失败，请重试",
         "renameHint": "只改显示名，不动凭证",
-        "rediscoverHint": "重新拉取这个来源能供给的模型",
         "deleteHint": "删除前会再确认一次",
         "reauthHint": "旧登录立即失效",
         "replaceKeyHint": "填入新 Key，地址与显示名不变"

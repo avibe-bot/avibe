@@ -69,6 +69,7 @@ import { AGENT_CHAIN_CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './t
  */
 export type Adoption = { adopted_by: AdoptedBy[]; skipped_by: SkippedBy[] | null };
 export type SourceCreated = { source: Source } & Adoption;
+export type SourceRefresh = { source: Source; discovered: number };
 
 /**
  * The response of BOTH oauth status and submit (api.md → OAuth completion): the
@@ -100,11 +101,11 @@ export type ModelsApi = {
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
   patchSource(id: string, patch: SourcePatch): Promise<Source>;
-  /** Re-run discovery on a hub source; resolves with the discovered count.
+  /** Re-run discovery on a hub source; resolves with the updated source and count.
    *  Contractually ALSO the recovery test: run on a needs_action / error source
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
-  testSource(id: string): Promise<number>;
+  refreshSource(id: string): Promise<SourceRefresh>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
   /** Replace the credential of a hub-channel api_key source. Refuses with
@@ -362,7 +363,7 @@ const liveApi: ModelsApi = {
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
-  testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
+  refreshSource: (id) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST')),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
@@ -543,6 +544,7 @@ class MockStore {
     const source: Source = {
       id: rid('src'),
       created_at: new Date().toISOString(),
+      last_discovered_at: new Date().toISOString(),
       kind: 'api_key',
       vendor: draft.vendor,
       display_name: draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor),
@@ -629,7 +631,7 @@ class MockStore {
     const recovered = wasBlocked(source.state);
     const previousMask = source.masked_credential;
     const previousState = { ...source.state };
-    // Atomic commit, standby-clearing semantics shared with testSource: a
+    // Atomic commit, standby-clearing semantics shared with refreshSource: a
     // replacement re-discovers and lands on standby, never straight to active.
     source.masked_credential = maskKey(body.key);
     source.credential_ref = rid('cred');
@@ -947,6 +949,7 @@ class MockStore {
       this.sources.push({
         id: rid('src'),
         created_at: new Date().toISOString(),
+        last_discovered_at: new Date().toISOString(),
         kind: isKey ? 'api_key' : 'subscription',
         vendor: item.backend === 'opencode' ? 'zhipuai' : item.backend === 'codex' ? 'openai' : 'anthropic',
         display_name: item.masked_detail.split(' · ')[0] || 'Imported',
@@ -1066,6 +1069,7 @@ class MockStore {
       if (!source) return;
       source.account_label = 'me@gmail.com';
       source.state = { status: 'standby', retry_at: null, detail_key: null };
+      source.last_discovered_at = new Date().toISOString();
       if (source.models.length === 0) {
         source.models = [
           {
@@ -1084,6 +1088,7 @@ class MockStore {
     this.sources.push({
       id,
       created_at: new Date().toISOString(),
+      last_discovered_at: new Date().toISOString(),
       kind: 'subscription',
       vendor: flow.vendor,
       display_name: isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅',
@@ -1145,14 +1150,15 @@ class MockStore {
     return delay(structuredClone(source), 300);
   }
 
-  testSource(id: string) {
+  refreshSource(id: string) {
     const source = this.sources.find((s) => s.id === id);
     if (!source) throw new ApiCallError('source_not_found');
     // Native-CLI subscriptions can't be re-discovered (server rejects them);
     // the UI only offers this action for hub sources, but fail closed anyway.
     if (source.supply_channel === 'native_cli') throw new ApiCallError('discovery_failed');
     source.state = { status: 'standby', retry_at: null, detail_key: null };
-    return delay(source.models.length, 700);
+    source.last_discovered_at = new Date().toISOString();
+    return delay({ source: structuredClone(source), discovered: source.models.length }, 700);
   }
 }
 
@@ -1201,7 +1207,7 @@ const mockApi: ModelsApi = {
   listSources: () => mockStore.listSources(),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
-  testSource: (id) => mockStore.testSource(id),
+  refreshSource: (id) => mockStore.refreshSource(id),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),
   replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
   reauthSource: (id) => mockStore.reauthSource(id),

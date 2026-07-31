@@ -16,7 +16,13 @@ import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
-import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import {
+  agentsWithEcho,
+  createLatestAsyncAuthority,
+  createPendingWrites,
+  mapWithConcurrency,
+  sourcesWithEcho,
+} from './asyncLifetime';
 import {
   emptyFeed,
   feedAfterHeadRead,
@@ -84,6 +90,16 @@ const readModelSurface = async (): Promise<[Source[], AgentSupply[], ModelChainI
   return [sources, agents, await readModelChains(agents)];
 };
 
+type ModelSurfaceLanding =
+  | {
+      kind: 'surface';
+      sources: Source[];
+      agents: AgentSupply[];
+      events: ResolutionEvent[] | null;
+      chains: ModelChainIndex;
+    }
+  | { kind: 'source'; source: Source };
+
 // 最近切换 is a cursor feed, not a fixed window: `/events` pages with `before`,
 // so 「查看全部」 over one fetched page could never reach row 21. One page size for
 // the first read and every 加载更早 read after it.
@@ -104,7 +120,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
-  const [retestingSourceId, setRetestingSourceId] = React.useState<string | null>(null);
+  const [refreshingSourceId, setRefreshingSourceId] = React.useState<string | null>(null);
   const [issuesOnly, setIssuesOnly] = React.useState(false);
   const agentSectionRef = React.useRef<HTMLDivElement>(null);
 
@@ -166,9 +182,14 @@ export const SettingsModelsPage: React.FC = () => {
   // this refresh's job. A feed left one write behind is not wrong, only not newer,
   // and the next mutation or reload catches it up.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null, ModelChainIndex]>(
-      ([nextSources, nextAgents, headEvents, nextChains]) => {
+    createLatestAsyncAuthority<ModelSurfaceLanding>(
+      (landing) => {
         if (!aliveRef.current) return;
+        if (landing.kind === 'source') {
+          setSources((previous) => sourcesWithEcho(previous, landing.source));
+          return;
+        }
+        const { sources: nextSources, agents: nextAgents, events: headEvents, chains: nextChains } = landing;
         setSources(nextSources);
         setAgents(nextAgents);
         agentsRef.current = nextAgents;
@@ -216,7 +237,13 @@ export const SettingsModelsPage: React.FC = () => {
           readModelSurface(),
           modelsApi.listEvents(EVENT_PAGE).catch(() => null),
         ]);
-        return [nextSources, nextAgents, headEvents, nextChains];
+        return {
+          kind: 'surface' as const,
+          sources: nextSources,
+          agents: nextAgents,
+          events: headEvents,
+          chains: nextChains,
+        };
       });
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
@@ -336,24 +363,29 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
-  const retestSource = async (source: Source) => {
-    if (retestingSourceId !== null) return;
-    setRetestingSourceId(source.id);
+  const refreshSource = async (source: Source) => {
+    if (refreshingSourceId !== null) return;
+    setRefreshingSourceId(source.id);
     try {
-      const count = await modelsApi.testSource(source.id);
-      if (!aliveRef.current) return;
+      // The mutation must fail outside the read authority: that authority
+      // intentionally suppresses stale read errors, while a discovery failure
+      // writes the source's error state and must always reach the honest toast.
+      const refreshed = await modelsApi.refreshSource(source.id);
+      await refreshAuthority.run(() =>
+        Promise.resolve({ kind: 'source' as const, source: refreshed.source }),
+      );
       await refreshSourcesAgents();
       if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.rediscovered', { count }) as string, 'success');
+        showToast(t('settings.models.sourceActions.refreshed', { count: refreshed.discovered }) as string, 'success');
       }
     } catch {
       if (!aliveRef.current) return;
       await refreshSourcesAgents();
       if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
+        showToast(t('settings.models.sourceActions.refreshFailed') as string, 'error');
       }
     } finally {
-      if (aliveRef.current) setRetestingSourceId(null);
+      if (aliveRef.current) setRefreshingSourceId(null);
     }
   };
 
@@ -416,8 +448,8 @@ export const SettingsModelsPage: React.FC = () => {
               onSetRoute={setModelRoute}
               onAddModel={(backend) => openCustomModel(undefined, backend)}
               onRepair={(source, kind) => setRepairTarget({ source, kind })}
-              onRetest={(source) => void retestSource(source)}
-              retestingSourceId={retestingSourceId}
+              onRetest={(source) => void refreshSource(source)}
+              retestingSourceId={refreshingSourceId}
               onProbeSettled={() => void refreshSourcesAgents()}
               connectingBackend={connecting}
             />
@@ -428,6 +460,8 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
+            onRefreshSource={(source) => void refreshSource(source)}
+            refreshingSourceId={refreshingSourceId}
             onRepair={(source, kind) => setRepairTarget({ source, kind })}
             onAddModel={(source) => openCustomModel(source.id)}
           />

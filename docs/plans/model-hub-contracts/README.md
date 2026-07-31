@@ -4,7 +4,9 @@ Status: **FROZEN v4 (targeted)** · 2026-07-30 · change only via orchestrator
 Advances `agent-chain`, `probe-result`, and `turn-provenance` from contract
 version 3 to 4. Later targeted-v4 amendments retain those pins while tightening
 the channel-aware adapter seam and grafting derived truth onto the live
-AgentSupply/source-creation projections. The versionless `resolution-event`
+AgentSupply/source-creation projections. The 2026-07-31 source-refresh amendment
+adds persisted discovery freshness and makes `/sources/<id>/refresh` the single
+explicit refresh/recovery operation. The versionless `resolution-event`
 includes the request-scoped `permission_denied` cause.
 Derived from: spec v2 (`../model-hub.md`), implementation plan
 (`../model-hub-implementation.md`),
@@ -66,6 +68,13 @@ messages alone never unfreeze a file. The first instance is this commit,
 `docs(model-hub): amend channel-aware native CLI contracts v4`, consolidating
 escalations #2+#3 as one class-level correction against master `807d1eee`; it remains
 owner-vetoable.
+
+The 2026-07-31 source-refresh amendment is likewise orchestrator-authorized and
+owner-vetoable. It reuses the existing discovery commit point: one timestamp now
+stamps both the replacement discovered rows and their owning source, so a manual-only
+inventory or a failed attempt cannot fabricate freshness. The canonical POST route
+returns the updated `Source`; the UI uses that server echo before its sequenced
+full-surface read-back.
 
 ## Resolved decision, carried forward from v1 (owner, 2026-07-23 10:33)
 
@@ -322,7 +331,7 @@ What the rules mean, and why the non-equality rules differ:
 
 | File | Consumers |
 | --- | --- |
-| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action`, immutable `created_at`, optional `usage.projected_exhaust_at`. Targeted v4 audit changes no shape: healthy source state and a lapsed `retry_at` do not assert process-local native CLI availability. No ordering field, ever. |
+| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action`, immutable `created_at`, optional `usage.projected_exhaust_at`. Targeted v4 adds required-nullable `last_discovered_at`: the latest successful full inventory replacement, never a failed-attempt time. Healthy source state and a lapsed `retry_at` do not assert process-local native CLI availability. No ordering field, ever. |
 | `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. Owns `sources`, the selected-route rollup, and v3 `named_agents`. The channel class pass extends the complete eligibility inventory with current-chain membership and process availability, retaining non-members so one projection serves both the Agent row and all-sources drawer. |
 | `agent-chain.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain and preserves visibility/order for blocked members. Each item now distinguishes source-global `health` from resolve-time channel availability: `runnable = health-permits AND process-available`; Hub availability is definitionally true, while an unavailable native CLI item at any health stays dimmed in place with `reason: native_cli_unavailable`. Cooldown plus unavailable is `interrupted`, not `waiting`. |
 | `probe-result.schema.json` | **New in v2, targeted v4 amendment.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. The probe selects the first runnable item; unavailable chain items are skipped. Hub keeps v3's completed-request truth table. Native CLI re-verifies process readiness, never claims completion evidence, and pins `latency_ms: null` in both directions. It reads the requested model's `supply_state`, never `supply_status`. |
@@ -331,7 +340,7 @@ What the rules mean, and why the non-equality rules differ:
 | `oauth-flow.schema.json` | L2, L4 UI. Remains presentation-only: channel is public, while engine credential refs and retained-material disposition stay on the service seam because the UI never consumes them. |
 | `migration-scan.schema.json` | L6, L5 UI. Unchanged by the v2 ruling — native-config import is an onboarding feature, not a priority mechanism. |
 | `runtime-dependency.schema.json` | L1, L2 status API, L7 guards. **URL policy (orchestrator, 07-23 12:05):** the example URLs are placeholders; L1 ships with upstream release URLs + SHA256 integrity verification. Availability guard = L7/orchestrator deliverable BEFORE GA: mirror the pinned assets into Avibe-owned release storage (same manifest-verified backup/recovery pattern as Show Runtime, per repo release rules), then point the manifest at the mirror with upstream recorded as provenance. SHA256s never change (same bytes). L1 must NOT build the mirror or touch the Show Runtime guard. **Platform expansion (07-23 13:13):** linux-arm64 / darwin-x64 assets get pinned (+ schema platform-enum rev) together with the mirror work at L7; until then unsupported hosts fail closed, Direct = escape hatch (L1's `model_hub_engine_platform_unsupported` coverage is the intended behavior). **Cross-vendor note (07-29):** if the v2.1 cross-vendor spike (spec §10.4) concludes that a conversion pair needs a CPA plugin or a different engine build, that lands here as a pin + SHA256 revision with mirrored assets published before the manifest moves — never as user-facing configuration. |
-| `api.md` | All route and envelope contracts. Targeted v4 keeps the shared envelope at v3 while documenting channel truth, the five-way OAuth repair partition, complete AgentSupply source signals, explicit skipped custom orders, and mapping/menu enrollment. |
+| `api.md` | All route and envelope contracts. Targeted v4 keeps the shared envelope at v3 while documenting channel truth, the five-way OAuth repair partition, complete AgentSupply source signals, explicit skipped custom orders, mapping/menu enrollment, and the single source refresh/recovery route. |
 | `opencode-overlay.md` | L3, L7 (identifier-stability tests). Identifiers stay stable across per-agent reordering — a source is never encoded into the provider segment. |
 | `adapter-interface.py` | L1 (implements), L2 (consumes; owns in-repo copy). v1.3 makes OAuth flow success channel-aware and adds the total retained-material disposition. The contract and `core/handlers/model_hub/adapter.py` remain byte-identical by mechanical guard. |
 
