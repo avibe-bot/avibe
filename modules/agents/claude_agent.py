@@ -6,6 +6,7 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
+from core.message_dispatcher import ActivityOutputNotDurablyPersistedAfterDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     MessageOutput,
@@ -45,6 +46,8 @@ class ClaudeAgent(BaseAgent):
     # Preserve the usual task-notification -> assistant/result association while
     # bounding terminal-only notifications on the otherwise long-lived stream.
     ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 30.0
+    ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS = 5
+    ACTIVITY_OUTPUT_FLUSH_MAX_BACKOFF_SECONDS = 300.0
 
     # AskUserQuestion support is disabled - SDK cannot respond programmatically
     # Set to True when SDK adds support (see issue #10168)
@@ -73,6 +76,7 @@ class ClaudeAgent(BaseAgent):
         self._detached_unsolicited_outputs: set[str] = set()
         self._detached_unsolicited_text: dict[str, str] = {}
         self._activity_flush_tasks: dict[str, asyncio.Task] = {}
+        self._activity_flush_retry_attempts: dict[str, int] = {}
         self._activity_settle_events: dict[str, asyncio.Event] = {}
         self._foreground_tool_use_ids: dict[str, set[str]] = {}
         self._turns_with_foreground_tools: set[str] = set()
@@ -872,6 +876,11 @@ class ClaudeAgent(BaseAgent):
                                 if registry is not None:
                                     for activity in detached_activities:
                                         registry.ack_completed_output(activity)
+                            except ActivityOutputNotDurablyPersistedAfterDeliveryError:
+                                self._ack_delivered_unpersisted_activities(
+                                    composite_key,
+                                    detached_activities,
+                                )
                             except Exception:
                                 registry = self._activity_registry()
                                 if registry is not None:
@@ -987,6 +996,14 @@ class ClaudeAgent(BaseAgent):
                                     parse_mode="markdown",
                                     request=pending_request,
                                 )
+                        except ActivityOutputNotDurablyPersistedAfterDeliveryError:
+                            if output_activity is None:
+                                raise
+                            self._ack_delivered_unpersisted_activities(
+                                composite_key,
+                                output_activities,
+                            )
+                            self._clear_request_activities(pending_request)
                         except Exception:
                             emit_failed = True
                             if output_activity is not None:
@@ -1482,6 +1499,25 @@ class ClaudeAgent(BaseAgent):
         """Restore a claimed batch to its Registry-owned queue positions."""
 
         registry.requeue_completed_outputs(activities)
+
+    def _ack_delivered_unpersisted_activities(
+        self,
+        composite_key: str,
+        activities: list[SessionActivity],
+    ) -> None:
+        """Consume outputs that reached the user despite a mirror-write failure."""
+
+        logger.error(
+            "Claude Activity output was delivered but not durably persisted; "
+            "acknowledging to prevent redelivery (runtime=%s activities=%s)",
+            composite_key,
+            ",".join(activity.id for activity in activities),
+            exc_info=True,
+        )
+        registry = self._activity_registry()
+        if registry is not None:
+            for activity in activities:
+                registry.ack_completed_output(activity)
 
     def _claim_activity_batch_for_turns(
         self,
@@ -2041,6 +2077,8 @@ class ClaudeAgent(BaseAgent):
             if registry is not None:
                 for item in activities:
                     registry.ack_completed_output(item)
+        except ActivityOutputNotDurablyPersistedAfterDeliveryError:
+            self._ack_delivered_unpersisted_activities(composite_key, activities)
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
@@ -2088,6 +2126,12 @@ class ClaudeAgent(BaseAgent):
                         request=matched_request,
                     )
                     self._ack_request_activities(matched_request)
+                except ActivityOutputNotDurablyPersistedAfterDeliveryError:
+                    self._ack_delivered_unpersisted_activities(
+                        composite_key,
+                        self._request_activities(matched_request),
+                    )
+                    self._clear_request_activities(matched_request)
                 except Exception:
                     self._requeue_request_activity(matched_request)
                     await self._settle_activity_turn_after_delivery_failure(context)
@@ -2122,6 +2166,8 @@ class ClaudeAgent(BaseAgent):
                 )
                 for item in activities:
                     registry.ack_completed_output(item)
+            except ActivityOutputNotDurablyPersistedAfterDeliveryError:
+                self._ack_delivered_unpersisted_activities(composite_key, activities)
             except Exception:
                 self._requeue_activities(registry, activities)
                 raise
@@ -2132,15 +2178,25 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         context: MessageContext,
+        *,
+        retry: bool = False,
     ) -> None:
         existing = self._activity_flush_tasks.get(composite_key)
         if existing is not None and not existing.done():
             return
+        if not retry:
+            self._activity_flush_retry_attempts.pop(composite_key, None)
+
+        retry_attempts = self._activity_flush_retry_attempts.get(composite_key, 0)
+        delay_seconds = min(
+            self.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS * (2**retry_attempts),
+            self.ACTIVITY_OUTPUT_FLUSH_MAX_BACKOFF_SECONDS,
+        )
 
         async def _flush_after_grace() -> None:
             retry = False
             try:
-                await asyncio.sleep(self.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS)
+                await asyncio.sleep(delay_seconds)
                 retry = await self._flush_completed_activity_outputs(composite_key, context)
             except asyncio.CancelledError:
                 raise
@@ -2151,11 +2207,23 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     exc_info=True,
                 )
+            else:
+                if not retry:
+                    self._activity_flush_retry_attempts.pop(composite_key, None)
             finally:
                 if self._activity_flush_tasks.get(composite_key) is task:
                     self._activity_flush_tasks.pop(composite_key, None)
             if retry:
-                self._schedule_completed_activity_flush(composite_key, context)
+                attempts = self._activity_flush_retry_attempts.get(composite_key, 0) + 1
+                self._activity_flush_retry_attempts[composite_key] = attempts
+                if attempts >= self.ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS:
+                    logger.error(
+                        "Stopped retrying completed Claude Activity flush for %s after %d attempts",
+                        composite_key,
+                        attempts,
+                    )
+                    return
+                self._schedule_completed_activity_flush(composite_key, context, retry=True)
 
         task = asyncio.create_task(_flush_after_grace())
         self._activity_flush_tasks[composite_key] = task

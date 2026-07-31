@@ -22,16 +22,18 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
+from modules.im import MessageContext
 from modules.claude_sdk_compat import (
     TextBlock,
     ToolUseBlock,
 )
+from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import terminal_output_for
 
 
@@ -291,6 +293,49 @@ def _build_agent(*, running_calls=None, mark_idle_calls=None, active_calls=None)
     agent._get_formatter = lambda context: None
     agent._handle_receiver_eof = AsyncMock()
     return agent, service
+
+
+class _ActivityDeliveryClient:
+    formatter = None
+
+    def __init__(self, *, fail_delivery: bool = False):
+        self.fail_delivery = fail_delivery
+        self.sent: list[str] = []
+
+    def should_use_thread_for_reply(self):
+        return False
+
+    async def send_message(self, _context, text, parse_mode=None, **_kwargs):
+        if self.fail_delivery:
+            raise RuntimeError("delivery unavailable")
+        self.sent.append(text)
+        return f"message-{len(self.sent)}"
+
+
+class _ActivityDispatcherSettings:
+    @staticmethod
+    def _canonicalize_message_type(message_type):
+        return message_type
+
+    @staticmethod
+    def is_message_type_hidden(_settings_key, _message_type):
+        return False
+
+
+def _install_activity_dispatcher(agent, im_client) -> None:
+    controller = agent.controller
+    controller.config = SimpleNamespace(
+        platform="discord",
+        reply_enhancements=False,
+    )
+    controller.im_client = im_client
+    controller.get_im_client_for_context = lambda _context: im_client
+    controller.get_settings_manager_for_context = lambda _context: _ActivityDispatcherSettings()
+    controller._get_settings_key = lambda context: context.channel_id
+    controller._get_session_key = lambda context: f"{context.platform}::{context.channel_id}"
+    agent.config = controller.config
+    agent.im_client = im_client
+    controller.emit_agent_message = ConsolidatedMessageDispatcher(controller).emit_agent_message
 
 
 class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
@@ -901,6 +946,146 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await receiver
+
+    async def test_delivered_unpersisted_activity_is_consumed_without_redelivery(self):
+        agent, service = _build_agent()
+        im_client = _ActivityDeliveryClient()
+        _install_activity_dispatcher(agent, im_client)
+        composite_key = "session-unpersisted-output:/tmp/work"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="discord",
+            platform_specific={"agent_session_id": "orphaned-definition"},
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="orphaned-definition",
+            activity_id="task-690",
+            kind="local_agent",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+
+        with (
+            patch("core.message_dispatcher.persist_agent_message", return_value=None) as persist,
+            patch("core.message_dispatcher.agent_message_exists", return_value=False),
+            patch.object(
+                service.activities,
+                "requeue_completed_outputs",
+                wraps=service.activities.requeue_completed_outputs,
+            ) as requeue,
+        ):
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+
+        self.assertEqual(im_client.sent, ["Background verification finished"])
+        persist.assert_called_once()
+        requeue.assert_not_called()
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+
+    async def test_undelivered_activity_output_requeues_and_retries(self):
+        agent, service = _build_agent()
+        im_client = _ActivityDeliveryClient(fail_delivery=True)
+        _install_activity_dispatcher(agent, im_client)
+        composite_key = "session-delivery-retry:/tmp/work"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="discord",
+            platform_specific={"agent_session_id": "session-delivery-retry"},
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="session-delivery-retry",
+            activity_id="task-690",
+            kind="local_agent",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-690",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+
+        with (
+            patch("core.message_dispatcher.persist_agent_message", return_value={"id": "message-row"}),
+            patch("core.message_dispatcher.agent_message_exists", return_value=False),
+            patch.object(
+                service.activities,
+                "requeue_completed_outputs",
+                wraps=service.activities.requeue_completed_outputs,
+            ) as requeue,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not durably persisted"):
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            self.assertTrue(service.activities.has_completed_output("claude", composite_key))
+
+            im_client.fail_delivery = False
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+
+        requeue.assert_called_once()
+        self.assertEqual(im_client.sent, ["Background verification finished"])
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+
+    async def test_completed_activity_flush_retry_cap_stops_rescheduling(self):
+        agent, _service = _build_agent()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 1
+        agent.ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS = 3
+        agent.ACTIVITY_OUTPUT_FLUSH_MAX_BACKOFF_SECONDS = 4
+        composite_key = "session-flush-retry-cap:/tmp/work"
+        context = SimpleNamespace(platform_specific={})
+        exhausted = asyncio.Event()
+        attempts = 0
+
+        async def _fail_flush(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == agent.ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS:
+                exhausted.set()
+            raise RuntimeError("delivery unavailable")
+
+        agent._flush_completed_activity_outputs = AsyncMock(side_effect=_fail_flush)
+        real_sleep = asyncio.sleep
+        with patch("modules.agents.claude_agent.asyncio.sleep", new=AsyncMock()) as sleep:
+            agent._schedule_completed_activity_flush(composite_key, context)
+            await asyncio.wait_for(exhausted.wait(), timeout=1)
+            await real_sleep(0)
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(sleep.await_args_list, [call(1), call(2), call(4)])
+        self.assertNotIn(composite_key, agent._activity_flush_tasks)
+
+    async def test_successful_completed_activity_flush_resets_retry_attempts(self):
+        agent, _service = _build_agent()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        composite_key = "session-flush-retry-reset:/tmp/work"
+        context = SimpleNamespace(platform_specific={})
+        agent._activity_flush_retry_attempts[composite_key] = 2
+        agent._flush_completed_activity_outputs = AsyncMock(return_value=False)
+
+        agent._schedule_completed_activity_flush(composite_key, context, retry=True)
+        task = agent._activity_flush_tasks[composite_key]
+        await task
+
+        agent._flush_completed_activity_outputs.assert_awaited_once_with(composite_key, context)
+        self.assertNotIn(composite_key, agent._activity_flush_retry_attempts)
 
     async def test_foreground_tool_activity_waits_for_result_and_uses_assistant_text(self):
         agent, service = _build_agent()

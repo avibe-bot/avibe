@@ -43,6 +43,10 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 
+class ActivityOutputNotDurablyPersistedAfterDeliveryError(RuntimeError):
+    """An Activity output reached the user but was not durably persisted."""
+
+
 def _coalesced_task_execution_ids(payload: dict[str, Any]) -> list[str]:
     run_ids: list[str] = []
     primary = str(payload.get("task_execution_id") or "").strip()
@@ -1985,6 +1989,10 @@ class ConsolidatedMessageDispatcher:
                         native_output_id
                         and agent_message_exists(target_context, native_output_id)
                     ):
+                        if primary_message_id is not None:
+                            raise ActivityOutputNotDurablyPersistedAfterDeliveryError(
+                                "Activity output was not durably persisted after delivery"
+                            )
                         raise RuntimeError(
                             "Activity output was not durably persisted after delivery"
                         )

@@ -9,7 +9,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.message_dispatcher as message_dispatcher_module
-from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_dispatcher import (
+    ActivityOutputNotDurablyPersistedAfterDeliveryError,
+    ConsolidatedMessageDispatcher,
+)
 from core.message_output import MessageOutput
 from modules.im import MessageContext
 
@@ -400,6 +403,41 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(recorded, [])
         persist.assert_not_called()
+
+    async def test_delivered_activity_persistence_failure_uses_distinct_error(self):
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+
+        with (
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+            patch.object(message_dispatcher_module, "persist_agent_message", return_value=None),
+        ):
+            with self.assertRaises(ActivityOutputNotDurablyPersistedAfterDeliveryError):
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "background work finished",
+                    output=MessageOutput(
+                        completes_turn=False,
+                        completes_run=True,
+                        detached=True,
+                        idempotency_key="activity-output",
+                        run_id="run-origin",
+                        requires_delivery_for_run_settlement=True,
+                    ),
+                )
+
+        self.assertEqual(controller.im_client.sent, [("C123", None, "background work finished")])
 
     async def test_activity_run_store_failure_propagates_after_message_persistence(self):
         controller = _StubController()
