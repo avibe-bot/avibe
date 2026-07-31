@@ -747,12 +747,64 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     return {"ok": True, "action": "ended", "backend": "opencode"}
 
 
+# Stop outcomes that leave the turn's own task still unwinding, so End must wait for
+# it before reconciling or tearing anything down (HFR-333).
+#
+# ``cancel_requested`` is the fire-and-forget success path: ``cancel`` calls
+# ``turn.task.cancel()`` and returns on the next line, with the turn's ``finally``
+# still owing the Model Hub settle, the sink release, the owned-run settlement and the
+# status stamp.
+#
+# The others are deliberately absent, and none of them is an oversight:
+# ``already_finished`` and ``stale_released`` are already settled (the latter awaits the
+# task inside ``cancel``), and ``stop_failed`` is the one that would HANG — it leaves the
+# turn ALIVE and running on purpose, so that a later natural completion can still flush.
+# It is also not ``ok``, so End reports the stop failure and the existing precedence rule
+# ("the stop's settlement outcome is authoritative") already governs what happens next.
+_STOP_STATUSES_AWAITING_TURN_SETTLEMENT = frozenset({"cancel_requested"})
+
+
+async def _await_settled_turn_task(task: Any, status: Optional[str]) -> None:
+    """Wait for a stopped Workbench turn to finish unwinding (HFR-333).
+
+    End's orchestration is "await both settlements, THEN reconcile, THEN tear the
+    backend down" — the same settle-first ordering ``core.session_teardown`` states
+    once for every teardown entry, and for the same reason: a dismantled backend can
+    no longer settle its own turn.
+
+    UNBOUNDED, matching ``release_for_teardown``'s precedent — the one other place
+    that awaits a turn it just cancelled. A timeout here would only convert a slow
+    settlement into the exact race being closed, and there is no turn-duration timeout
+    anywhere in this FSM to be consistent with.
+
+    Guarded for the caller's own task exactly as ``release_for_teardown`` is
+    (HFR-320): awaiting yourself does not resolve. A non-``Future`` (the
+    ``SimpleNamespace`` turn doubles) is not awaitable and is left alone.
+    """
+
+    if status not in _STOP_STATUSES_AWAITING_TURN_SETTLEMENT:
+        return
+    if not isinstance(task, asyncio.Future):
+        return
+    if task is asyncio.current_task():
+        return
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def _settle_workbench_turn(controller: "Controller", session_id: Optional[str]) -> Optional[dict[str, Any]]:
     """If a Workbench/chat turn is in flight for ``session_id``, stop it through
     ``SessionTurnManager.cancel`` so the turn FSM settles: it interrupts the
     backend, emits the terminal result, AND cancels the ``dispatch_turn`` task the
     Chat page is awaiting. Skipping this (and only doing the backend teardown
     below) would leave the chat session stuck "running" with sends queued.
+
+    THE TASK IS CAPTURED BEFORE THE CANCEL AND AWAITED AFTER IT (HFR-333).
+    ``cancel``'s success path is ``task.cancel()`` + ``return``, so without the await
+    this returns while the turn is still unwinding and ``end_running_agent`` runs its
+    reconcile and its BACKEND TEARDOWN under a turn whose ``finally`` has not yet run.
+    Captured first because ``cancel`` pops ``in_flight`` on some branches, so reading
+    the turn afterwards can find nothing to wait for. ``cancel``'s own semantics are
+    untouched — every other caller keeps the behaviour it was written against.
 
     Returns a success/failure result when the Workbench manager owned the turn;
     returns ``None`` for IM/agent-run turns and when there is no turn owner.
@@ -765,8 +817,12 @@ async def _settle_workbench_turn(controller: "Controller", session_id: Optional[
     try:
         if not manager.is_in_flight(session_id):
             return None
+        in_flight = getattr(manager, "in_flight", None)
+        entry = in_flight.get(session_id) if isinstance(in_flight, dict) else None
+        turn_task = getattr(entry, "task", None)
         result = await manager.cancel(session_id)
         if isinstance(result, dict) and result.get("ok"):
+            await _await_settled_turn_task(turn_task, result.get("status"))
             return {
                 "ok": True,
                 "action": "stopped",

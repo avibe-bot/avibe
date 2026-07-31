@@ -1545,6 +1545,126 @@ def test_ending_an_idle_row_is_silent_and_settles_nothing(tmp_path, monkeypatch)
     assert not (survivor["metadata"] or {}).get("interrupt_reason")
 
 
+def test_end_awaits_the_stopped_turn_before_reconciling_and_teardown(tmp_path, monkeypatch):
+    """HFR-333: End's step 3 says AWAIT both settlements, and the manager leg did not.
+
+    ``SessionTurnManager.cancel``'s success path is ``turn.task.cancel()`` followed
+    immediately by ``return {"status": "cancel_requested"}`` — fire and forget. It
+    awaits internally only on the ``stale_released`` branch, where it cancelled a turn
+    the backend could no longer stop. So ``_settle_workbench_turn`` used to return
+    while the cancelled turn was still unwinding, and ``end_running_agent`` went
+    straight on to the reconcile (whose active branch unions the manager lane's ids
+    per HFR-324) and then to the BACKEND TEARDOWN.
+
+    That inverts the ordering the whole teardown module exists to state: settle first,
+    tear down second, because a dismantled backend can no longer settle its own turn.
+    The turn's ``finally`` still owes the Model Hub provenance settle, the sink
+    release, the settlement of the ``agent_runs`` rows it owned, and the status stamp
+    — all of it racing a teardown that has already started.
+
+    (The bot's framing was that the turn would "park through the Activity-aware
+    settlement path". It would not: HFR-325 deliberately preserves master's immediate
+    settle for ``stopped``. The defect is purely the un-awaited race.)
+
+    The fix is local to End's manager leg — ``cancel``'s semantics are unchanged for
+    every other caller. The task reference is captured BEFORE the cancel (which pops
+    ``in_flight`` on some branches) and awaited unbounded, exactly as
+    ``release_for_teardown`` does for the same reason.
+    """
+
+    from core import session_turns
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store, session_id="ses-end-333", message="a turn the user stopped"
+    )
+
+    events: list[str] = []
+
+    async def _reap(*_args, **_kwargs):
+        events.append("teardown")
+        return 0
+
+    monkeypatch.setattr("modules.agents.claude_process_reaper._reap_pid_set", _reap)
+    monkeypatch.setattr(running_agents, "_claude_pid_for", lambda *a, **k: 4242)
+
+    controller = _make_controller()
+    controller.scheduled_task_service = service
+    controller.command_handler = types.SimpleNamespace(handle_stop=_AsyncFlag(ret=True))
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions={}, cleanup_session=_AsyncFlag()
+    )
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    service.controller = controller
+
+    holder: dict = {}
+
+    async def _go():
+        started = asyncio.Event()
+
+        async def _turn_body():
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                # Stands in for ``_run``'s finally, which is not instantaneous: it
+                # still owes the Model Hub settle, the sink release, the owned-run
+                # settlement and the status stamp, each of which can yield.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                events.append("turn_settled")
+                manager.in_flight.pop("ses-end-333", None)
+                raise
+
+        task = asyncio.create_task(_turn_body())
+        ctx = types.SimpleNamespace(
+            platform_specific={
+                "agent_session_id": "ses-end-333",
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "slack_x",
+                },
+                # The turn owns the harness run, so the pre-stop snapshot is where
+                # that ownership is recorded.
+                "task_execution_id": run_id,
+            }
+        )
+        manager.in_flight["ses-end-333"] = session_turns.Turn(task=task, context=ctx)
+        await started.wait()
+
+        result = await running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            state="active",
+            session_id="ses-end-333",
+            composite_key="slack_x:/w",
+        )
+        holder["turn_done_at_return"] = task.done()
+        await asyncio.gather(task, return_exceptions=True)
+        return result
+
+    res = asyncio.run(_go())
+
+    assert res["ok"] is True
+    # (1) End did not return while its own stopped turn was still unwinding.
+    assert holder["turn_done_at_return"] is True, (
+        "End returned while the cancelled turn was still settling"
+    )
+    # (2) ...and the turn's settlement observably preceded the backend teardown.
+    assert "turn_settled" in events and "teardown" in events
+    assert events.index("turn_settled") < events.index("teardown"), (
+        f"the backend was torn down under a mid-unwind turn: {events}"
+    )
+    # (3) The settlement recorded is the canonical stop's: a user decision.
+    settled = request_store.get_run(run_id)
+    assert settled is not None
+    assert settled["status"] == "canceled"
+    assert settled["completed_at"] is not None
+    assert "interrupt_reason" not in (settled["metadata"] or {})
+
+
 def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
     tmp_path, monkeypatch
 ):

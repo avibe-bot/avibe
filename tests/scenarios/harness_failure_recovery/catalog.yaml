@@ -3364,6 +3364,50 @@ scenarios:
     # LESSON: a test that performs by hand what production must do automatically pins the
     # mechanism and not the outcome. The manual flush WAS the residual.
     test: tests/test_internal_server.py::test_reopening_teardown_admission_drains_the_queued_messages
+  - id: HFR-333
+    name: End awaits the stopped manager turn before reconciling and tearing down
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 10, and a violation of the ONE ordering core.session_teardown
+    # exists to state: record the cause -> cancel BOTH lanes (awaited) -> reconcile ->
+    # tear the backend down. End's plan step 3 says "await both settlements"; its manager
+    # leg did not.
+    # THE BUG: SessionTurnManager.cancel's success path is turn.task.cancel() followed by
+    # return {"status": "cancel_requested"} on the next line -- fire and forget. It awaits
+    # internally ONLY on the stale_released branch, where it cancelled a turn the backend
+    # could no longer stop. So _settle_workbench_turn returned while the cancelled turn
+    # was still unwinding, and end_running_agent went straight on to the reconcile (whose
+    # active branch unions the manager-lane ids per HFR-324) and then to the BACKEND
+    # TEARDOWN -- all of it racing a finally that still owed the Model Hub provenance
+    # settle, the sink release, the settlement of the agent_runs rows the turn owned, and
+    # the status stamp. A dismantled backend can no longer settle its own turn, which is
+    # the whole reason the ordering is settle-first.
+    # FRAMING CORRECTION: the reviewing bot described the turn as "parking through the
+    # Activity-aware settlement path". It does not -- HFR-325 deliberately preserves
+    # master's IMMEDIATE settle for stopped, and parks only the teardown causes. The
+    # defect is purely the un-awaited race, and the fix is scoped to that.
+    # FIX, local to End's manager leg so cancel's semantics are unchanged for every other
+    # caller: capture the turn's task BEFORE manager.cancel (which pops in_flight on some
+    # branches, so reading it afterwards can find nothing to wait for) and await it after
+    # a stop outcome that left it unwinding.
+    # THE AWAITED STATUS SET IS AN ALLOWLIST OF ONE, cancel_requested, and the omissions
+    # are load-bearing: already_finished and stale_released are already settled (the
+    # latter awaits inside cancel), and stop_failed would HANG -- it leaves the turn ALIVE
+    # on purpose so a later natural completion can still flush. stop_failed is also not
+    # ok, so End reports it and the existing precedence rule (the stop's settlement
+    # outcome is authoritative) governs the rest unchanged.
+    # UNBOUNDED gather(task, return_exceptions=True), matching release_for_teardown -- the
+    # one other place that awaits a turn it just cancelled. A timeout would only convert a
+    # slow settlement back into the race being closed, and this FSM has no turn-duration
+    # timeout to be consistent with. Guarded for the caller's own task exactly as
+    # release_for_teardown is (HFR-320).
+    # CHECKED AND CLEAN: _stop_active_agent's other road (command_handler.handle_stop on a
+    # built context) is reached only when NO manager turn is in flight, and
+    # core/handlers/command_handlers.py never references session_turns at all -- there is
+    # no second un-awaited manager cancel on that path.
+    test: tests/test_running_agents_service.py::test_end_awaits_the_stopped_turn_before_reconciling_and_teardown
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
