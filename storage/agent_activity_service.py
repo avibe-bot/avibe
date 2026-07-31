@@ -5,12 +5,13 @@ Composes the two persisted trace sources into per-turn groups:
 * interim ``assistant`` messages (``messages`` table, ``type='assistant'``), and
 * activity and migrated terminal events from ``agent_events``.
 
-A *turn* is bounded by transcript markers rather than an id: it ends at the
-agent's terminal reply (``result`` / ``error`` / backend-failure ``notify``) or,
-when the user starts a new turn without one, is reported as ``interrupted``.
-Grouping is chronological because ``messages`` carries no ``turn_id`` (only
-``agent_events`` does). Message/event rows persist whole-second ``created_at``,
-but both also mint ids with a MICROSECOND clock prefix
+A *turn* ends at the agent's terminal reply (``result`` / ``error`` /
+backend-failure ``notify``) or, when a new turn starts without one, is reported
+as ``interrupted``. Durable input roles and start boundaries come from the
+Delivery-to-Turn ownership graph: an initial Delivery opens its accepted Turn,
+while accepted steer participants remain inside that Turn. Legacy/non-durable
+rows fall back to transcript chronology. Message/event rows persist whole-second
+``created_at``, but both also mint ids with a MICROSECOND clock prefix
 (``<pfx>_<15-hex microsecond epoch><uuid8>``), so the merge sorts by
 that decoded microsecond, recovering the true emission order ACROSS tables (a fast
 turn's tool call before its same-second terminal; one turn's terminal before the
@@ -40,7 +41,7 @@ from sqlalchemy import func, select
 
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
-from storage.models import session_turns
+from storage.models import message_deliveries, session_turns
 from vibe.message_types import spec_for, types_with
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
@@ -193,6 +194,36 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
+    message_ids = tuple(
+        str(message["id"])
+        for message in msgs
+        if message.get("id") is not None
+    )
+    accepted_roles: dict[str, dict[str, Any]] = {}
+    if message_ids:
+        rows = conn.execute(
+            select(
+                message_deliveries.c.message_id,
+                message_deliveries.c.id.label("delivery_id"),
+                message_deliveries.c.materialized_at,
+                session_turns.c.initial_delivery_id,
+                session_turns.c.started_at,
+                session_turns.c.created_at.label("turn_created_at"),
+            )
+            .select_from(
+                message_deliveries.join(
+                    session_turns,
+                    session_turns.c.id == message_deliveries.c.accepted_turn_id,
+                )
+            )
+            .where(message_deliveries.c.state == "accepted")
+            .where(message_deliveries.c.message_id.in_(message_ids))
+        ).mappings()
+        accepted_roles = {
+            str(row["message_id"]): dict(row)
+            for row in rows
+            if row["message_id"] is not None
+        }
 
     items: list[dict[str, Any]] = []
     for msg in msgs:
@@ -200,21 +231,40 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
         activity_role = spec_for(mtype if isinstance(mtype, str) else "")["activityRole"]
+        accepted_role = accepted_roles.get(str(msg.get("id") or ""))
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
         elif activity_role == "turn_start":
-            kind = "turn_start"
+            kind = (
+                "turn_start"
+                if accepted_role is None
+                or accepted_role["delivery_id"]
+                == accepted_role["initial_delivery_id"]
+                else "ignore"
+            )
         elif activity_role == "activity":
             kind = "activity"
         else:
             kind = "ignore"
-        mts = _parse_ts(msg.get("created_at"))
+        created_at = msg.get("created_at")
+        if kind == "turn_start" and accepted_role is not None:
+            created_at = (
+                accepted_role.get("started_at")
+                or accepted_role.get("materialized_at")
+                or accepted_role.get("turn_created_at")
+                or created_at
+            )
+        mts = _parse_ts(created_at)
         items.append(
             {
                 "ts": mts,
-                "sort": _emit_micros(msg.get("id"), mts),
+                "sort": (
+                    int(mts.timestamp() * 1_000_000)
+                    if accepted_role is not None and kind == "turn_start"
+                    else _emit_micros(msg.get("id"), mts)
+                ),
                 "rank": _PHASE_RANK[kind],
-                "created_at": msg.get("created_at"),
+                "created_at": created_at,
                 "kind": kind,
                 "id": msg.get("id"),
                 "mtype": mtype,

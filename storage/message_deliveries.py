@@ -33,8 +33,8 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def terminal_now_iso() -> str:
-    """Preserve the terminal's true order after same-second native activity."""
+def turn_now_iso() -> str:
+    """Preserve the true order of Turn lifecycle boundaries."""
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -258,7 +258,7 @@ def insert_turn(
     backend: str,
     now: str | None = None,
 ) -> dict[str, Any]:
-    timestamp = now or utc_now_iso()
+    timestamp = now or turn_now_iso()
     values = {
         "id": turn_id,
         "session_id": session_id,
@@ -283,7 +283,7 @@ def insert_turn(
         "version": 1,
         "created_at": timestamp,
         "updated_at": timestamp,
-        "started_at": None,
+        "started_at": timestamp if state == "starting" else None,
         "terminal_at": None,
     }
     conn.execute(session_turns.insert().values(**values))
@@ -403,6 +403,8 @@ def cas_turn(
     values: dict[str, Any],
 ) -> dict[str, Any] | None:
     next_values = {**values, "version": expected_version + 1, "updated_at": utc_now_iso()}
+    if next_values.get("state") == "starting" and "started_at" not in next_values:
+        next_values["started_at"] = turn_now_iso()
     result = conn.execute(
         update(session_turns)
         .where(session_turns.c.id == turn_id)
@@ -534,7 +536,7 @@ def bind_native_start(
             "runtime_key": runtime_key or turn.get("runtime_key"),
             "runtime_turn_id": runtime_turn_id or turn.get("runtime_turn_id"),
             "native_turn_id": native_turn_id or turn.get("native_turn_id"),
-            "started_at": turn.get("started_at") or utc_now_iso(),
+            "started_at": turn.get("started_at") or turn_now_iso(),
         },
     )
 
@@ -765,7 +767,7 @@ def terminalize_turn(
             "settled_by": settled_by,
             "terminal_evidence_kind": evidence_kind,
             "terminal_evidence_json": _canonical_json(evidence or {}),
-            "terminal_at": terminal_now_iso(),
+            "terminal_at": turn_now_iso(),
         },
     )
     return {"changed": settled is not None, "turn": settled or turn}

@@ -723,6 +723,254 @@ def test_replyless_terminal_keeps_subsecond_order_after_last_activity(isolated_s
     assert groups[0]["steps"] == 1
 
 
+def test_queued_initial_message_opens_at_its_accepted_turn(
+    isolated_state,
+    monkeypatch,
+):
+    """Submission order stays in the transcript, but execution grouping starts when
+    the queued Delivery becomes the initial owner of its accepted Turn."""
+
+    engine = create_sqlite_engine()
+    sid = "ses_queued_boundary"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="msg_first_input",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="first",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="event_first_tool",
+            created_at="2026-06-01T10:00:10Z",
+            text="first tool",
+        )
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_queued_input",
+            session_id=sid,
+            priority="p3",
+            state="interrupt_waiting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="queued while first turn runs",
+            ),
+            dispatch_text="queued while first turn runs",
+            now="2026-06-01T10:00:15Z",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="msg_first_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:20Z",
+            text="first done",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_queued_input",
+            session_id=sid,
+            initial_delivery_id="msg_queued_input",
+            state="waiting",
+            backend="codex",
+            now="2026-06-01T10:00:15Z",
+        )
+        monkeypatch.setattr(
+            message_deliveries,
+            "turn_now_iso",
+            lambda: "2026-06-01T10:00:21.000001Z",
+        )
+        waiting_turn = message_deliveries.get_turn(conn, "trn_queued_input")
+        waiting_delivery = message_deliveries.get_delivery(conn, "msg_queued_input")
+        assert waiting_turn is not None
+        assert waiting_delivery is not None
+        assert message_deliveries.cas_turn(
+            conn,
+            "trn_queued_input",
+            expected_version=int(waiting_turn["version"]),
+            expected_states=("waiting",),
+            values={"state": "starting"},
+        ) is not None
+        assert message_deliveries.open_start_attempt(
+            conn,
+            "msg_queued_input",
+            expected_version=int(waiting_delivery["version"]),
+            turn_id="trn_queued_input",
+            attempt_id="atm_queued_input",
+        ) is not None
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="msg_queued_input",
+            expected_attempt_id="atm_queued_input",
+            accepted_turn_id="trn_queued_input",
+            evidence={"kind": "test_native_acceptance"},
+        ) is not None
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="event_second_tool",
+            created_at="2026-06-01T10:00:22Z",
+            text="second tool",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="msg_second_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:23Z",
+            text="second done",
+        )
+
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=sid,
+            types=("user", "result"),
+        )["messages"]
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [row["id"] for row in transcript] == [
+        "msg_first_input",
+        "msg_queued_input",
+        "msg_first_result",
+        "msg_second_result",
+    ]
+    assert [group["status"] for group in groups] == ["done", "done"]
+    assert [group["anchor_message_id"] for group in groups] == [
+        "msg_first_result",
+        "msg_second_result",
+    ]
+
+
+def test_accepted_steer_participant_does_not_open_a_second_turn(isolated_state):
+    engine = create_sqlite_engine()
+    sid = "ses_steer_participant"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_initial",
+            session_id=sid,
+            priority="p1",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="initial",
+            ),
+            dispatch_text="initial",
+            current_attempt_id="atm_initial",
+            current_attempt_kind="start",
+            current_target_turn_id="trn_shared",
+            now="2026-06-01T10:00:00Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_shared",
+            session_id=sid,
+            initial_delivery_id="msg_initial",
+            state="starting",
+            backend="codex",
+            now="2026-06-01T10:00:00Z",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="msg_initial",
+            expected_attempt_id="atm_initial",
+            accepted_turn_id="trn_shared",
+            evidence={"kind": "test_native_acceptance"},
+        ) is not None
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="event_before_steer",
+            created_at="2026-06-01T10:00:01Z",
+            text="before steer",
+        )
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_steer",
+            session_id=sid,
+            priority="p1",
+            state="steering",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="steer participant",
+            ),
+            dispatch_text="steer participant",
+            current_attempt_id="atm_steer",
+            current_attempt_kind="steer",
+            current_target_turn_id="trn_shared",
+            current_expected_native_turn_id="native-shared",
+            now="2026-06-01T10:00:02Z",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="msg_steer",
+            expected_attempt_id="atm_steer",
+            accepted_turn_id="trn_shared",
+            evidence={"kind": "test_steer_acceptance"},
+        ) is not None
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="event_after_steer",
+            created_at="2026-06-01T10:00:03Z",
+            text="after steer",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="msg_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="done",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert len(groups) == 1
+    assert groups[0]["status"] == "done"
+    assert groups[0]["steps"] == 2
+    assert groups[0]["anchor_message_id"] == "msg_result"
+
+
 def test_midturn_notify_does_not_split_or_close_a_turn(isolated_state):
     """A plain (non-backend-failure) ``notify`` is NOT terminal: agents emit mid-turn
     notify rows that keep the turn going (e.g. Claude's model-refusal fallback). It must

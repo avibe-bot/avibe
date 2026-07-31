@@ -1422,9 +1422,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "adds no Message; it releases the hold and promotes the exact oldest queued P3 head",
             prompt,
         )
+        self.assertIn(
+            "steers that exact head into the active logical/native Turn",
+            prompt,
+        )
+        self.assertIn(
+            "if the Session is idle, it starts that head as a new Turn",
+            prompt,
+        )
+        self.assertNotIn(
+            "Both forms require a Web/Workbench Session, interrupt through the shared Stop path",
+            prompt,
+        )
         self.assertNotIn("the new message does not leapfrog it", prompt)
         self.assertIn(
-            "If interruption is refused, the active turn and durable queue remain intact",
+            "if that interruption is refused, the active Turn and durable queue remain intact",
             prompt,
         )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)

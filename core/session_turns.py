@@ -2427,6 +2427,10 @@ class SessionTurnManager:
 
             bus.publish("message.new", row)
             bus.publish(
+                "queue.updated",
+                {"session_id": row.get("session_id")},
+            )
+            bus.publish(
                 "session.activity",
                 {
                     "session_id": row.get("session_id"),

@@ -363,7 +363,7 @@ def test_empty_p1_refuses_when_exact_turn_changes_before_head_claim(managers) ->
     assert steer_calls == []
 
 
-def test_p1_steer_uses_persisted_dispatch_text(managers) -> None:
+def test_p1_steer_uses_persisted_dispatch_text(managers, monkeypatch) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(manager))
     delivery_id = delivery_store.new_delivery_id()
@@ -391,6 +391,11 @@ def test_p1_steer_uses_persisted_dispatch_text(managers) -> None:
         steer_calls.append(request.text)
         return steer_result(SteerOutcome.ACCEPTED)
 
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "core.inbox_events.bus.publish",
+        lambda event, payload: published.append((event, payload)),
+    )
     manager._steer = accepted
     result = asyncio.run(
         manager.deliver(
@@ -408,6 +413,7 @@ def test_p1_steer_uses_persisted_dispatch_text(managers) -> None:
     assert steer_calls == ["canonical agent prompt"]
     row = _row(engine, delivery_id)
     assert row["accepted_turn_id"] == turn_id
+    assert ("queue.updated", {"session_id": "ses_fsm"}) in published
     with engine.connect() as conn:
         materialized = conn.execute(
             select(messages.c.content_text).where(messages.c.id == delivery_id)
