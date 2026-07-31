@@ -138,7 +138,7 @@ describe('installed but not-started Model Hub runtime', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={i18n}>
         <ModelsPageActions
-          runtimeNotStarted
+          runtimeHealth="not_started"
           startingRuntime={false}
           issueCount={2}
           issuesOnly={false}
@@ -152,12 +152,31 @@ describe('installed but not-started Model Hub runtime', () => {
     expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
   });
 
-  it('wires only the not_started state to the POST-backed start action', () => {
+  it('keeps the explicit start action after a failed attempt', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={i18n}>
+        <ModelsPageActions
+          runtimeHealth="down"
+          startingRuntime={false}
+          issueCount={2}
+          issuesOnly={false}
+          onStartRuntime={vi.fn()}
+          onFocusIssues={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(html).toContain(zh.settings.models.runtime.startNow);
+    expect(html).toContain(i18n.t('settings.models.status.needsAction', { count: 2 }));
+    expect(html).not.toContain(zh.settings.models.runtime.notStarted);
+  });
+
+  it('wires idle and down runtime states to the POST-backed start action', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
     const api = readFileSync(join(here, 'modelsApi.ts'), 'utf8');
 
-    expect(page).toMatch(/runtime\?\.status\.health === 'not_started'/);
+    expect(page).toMatch(/runtimeNotStarted \|\| runtimeHealth === 'down'/);
     expect(page).toMatch(/startRuntimeWithStatusRefresh\(modelsApi\)/);
     expect(api).toMatch(/'\/api\/models\/runtime\/start', jsonInit\('POST'\)/);
   });

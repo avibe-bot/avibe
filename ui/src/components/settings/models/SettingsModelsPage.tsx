@@ -67,14 +67,19 @@ const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick
   );
 };
 
-export const RuntimeNotStartedAction: React.FC<{ starting: boolean; onStart: () => void }> = ({
+export const RuntimeNotStartedAction: React.FC<{
+  starting: boolean;
+  showIdleCopy?: boolean;
+  onStart: () => void;
+}> = ({
   starting,
+  showIdleCopy = true,
   onStart,
 }) => {
   const { t } = useTranslation();
   return (
     <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 text-[13px] text-muted sm:max-w-none">
-      <span>{t('settings.models.runtime.notStarted')}</span>
+      {showIdleCopy && <span>{t('settings.models.runtime.notStarted')}</span>}
       <Button variant="secondary" size="xs" onClick={onStart} disabled={starting}>
         {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
         {t(starting ? 'settings.models.runtime.starting' : 'settings.models.runtime.startNow')}
@@ -84,21 +89,23 @@ export const RuntimeNotStartedAction: React.FC<{ starting: boolean; onStart: () 
 };
 
 export const ModelsPageActions: React.FC<{
-  runtimeNotStarted: boolean;
+  runtimeHealth: RuntimeDependency['status']['health'] | null;
   startingRuntime: boolean;
   issueCount: number;
   issuesOnly: boolean;
   onStartRuntime: () => void;
   onFocusIssues: () => void;
 }> = ({
-  runtimeNotStarted,
+  runtimeHealth,
   startingRuntime,
   issueCount,
   issuesOnly,
   onStartRuntime,
   onFocusIssues,
 }) => {
-  if (!runtimeNotStarted) {
+  const runtimeNotStarted = runtimeHealth === 'not_started';
+  const runtimeStartable = runtimeNotStarted || runtimeHealth === 'down';
+  if (!runtimeStartable) {
     return <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />;
   }
   return (
@@ -106,7 +113,11 @@ export const ModelsPageActions: React.FC<{
       {issueCount > 0 && (
         <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />
       )}
-      <RuntimeNotStartedAction starting={startingRuntime} onStart={onStartRuntime} />
+      <RuntimeNotStartedAction
+        starting={startingRuntime}
+        showIdleCopy={runtimeNotStarted}
+        onStart={onStartRuntime}
+      />
     </div>
   );
 };
@@ -254,12 +265,14 @@ export const SettingsModelsPage: React.FC = () => {
     };
   }, []);
 
+  const runtimeHealth = runtime?.status.health ?? null;
   React.useEffect(() => {
-    if (runtime?.status.health !== 'not_started' || startingRuntime) return undefined;
+    const runtimeCanRecover = runtimeHealth === 'not_started' || runtimeHealth === 'down';
+    if (!runtimeCanRecover || startingRuntime) return undefined;
     return pollRuntimeStatus(modelsApi, (nextRuntime) => {
       if (aliveRef.current) setRuntime(nextRuntime);
     });
-  }, [runtime?.status.health, startingRuntime]);
+  }, [runtimeHealth, startingRuntime]);
 
   // 最近切换 is re-read here with the rows, because the writes this refresh exists
   // for are the writes that FILE events: a failing 试跑 cools its head down through
@@ -515,8 +528,6 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
-  const runtimeNotStarted = runtime?.status.health === 'not_started';
-
   return (
     <SettingsPageShell
       activeTab="models"
@@ -525,7 +536,7 @@ export const SettingsModelsPage: React.FC = () => {
       actions={
         !loading && !loadError ? (
           <ModelsPageActions
-            runtimeNotStarted={runtimeNotStarted}
+            runtimeHealth={runtimeHealth}
             startingRuntime={startingRuntime}
             issueCount={issueCount}
             issuesOnly={issuesOnly}

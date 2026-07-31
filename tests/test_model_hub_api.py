@@ -437,6 +437,50 @@ def test_runtime_start_sync_failure_is_reported_as_down(tmp_path):
     assert runtime["status"]["health"] == "down"
 
 
+def test_runtime_start_in_progress_remains_not_started(tmp_path):
+    class IdleAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.started = False
+
+        async def start(self):
+            self.started = True
+            return await super().start()
+
+        async def status(self):
+            return EngineStatus(
+                health=(EngineHealth.OK if self.started else EngineHealth.NOT_STARTED),
+                installed_version="v7.2.95",
+                verified=True,
+                listen_host="127.0.0.1",
+                listen_port=15220 if self.started else None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=IdleAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    async def status_while_start_waits_for_sync():
+        await service._mutation_lock.acquire()
+        start = asyncio.create_task(service.runtime_start())
+        await asyncio.sleep(0)
+        assert not start.done()
+        pending = await service.runtime_status()
+        service._mutation_lock.release()
+        started = await start
+        return pending, started
+
+    pending, started = asyncio.run(status_while_start_waits_for_sync())
+
+    assert pending["status"]["health"] == "not_started"
+    assert started["status"]["health"] == "ok"
+
+
 def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
     from vibe import model_hub_client
 

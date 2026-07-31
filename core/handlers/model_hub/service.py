@@ -426,7 +426,7 @@ class ModelHubService:
         )
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
-        self._engine_demanded = False
+        self._engine_preparation_failed = False
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -594,12 +594,18 @@ class ModelHubService:
                     pass
 
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
-        self._engine_demanded = True
-        if not already_synced:
+        try:
+            if already_synced:
+                self._engine_preparation_failed = False
+                return
             await self._ensure_engine_synced()
+        except Exception:
+            self._engine_preparation_failed = True
+            raise
+        self._engine_preparation_failed = False
 
     def _runtime_status_after_demand(self, status: EngineStatus) -> EngineStatus:
-        if self._engine_demanded and status.health is EngineHealth.NOT_STARTED:
+        if self._engine_preparation_failed and status.health is EngineHealth.NOT_STARTED:
             return replace(status, health=EngineHealth.DOWN)
         return status
 
