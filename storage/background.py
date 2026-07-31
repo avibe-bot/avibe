@@ -2205,6 +2205,10 @@ class SQLiteBackgroundTaskStore:
                 definition_type="scheduled task",
             )
             if not landed:
+                # A normal return from ``engine.begin()`` COMMITs. The notice was
+                # written earlier in this transaction, so an explicit rollback is
+                # what keeps a refused definition CAS from publishing stale news.
+                conn.rollback()
                 return False
         return True
 

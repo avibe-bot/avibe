@@ -8730,6 +8730,69 @@ def test_binding_marker_rolls_back_when_its_notice_write_faults(
     assert notice["failure_id"] == f"binding:{task.id}:{change.signature}"
 
 
+def test_binding_notice_rolls_back_when_the_definition_marker_cas_loses(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A refused marker must not commit the notice written earlier in its transaction."""
+
+    from sqlalchemy import update as sa_update
+
+    from core.scheduled_tasks import BINDING_RECOVERY_METADATA_KEY, SessionBindingChange
+    from storage.models import run_definitions
+    from tests.test_scheduled_tasks import _binding_env
+
+    _binding_env(tmp_path, monkeypatch)
+    sqlite, requests = _store(tmp_path)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    task = service.store.add_task(
+        name="daily digest",
+        session_key="",
+        session_id="ses-fresh",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    run = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    assert requests.claim(run.id) is not None
+    change = SessionBindingChange(
+        action="rebound",
+        task_id=task.id,
+        reason="session_missing",
+        previous_session_id="ses-gone",
+        detail="the pinned session was replaced",
+        new_session_id="ses-fresh",
+        settings_preserved=True,
+    )
+
+    real_atomic_write = sqlite.upsert_scheduled_task_with_binding_notice
+
+    def _repoint_before_atomic_write(payload, *, expect, notice):
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(run_definitions)
+                .where(run_definitions.c.id == task.id)
+                .values(session_id="ses-concurrently-repointed")
+            )
+        return real_atomic_write(payload, expect=expect, notice=notice)
+
+    monkeypatch.setattr(
+        sqlite,
+        "upsert_scheduled_task_with_binding_notice",
+        _repoint_before_atomic_write,
+    )
+    asyncio.run(service._emit_binding_change(change, run_id=run.id, run_error=None))
+
+    stored = service.store.get_task(task.id)
+    assert stored is not None and stored.session_id == "ses-concurrently-repointed"
+    assert BINDING_RECOVERY_METADATA_KEY not in (stored.metadata or {})
+    assert sqlite.owed_failure_notice(run.id) is None
+
+
 def test_a_binding_stamp_refuses_a_failure_terminalized_inside_its_gap(tmp_path: Path) -> None:
     """Subordinate to HFR-099 — the binding stamp must re-assert what it read.
 
