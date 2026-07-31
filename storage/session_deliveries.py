@@ -18,8 +18,6 @@ from sqlalchemy.engine import Connection
 from storage.models import messages, session_deliveries, session_turns
 
 TURN_OWNER_STATES = frozenset({"starting", "active", "quarantined"})
-TURN_TERMINAL_STATES = frozenset({"terminal"})
-DELIVERY_QUEUE_STATES = frozenset({"queued"})
 
 
 def utc_now_iso() -> str:
