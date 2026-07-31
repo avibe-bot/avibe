@@ -821,6 +821,14 @@ class SessionTurnManager:
             self._engine = get_cached_sqlite_engine()
         return self._engine
 
+    def _durable_schema_available(self) -> bool:
+        engine = self._sqlite_engine()
+        with engine.connect() as conn:
+            return conn.dialect.has_table(
+                conn,
+                "session_turns",
+            ) and conn.dialect.has_table(conn, "agent_sessions")
+
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
@@ -1818,6 +1826,13 @@ class SessionTurnManager:
         return await self._start_persisted_turn(turn_id)
 
     def _terminalize_durable_turn(self, turn_id: str, outcome: str) -> dict[str, Any]:
+        if not self._durable_schema_available():
+            return {
+                "changed": False,
+                "successor_turn_id": None,
+                "delivery_id": None,
+                "requeued_delivery_ids": [],
+            }
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             result = delivery_store.terminalize_and_claim_successor(
@@ -1865,6 +1880,8 @@ class SessionTurnManager:
         session_id = self.controller._session_id_from_context(context) if self.controller else None
         if not logical_turn_id or not session_id:
             return
+        if not self._durable_schema_available():
+            return
         identity = self._active_identity(backend, session_id, logical_turn_id)
         native_turn_id = identity[1] if identity and identity[0] == logical_turn_id else None
         with self._sqlite_engine().begin() as conn:
@@ -1886,6 +1903,8 @@ class SessionTurnManager:
         logical_turn_id = str(payload.get("turn_token") or "").strip()
         runtime_turn_id = str(payload.get("agent_runtime_turn_token") or "").strip()
         if not logical_turn_id:
+            return
+        if not self._durable_schema_available():
             return
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -2152,18 +2171,21 @@ class SessionTurnManager:
         """
         from core.inbox_events import bus
 
+        durable_turn_registered = durable_preallocated
+        if durable_preallocated and not logical_turn_id:
+            raise ValueError("preallocated durable Turn requires its logical id")
         if context.platform_specific is None:
             context.platform_specific = {}
+        context_turn_id = str(context.platform_specific.get("turn_token") or "").strip()
         if isinstance(session_id, str) and session_id:
-            if logical_turn_id is None:
-                logical_turn_id = delivery_store.new_turn_id()
-            if not durable_preallocated:
+            if not durable_preallocated and self._durable_schema_available():
                 with self._sqlite_engine().begin() as conn:
                     reserve_write_lock(conn)
                     session_exists = conn.execute(
                         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
                     ).scalar_one_or_none()
                     if session_exists is not None:
+                        logical_turn_id = logical_turn_id or delivery_store.new_turn_id()
                         existing = delivery_store.active_turn(conn, session_id)
                         if existing is not None:
                             raise RuntimeError(
@@ -2184,8 +2206,11 @@ class SessionTurnManager:
                         )
                         if claimed is None:
                             raise RuntimeError("legacy Turn start attempt was not claimed")
+                        durable_turn_registered = True
+            if not durable_turn_registered:
+                logical_turn_id = logical_turn_id or context_turn_id or uuid.uuid4().hex
         else:
-            logical_turn_id = logical_turn_id or uuid.uuid4().hex
+            logical_turn_id = logical_turn_id or context_turn_id or uuid.uuid4().hex
         context.platform_specific["turn_token"] = logical_turn_id
 
         async def _runner() -> None:
@@ -2259,7 +2284,7 @@ class SessionTurnManager:
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_STOPPED
                     self._settle_model_hub_turn(context, settled_by)
-                    if logical_turn_id:
+                    if logical_turn_id and durable_turn_registered:
                         if cancelled:
                             self._terminalize_durable_turn(logical_turn_id, "canceled")
                         elif settled_by is not None:
@@ -2313,7 +2338,8 @@ class SessionTurnManager:
                         self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
                     elif should_flush:
                         await self.flush_queue(session_id)
-                    await self._resume_durable_session(session_id)
+                    if durable_turn_registered:
+                        await self._resume_durable_session(session_id)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
@@ -3211,11 +3237,8 @@ class SessionTurnManager:
             context.platform_specific = {}
         context.platform_specific["turn_token"] = turn_token
         engine = self._sqlite_engine()
+        durable_schema = self._durable_schema_available()
         with engine.connect() as conn:
-            durable_schema = conn.dialect.has_table(
-                conn,
-                "session_turns",
-            ) and conn.dialect.has_table(conn, "agent_sessions")
             session_exists = durable_schema and (
                 conn.execute(
                     select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
