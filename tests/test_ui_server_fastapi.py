@@ -2582,3 +2582,127 @@ def test_sessions_create_preserves_metadata_without_web_push_owner(monkeypatch, 
     metadata = response.get_json()["metadata"]
     assert metadata["client"] == "test"
     assert "_web_push_user_key" not in metadata
+
+
+def test_sessions_create_locks_before_agent_validation(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    route_engine = create_sqlite_engine()
+    agent_store = VibeAgentStore()
+    competitor = VibeAgentStore()
+    try:
+        agent_store.create(name="pm", backend="codex")
+        project_dir = tmp_path / "locked-create-project"
+        project_dir.mkdir()
+        with route_engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+
+        race = {"fired": 0, "refused": 0, "committed": 0}
+
+        @event.listens_for(competitor.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(route_engine, "after_cursor_execute")
+        def _archive_on_agent_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            if race["fired"] or "FROM agents" not in " ".join(statement.split()):
+                return
+            race["fired"] = 1
+            try:
+                competitor.archive("pm")
+            except OperationalError:
+                race["refused"] = 1
+            else:
+                race["committed"] = 1
+
+        monkeypatch.setattr(ui_server, "_projects_engine", lambda: route_engine)
+        client = app.test_client()
+        response = client.post(
+            "/api/sessions",
+            json={"project_id": project["id"], "agent_name": "pm", "agent_backend": "codex"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 201
+        assert response.get_json()["agent_name"] == "pm"
+        assert race == {"fired": 1, "refused": 1, "committed": 0}
+    finally:
+        competitor.close()
+        agent_store.close()
+        route_engine.dispose()
+
+
+def test_sessions_patch_locks_before_agent_validation(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    route_engine = create_sqlite_engine()
+    agent_store = VibeAgentStore()
+    competitor = VibeAgentStore()
+    try:
+        agent_store.create(name="pm", backend="codex")
+        agent_store.create(name="reviewer", backend="codex")
+        project_dir = tmp_path / "locked-patch-project"
+        project_dir.mkdir()
+        with route_engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session = create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_name="pm",
+                agent_backend="codex",
+            )
+
+        race = {"fired": 0, "refused": 0, "committed": 0}
+
+        @event.listens_for(competitor.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(route_engine, "after_cursor_execute")
+        def _archive_on_agent_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            if race["fired"] or "FROM agents" not in " ".join(statement.split()):
+                return
+            race["fired"] = 1
+            try:
+                competitor.archive("reviewer")
+            except OperationalError:
+                race["refused"] = 1
+            else:
+                race["committed"] = 1
+
+        monkeypatch.setattr(ui_server, "_projects_engine", lambda: route_engine)
+        client = app.test_client()
+        response = client.patch(
+            f"/api/sessions/{session['id']}",
+            json={"agent_name": "reviewer", "agent_backend": "codex"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["agent_name"] == "reviewer"
+        assert race == {"fired": 1, "refused": 1, "committed": 0}
+    finally:
+        competitor.close()
+        agent_store.close()
+        route_engine.dispose()

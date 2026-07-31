@@ -91,6 +91,15 @@ def normalize_agent_name(name: str) -> str:
     return normalized
 
 
+def _validated_public_agent_name(name: str) -> tuple[str, str]:
+    raw_name = str(name or "").strip()
+    if raw_name.startswith("_"):
+        raise ValueError("agent names starting with '_' are reserved for Avibe")
+    if "/" in raw_name or "\\" in raw_name:
+        raise ValueError("agent names cannot contain path separators")
+    return raw_name, normalize_agent_name(raw_name)
+
+
 def validate_agent_backend(backend: str) -> str:
     value = str(backend or "").strip().lower()
     if value not in SUPPORTED_AGENT_BACKENDS:
@@ -327,10 +336,7 @@ class VibeAgentStore:
         metadata: Optional[dict[str, Any]] = None,
         enabled: bool = True,
     ) -> VibeAgent:
-        raw_name = str(name or "").strip()
-        if raw_name.startswith("_"):
-            raise ValueError("agent names starting with '_' are reserved for Avibe")
-        normalized = normalize_agent_name(name)
+        raw_name, normalized = _validated_public_agent_name(name)
         normalized_backend = validate_agent_backend(backend)
         now = _utc_now_iso()
         agent = VibeAgent(
@@ -411,10 +417,7 @@ class VibeAgentStore:
         return self.update(name, enabled=enabled)
 
     def rename(self, name: str, new_name: str) -> VibeAgent:
-        raw_new_name = str(new_name or "").strip()
-        if raw_new_name.startswith("_"):
-            raise ValueError("agent names starting with '_' are reserved for Avibe")
-        new_normalized = normalize_agent_name(raw_new_name)
+        raw_new_name, new_normalized = _validated_public_agent_name(new_name)
         old_normalized = normalize_agent_name(name)
         now = _utc_now_iso()
         try:

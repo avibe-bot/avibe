@@ -2497,10 +2497,17 @@ def _resolve_agent_for_target(
     session_id: Optional[str],
     session_key: str,
     help_command: str,
+    existing_agent_reference: bool = False,
 ):
     store = _agent_store()
     try:
-        requested = store.require_enabled(agent_name) if agent_name else None
+        requested = None
+        if agent_name:
+            requested = (
+                store.require_reference(agent_name)
+                if existing_agent_reference
+                else store.require_enabled(agent_name)
+            )
         if session_id:
             target = resolve_session_id_target(session_id)
             session_agent = store.require_reference(target.agent_name) if target.agent_name else None
@@ -3374,6 +3381,7 @@ def cmd_task_update(args):
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe task update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
             agent_name = agent.name if agent else None
         if session_policy == "create_once" and (
@@ -8799,6 +8807,7 @@ def cmd_watch_update(args):
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe watch update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
             agent_name = agent.name if agent else None
         if session_policy == "create_once" and (

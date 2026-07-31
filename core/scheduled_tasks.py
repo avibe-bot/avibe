@@ -2285,6 +2285,17 @@ class TaskExecutionStore:
         payload = json.loads(processing_path.read_text(encoding="utf-8"))
         return TaskExecutionRequest.from_dict(payload)
 
+    def refresh_claimed_request(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+        """Refresh the Agent name that a catalog rename may rewrite after claim."""
+
+        if self._sqlite is None:
+            return request
+        payload = self._sqlite.get_run(request.id)
+        if payload is None:
+            return request
+        request.agent_name = payload.get("agent_name")
+        return request
+
     def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
         if self._sqlite is not None:
             if metadata is not None:
@@ -4851,6 +4862,7 @@ class ScheduledTaskService:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
+        request = self.request_store.refresh_claimed_request(request)
         error: Optional[str] = None
         #: The structured CLASS of this run's failure, when the failure has one. Kept
         #: beside ``error`` rather than parsed back out of it: the text is a sentence

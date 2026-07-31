@@ -444,6 +444,11 @@ def test_user_agent_names_cannot_enter_internal_namespace(tmp_path) -> None:
         store.create(name="worker", backend="codex")
         with pytest.raises(ValueError, match="reserved for Avibe"):
             store.rename("worker", "_hidden")
+        for invalid_name in ("review/team", r"review\team"):
+            with pytest.raises(ValueError, match="path separators"):
+                store.create(name=invalid_name, backend="codex")
+            with pytest.raises(ValueError, match="path separators"):
+                store.rename("worker", invalid_name)
     finally:
         store.close()
 

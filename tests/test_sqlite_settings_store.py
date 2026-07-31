@@ -18,6 +18,7 @@ from storage.models import scope_settings, scopes
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import (
     SQLiteSettingsService,
+    ScopeAgentUnavailableError,
     StaleScopeAgentBindingError,
     upsert_scope,
 )
@@ -69,6 +70,8 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
 
 def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    agent_store.create(name="reviewer", backend="codex")
     store = SettingsStore(settings_path)
     parent = ChannelSettings(enabled=True, require_mention=True, require_bind=False)
     topic = ChannelSettings(
@@ -101,6 +104,7 @@ def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path)
         assert reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram").require_mention is True
     finally:
         reloaded.close()
+        agent_store.close()
 
 
 def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
@@ -559,6 +563,52 @@ def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: 
             conflicting_store.close()
         store.close()
         agents_store.close()
+
+
+def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agent_store.create(name="pm", backend="claude")
+        store.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+        archived = agent_store.archive("pm")
+        assert archived is not None
+
+        reloaded = SettingsStore(settings_path)
+        try:
+            existing = reloaded.find_channel("C1", platform="slack")
+            assert existing is not None
+            assert existing.routing.agent_name == archived.archived_name
+            existing.custom_cwd = "/preserved"
+            reloaded.save()
+
+            with pytest.raises(ScopeAgentUnavailableError, match="Agent is unavailable"):
+                reloaded.update_channel(
+                    "C2",
+                    ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(agent_name=archived.archived_name),
+                    ),
+                    platform="slack",
+                )
+        finally:
+            reloaded.close()
+
+        with agent_store.engine.connect() as conn:
+            rows = conn.execute(
+                select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.workdir)
+                .where(scope_settings.c.scope_id.in_(("slack::channel::C1", "slack::channel::C2")))
+                .order_by(scope_settings.c.scope_id)
+            ).all()
+        assert rows == [("slack::channel::C1", archived.archived_name, "/preserved")]
+    finally:
+        agent_store.close()
+        store.close()
 
 
 def test_settings_save_preserves_observed_scope_metadata(tmp_path: Path) -> None:

@@ -113,6 +113,65 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "--deliver-key" not in captured.out
 
 
+def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="codex")
+        store = ManagedWatchStore()
+        watch = store.add_watch(
+            name="Review watch",
+            session_key="slack::channel::C123",
+            agent_name=agent.name,
+            command=["python3", "wait.py"],
+            shell_command=None,
+            prefix=None,
+            cwd=None,
+            mode="once",
+            timeout_seconds=600,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=30,
+            post_to=None,
+            deliver_key=None,
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+        runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+
+        args = _parse_watch_update([watch.id, "--name", "Renamed watch"])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=store),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_watch_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert ManagedWatchStore().get_watch(watch.id).agent_name == archived.archived_name
+
+        explicit = _parse_watch_update([watch.id, "--agent", archived.archived_name])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_watch_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
 def test_watch_list_help_describes_bounded_history(capsys) -> None:
     parser = cli.build_parser()
 

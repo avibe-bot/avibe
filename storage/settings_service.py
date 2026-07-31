@@ -26,7 +26,7 @@ from config.v2_settings import (
 )
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
-from storage.models import auth_codes, scope_settings, scopes
+from storage.models import agents, auth_codes, scope_settings, scopes
 
 SETTINGS_VERSION = 1
 GUILD_POLICY_KIND = "guild_policy"
@@ -37,6 +37,10 @@ _MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
 
 
 class StaleScopeAgentBindingError(ValueError):
+    pass
+
+
+class ScopeAgentUnavailableError(ValueError):
     pass
 
 
@@ -246,12 +250,31 @@ class SQLiteSettingsService:
             select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
         ).scalar_one_or_none()
         if current == expected:
+            if item.routing.agent_name != current:
+                SQLiteSettingsService._require_enabled_agent_binding(
+                    conn,
+                    item.routing.agent_name,
+                )
             return item.routing
         if item.routing.agent_name == expected:
             return replace(item.routing, agent_name=current)
         raise StaleScopeAgentBindingError(
             f"Agent binding changed while settings were open: {scope_id}"
         )
+
+    @staticmethod
+    def _require_enabled_agent_binding(conn: Connection, agent_name: str | None) -> None:
+        if not agent_name:
+            return
+        available = conn.execute(
+            select(agents.c.id)
+            .where(agents.c.name == agent_name)
+            .where(agents.c.enabled == 1)
+            .where(agents.c.archived_at.is_(None))
+            .limit(1)
+        ).first()
+        if available is None:
+            raise ScopeAgentUnavailableError(f"Agent is unavailable: {agent_name}")
 
     def _upsert_scope_settings(self, conn: Connection, *, scope_id: str, **values: Any) -> None:
         """Insert or update one scope's settings row by scope_id — no delete.

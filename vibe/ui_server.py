@@ -5018,20 +5018,22 @@ def ui_reload():
 @app.route("/api/settings", methods=["POST"])
 def settings_post():
     from vibe import api
-    from storage.settings_service import StaleScopeAgentBindingError
+    from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
     payload = request.json or {}
     try:
         return jsonify(api.save_settings(payload))
     except StaleScopeAgentBindingError as exc:
         return _coded_error_response("settings_conflict", str(exc), 409)
+    except ScopeAgentUnavailableError as exc:
+        return _coded_error_response("agent_unavailable", str(exc), 400)
 
 
 @app.post("/api/settings/thread", include_in_schema=False)
 async def thread_settings_post(starlette_request: FastAPIRequest):
     async def handler():
         from vibe import api
-        from storage.settings_service import StaleScopeAgentBindingError
+        from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
         body = await starlette_request.body()
         payload = await starlette_request.json() if body else {}
@@ -5039,6 +5041,8 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
             return api.save_thread_settings(payload if isinstance(payload, dict) else {})
         except StaleScopeAgentBindingError as exc:
             return _coded_error_response("settings_conflict", str(exc), 409)
+        except ScopeAgentUnavailableError as exc:
+            return _coded_error_response("agent_unavailable", str(exc), 400)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -6336,6 +6340,9 @@ def sessions_create():
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
             if payload.get("agent_name"):
                 workbench_sessions_service.require_enabled_agent_backend(
                     conn,
@@ -6811,6 +6818,9 @@ async def sessions_update(session_id: str):
 
     try:
         with engine.begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
             if updatable.get("agent_name"):
                 workbench_sessions_service.require_enabled_agent_backend(
                     conn,
@@ -8998,13 +9008,15 @@ def users_get():
 @app.route("/api/users", methods=["POST"])
 def users_post():
     from vibe import api
-    from storage.settings_service import StaleScopeAgentBindingError
+    from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
     payload = request.json or {}
     try:
         return jsonify(api.save_users(payload))
     except StaleScopeAgentBindingError as exc:
         return _coded_error_response("settings_conflict", str(exc), 409)
+    except ScopeAgentUnavailableError as exc:
+        return _coded_error_response("agent_unavailable", str(exc), 400)
 
 
 @app.route("/api/users/<user_id>/admin", methods=["POST"])

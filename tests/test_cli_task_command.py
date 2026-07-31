@@ -101,6 +101,59 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     assert payload["error"] == "agent 'worker' is disabled"
 
 
+def test_task_update_preserves_archived_agent_reference(capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="codex")
+        store = cli.ScheduledTaskStore()
+        task = store.add_task(
+            name="Daily review",
+            session_key="slack::channel::C123",
+            prompt="review",
+            schedule_type="cron",
+            agent_name=agent.name,
+            cron="0 9 * * *",
+            timezone_name="UTC",
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+
+        args = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--name", "Renamed review"]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_task_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert cli.ScheduledTaskStore().get_task(task.id).agent_name == archived.archived_name
+
+        explicit = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--agent", archived.archived_name]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore()),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_task_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
 def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
