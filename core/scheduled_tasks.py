@@ -3228,14 +3228,52 @@ class ScheduledTaskService:
                 locks.add(lock_key)
         return locks
 
+    def _shutdown_closed_all_admission(self) -> bool:
+        """True once the process is exiting and NO session may dispatch (HFR-339).
+
+        The unscoped door, asked before the lock-keyed one, because
+        :meth:`_teardown_held_session_locks` structurally cannot answer it: it maps the
+        counted per-session holds forward onto lock keys, and the shutdown close is not
+        a set of sessions — it is every session, including the ones no row has resolved
+        yet. Mapping it into lock keys would mean enumerating the world.
+
+        Read through the same defensive adapter shape as the rest: a controller with no
+        turn manager (headless service, the test doubles) is "not shutting down" rather
+        than an exception on the dispatch path, and a provider that raises is treated
+        the same way — deliberately, since the ``cleanup_sync`` thread is about to stop
+        this service anyway and a drain that crashes is worse than a drain that runs
+        one last row.
+        """
+
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "is_admission_closed_for_shutdown", None)
+        if not callable(provider):
+            return False
+        try:
+            return bool(provider())
+        except Exception:
+            logger.warning(
+                "Scheduler drain: shutdown admission state could not be read; "
+                "dispatching as if the process were staying up",
+                exc_info=True,
+            )
+            return False
+
     def _teardown_holds_request(self, request: TaskExecutionRequest) -> bool:
         """True when this request's session is being torn down right now (HFR-336).
 
         The single-row form of :meth:`_teardown_held_session_locks`, for the trigger
         path that dispatches one request without running a drain pass. The drain keeps
         its own set-per-pass because it asks the question many times in a row.
+
+        The shutdown close (HFR-339) is checked FIRST and answers for every row,
+        including the ``create_per_run`` ones that have no lock key at all — those
+        target a session that does not exist yet, which no teardown can hold but a
+        dying process most certainly can.
         """
 
+        if self._shutdown_closed_all_admission():
+            return True
         lock_key = self._execution_lock_key(request)
         if lock_key is None:
             return False
@@ -4207,6 +4245,22 @@ class ScheduledTaskService:
         # backend that never returns) blocked the loop forever and every
         # later request piled up in ``queued``. Dispatching concurrently keeps
         # delivery flowing: a stuck turn only holds up its own session.
+        if self._shutdown_closed_all_admission():
+            # THE PROCESS IS EXITING (HFR-339). Every session's admission is closed and
+            # will not reopen, so there is no row this pass could honestly claim: the
+            # backends are being dismantled by ``cleanup_sync`` on another thread while
+            # this loop still runs. Nothing is written — no claim, no requeue, no skip
+            # reason — exactly as the per-session refusal below leaves its row, and for
+            # the stronger version of the same reason. ``_drain_dirty`` is NOT re-armed
+            # here: unlike a teardown hold, this one never clears, so re-arming would
+            # only spin the ticks that remain before the service stops.
+            #
+            # ``ScheduledTaskService.stop()`` runs a step ahead of the settlement that
+            # sets the flag, so in the ordinary shutdown order this loop is already
+            # done. It is checked anyway because "already stopped" is a fact about
+            # ordering, not an invariant this method may assume.
+            logger.debug("Scheduler drain skipped: the process is shutting down")
+            return
         # One snapshot for the whole pass: the loop below never awaits, so no hold can
         # change under it, and a pass that re-read the manager per row could gate two
         # rows of the same conversation against two different answers.

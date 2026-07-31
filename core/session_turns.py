@@ -781,6 +781,9 @@ class SessionTurnManager:
         # Sessions whose admission hold OWES a drain when it finally reopens
         # (HFR-332). See :meth:`teardown_admission`'s ``drain_on_release``.
         self._teardown_drain_owed: set[str] = set()
+        # The process is exiting: admission is closed for EVERY session, for good
+        # (HFR-339). See :meth:`close_admission_for_shutdown`.
+        self._admission_closed_for_shutdown: bool = False
         # Strong references to the scheduled drains, so the loop cannot collect a
         # task nobody is awaiting.
         self._teardown_drain_tasks: dict[str, asyncio.Task] = {}
@@ -801,10 +804,70 @@ class SessionTurnManager:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
 
+    def is_admission_closed_for_shutdown(self) -> bool:
+        """True once this process has begun exiting (HFR-339).
+
+        The UNSCOPED half of :meth:`is_teardown_admission_closed`, exposed on its own
+        because the per-session forms cannot express it: the enumerating one
+        (:meth:`teardown_held_session_ids`) would have to return every session id that
+        will ever exist. Consumers that ask the enumerating question must ask this one
+        FIRST — see ``ScheduledTaskService._shutdown_closed_all_admission``.
+        """
+
+        return self._admission_closed_for_shutdown
+
+    def close_admission_for_shutdown(self) -> None:
+        """Close admission for EVERY session, for the rest of the process (HFR-339).
+
+        WHY A FLAG AND NOT MORE HOLDS. ``Controller._settle_inflight_turns_for_shutdown``
+        already takes a counted hold per busy session, and HFR-334 pinned that they all
+        stay held for the whole settlement loop. But the loop is only the FIRST step of
+        ``cleanup_sync``, which is a synchronous method running on another thread: it
+        submits each stop to the still-running loop and blocks on the result, once for
+        the watch service, once for the runtime command watcher, once for the Model Hub
+        gateway, once for the Codex runtime. The event loop is live for the whole of
+        those waits. A hold released when the settlement returns therefore reopens
+        admission at the exact moment the backends start coming apart — the residual
+        HFR-334 documented as "a shutdown tail with no awaits in it", which was simply
+        not true of a loop that keeps running beside a blocking caller.
+
+        NEVER CLEARED, and that is the honest semantics rather than a shortcut. What
+        this records is not "a teardown is dismantling these sessions" but "this
+        process is exiting", and no later moment makes dispatching correct again. There
+        is no reopen path because there is no recovery: the next start's restart
+        recovery and the ordinary queue drain own everything admitted from here on.
+
+        NOT A REJECTION, either. ``submit`` folds a closed admission into ``busy``, so
+        an arriving message still ENQUEUES durably and simply runs after the restart.
+        The flag makes the process stop dispatching, not stop accepting.
+
+        Set on the LOOP THREAD (the helper that calls this is submitted through
+        ``run_coroutine_threadsafe``), so every mutation of the admission state stays
+        on the one thread that reads it — the same discipline the counted holds keep.
+        Idempotent: a second shutdown pass, or a caller that retries, changes nothing.
+        """
+
+        if not self._admission_closed_for_shutdown:
+            logger.info(
+                "Closing session admission for the rest of this process: shutdown has "
+                "begun and no further turn may dispatch"
+            )
+        self._admission_closed_for_shutdown = True
+
     def is_teardown_admission_closed(self, session_id: Optional[str]) -> bool:
-        """True while a teardown holds this session's admission shut (HFR-330)."""
+        """True while a teardown holds this session's admission shut (HFR-330).
+
+        Or while the PROCESS is exiting (HFR-339), which closes every session at once
+        and never reopens — see :meth:`close_admission_for_shutdown`. An empty session
+        id stays a no-op even then: there is no session to refuse admission for, and
+        every caller already treats it that way.
+        """
         resolved = str(session_id or "").strip()
-        return bool(resolved) and self._teardown_admission.get(resolved, 0) > 0
+        if not resolved:
+            return False
+        if self._admission_closed_for_shutdown:
+            return True
+        return self._teardown_admission.get(resolved, 0) > 0
 
     def teardown_held_session_ids(self) -> set[str]:
         """Every session whose admission a teardown currently holds shut (HFR-336).
@@ -824,6 +887,14 @@ class SessionTurnManager:
         A copy, not the live dict: callers read it across their own awaits, and a hold
         released underneath a mutating view would be the same stale-snapshot bug this
         file is otherwise about.
+
+        IT REPORTS THE COUNTED HOLDS ONLY, and deliberately does not fold in the
+        process-wide shutdown close (HFR-339): "every session there will ever be" is
+        not a set this method can return, and inventing a partial one — the busy
+        sessions, say — would be a worse answer than an empty one, because a caller
+        would read it as complete. Callers that need the whole truth ask
+        :meth:`is_admission_closed_for_shutdown` first and defer everything when it is
+        ``True``.
         """
 
         return {session_id for session_id, depth in self._teardown_admission.items() if depth > 0}

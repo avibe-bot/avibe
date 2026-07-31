@@ -3726,6 +3726,61 @@ scenarios:
     # replacement direction -- a loser's result_text does not survive onto the failure
     # that outranked it).
     test: tests/test_harness_failure_visibility.py::test_a_losing_park_does_not_relabel_the_incumbent_intent
+  - id: HFR-339
+    name: >-
+      shutdown closes session admission for the whole process, so no turn dispatches
+      onto a backend cleanup_sync is dismantling
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 14. SUPERSEDES the documented residual HFR-334 accepted, which
+    # was accepted on a false premise.
+    # THE BUG: _settle_inflight_turns_for_shutdown holds every busy session's admission
+    # in one ExitStack (drain_on_release=False) and releases it when the helper returns.
+    # HFR-334 recorded the remainder as bounded -- "a shutdown tail with no awaits in
+    # it". There is no such tail. cleanup_sync is a SYNCHRONOUS method on a non-loop
+    # thread: it submits each stop with asyncio.run_coroutine_threadsafe and blocks on
+    # future.result, once for the watch service, once for the runtime command watcher,
+    # once for the Model Hub gateway, once for Codex shutdown_runtime. The event loop
+    # runs throughout every one of those waits, so from the settlement's return until
+    # the process actually dies the loop can admit AND dispatch a fresh turn onto a
+    # backend that is being taken apart. The window is not the tail of the shutdown; it
+    # is the entire backend teardown.
+    # THE FIX: a process-wide, never-cleared flag on SessionTurnManager
+    # (close_admission_for_shutdown), set at the TOP of the settlement helper -- before
+    # the busy set is enumerated, and unconditionally, so no window precedes it and an
+    # empty or failed enumeration cannot skip it. The helper is submitted to the loop,
+    # so the mutation stays on the one thread that reads the admission state.
+    # WHY A FLAG AND NOT A LONGER HOLD: the fact being recorded is not "a teardown is
+    # dismantling these sessions" but "this process is exiting", which no per-session
+    # counter can express and no later moment makes false. NEVER CLEARED for the same
+    # reason -- there is no reopen path because there is no recovery. It is not a
+    # rejection either: submit folds a closed admission into `busy` (unchanged), so an
+    # arriving message still ENQUEUES durably and the next start's restart recovery and
+    # queue drain own it.
+    # THE COUNTED HOLDS STAY. Under the flag they are redundant but never contradictory
+    # (the flag is a strict superset, so releasing the stack cannot reopen anything),
+    # and they remain the per-session record the settlement phase runs against: the
+    # teardown chain nests its own holds, and the helper is reachable with a manager
+    # that has no flag at all -- a half-built controller, a test double.
+    # ALL THREE DOORS, because closing one is the HFR-336 lesson.
+    # is_teardown_admission_closed answers True for EVERY session id (an empty id stays
+    # a no-op, as everywhere). teardown_held_session_ids deliberately does NOT fold the
+    # flag in: "every session there will ever be" is not a set it can return, and a
+    # partial one would read as complete. So the scheduler drain gets its own unscoped
+    # read, _shutdown_closed_all_admission, checked BEFORE the lock-keyed set in both
+    # _drain_requests (returns without claiming, and without re-arming _drain_dirty --
+    # this hold never clears, so re-arming would only spin the remaining ticks) and
+    # _teardown_holds_request (where it also covers create_per_run rows, which have no
+    # lock key for a teardown to hold but are just as unrunnable in a dying process).
+    # scheduled_task_service.stop() runs a step ahead of the settlement, so in the
+    # ordinary order those doors are already shut; the predicate is made truthful
+    # anyway, because "already stopped" is an ordering fact, not an invariant.
+    # HFR-334's shutdown pin is EXTENDED, not weakened: the counted holds still release
+    # on every path (_teardown_admission empties), and admission still reads closed
+    # afterwards -- now for sessions the stack never held as well.
+    test: tests/test_session_teardown.py::test_shutdown_admission_stays_closed_after_settlement_returns
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

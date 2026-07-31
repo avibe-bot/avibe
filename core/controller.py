@@ -1582,6 +1582,25 @@ class Controller:
         """
 
         manager = getattr(self, "session_turns", None)
+
+        # ADMISSION CLOSES FIRST, FOR THE WHOLE PROCESS (HFR-339).
+        #
+        # Before the busy set is even read, because there must be no window in front of
+        # it and because the flag is not a statement about who is busy — it is a
+        # statement about a process that is exiting. An enumeration that comes back
+        # empty, or raises, must not leave the door open behind it, so this is
+        # unconditional and precedes every early return below.
+        #
+        # This coroutine is submitted to the LOOP by ``cleanup_sync``, so the mutation
+        # happens on the same thread that reads it everywhere else; the counted holds
+        # below keep the same discipline.
+        close_admission = getattr(manager, "close_admission_for_shutdown", None)
+        if callable(close_admission):
+            try:
+                close_admission()
+            except Exception:  # noqa: BLE001
+                logger.debug("Shutdown: could not close session admission", exc_info=True)
+
         busy_session_ids = getattr(manager, "busy_session_ids", None)
         if not callable(busy_session_ids):
             return
@@ -1619,11 +1638,23 @@ class Controller:
         # per-session hold released at the top of the next iteration would reopen
         # sessions the shutdown has already passed.
         #
-        # RESIDUAL, accepted and bounded: the stack releases when this returns, while
-        # ``cleanup_sync`` still has backends to stop. Spanning that is not possible
-        # from here — it is a synchronous method on the other side of the loop
-        # teardown — and the remaining gap is a shutdown tail with no awaits in it,
-        # against the same durable queue.
+        # THE STACK NO LONGER HAS TO SPAN THE BACKEND TEARDOWN (HFR-339). It used to
+        # try, and the gap it left was documented as "a shutdown tail with no awaits in
+        # it" — which was wrong. ``cleanup_sync`` runs on ANOTHER thread and blocks on
+        # each remaining stop while this loop keeps running, so the stack's release
+        # reopened admission for the entire dismantling of the watch service, the
+        # runtime command watcher, the Model Hub gateway and the Codex runtime. The
+        # process-wide close above owns that window now, and owns it permanently.
+        #
+        # THE COUNTED HOLDS STAY, and are not merely belt-and-braces. They are the
+        # per-session record the settlement phase itself runs against: the teardown
+        # chain below nests its own holds (``release_for_teardown`` takes one inside
+        # ``teardown_session_runs``), and this helper is also reachable with a manager
+        # that never saw the flag — a half-built controller, a test double whose
+        # ``close_admission_for_shutdown`` is absent. Under the flag they are
+        # redundant, never contradictory: the flag is a strict superset, so a release
+        # here cannot reopen anything. Removing them would make the settlement's own
+        # correctness depend on the flag having been settable.
         with ExitStack() as admission_holds:
             for session_id in session_ids:
                 hold_session_admission(

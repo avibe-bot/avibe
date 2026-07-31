@@ -602,13 +602,121 @@ def test_controller_shutdown_settlement_holds_admission_without_draining() -> No
     # is still working through the rest of the list.
     assert settled[1][2] is True
 
-    # Released on the way out...
-    assert manager.is_teardown_admission_closed("sess-a") is False
-    assert manager.is_teardown_admission_closed("sess-b") is False
+    # The COUNTED holds are released on the way out, on every path, as they always
+    # were — a leaked counter would be a wedged session in any other caller.
+    assert manager._teardown_admission == {}
+    # ...but admission does NOT reopen, because HFR-339 supersedes what this test
+    # used to assert here. Releasing the stack once looked like the end of the
+    # window; it is the beginning of the backend teardown, which ``cleanup_sync``
+    # performs from another thread while this loop keeps running. The process-wide
+    # close now spans it and never lifts. Strictly stronger than the old pin: every
+    # session the stack held is still closed, and so is every session it did not.
+    assert manager.is_teardown_admission_closed("sess-a") is True
+    assert manager.is_teardown_admission_closed("sess-b") is True
     # ...and NOTHING was drained: a shutdown must not start fresh turns against
     # backends ``cleanup_sync`` is about to tear down.
     assert manager._teardown_drain_owed == set()
     assert manager._teardown_drain_tasks == {}
+
+
+def test_shutdown_admission_stays_closed_after_settlement_returns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-339: the shutdown hold must outlive the settlement that took it.
+
+    HFR-334 closed admission for the DURATION of
+    ``_settle_inflight_turns_for_shutdown`` and documented the tail as an accepted
+    residual "with no awaits in it". That description is false. The helper is
+    submitted to the STILL-RUNNING event loop by ``cleanup_sync``, which is a
+    synchronous method on another thread; when the helper returns, its ``ExitStack``
+    releases and the cleanup thread goes on to BLOCK — once per stop — waiting for
+    the watch service, the runtime command watcher, the Model Hub gateway and the
+    Codex runtime. The loop is running for the whole of those waits, so it can admit
+    and dispatch a brand-new turn onto a backend that is being dismantled. The
+    window is not a tail without awaits; it is the entire backend teardown.
+
+    So the shutdown answer is a PROCESS-WIDE, NEVER-CLEARED flag rather than a set of
+    per-session holds: the thing that changed is not "these sessions are being torn
+    down" but "this process is exiting", and nothing that arrives afterwards should
+    ever dispatch. Set on the loop thread at the very top of the helper — before the
+    busy set is even enumerated, so no window precedes it and no failure to enumerate
+    can skip it.
+
+    Pinned on all three doors the flag has to close, because closing one and leaving
+    the others is the HFR-336 lesson: ``is_teardown_admission_closed`` for every
+    session id (not just the busy ones), ``submit`` still ENQUEUEING durably rather
+    than dispatching, and the scheduler's own single-row door.
+    """
+
+    from core.controller import Controller
+    from core.scheduled_tasks import ScheduledTaskStore, TaskExecutionStore
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    manager = SessionTurnManager()
+    controller = SimpleNamespace(session_turns=manager, platform_settings_managers={})
+    manager.controller = controller
+    manager.busy_session_ids = lambda: {"sess-busy"}
+
+    async def _teardown_session_runs(_controller, _session_id, *, settled_by, **_kwargs):
+        return 1
+
+    with patch("core.controller.teardown_session_runs", _teardown_session_runs):
+        asyncio.run(Controller._settle_inflight_turns_for_shutdown(controller))
+
+    # Pre-fix the stack had unwound by now and every one of these read OPEN.
+    assert manager.is_admission_closed_for_shutdown() is True
+    assert manager.is_teardown_admission_closed("sess-busy") is True
+    # ...including a session that was never busy. The flag is about the dying
+    # process, not about who happened to be mid-turn when it started dying.
+    assert manager.is_teardown_admission_closed("sess-idle") is True
+
+    dispatched: list[str] = []
+    enqueued: list[str] = []
+
+    async def _never_dispatch(_session_id, _context, text, **_kwargs) -> None:
+        dispatched.append(text)
+
+    manager._run = _never_dispatch  # type: ignore[assignment]
+    context = MessageContext(user_id="U", channel_id="sess-idle", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "sess-idle",
+        "agent_session_target": {"agent_backend": "claude"},
+    }
+
+    def _enqueue() -> bool:
+        enqueued.append("racer")
+        return True
+
+    result = asyncio.run(manager.submit("sess-idle", context, "racer", enqueue=_enqueue))
+
+    # The refusal is a DURABLE QUEUE, not a rejection: ``submit`` folds the closed
+    # admission into ``busy``, so the message survives to the next start.
+    assert result.route == "enqueued"
+    assert result.queue_persisted is True
+    assert enqueued == ["racer"]
+    assert dispatched == [], (
+        "a message admitted after the shutdown settlement returned dispatched onto a "
+        "backend cleanup_sync was about to tear down"
+    )
+
+    # THE SCHEDULER'S DOOR (HFR-336) has to be told the same truth, and cannot learn
+    # it from the enumerating half: ``teardown_held_session_ids`` reports the counted
+    # per-session holds, and "every session there will ever be" is not a set it can
+    # return. So the drain asks the flag first.
+    request_store = TaskExecutionStore(tmp_path / "reqs")
+    queued = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123", prompt="queued while the process exits"
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert manager.teardown_held_session_ids() == set()
+    assert service._teardown_holds_request(queued) is True
 
 
 def test_composite_split_disambiguates_against_stored_anchors(tmp_path: Path) -> None:
