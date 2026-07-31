@@ -4120,8 +4120,9 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
         ).mappings().first()
         assert session is not None
         scope_id = session["scope_id"]
+        stale_rows = {}
         for run_id in run_ids:
-            message_deliveries.enqueue_queued(
+            stale_rows[run_id] = message_deliveries.enqueue_queued(
                 conn,
                 scope_id=scope_id,
                 session_id=session_id,
@@ -4162,17 +4163,146 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     assert "coalesced prompt 2" in submitted[0]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        retained = [
-            message_deliveries.get_delivery_by_dedupe(
-                conn,
-                f"avibe:agent_run:{run_id}",
-            )
+        retained = {
+            run_id: message_deliveries.get_delivery(conn, stale_rows[run_id]["id"])
             for run_id in run_ids
-        ]
-    assert all(row is not None and row["state"] == "retired" for row in retained)
+        }
+        primary_owner = message_deliveries.get_delivery_by_dedupe(
+            conn,
+            f"avibe:agent_run:{run_ids[0]}",
+        )
+        child_owner = message_deliveries.get_delivery_by_dedupe(
+            conn,
+            f"avibe:agent_run:{run_ids[1]}",
+        )
+    assert all(row is not None and row["state"] == "retired" for row in retained.values())
+    assert retained[run_ids[0]]["dedupe_key"] is None
+    assert primary_owner is None
+    assert child_owner is not None and child_owner["id"] == stale_rows[run_ids[1]]["id"]
     stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
     assert stored[run_ids[0]]["status"] == "running"
     assert stored[run_ids[1]]["status"] == "queued"
+
+
+def test_recovered_agent_run_resubmits_through_real_session_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from core import internal_server, session_turns
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recover through the durable gate",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_runs_for_workbench([request.id]) == [request.id]
+    request_store.recover_processing()
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        stale = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="recover through the durable gate",
+            native_message_id=f"agent_run:{request.id}",
+        )
+
+    sinks: dict[str, dict] = {}
+
+    def _session_key(context):
+        return f"avibe::{(context.platform_specific or {}).get('agent_session_id')}"
+
+    def _register_sink(
+        key,
+        *,
+        on_chunk,
+        done_event,
+        turn_token=None,
+        context=None,
+    ):
+        sinks[key] = {
+            "on_chunk": on_chunk,
+            "done_event": done_event,
+            "turn_token": turn_token,
+            "context": context,
+        }
+
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        message_handler=SimpleNamespace(handle_scheduled_message=AsyncMock()),
+        command_handler=SimpleNamespace(handle_stop=AsyncMock(return_value=True)),
+        agent_service=SimpleNamespace(default_agent="codex", agents={}, _turn_gates={}),
+        config=SimpleNamespace(language="en"),
+        _get_lang=lambda: "en",
+        _get_session_key=_session_key,
+        register_turn_sink=_register_sink,
+        get_turn_sink=lambda key: sinks.get(key),
+        pop_turn_sink=lambda key, done_event=None: sinks.pop(key, None),
+        _session_id_from_context=lambda context: (
+            context.platform_specific or {}
+        ).get("agent_session_id"),
+        resolve_agent_for_context=lambda _context: "codex",
+        set_agent_status=lambda *_args: None,
+        emit_agent_message=AsyncMock(),
+    )
+    internal_server.create_app(controller)
+    dispatched: list[str] = []
+
+    async def _dispatch(_controller, _context, text, **_kwargs):
+        dispatched.append(text)
+        return TurnDispatchOutcome(
+            error=None,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+        )
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+        for _ in range(100):
+            if not controller.session_turns.in_flight:
+                break
+            await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+    assert dispatched == ["recover through the durable gate"]
+    with engine.connect() as conn:
+        stale_after = message_deliveries.get_delivery(conn, stale["id"])
+        owner = message_deliveries.get_delivery_by_dedupe(
+            conn,
+            f"avibe:agent_run:{request.id}",
+        )
+    assert stale_after is not None and stale_after["state"] == "retired"
+    assert stale_after["dedupe_key"] is None
+    assert owner is not None and owner["id"] != stale["id"]
+    assert owner["state"] == "accepted"
 
 
 def test_recovered_coalesced_agent_run_early_failure_settles_children(tmp_path: Path, monkeypatch) -> None:

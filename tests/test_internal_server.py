@@ -2553,6 +2553,64 @@ def test_backend_drain_queues_idle_session_without_dispatching(tmp_path, monkeyp
     assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
+def test_backend_drain_queues_pre_reserved_idle_submission_before_resume(
+    tmp_path,
+    monkeypatch,
+):
+    """A Web-reserved Delivery becomes claimable before the backend drain ends."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_backend_drain_reserved",
+        backend="codex",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="reserved during refresh",
+        )
+
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    manager._start_persisted_turn = AsyncMock(return_value=None)
+    context = MessageContext(
+        user_id="U",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": session_id,
+            "scope_id": session["scope_id"],
+            "delivery_id": reserved["id"],
+            "agent_session_target": {"agent_backend": "codex"},
+        },
+    )
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        admitted = await manager.submit(
+            session_id,
+            context,
+            "reserved during refresh",
+        )
+        with engine.connect() as conn:
+            queued = message_deliveries.get_delivery(conn, reserved["id"])
+        await manager.end_backend_drain("codex")
+        return admitted, queued
+
+    admitted, queued = asyncio.run(_go())
+
+    assert admitted == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+    )
+    assert queued is not None and queued["state"] == "queued"
+    manager._start_persisted_turn.assert_awaited_once()
+
+
 def test_backend_drain_exposes_failed_queue_persistence(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _engine, session = _create_test_session(

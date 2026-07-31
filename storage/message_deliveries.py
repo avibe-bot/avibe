@@ -956,7 +956,47 @@ def retire_queued(conn: Connection, session_id: str, delivery_id: str) -> bool:
     return updated is not None
 
 
+def retire_queued_for_resubmission(
+    conn: Connection,
+    session_id: str,
+    delivery_id: str,
+    *,
+    expected_dedupe_key: str,
+) -> bool:
+    """Retire a recovered primary row and release its native dedupe claim."""
+
+    delivery = get_delivery(conn, delivery_id)
+    if (
+        delivery is None
+        or delivery["session_id"] != session_id
+        or delivery["state"] != "queued"
+        or delivery.get("dedupe_key") != expected_dedupe_key
+        or delivery.get("current_attempt_id") is not None
+    ):
+        return False
+    updated = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("queued",),
+        values={
+            "state": "retired",
+            "retired_at": utc_now_iso(),
+            "dedupe_key": None,
+        },
+        history_event={
+            "kind": "retire",
+            "reason": "agent_run_recovery_resubmit",
+            "released_dedupe_key": expected_dedupe_key,
+        },
+    )
+    return updated is not None
+
+
 def owned_agent_run_id(delivery: dict[str, Any]) -> str | None:
+    projected_native_message_id = str(delivery.get("native_message_id") or "")
+    if projected_native_message_id.startswith("agent_run:"):
+        return projected_native_message_id.removeprefix("agent_run:") or None
     snapshot = _json_object(delivery.get("snapshot_json"))
     native_message_id = str(snapshot.get("native_message_id") or "")
     if native_message_id.startswith("agent_run:"):

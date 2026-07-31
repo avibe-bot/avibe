@@ -965,6 +965,7 @@ def _retire_stale_agent_run_queue_rows(
     *,
     session_id: Optional[str],
     execution_ids: list[str],
+    resubmit_execution_id: Optional[str] = None,
 ) -> int:
     """Retire old queued Workbench rows for recovered direct Agent Runs.
 
@@ -999,9 +1000,20 @@ def _retire_stale_agent_run_queue_rows(
         ]
         retired = 0
         for row in rows:
-            retired += int(
-                message_deliveries.retire_queued(conn, session_id, str(row["id"]))
-            )
+            owned_run_id = message_deliveries.owned_agent_run_id(row)
+            if owned_run_id == resubmit_execution_id:
+                retired += int(
+                    message_deliveries.retire_queued_for_resubmission(
+                        conn,
+                        session_id,
+                        str(row["id"]),
+                        expected_dedupe_key=f"avibe:agent_run:{resubmit_execution_id}",
+                    )
+                )
+            else:
+                retired += int(
+                    message_deliveries.retire_queued(conn, session_id, str(row["id"]))
+                )
         return retired
 
 
@@ -5253,6 +5265,7 @@ class ScheduledTaskService:
                     )
                 )
                 or [execution_id],
+                resubmit_execution_id=execution_id,
             )
             if stale_queue_rows:
                 try:

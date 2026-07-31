@@ -842,18 +842,21 @@ class SessionTurnManager:
                     str(delivery["state"]),
                     str(delivery.get("current_target_turn_id") or "") or None,
                 )
-            if active is not None and delivery["state"] == "reserved":
+            if (active is not None or backend_draining) and delivery["state"] == "reserved":
+                queue_reason = "active_turn" if active is not None else "backend_drain"
+                history_event: dict[str, Any] = {
+                    "kind": "queue",
+                    "reason": queue_reason,
+                }
+                if active is not None:
+                    history_event["turn_id"] = str(active["id"])
                 claimed = delivery_store.cas_delivery(
                     conn,
                     str(delivery["id"]),
                     expected_version=int(delivery["version"]),
                     expected_states=("reserved",),
                     values={"state": "queued"},
-                    history_event={
-                        "kind": "queue",
-                        "reason": "active_turn",
-                        "turn_id": str(active["id"]),
-                    },
+                    history_event=history_event,
                 )
                 if claimed is None:
                     raise RuntimeError("P3 queue claim lost after writer reservation")

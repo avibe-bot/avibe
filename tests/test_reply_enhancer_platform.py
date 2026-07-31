@@ -1411,9 +1411,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "the new message does not leapfrog it",
+            "`--send-now --message` is a content-P0 admission",
             prompt,
         )
+        self.assertIn(
+            "starts that new instruction immediately even if older backlog is held",
+            prompt,
+        )
+        self.assertIn(
+            "adds no Message; it releases the hold and promotes the exact oldest queued P3 head",
+            prompt,
+        )
+        self.assertNotIn("the new message does not leapfrog it", prompt)
         self.assertIn(
             "If interruption is refused, the active turn and durable queue remain intact",
             prompt,
