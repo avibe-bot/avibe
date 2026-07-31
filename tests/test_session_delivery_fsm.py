@@ -491,6 +491,37 @@ def test_native_start_ambiguity_is_quarantined_without_duplicate_dispatch(manage
     assert turn["start_attempt_id"]
 
 
+def test_restart_reconciles_unrecorded_p0_interrupt_without_retry(managers) -> None:
+    manager, restarted, engine, _engine_b, _starts = managers
+
+    async def leave_interrupt_unrecorded(_session_id, _turn_id, _delivery_id):
+        return {"state": "interrupting"}
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        manager._interrupt_durable_turn = leave_interrupt_unrecorded
+        delivery = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="replacement"),
+            context=_context(),
+        )
+        assert delivery.state == "interrupting"
+        await restarted.recover_durable_delivery_state()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return delivery
+
+    delivery = asyncio.run(run())
+    row = next(item for item in _delivery_rows(engine) if item["id"] == delivery.delivery_id)
+    assert row["state"] == "reconciling"
+    restarted.controller.command_handler.handle_stop.assert_not_awaited()
+
+
 def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     admitted = asyncio.run(

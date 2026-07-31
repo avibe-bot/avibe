@@ -2026,12 +2026,12 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             for attempt in delivery_store.unsettled_attempts(conn, session_id):
-                if attempt["state"] == "steering":
+                if attempt["state"] in {"steering", "interrupting"}:
                     delivery_store.cas_delivery(
                         conn,
                         str(attempt["id"]),
                         expected_version=int(attempt["version"]),
-                        expected_states=("steering",),
+                        expected_states=(str(attempt["state"]),),
                         values={"state": "reconciling", "receipt_outcome": "unknown"},
                     )
 
