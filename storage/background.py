@@ -1614,6 +1614,60 @@ def _cancel_aware_terminal_status(
     return status, guards
 
 
+def _deferred_metadata_for_settlement(
+    parked: Any,
+    *,
+    run_id: str,
+    settling_status: Any,
+    deferred_status: Any,
+) -> Optional[dict[str, Any]]:
+    """THE SETTLEMENT EQUALITY RULE for a parked terminal cause. ONE copy, TWO callers.
+
+    Used by BOTH settling consumers of the ``deferred_terminal_*`` family —
+    :meth:`SQLiteBackgroundTaskStore.record_run_output` and
+    :meth:`SQLiteBackgroundTaskStore.settle_deferred_run`. **A third consumer must call
+    this, not re-derive it**: the rule was written once for HFR-329, left inline, and
+    the other consumer settled contradictory rows for a whole review round (HFR-331).
+
+    The parked metadata rides along IFF the status that ACTUALLY settles equals the
+    deferred one — i.e. the parked cause won or tied the arbitration. ``settling_status``
+    must therefore be the value the caller is about to WRITE, read from inside its own
+    bounded re-read, never a pre-loop request: ``_cancel_aware_terminal_status`` turns a
+    ``failed`` into ``canceled`` when a user's Stop lands under the first CAS, and that
+    is a different outcome from the parked one.
+
+    STRICTER THAN THE SIBLING ``deferred_terminal_error``, deliberately, which still
+    overrides unconditionally in both callers (§10.3 covers contradictory TEXT through
+    the equality-guarded backfill instead). ``interrupt_reason`` is not text: it selects
+    the notice IDENTITY (``interrupt:{run}:{reason}`` vs the bare run id the live path's
+    dedup key resolves to) and it removes the row from derived health by membership in
+    ``RUN_INTERRUPTION_REASONS``. Merging a cause into an outcome it did not win is
+    therefore wrong in two user-visible systems at once — and the case that matters most
+    is the inversion: a user's Stop settling ``canceled`` while carrying
+    ``interrupt_reason=evicted``, infrastructure metadata describing user intent, which
+    is HFR-012/037's inversion in metadata form.
+
+    Returns the metadata to merge, or ``None`` when the cause was superseded. THE KEY IS
+    POPPED BY THE CALLER EITHER WAY: the call consumes the deferred intent, and a key
+    left in ``result_payload_json`` is a parked cause with no settlement left to reach —
+    stale forever and replayable by the next reader of the family.
+    """
+
+    if not isinstance(parked, dict) or not parked:
+        return None
+    settling = normalize_run_status(settling_status)
+    if settling == normalize_run_status(deferred_status):
+        return dict(parked)
+    logger.debug(
+        "run %s: parked terminal cause (%s) superseded by the settling outcome (%s); "
+        "settling without it",
+        run_id,
+        normalize_run_status(deferred_status),
+        settling,
+    )
+    return None
+
+
 def _coalesced_terminal_write(
     conn: Any, row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
 ) -> Optional[tuple[dict[str, Any], list[Any]]]:
@@ -3501,37 +3555,16 @@ class SQLiteBackgroundTaskStore:
                     status, guards = _cancel_aware_terminal_status(
                         terminal_row, effective_terminal_status
                     )
-                    # THE RULE: the parked metadata rides along IFF the status that
-                    # actually settles equals the deferred one — i.e. the parked cause
-                    # won or tied the arbitration. It is decided HERE, inside the
-                    # bounded re-read, against the ``status`` this attempt will write,
-                    # never against the pre-loop value: the second attempt can turn a
-                    # ``failed`` into ``canceled`` through
-                    # ``_cancel_aware_terminal_status`` when a Stop lands under the
-                    # first CAS, and that is a different outcome from the parked one.
-                    #
-                    # STRICTER THAN THE SIBLING ``deferred_error``, deliberately, and
-                    # the asymmetry is not an oversight. ``deferred_terminal_error``
-                    # still overrides unconditionally (unchanged here — §10.3 covers
-                    # contradictory TEXT through the equality-guarded backfill below).
-                    # ``interrupt_reason`` is not text: it selects the notice IDENTITY
-                    # (``interrupt:{run}:{reason}`` vs the bare run id the live path's
-                    # dedup key resolves to) and it removes the row from derived health
-                    # by membership in ``RUN_INTERRUPTION_REASONS``. Merging a cause
-                    # into an outcome it did not win is therefore wrong in two
-                    # user-visible systems at once: a genuine backend failure would be
-                    # minted an interruption identity AND dropped from the definition's
-                    # own failure history.
-                    parked_cause = deferred_metadata
-                    if parked_cause and normalize_run_status(status) != deferred_status:
-                        logger.debug(
-                            "run %s: parked terminal cause (%s) superseded by the "
-                            "delivered outcome (%s); settling without it",
-                            run_id,
-                            deferred_status,
-                            normalize_run_status(status),
-                        )
-                        parked_cause = None
+                    # THE SETTLEMENT EQUALITY RULE, decided HERE — inside the bounded
+                    # re-read, against the ``status`` this attempt will write, never the
+                    # pre-loop value. See ``_deferred_metadata_for_settlement``, which
+                    # owns the rule for this caller and for ``settle_deferred_run``.
+                    parked_cause = _deferred_metadata_for_settlement(
+                        deferred_metadata,
+                        run_id=run_id,
+                        settling_status=status,
+                        deferred_status=deferred_status,
+                    )
                     terminal_values = {
                         **base_terminal_values,
                         "status": status,
@@ -3868,6 +3901,11 @@ class SQLiteBackgroundTaskStore:
         defer time both survives a crash in the gap and reaches
         ``_owed_failure_notice_for_transition`` in time to pick the interruption
         lane rather than the ordinary-failure one.
+
+        THE MERGE IS CONDITIONAL, on the equality rule this method shares with
+        ``record_run_output`` (``_deferred_metadata_for_settlement``, HFR-331). Popping
+        is not: the intent is consumed by this call either way, or the key is left in
+        ``result_payload_json`` as a parked cause with no settlement left to reach.
         """
 
         now = updated_at or _utc_now_iso()
@@ -3907,6 +3945,22 @@ class SQLiteBackgroundTaskStore:
                     else normalize_run_status(deferred_status)
                 )
                 status, guards = _cancel_aware_terminal_status(row, requested_status)
+                # THE SETTLEMENT EQUALITY RULE — the same one ``record_run_output``
+                # applies, and this call is why it lives in a shared helper (HFR-331).
+                # ``_cancel_aware_terminal_status`` above can flip a deferred ``failed``
+                # to ``canceled`` when the user's Stop raced the settlement, and the
+                # metadata used to ride along unconditionally: a row recorded as
+                # ``canceled`` — user intent — carrying ``interrupt_reason=evicted``,
+                # infrastructure metadata describing a cancellation nobody's
+                # infrastructure caused. It is decided against ``status``, the value this
+                # attempt actually writes, and re-decided on the re-read pass because the
+                # payload is re-popped there too.
+                parked_cause = _deferred_metadata_for_settlement(
+                    deferred_metadata,
+                    run_id=run_id,
+                    settling_status=status,
+                    deferred_status=deferred_status,
+                )
                 values: dict[str, Any] = {
                     "status": status,
                     "completed_at": now,
@@ -3926,7 +3980,7 @@ class SQLiteBackgroundTaskStore:
                     source_kind=row["source_kind"],
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
-                    extra_metadata=deferred_metadata,
+                    extra_metadata=parked_cause,
                     now=now,
                 )
                 transition = conn.execute(

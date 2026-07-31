@@ -3270,6 +3270,44 @@ scenarios:
     # itself and must still be stamped, or an evicted session stays running forever.
     # Presence alone was too coarse and broke HFR-121's double.
     test: tests/test_internal_server.py::test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_runtime
+  - id: HFR-331
+    name: a user cancel beats a parked interruption cause at settlement
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 9, and the SHARED-HELPER CONSOLIDATION of HFR-329's rule. HFR-329
+    # established the settlement equality rule -- a parked terminal cause may ride the
+    # settlement only when the status that actually settles EQUALS the deferred one --
+    # and implemented it INLINE in record_run_output, the consumer it was fixing.
+    # settle_deferred_run is the family's other settling consumer and never got it.
+    # THE BUG: settle_deferred_run pops deferred_terminal_metadata, computes
+    # requested_status via _stronger_terminal_status, hands it to
+    # _cancel_aware_terminal_status -- which flips failed to canceled when the user's
+    # Stop set cancel_requested under the settlement -- and then passed the parked
+    # metadata as extra_metadata UNCONDITIONALLY, one line later. On the exact race that
+    # guard exists for, the row settled canceled while carrying
+    # interrupt_reason=evicted: infrastructure metadata describing a cancellation the
+    # user asked for. HFR-012/037's inversion in metadata form, plus HFR-329's two
+    # user-visible systems (the interrupt:{run}:{reason} notice identity, and removal
+    # from derived health by membership in RUN_INTERRUPTION_REASONS).
+    # FIX: extract the rule ONCE into _deferred_metadata_for_settlement and call it from
+    # BOTH consumers -- record_run_output refactored onto it with its HFR-329 behavior
+    # unchanged, settle_deferred_run gaining it. Decided against the status the caller
+    # is about to WRITE, inside each caller's own bounded re-read / CAS structure
+    # (settle_deferred_run re-pops the payload on its re-read pass, so the decision is
+    # re-taken there too), never against a pre-loop request. Metadata still POPPED
+    # unconditionally in both: the call consumes the intent either way, and a surviving
+    # key is a parked cause with no settlement left to reach. The helper's docstring
+    # names both consumers and warns the next one to call it rather than re-derive.
+    # LESSON, the second iteration of HFR-329's own propagate lesson (§10.10): fixing a
+    # shared rule at one consumer and leaving it inline IS the root cause of the next
+    # round's finding. Build once, call twice.
+    # Companion (the agreeing case -- parked failed/evicted, no cancel race -> failed +
+    # interrupt_reason + the interruption notice identity) is already pinned by HFR-110's
+    # test_interrupt_reason_survives_a_crash_between_defer_and_settle and is not
+    # duplicated; record_run_output's own two directions stay pinned by HFR-329's pair.
+    test: tests/test_harness_failure_visibility.py::test_user_cancel_beats_a_parked_interruption_cause
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

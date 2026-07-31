@@ -567,6 +567,76 @@ def test_a_parked_cause_does_not_mislabel_an_outcome_that_outranks_it(
     assert health["consecutive_failures"] == 1
 
 
+def test_user_cancel_beats_a_parked_interruption_cause(tmp_path: Path) -> None:
+    """HFR-331 — the equality rule belongs to BOTH settling consumers, not one.
+
+    HFR-329 wrote the rule inline in ``record_run_output`` and stopped there.
+    ``settle_deferred_run`` is the family's other settling consumer and it merged the
+    parked metadata UNCONDITIONALLY, one line after
+    ``_cancel_aware_terminal_status`` had been given the chance to overrule the parked
+    status. So on the exact race that guard exists for — a user's Stop landing on a run
+    whose infrastructure interruption was already parked — the row settled ``canceled``
+    while carrying ``interrupt_reason=evicted``: infrastructure metadata describing a
+    cancellation the user asked for. HFR-012/037's inversion, in metadata form, and the
+    same two user-visible systems HFR-329 names go wrong with it (the notice identity
+    and the definition's derived health).
+
+    The fix is consolidation, not a second copy: both consumers now call
+    ``_deferred_metadata_for_settlement``. The metadata is still POPPED unconditionally
+    here — the intent is consumed by this call whether or not it is merged.
+
+    ``cancel_run`` on a RUNNING row sets ``cancel_requested`` alone (it flips only a
+    QUEUED row straight to ``canceled``), which is exactly the state a Stop leaves for
+    the settlement to arbitrate. The AGREEING case — a parked failed/evicted intent with
+    no cancel race, settling ``failed`` with the ``interrupt:{run}:{reason}`` notice
+    identity — is already pinned by
+    ``test_interrupt_reason_survives_a_crash_between_defer_and_settle`` (HFR-110) and is
+    deliberately not duplicated here.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-stopped", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-stopped")
+    assert requests.claim(run.id) is not None
+    assert sqlite.defer_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="the session was reclaimed mid-turn",
+        metadata={"interrupt_reason": "evicted"},
+    )
+    assert sqlite.get_run(run.id)["status"] == "running"
+
+    # The user's Stop, landing before the parked intent is applied.
+    assert sqlite.cancel_run(run.id) is True
+    parked = sqlite.get_run(run.id)
+    assert parked["status"] == "running", "a running row keeps only the flag"
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+
+    assert sqlite.settle_deferred_run(run.id) is True
+
+    settled = sqlite.get_run(run.id)
+    assert settled["status"] == "canceled", "the Stop outranks the parked failure"
+    assert "interrupt_reason" not in (settled.get("metadata") or {}), (
+        "a cause that lost the arbitration must not describe the outcome that won it — "
+        "an infrastructure interruption recorded on a row the user cancelled"
+    )
+    # A cancellation owes no failure notice, and none may be minted by the stale cause.
+    assert (settled.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+    # Consumed either way: the deferred intent was settled by this call.
+    assert not [
+        key
+        for key in (settled.get("result_payload") or {})
+        if key.startswith("deferred_terminal_")
+    ]
+    # And the definition's health is untouched: a user Stop is neither its failure nor
+    # an out-of-band interruption.
+    health = sqlite.definition_health("task-stopped")
+    assert health["recent_failures"] == 0
+    assert health["consecutive_failures"] == 0
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 
