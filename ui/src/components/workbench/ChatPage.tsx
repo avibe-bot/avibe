@@ -27,6 +27,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
+import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
   activityKindI18nKey,
@@ -3444,6 +3445,7 @@ export const MessageRow = memo(function MessageRow({
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
+  const resultPresentation = resultFooterParts(message);
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media
   // is rewritten inline into the text instead, handled by the Markdown renderer).
@@ -3515,9 +3517,9 @@ export const MessageRow = memo(function MessageRow({
   // original line breaks stay visible (a harness prompt often mixes authored
   // Markdown with line-oriented waiter output); agent/system replies are
   // authored Markdown and must not get stray hard breaks.
-  const bodyNode = message.text ? (
+  const bodyNode = resultPresentation.body ? (
     <Markdown
-      content={message.text}
+      content={resultPresentation.body}
       // An annotation the user typed is the user's own words (rule 05), so it
       // keeps their line breaks exactly as the ordinary user bubble does.
       softBreaks={isUser || isHarness || (row.kind === 'annotation' && row.annotation.direction === 'user')}
@@ -3546,8 +3548,21 @@ export const MessageRow = memo(function MessageRow({
   // the unnamed ``group-hover`` ChatImage uses for its own overlay button.
   // Coarse pointers (touch) have no hover, so keep it always visible there.
   const time = (
-    <span className="px-1 font-mono text-[10px] text-muted opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100">
-      {formatLocalDateTime(message.created_at)}
+    <span
+      className={clsx(
+        'inline-flex max-w-full items-center gap-1.5 whitespace-nowrap px-1 font-mono text-[10px] text-muted transition-opacity duration-150',
+        resultPresentation.footer
+          ? 'opacity-100'
+          : 'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
+      )}
+    >
+      <span>{formatLocalDateTime(message.created_at)}</span>
+      {resultPresentation.footer ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <span>{resultPresentation.footer}</span>
+        </>
+      ) : null}
     </span>
   );
 

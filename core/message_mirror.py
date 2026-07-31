@@ -321,6 +321,7 @@ def persist_agent_message(
     text: str,
     *,
     quick_replies: Optional[list[str]] = None,
+    result_footer: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
 ) -> Optional[dict]:
@@ -431,6 +432,11 @@ def persist_agent_message(
                 # render their own native buttons from the same parse).
                 if quick_replies:
                     content = {**(content or {}), "quick_replies": list(quick_replies)}
+                # Keep the generated duration/token summary as structured content.
+                # IM delivery may still fold it into ``text``, while the Web
+                # transcript can render it beside the timestamp without guessing.
+                if result_footer:
+                    content = {**(content or {}), "result_footer": result_footer}
                 appended_row = _append_quietly(
                     conn,
                     scope_id=scope_id,

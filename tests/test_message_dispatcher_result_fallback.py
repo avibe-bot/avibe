@@ -549,6 +549,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_called_once()
         _, _ptype, ptext = persist.call_args.args
         self.assertEqual(ptext, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
+        self.assertEqual(persist.call_args.kwargs["result_footer"], "✅ ⏱️ 5s · 🪙 1.2k tok")
 
     async def test_folded_result_footer_is_persisted_for_non_subtext_platform(self):
         """The folded footnote must be persisted too, so a reloaded transcript /
@@ -567,6 +568,22 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         _, persisted_type, persisted_text = persist.call_args.args
         self.assertEqual(persisted_type, "result")
         self.assertEqual(persisted_text, "Answer body\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
+        self.assertEqual(persist.call_args.kwargs["result_footer"], "✅ ⏱️ 5s · 🪙 1.2k tok")
+
+    async def test_avibe_persists_clean_body_with_structured_result_footer(self):
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="avibe")
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(
+                context, "result", "Answer body", result_footer="✅ ⏱️ 5s · 🪙 1.2k tok"
+            )
+
+        _, persisted_type, persisted_text = persist.call_args.args
+        self.assertEqual(persisted_type, "result")
+        self.assertEqual(persisted_text, "Answer body")
+        self.assertEqual(persist.call_args.kwargs["result_footer"], "✅ ⏱️ 5s · 🪙 1.2k tok")
 
     async def test_result_persists_cleaned_display_text_not_raw(self):
         """The persisted result must match what the user was shown, not the raw
@@ -628,9 +645,9 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.sent_messages, [])
 
     async def test_suppressed_result_records_folded_footer(self):
-        """A suppressed (private) result can't ride subtext, so the footnote must
-        be folded into the recorded text to keep the duration/token info (Codex P2)."""
-        controller = _StubController(platform="slack")
+        """A suppressed Web result keeps structured UI metrics while its run
+        record retains the complete folded text."""
+        controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         captured = {}
 
@@ -639,15 +656,18 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher._record_suppressed_run_message = _capture
         context = MessageContext(
-            user_id="U1", channel_id="C1", platform="slack",
+            user_id="U1", channel_id="C1", platform="avibe",
             platform_specific={"suppress_delivery": True},
         )
 
-        await dispatcher.emit_agent_message(
-            context, "result", "private output", result_footer="✅ ⏱️ 5s · 🪙 1.2k tok"
-        )
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(
+                context, "result", "private output", result_footer="✅ ⏱️ 5s · 🪙 1.2k tok"
+            )
 
         self.assertEqual(captured["text"], "private output\n\n✅ ⏱️ 5s · 🪙 1.2k tok")
+        self.assertEqual(persist.call_args.args[2], "private output")
+        self.assertEqual(persist.call_args.kwargs["result_footer"], "✅ ⏱️ 5s · 🪙 1.2k tok")
 
     async def test_notify_persisted_only_on_successful_send(self):
         controller = _StubController(platform="slack")

@@ -532,6 +532,39 @@ describe('read-only transcript locks the secret-request cards', () => {
   });
 });
 
+describe('Agent result metrics tail', () => {
+  const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
+
+  it('renders structured duration and token usage once, after the timestamp', () => {
+    const markup = render(
+      <MessageRow
+        message={agentWithQuickReplies({ result_footer: footer })}
+        session={session()}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).toContain('opacity-100');
+  });
+
+  it('moves a legacy folded footer out of the Markdown body', () => {
+    const legacy = {
+      ...agentWithQuickReplies(),
+      text: `Answer body\n\n${footer}`,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={legacy} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('Answer body');
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+  });
+});
+
 describe('agent-authored local file links', () => {
   const linkedMessage = (author: 'agent' | 'user'): WorkbenchMessage => ({
     ...agentWithQuickReplies(),
