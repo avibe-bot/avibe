@@ -3021,6 +3021,44 @@ scenarios:
     # The Stop half is pinned separately so the guard cannot quietly widen:
     # tests/test_scheduled_tasks.py::test_stopped_manager_lane_settlement_ignores_a_blocking_activity
     test: tests/test_scheduled_tasks.py::test_evicted_workbench_turn_with_blocking_activity_parks_its_settlement
+  - id: HFR-326
+    name: a Codex force-eviction converges even when the transport refuses to stop
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: codex
+    # PR2 review round 6. Inside evict_idle_transports' per-cwd lock the teardown
+    # (teardown_runtime_session_runs(..., evicted): settles the runs, cancels the
+    # manager turns) runs BEFORE await transport.stop(). The failure branch was
+    # `except Exception: continue`, which preserved _transports,
+    # _transport_last_activity, the cwd inode map, the thread mappings, _turn_registry
+    # and _session_locks for a later retry -- while the runs were ALREADY terminalized
+    # and the turns ALREADY cancelled. A transient stop failure therefore left a LIVE
+    # backend whose rows are terminal: its eventual real result has no owner, and
+    # settle_run_terminal is scoped to queued|running, so it can never take them back.
+    # FIX: converge on failure, End's precedent ("teardown even when stop failed"). Log
+    # and fall through to the SAME state-convergence block the success path runs -- pop
+    # transports / last_activity / inodes, retire the model-hub process scope,
+    # _settle_stuck_active_request, invalidate_thread, clear the turn registry and
+    # session locks -- and count the eviction. Both branches (idle and stuck-active)
+    # already share that block, so they converge uniformly.
+    # WHY NOT DEFER THE SETTLEMENT UNTIL A SUCCESSFUL STOP: the manager-turn cancel is
+    # irreversible, and a transport whose stop() always raises would stay wedged
+    # forever -- the wedge class this PR removes. The settle-first ordering exists
+    # because a torn-down backend cannot settle its own turn; a backend that REFUSES to
+    # tear down is the opposite case, but its waiters are gone either way.
+    # NO HARDER KILL IS ATTEMPTED because none exists: CodexTransport.stop() is the only
+    # teardown entry point and already runs the whole ladder internally (close stdin ->
+    # wait -> SIGTERM process tree -> wait -> SIGKILL process tree -> wait), so a stop()
+    # that raises is that ladder having failed.
+    # RESIDUAL: a process refusing to die may outlive the eviction until process-level
+    # reaping. State is left consistent, the runs are settled, and the mappings are
+    # dropped so a NEW transport can be created for the cwd.
+    # The idle branch's twin carries this same id:
+    # tests/test_codex_agent.py::test_evict_idle_transports_converges_when_stop_fails
+    # Both tests previously asserted the OPPOSITE (state preserved, next sweep retries),
+    # which was only safe while eviction settled nothing.
+    test: tests/test_codex_agent.py::test_codex_force_eviction_converges_when_transport_stop_fails
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -715,8 +715,41 @@ class CodexAgent(BaseAgent):
                 try:
                     await transport.stop()
                 except Exception as exc:
-                    logger.warning("Failed to stop idle Codex transport for cwd=%s: %s", cwd, exc)
-                    continue
+                    # CONVERGE ANYWAY — do NOT preserve state for a retry (HFR-326).
+                    #
+                    # The runs above are already settled ``evicted`` and their manager
+                    # turns already cancelled, and neither is reversible. Keeping the
+                    # transport and its mappings registered would leave a LIVE backend
+                    # whose rows are terminal: its eventual real result has no owner and
+                    # ``settle_run_terminal`` is scoped to queued|running, so it could
+                    # never take those rows back. The settle-first ordering exists
+                    # because a torn-down backend cannot settle its own turn; a backend
+                    # that REFUSES to tear down is the opposite case, but by this point
+                    # its waiters are gone either way, so the only consistent state is
+                    # to treat the transport as gone.
+                    #
+                    # Deferring the settlement until a successful stop is not an
+                    # alternative: the manager-turn cancel cannot be undone, and a
+                    # transport whose ``stop()`` always raises would stay wedged
+                    # forever — the wedge class this work exists to remove.
+                    #
+                    # NO HARDER KILL IS ATTEMPTED because none exists to attempt.
+                    # ``CodexTransport.stop()`` is the only teardown entry point and it
+                    # already contains the full escalation ladder internally (close
+                    # stdin -> wait -> SIGTERM the process tree -> wait -> SIGKILL the
+                    # process tree -> wait), so a ``stop()`` that raises is that ladder
+                    # having failed, not a soft attempt worth escalating from here.
+                    #
+                    # RESIDUAL: a process that refuses to die may outlive this eviction
+                    # until process-level reaping. That is accepted. State is left
+                    # consistent, the runs are settled, and the mappings are dropped so
+                    # a NEW transport can be created for this cwd.
+                    logger.warning(
+                        "Failed to stop Codex transport for cwd=%s: %s; converging anyway "
+                        "(its runs are already settled and its turns cancelled)",
+                        cwd,
+                        exc,
+                    )
 
                 self._transports.pop(cwd, None)
                 self._transport_last_activity.pop(cwd, None)

@@ -518,7 +518,16 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
-    async def test_evict_idle_transports_preserves_state_when_stop_fails(self):
+    async def test_evict_idle_transports_converges_when_stop_fails(self):
+        """HFR-326: the idle branch converges too -- the runs are already settled.
+
+        This test used to assert the opposite (state preserved, next sweep retries).
+        That was safe only while eviction settled nothing. It now tears the runs down
+        BEFORE the stop, so a preserved transport is a live backend whose runs are
+        already terminal: its later real result has no owner and cannot take the rows
+        back. Both branches converge uniformly.
+        """
+
         agent = object.__new__(CodexAgent)
         invalidated_sessions = []
         cleared_turns = []
@@ -546,13 +555,15 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
 
-        self.assertEqual(evicted, 0)
-        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(evicted, 1)
+        self.assertEqual(agent._transports, {})
+        self.assertEqual(agent._transport_last_activity, {})
+        self.assertEqual(invalidated_sessions, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+        self.assertEqual(agent._session_locks, {})
+        # The per-cwd lock is retained on the success path too -- it guards the slot,
+        # not the transport, and a replacement transport needs it.
         self.assertIs(agent._transport_locks["/tmp/work"], lock)
-        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
-        self.assertEqual(invalidated_sessions, [])
-        self.assertEqual(cleared_turns, [])
-        agent.sessions.clear_agent_session_mapping.assert_not_called()
 
     async def test_evict_idle_transports_revalidates_activity_before_stop(self):
         agent = object.__new__(CodexAgent)
@@ -766,14 +777,35 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.emit_agent_message.assert_not_awaited()
         self.assertEqual(agent._event_handler.release_calls, [])
 
-    async def test_evict_idle_transports_force_evict_preserves_state_when_stop_fails(self):
-        # Stuck-active force-eviction path: if transport.stop() raises, the
-        # transport and its bookkeeping must be left intact (next sweep retries).
+    async def test_codex_force_eviction_converges_when_transport_stop_fails(self):
+        """HFR-326: a stop that raises must not strand already-settled runs.
+
+        The teardown runs BEFORE ``transport.stop()`` on purpose: once the app-server
+        is gone no run executing through it can settle its own turn. The old failure
+        branch then did ``continue``, which preserved ``_transports``,
+        ``_transport_last_activity``, the thread mappings, the turn registry and the
+        session locks for a retry -- while the runs had ALREADY been terminalized as
+        ``evicted`` and the manager turns cancelled. A transient stop failure left a
+        live backend whose later real result had no owner and could not replace the
+        failed rows.
+
+        Converge instead, on End's precedent. The settle-first ordering exists because
+        a torn-down backend cannot settle its own turn; here the backend REFUSED to
+        tear down -- the opposite case -- but its turn waiters are already cancelled
+        and its runs already settled, so the only consistent state is to treat the
+        transport as gone. Deferring settlement until a successful stop cannot work:
+        the manager-turn cancel is irreversible, and a transport whose ``stop()``
+        always raises would stay wedged forever, which is the wedge class this work
+        removes.
+        """
+
         agent = object.__new__(CodexAgent)
         invalidated = []
         cleared_turns = []
+        calls = []
 
         async def stop_transport():
+            calls.append("stop")
             raise RuntimeError("boom")
 
         transport = SimpleNamespace(stop=stop_transport)
@@ -785,22 +817,41 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
             invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
         )
+        request = SimpleNamespace(context="ctx-1", base_session_id="session-1")
         agent._turn_registry = SimpleNamespace(
             get_active_turn=lambda base_session_id: "turn-1",
             has_pending_turn_start=lambda base_session_id: False,
+            get_request_for_turn=lambda turn_id: request if turn_id == "turn-1" else None,
+            get_latest_request=lambda base_session_id: request,
             clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
 
-        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
-            evicted = await agent.evict_idle_transports(600)
+        async def _teardown(*_args, **kwargs):
+            calls.append(("teardown", kwargs.get("settled_by")))
+            return 1
 
-        self.assertEqual(evicted, 0)
-        self.assertIs(agent._transports["/tmp/work"], transport)
-        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
-        self.assertEqual(invalidated, [])
-        self.assertEqual(cleared_turns, [])
+        with patch.object(_MODULE, "teardown_runtime_session_runs", _teardown):
+            with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+                evicted = await agent.evict_idle_transports(600)
+
+        # The runs were settled evicted, and BEFORE the stop was attempted.
+        self.assertEqual(calls, [("teardown", "evicted"), "stop"])
+        # The eviction is counted: it happened, whatever the app-server did.
+        self.assertEqual(evicted, 1)
+        # The transport and every mapping that would block a replacement are gone, so
+        # a fresh transport can be created for this cwd.
+        self.assertEqual(agent._transports, {})
+        self.assertEqual(agent._transport_last_activity, {})
+        self.assertEqual(agent._session_locks, {})
+        self.assertEqual(invalidated, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+        # The force-reaped stuck turn still settles its Workbench status + runtime gate.
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            "ctx-1", "result", "", is_error=True, level="silent", output=ANY
+        )
 
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
