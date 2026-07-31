@@ -2373,7 +2373,7 @@ def test_failed_old_credential_revoke_reconciles_after_service_restart(tmp_path)
     assert restarted.store.load().sources[0].credential_ref == "cred_replacement_1"
 
 
-def test_existing_source_test_clears_blocker_and_restores_runnable_supply(tmp_path):
+def test_existing_source_refresh_clears_blocker_and_restores_runnable_supply(tmp_path):
     adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
     service = _service(tmp_path, adapter)
     config = service.store.load()
@@ -2386,7 +2386,7 @@ def test_existing_source_test_clears_blocker_and_restores_runnable_supply(tmp_pa
     for agent in config.agents.values():
         agent.sources.order = [source.id]
 
-    updated, discovered = asyncio.run(service.test_source(source.id))
+    updated, discovered = asyncio.run(service.refresh_source(source.id))
     resolved = asyncio.run(
         service.resolve(
             backend="claude",
@@ -2397,10 +2397,12 @@ def test_existing_source_test_clears_blocker_and_restores_runnable_supply(tmp_pa
 
     assert discovered == 1
     assert updated["state"]["status"] == "standby"
+    assert updated["last_discovered_at"] == "2026-07-23T03:00:00+00:00"
+    assert service.store.load().sources[0].last_discovered_at == updated["last_discovered_at"]
     assert resolved.source_id == source.id
 
 
-def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
+def test_existing_source_refresh_persists_safe_error_state_on_discovery_failure(
     tmp_path,
 ):
     adapter = NarrowingCredentialAdapter()
@@ -2411,18 +2413,20 @@ def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
         status="needs_action",
         detail_key="models.source.needs_action.balance_exhausted",
     )
+    source.last_discovered_at = "2026-07-22T03:00:00+00:00"
 
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.test_source(source.id))
+        asyncio.run(service.refresh_source(source.id))
 
     assert exc_info.value.code == "discovery_failed"
     assert service.store.load().sources[0].state.status == "error"
     assert service.store.load().sources[0].state.detail_key == (
         "models.source.error.unclassified"
     )
-    source_test_event = service.list_events(limit=10)[0]
-    assert source_test_event["agent"] == "system"
-    assert source_test_event["model_id"] is None
+    assert service.store.load().sources[0].last_discovered_at == "2026-07-22T03:00:00+00:00"
+    source_refresh_event = service.list_events(limit=10)[0]
+    assert source_refresh_event["agent"] == "system"
+    assert source_refresh_event["model_id"] is None
 
     turn_service = _service(
         tmp_path / "turn",
@@ -2446,12 +2450,12 @@ def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
         if event["kind"] == "needs_action"
     )
     fields = ("kind", "reason", "from_source", "severity")
-    assert tuple(source_test_event[field] for field in fields) == tuple(
+    assert tuple(source_refresh_event[field] for field in fields) == tuple(
         turn_event[field] for field in fields
     )
 
 
-def test_existing_source_test_rejects_empty_discovery_before_recovery(tmp_path):
+def test_existing_source_refresh_rejects_empty_discovery_before_recovery(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)
     source = service.store.load().sources[0]
@@ -2466,7 +2470,7 @@ def test_existing_source_test_rejects_empty_discovery_before_recovery(tmp_path):
     adapter.discover_models = empty_discovery
 
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.test_source(source.id))
+        asyncio.run(service.refresh_source(source.id))
 
     assert exc_info.value.code == "discovery_failed"
     persisted = service.store.load().sources[0]
@@ -2474,7 +2478,7 @@ def test_existing_source_test_rejects_empty_discovery_before_recovery(tmp_path):
     assert persisted.state.detail_key == "models.source.error.unclassified"
 
 
-def test_existing_source_test_preserves_health_on_engine_outage(tmp_path):
+def test_existing_source_refresh_preserves_health_on_engine_outage(tmp_path):
     adapter = NarrowingCredentialAdapter()
     service = _service(tmp_path, adapter)
     before = _serialized_config(service)
@@ -2484,7 +2488,7 @@ def test_existing_source_test_preserves_health_on_engine_outage(tmp_path):
 
     adapter.discover_models = engine_unavailable
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.test_source("src_primary01"))
+        asyncio.run(service.refresh_source("src_primary01"))
 
     assert exc_info.value.code == "engine_down"
     assert _serialized_config(service) == before

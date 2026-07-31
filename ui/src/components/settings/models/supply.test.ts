@@ -20,6 +20,7 @@ const source = (id: string, state: SourceState, name = id): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state,
+  last_discovered_at: null,
   models: [],
 });
 

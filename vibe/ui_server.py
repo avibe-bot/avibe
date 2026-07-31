@@ -3230,13 +3230,13 @@ async def model_hub_sources_delete(source_id):
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/sources/<source_id>/test", methods=["POST"])
-async def model_hub_sources_test(source_id):
+@app.route("/api/models/sources/<source_id>/refresh", methods=["POST"])
+async def model_hub_sources_refresh(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        _, discovered = await _model_hub_service().test_source(source_id)
-        return _model_hub_success(discovered=discovered)
+        source, discovered = await _model_hub_service().refresh_source(source_id)
+        return _model_hub_success(source=source, discovered=discovered)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

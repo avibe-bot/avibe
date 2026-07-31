@@ -29,6 +29,7 @@ export function buildMockSources(): Source[] {
     {
       id: 'src_claudepro1',
       created_at: iso(-30 * DAY),
+      last_discovered_at: iso(-3 * HOUR),
       kind: 'subscription',
       vendor: 'anthropic',
       display_name: 'Claude Pro 订阅',
@@ -50,6 +51,7 @@ export function buildMockSources(): Source[] {
     {
       id: 'src_chatgptplus',
       created_at: iso(-20 * DAY),
+      last_discovered_at: iso(-3 * HOUR),
       kind: 'subscription',
       vendor: 'openai',
       display_name: 'ChatGPT Plus 订阅',
@@ -70,6 +72,7 @@ export function buildMockSources(): Source[] {
     {
       id: 'src_anthkey01',
       created_at: iso(-10 * DAY),
+      last_discovered_at: iso(-6 * HOUR),
       kind: 'api_key',
       vendor: 'anthropic',
       display_name: 'Anthropic API Key',
@@ -91,6 +94,7 @@ export function buildMockSources(): Source[] {
     {
       id: 'src_zhipukey01',
       created_at: iso(-4 * DAY),
+      last_discovered_at: iso(-6 * HOUR),
       kind: 'api_key',
       vendor: 'zhipuai',
       display_name: '智谱 API Key',
@@ -116,6 +120,7 @@ export function buildMockSources(): Source[] {
       // chain as ChatGPT Plus › relay.example › 智谱 API Key, and under §4.2 an
       // api_key's place in that chain is its created_at.
       created_at: iso(-6 * DAY),
+      last_discovered_at: null,
       kind: 'api_key',
       vendor: 'custom',
       display_name: 'relay.example',

@@ -525,7 +525,7 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("PUT", "/api/models/sources/src_test0001/credential"),
         ("POST", "/api/models/sources/src_test0001/reauth"),
         ("DELETE", "/api/models/sources/src_test0001"),
-        ("POST", "/api/models/sources/src_test0001/test"),
+        ("POST", "/api/models/sources/src_test0001/refresh"),
         ("GET", "/api/models/agents"),
         ("GET", "/api/models/agents/claude/sources"),
         ("PUT", "/api/models/agents/claude/sources"),
@@ -773,20 +773,44 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         status="needs_action",
         detail_key="models.source.needs_action.balance_exhausted",
     )
+    previous_discovered_at = persisted_source.last_discovered_at
+    unauthorized = client.post(
+        f"/api/models/sources/{source_id}/refresh",
+        base_url=base_url,
+    )
+    assert unauthorized.status_code == 403
+    assert store.config.sources[0].last_discovered_at == previous_discovered_at
+
+    async def refreshed_models(vendor, protocol, endpoint, credential_ref):
+        return ("claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-5")
+
+    adapter.discover_models = refreshed_models
+    original_now = service.now
+    service.now = lambda: datetime(2026, 7, 31, 5, 15, tzinfo=timezone.utc)
     response = client.post(
-        f"/api/models/sources/{source_id}/test",
+        f"/api/models/sources/{source_id}/refresh",
         headers=headers,
         base_url=base_url,
     )
     body = response.get_json()
     _assert_envelope(body)
-    assert body["discovered"] == 2
+    assert set(body) == {"ok", "contract_version", "source", "discovered"}
+    assert body["discovered"] == 3
+    _assert_valid("source.schema.json", body["source"])
+    assert {model["id"] for model in body["source"]["models"]} == {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-5",
+    }
+    assert body["source"]["last_discovered_at"] == "2026-07-31T05:15:00+00:00"
+    assert store.config.sources[0].last_discovered_at == body["source"]["last_discovered_at"]
     assert store.config.sources[0].state.status == "standby"
     assert (
         store.config.sources[0].id,
         store.config.sources[0].created_at,
         store.config.sources[0].credential_ref,
     ) == immutable_identity
+    service.now = original_now
 
     response = client.post(
         "/api/models/custom-models",
@@ -3101,7 +3125,7 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
         retry_at="2026-07-23T03:05:00Z",
     )
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.test_source(source["id"]))
+        asyncio.run(service.refresh_source(source["id"]))
 
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].state.status == "cooldown"

@@ -790,6 +790,7 @@ class ModelHubService:
             for model_id in discovered
             if model_id not in manual_model_ids
         ] + manual_models
+        source.last_discovered_at = discovered_at
 
     async def _commit_new_source_locked(
         self,
@@ -1433,6 +1434,7 @@ class ModelHubService:
             "state",
             "usage",
             "created_at",
+            "last_discovered_at",
         } & set(payload)
         if forbidden:
             raise ModelHubError("discovery_failed")
@@ -1819,7 +1821,7 @@ class ModelHubService:
             if source.credential_ref:
                 self.revocations.remove(source.id, source.credential_ref)
 
-    async def test_source(self, source_id: str) -> tuple[dict, int]:
+    async def refresh_source(self, source_id: str) -> tuple[dict, int]:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)

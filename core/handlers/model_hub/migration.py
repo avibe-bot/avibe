@@ -596,6 +596,7 @@ def _new_source(
     return ModelHubSourceConfig(
         id=item.source_id,
         created_at=discovered_at,
+        last_discovered_at=discovered_at if models else None,
         kind="subscription" if keep_native or controlled else "api_key",
         vendor=item.vendor,
         display_name=item.display_name,

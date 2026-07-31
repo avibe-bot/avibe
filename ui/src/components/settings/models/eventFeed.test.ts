@@ -213,7 +213,7 @@ describe('the page reads the feed through this owner', () => {
     // the same Promise.all, one failing leg left repaired sources and the ● 当前
     // the user just moved on screen as they were before the mutation.
     expect(page).toMatch(/modelsApi\.listEvents\(EVENT_PAGE\)\.catch\(\(\) => null\)/);
-    expect(page).toMatch(/createLatestAsyncAuthority<\[Source\[\], AgentSupply\[\], ResolutionEvent\[\] \| null, ModelChainIndex\]>/);
+    expect(page).toMatch(/createLatestAsyncAuthority<ModelSurfaceLanding>/);
     // Sources and agents are NOT tolerated the same way — they are what this
     // refresh is for, and the caller's toast is what reports them failing.
     expect(page).not.toMatch(/modelsApi\.list(Sources|Agents)\(\)\.catch/);

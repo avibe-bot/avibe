@@ -87,6 +87,9 @@ export type Source = {
    *  sources array itself is explicitly unordered). May be null on rows
    *  persisted before the field existed; `id` ascending is the tie-breaker. */
   created_at?: string | null;
+  /** Latest successful full model discovery for this source. null means the
+   *  source predates the field or has no known successful discovery. */
+  last_discovered_at: string | null;
   kind: SourceKind;
   /** Standard vendor id (anthropic|openai|zhipuai|kimi|xai|…) or 'custom'. */
   vendor: string;
