@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
@@ -1198,6 +1198,8 @@ class SessionTurnManager:
             raise ValueError("Session delivery requires a Session id")
         if request.priority not in {"p0", "p1", "p3"}:
             raise ValueError(f"unsupported delivery priority: {request.priority}")
+        if request.content == "":
+            request = replace(request, content=None)
         if request.priority in {"p1", "p3"} and request.content is None and request.priority == "p3":
             raise ValueError("P3 requires content")
         backend, resolved_context = self._delivery_backend(request.session_id, context)

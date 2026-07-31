@@ -223,7 +223,11 @@ def test_two_empty_p1_requests_cas_the_same_fifo_head_only(managers) -> None:
             pool.submit(
                 asyncio.run,
                 manager.deliver(
-                    DeliveryRequest(session_id="ses_fsm", priority="p1"),
+                    DeliveryRequest(
+                        session_id="ses_fsm",
+                        priority="p1",
+                        content="",
+                    ),
                     context=_context(),
                 ),
             )
@@ -699,6 +703,28 @@ def test_missing_runtime_owner_persists_p0_reconciliation(managers) -> None:
     assert row["state"] == "reconciling"
     assert row["receipt_outcome"] == "unknown"
     manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+
+def test_explicit_empty_p0_creates_control_delivery_without_message(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="",
+            ),
+            context=_context(),
+        )
+    )
+
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(result.delivery_id))
+        message_count = conn.execute(select(messages.c.id)).all()
+    assert result.message_id is None
+    assert delivery is not None
+    assert delivery["message_id"] is None
+    assert message_count == []
 
 
 def test_late_positive_native_evidence_rebinds_quarantined_turn(managers) -> None:
