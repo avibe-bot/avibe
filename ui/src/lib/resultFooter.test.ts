@@ -38,6 +38,11 @@ describe('resultFooterParts', () => {
     }
   });
 
+  it('moves a standalone generated footer out of a footer-only completion body', () => {
+    const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
+    expect(resultFooterParts(message(footer))).toEqual({ body: '', footer });
+  });
+
   it('does not move authored text or non-Agent result content', () => {
     const text = 'Answer\n\n✅ Looks good';
     expect(resultFooterParts(message(text))).toEqual({ body: text, footer: null });

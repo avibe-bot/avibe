@@ -25,6 +25,10 @@ export function resultFooterParts(
     };
   }
 
+  if (LEGACY_RESULT_FOOTER_RE.test(message.text)) {
+    return { body: '', footer: message.text };
+  }
+
   // Rows created before result_footer became structured still contain the exact
   // generated footer as their final paragraph. Match only that closed format so
   // authored prose ending in ordinary emoji/text is never moved.

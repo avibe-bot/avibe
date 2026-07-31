@@ -3537,7 +3537,7 @@ export const MessageRow = memo(function MessageRow({
       readOnly={readOnly}
       className="vr-markdown--inherit-size"
     />
-  ) : drawsEmptyBodyPlaceholder(row, messageAttachments.length > 0) ? (
+  ) : !resultPresentation.footer && drawsEmptyBodyPlaceholder(row, messageAttachments.length > 0) ? (
     <div className="text-[13px] text-muted">—</div>
   ) : null;
 
@@ -3550,19 +3550,14 @@ export const MessageRow = memo(function MessageRow({
   const time = (
     <span
       className={clsx(
-        'inline-flex max-w-full items-center gap-1.5 whitespace-nowrap px-1 font-mono text-[10px] text-muted transition-opacity duration-150',
+        'inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 px-1 font-mono text-[10px] text-muted transition-opacity duration-150',
         resultPresentation.footer
           ? 'opacity-100'
           : 'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
       )}
     >
-      <span>{formatLocalDateTime(message.created_at)}</span>
-      {resultPresentation.footer ? (
-        <>
-          <span aria-hidden="true">·</span>
-          <span>{resultPresentation.footer}</span>
-        </>
-      ) : null}
+      <span className="whitespace-nowrap">{formatLocalDateTime(message.created_at)}</span>
+      {resultPresentation.footer ? <span className="min-w-0 break-words">{resultPresentation.footer}</span> : null}
     </span>
   );
 
@@ -3590,7 +3585,9 @@ export const MessageRow = memo(function MessageRow({
             <Bell className="mt-px size-3 shrink-0" />
             <span className="min-w-0 break-words">
               <span className="font-semibold">{t('chat.notifyLabel')}</span>
-              {message.text && <span className="font-normal text-gold/80"> · {message.text}</span>}
+              {resultPresentation.body && (
+                <span className="font-normal text-gold/80"> · {resultPresentation.body}</span>
+              )}
             </span>
           </div>
           {time}
@@ -3689,10 +3686,12 @@ export const MessageRow = memo(function MessageRow({
           <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{isAgent ? <Bot /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
-        <div className={isAgent ? AGENT_BUBBLE : SYSTEM_BUBBLE} style={messageFontStyle}>
-          {bodyNode}
-          {attachmentsNode}
-        </div>
+        {bodyNode || attachmentsNode ? (
+          <div className={isAgent ? AGENT_BUBBLE : SYSTEM_BUBBLE} style={messageFontStyle}>
+            {bodyNode}
+            {attachmentsNode}
+          </div>
+        ) : null}
         {quickRepliesNode}
         {vaultRequestsNode}
         {time}
