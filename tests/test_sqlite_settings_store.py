@@ -453,6 +453,7 @@ def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: 
     conflicting_store = None
     try:
         agents_store.create(name="pm", backend="claude")
+        agents_store.create(name="zz-fallback", backend="claude")
         route = RoutingSettings(agent_name="pm")
         store.update_channel(
             "C1",
@@ -574,6 +575,7 @@ def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_p
     agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
     try:
         agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
         store.update_channel(
             "C1",
             ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="pm")),

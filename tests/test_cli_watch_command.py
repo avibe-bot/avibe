@@ -118,6 +118,7 @@ def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys)
     agent_store = cli.VibeAgentStore(db_path)
     try:
         agent = agent_store.create(name="pm", backend="codex")
+        agent_store.create(name="zz-fallback", backend="codex")
         store = ManagedWatchStore()
         watch = store.add_watch(
             name="Review watch",

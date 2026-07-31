@@ -153,6 +153,7 @@ def test_graph_projects_archived_agent_display_name(isolated_state) -> None:
     store = VibeAgentStore()
     try:
         original = store.create(name="pm", backend="claude")
+        store.create(name="zz-fallback", backend="claude")
         archived = store.archive(original.name)
         assert archived is not None
         with store.engine.begin() as conn:
