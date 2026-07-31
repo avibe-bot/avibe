@@ -48,13 +48,19 @@ export interface NewSessionState {
   upsertSelectProject: (project: WorkbenchProject) => void;
 }
 
+const normalizeAgentName = (name: string) =>
+  name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+
 export function isProjectDefaultAgentAvailable(
   project: WorkbenchProject | null,
   agents: VibeAgentBrief[],
 ): boolean {
   const name = project?.default_agent?.agent_name;
   if (!name) return false;
-  return agents.some((agent) => agent.name === name && agent.enabled && !agent.archived);
+  const normalizedName = normalizeAgentName(name);
+  return agents.some(
+    (agent) => normalizeAgentName(agent.name) === normalizedName && agent.enabled && !agent.archived,
+  );
 }
 
 const sortByRecent = (list: WorkbenchProject[]) =>

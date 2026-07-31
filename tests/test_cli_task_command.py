@@ -197,6 +197,26 @@ def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path) -> None:
         agent_store.close()
 
 
+def test_agent_remove_cli_localizes_invalid_reference_metadata() -> None:
+    def refuse_archive(_name):
+        raise cli.AgentReferenceRewriteError()
+
+    store = SimpleNamespace(archive=refuse_archive)
+    with (
+        patch("vibe.cli._agent_store", return_value=store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_agent_remove,
+            _parse_agent(["remove", "worker"]),
+        )
+
+    assert result == 1
+    assert payload["code"] == "agent_reference_metadata_invalid"
+    assert payload["error"] == "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。"
+    assert payload["hint"] == "请修复或删除元数据异常的任务或监控，然后重试。"
+
+
 def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:

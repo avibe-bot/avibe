@@ -12,6 +12,7 @@ from core.vibe_agents import (
     AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
+    AgentReferenceRewriteError,
     AgentUnavailableError,
     VibeAgentStore,
     normalize_agent_name,
@@ -546,6 +547,137 @@ def test_existing_definition_enqueue_pins_the_post_archive_agent_identity(tmp_pa
         agent_store.close()
 
 
+def test_existing_definition_enqueue_uses_one_current_definition_snapshot(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    requests = TaskExecutionStore(tmp_path / "task_requests")
+    requests._sqlite = background
+    try:
+        agent = agent_store.create(name="current-worker", backend="claude")
+        with agent_store.engine.begin() as conn:
+            conn.execute(
+                run_definitions.insert().values(
+                    id="task_current_snapshot",
+                    definition_type="scheduled",
+                    name="current snapshot",
+                    agent_name=agent.name,
+                    session_policy="create_per_run",
+                    session_id="ses-current",
+                    legacy_session_key="slack::channel::current",
+                    post_to="scope",
+                    deliver_key="slack::channel::C2",
+                    prompt="current prompt",
+                    message="current message",
+                    message_payload_json=json.dumps({"text": "current payload"}),
+                    enabled=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json=json.dumps({"version": 2}),
+                )
+            )
+
+        queued = requests.enqueue_definition_run(
+            definition_id="task_current_snapshot",
+            run_type="scheduled",
+            source_kind="scheduler",
+            session_key="slack::channel::stale",
+            session_id="ses-stale",
+            post_to="none",
+            deliver_key="slack::channel::C1",
+            prompt="stale prompt",
+            agent_name="stale-worker",
+            session_policy="existing",
+            metadata={"version": 1},
+        )
+
+        expected = {
+            "agent_name": agent.name,
+            "agent_id": agent.id,
+            "session_policy": "create_per_run",
+            "session_id": "ses-current",
+            "session_key": "slack::channel::current",
+            "post_to": "scope",
+            "deliver_key": "slack::channel::C2",
+            "prompt": "current prompt",
+            "message": "current message",
+            "message_payload": {"text": "current payload"},
+            "metadata": {"version": 2},
+        }
+        assert {key: getattr(queued, key) for key in expected} == expected
+        stored = background.get_run(queued.id)
+        assert stored is not None
+        assert {key: stored[key] for key in expected} == expected
+    finally:
+        background.close()
+        agent_store.close()
+
+
+def test_archive_does_not_rewrite_reused_name_owned_by_another_agent_id(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        _create_archive_fallback(store)
+        first = store.create(name="pm", backend="claude")
+        first_archive = store.archive(first.name)
+        assert first_archive is not None
+        replacement = store.create(name="pm", backend="claude")
+        with store.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.insert().values(
+                    id="ses_stale_reused_name",
+                    scope_id=None,
+                    agent_id=first.id,
+                    agent_name=replacement.name,
+                    agent_backend="claude",
+                    agent_variant="claude",
+                    model=None,
+                    reasoning_effort=None,
+                    session_anchor="ses_stale_reused_name",
+                    workdir=None,
+                    native_session_id="native-first",
+                    title="Stable first Agent",
+                    status="active",
+                    visibility="foreground",
+                    pinned=0,
+                    agent_status="idle",
+                    metadata_json="{}",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    last_active_at=NOW,
+                )
+            )
+            conn.execute(
+                agent_runs.insert().values(
+                    id="run_stale_reused_name",
+                    run_type="agent_run",
+                    status="queued",
+                    agent_id=first.id,
+                    agent_name=replacement.name,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json="{}",
+                )
+            )
+
+        result = store.archive(replacement.name)
+
+        assert result is not None
+        assert result.references["sessions"] == 0
+        with store.engine.connect() as conn:
+            session_name = conn.execute(
+                select(agent_sessions.c.agent_name).where(
+                    agent_sessions.c.id == "ses_stale_reused_name"
+                )
+            ).scalar_one()
+            run_name = conn.execute(
+                select(agent_runs.c.agent_name).where(agent_runs.c.id == "run_stale_reused_name")
+            ).scalar_one()
+        assert session_name == "pm"
+        assert run_name == "pm"
+    finally:
+        store.close()
+
+
 def test_rename_moves_references_and_default_without_changing_agent_identity(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
@@ -668,6 +800,7 @@ def test_remove_compacts_legacy_archive_name_and_moves_its_references(tmp_path) 
             )
             store._rewrite_references(
                 conn,
+                agent_id=original.id,
                 reference_names=frozenset((original.name, original.normalized_name)),
                 new_name=legacy_name,
                 revision=NOW,
@@ -906,8 +1039,9 @@ def test_archive_refuses_to_overwrite_malformed_definition_metadata(tmp_path) ->
                 )
             )
 
-        with pytest.raises(ValueError, match="definition metadata is malformed"):
+        with pytest.raises(AgentReferenceRewriteError) as exc_info:
             store.archive(original.name)
+        assert exc_info.value.code == "agent_reference_metadata_invalid"
 
         assert store.require_enabled(original.name).id == original.id
         with store.engine.connect() as conn:

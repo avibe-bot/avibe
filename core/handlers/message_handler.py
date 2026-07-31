@@ -277,7 +277,9 @@ class MessageHandler(BaseHandler):
                 if requested_vibe_agent_id:
                     resolve_kwargs["override_agent_id"] = requested_vibe_agent_id
                 vibe_agent = resolve_vibe_agent(context, **resolve_kwargs)
-            elif callable(resolve_vibe_agent) and not session_agent_backend:
+            elif callable(resolve_vibe_agent) and (
+                durable_agent_identity or not session_agent_backend
+            ):
                 vibe_agent = resolve_vibe_agent(context, required=durable_agent_identity)
             if vibe_agent:
                 agent_name = vibe_agent.backend

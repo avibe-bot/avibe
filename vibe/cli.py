@@ -47,7 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
@@ -4016,6 +4016,19 @@ def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
     )
 
 
+def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang),
+    )
+
+
 def cmd_agent_remove(args):
     try:
         store = _agent_store()
@@ -4040,6 +4053,8 @@ def cmd_agent_remove(args):
                 ),
                 details={"agent": args.name},
             ) from exc
+        except AgentReferenceRewriteError as exc:
+            raise _agent_reference_rewrite_cli_error(exc) from exc
         if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
         _print_cli_payload(

@@ -30,6 +30,15 @@ describe('isProjectDefaultAgentAvailable', () => {
     expect(isProjectDefaultAgentAvailable(project('pm'), [agent({})])).toBe(true);
   });
 
+  it('accepts a legacy normalized-equivalent project default', () => {
+    expect(
+      isProjectDefaultAgentAvailable(
+        project('PROJECT-MANAGER'),
+        [agent({ name: 'Project Manager' })],
+      ),
+    ).toBe(true);
+  });
+
   it('rejects an archived internal project default that is absent from the live catalog', () => {
     expect(isProjectDefaultAgentAvailable(project('_pm-8dd7'), [agent({ name: 'codex' })])).toBe(false);
   });

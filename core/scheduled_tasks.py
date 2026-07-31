@@ -863,6 +863,7 @@ class TaskExecutionRequest:
     deliver_key: Optional[str] = None
     prompt: Optional[str] = None
     message: Optional[str] = None
+    message_payload: Any = None
     source_kind: Optional[str] = None
     source_actor: Optional[str] = None
     parent_run_id: Optional[str] = None
@@ -892,6 +893,7 @@ class TaskExecutionRequest:
             deliver_key=payload.get("deliver_key"),
             prompt=payload.get("prompt"),
             message=payload.get("message") or payload.get("prompt"),
+            message_payload=payload.get("message_payload"),
             source_kind=payload.get("source_kind"),
             source_actor=payload.get("source_actor"),
             parent_run_id=payload.get("parent_run_id"),
@@ -1673,9 +1675,21 @@ class TaskExecutionStore:
         )
         if self._sqlite is None:
             return self.enqueue(request)
-        identity = self._sqlite.enqueue_definition_run(self.queued_run_payload(request))
-        request.agent_name = identity.get("agent_name")
-        request.agent_id = identity.get("agent_id")
+        snapshot = self._sqlite.enqueue_definition_run(self.queued_run_payload(request))
+        for field_name in (
+            "agent_name",
+            "agent_id",
+            "session_policy",
+            "session_id",
+            "session_key",
+            "post_to",
+            "deliver_key",
+            "prompt",
+            "message",
+            "message_payload",
+            "metadata",
+        ):
+            setattr(request, field_name, snapshot.get(field_name))
         return request
 
     def enqueue_hook_send(

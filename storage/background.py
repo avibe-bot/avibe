@@ -2567,8 +2567,8 @@ class SQLiteBackgroundTaskStore:
                 )
             enqueue_run_in_connection(conn, values)
 
-    def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Optional[str]]:
-        """Pin an existing definition run to its current Agent under one write lock."""
+    def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Enqueue one internally consistent snapshot of a live definition."""
 
         values = self._run_values(payload)
         definition_id = str(values.get("definition_id") or "").strip()
@@ -2577,19 +2577,61 @@ class SQLiteBackgroundTaskStore:
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
             definition = conn.execute(
-                select(run_definitions.c.agent_name)
+                select(
+                    run_definitions.c.agent_name,
+                    run_definitions.c.session_policy,
+                    run_definitions.c.session_id,
+                    run_definitions.c.legacy_session_key,
+                    run_definitions.c.post_to,
+                    run_definitions.c.deliver_key,
+                    run_definitions.c.prompt,
+                    run_definitions.c.message,
+                    run_definitions.c.message_payload_json,
+                    run_definitions.c.metadata_json,
+                    run_definitions.c.enabled,
+                    run_definitions.c.deleted_at,
+                )
                 .where(run_definitions.c.id == definition_id)
                 .limit(1)
             ).mappings().first()
             if definition is not None:
+                if definition["deleted_at"] is not None:
+                    raise ValueError(f"definition '{definition_id}' not found")
+                if not bool(definition["enabled"]):
+                    raise ValueError(f"definition '{definition_id}' is disabled")
+
                 current_name = str(definition["agent_name"] or "").strip() or None
                 identity = _resolve_agent_identity_by_name(conn, current_name)
-                values["agent_name"] = identity["name"] if identity else current_name
-                values["agent_id"] = identity["id"] if identity else None
+                message = definition["message"] or definition["prompt"]
+                metadata = _json_loads(definition["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                values.update(
+                    agent_name=identity["name"] if identity else current_name,
+                    agent_id=identity["id"] if identity else None,
+                    session_policy=definition["session_policy"],
+                    session_id=definition["session_id"],
+                    legacy_session_key=definition["legacy_session_key"],
+                    post_to=definition["post_to"],
+                    deliver_key=definition["deliver_key"],
+                    prompt=definition["prompt"] or message,
+                    message=message,
+                    message_payload_json=definition["message_payload_json"],
+                    metadata_json=_json_dumps(metadata),
+                )
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],
             "agent_id": values["agent_id"],
+            "session_policy": values["session_policy"],
+            "session_id": values["session_id"],
+            "session_key": values["legacy_session_key"],
+            "post_to": values["post_to"],
+            "deliver_key": values["deliver_key"],
+            "prompt": values["prompt"],
+            "message": values["message"],
+            "message_payload": _json_loads(values["message_payload_json"], None),
+            "metadata": _json_loads(values["metadata_json"], {}),
         }
 
     def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:

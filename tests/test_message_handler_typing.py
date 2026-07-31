@@ -758,6 +758,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="m1",
             platform="slack",
+            platform_specific={"agent_run_target": {"agent_backend": "codex"}},
         )
 
         await handler.handle_user_message(context, "start a new thread")

@@ -71,6 +71,7 @@ from core.vibe_agents import (
     AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
+    AgentReferenceRewriteError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
@@ -1452,6 +1453,8 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
             return _agent_name_validation_error(exc)
         except AgentArchivedEditError as exc:
             return _agent_archived_edit_error(exc)
+        except AgentReferenceRewriteError as exc:
+            return _agent_reference_rewrite_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1485,6 +1488,20 @@ def _agent_archived_edit_error(exc: AgentArchivedEditError) -> dict:
     }
 
 
+def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang),
+        "hint": backend_t(f"{key}.hint", lang),
+    }
+
+
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
@@ -1504,6 +1521,8 @@ def remove_vibe_agent(name: str) -> dict:
                     agent=exc.agent_name,
                 ),
             }
+        except AgentReferenceRewriteError as exc:
+            return _agent_reference_rewrite_error(exc)
         if archived is None:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}
         return {

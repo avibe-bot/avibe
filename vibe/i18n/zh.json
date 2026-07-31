@@ -186,6 +186,10 @@
       "agent_archived_read_only": {
         "message": "Agent `{agent}` 已归档，无法编辑。",
         "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
+        "hint": "请修复或删除元数据异常的任务或监控，然后重试。"
       }
     },
     "agentNameValidation": {

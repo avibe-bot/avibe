@@ -2830,6 +2830,31 @@ def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
     assert result["message"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
 
 
+def test_vibe_agent_api_localizes_invalid_reference_metadata_on_rename(monkeypatch):
+    class RefusingStore:
+        def rename(self, _name, _new_name):
+            raise api.AgentReferenceRewriteError()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(api, "VibeAgentStore", RefusingStore)
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    result = api.update_vibe_agent("worker", {"name": "renamed-worker"})
+
+    assert result == {
+        "ok": False,
+        "code": "agent_reference_metadata_invalid",
+        "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
+        "hint": "请修复或删除元数据异常的任务或监控，然后重试。",
+    }
+
+
 def test_vibe_agent_api_localizes_archived_edit_refusal(tmp_path, monkeypatch):
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     store.create(name="archive-fallback", backend="codex")

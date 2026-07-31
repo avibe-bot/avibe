@@ -186,6 +186,10 @@
       "agent_archived_read_only": {
         "message": "Agent `{agent}` is archived and cannot be edited.",
         "hint": "Archived Agents are read-only and remain available only to existing durable references."
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "Avibe cannot update Agent references because a task or watch contains invalid metadata.",
+        "hint": "Repair or remove the malformed task or watch metadata, then try again."
       }
     },
     "agentNameValidation": {
