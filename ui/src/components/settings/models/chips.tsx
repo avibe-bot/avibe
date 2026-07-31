@@ -12,7 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { ACCENT_DOT, type Accent } from './vendorMeta';
 import type { AgentMode, SourceState } from './types';
 
-/** Status dot used in the ● 当前 chip and the 最近切换 list. */
+/** Shared status dot used by source supply and recent-switch rows. */
 export const Dot: React.FC<{ accent: Accent; className?: string }> = ({ accent, className }) => (
   <span className={cn('inline-block size-1.5 shrink-0 rounded-full', ACCENT_DOT[accent], className)} aria-hidden />
 );
@@ -87,22 +87,6 @@ export const StateChip: React.FC<{ state: SourceState }> = ({ state }) => {
     default:
       return null;
   }
-};
-
-/**
- * ● 当前 — the source this Agent is resolved onto right now (§4.3), which is a
- * per-Agent fact: the same source is 当前 for one backend and merely enabled for
- * another. Sits in the state chip's column, and the two are mutually exclusive by
- * construction — a source that isn't serving normally can't be the current one.
- */
-export const CurrentChip: React.FC = () => {
-  const { t } = useTranslation();
-  return (
-    <Badge variant="success" className={cn(CHIP_MOBILE, 'text-[10px] sm:text-[11px]')}>
-      <Dot accent="mint" />
-      {t('settings.models.current')}
-    </Badge>
-  );
 };
 
 /**

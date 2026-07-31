@@ -288,7 +288,7 @@ const ModelRow: React.FC<{
   const { t } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const configurable = agent.mode === 'hub';
-  const current = agent.selected_model_id === modelId;
+  const selected = agent.selected_model_id === modelId;
   const head = runnableHead(read);
   const headIndex = read?.kind === 'ready' && head ? read.chain.chain.indexOf(head) : -1;
   const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
@@ -342,7 +342,7 @@ const ModelRow: React.FC<{
     status = t('settings.models.modelStatus.ok') as string;
     const serving = sourceName(sources, head.source_id);
     detail = t(
-      current
+      selected
         ? headIndex > 0
           ? 'settings.models.modelStatus.currentSwitched'
           : 'settings.models.modelStatus.currentSource'
@@ -404,21 +404,14 @@ const ModelRow: React.FC<{
   ) : null;
 
   return (
-    <div className={cn('border-b border-border last:border-b-0', current && 'bg-mint-soft/35')} data-model-issue={needsAttention || undefined}>
+    <div className={cn('border-b border-border last:border-b-0', selected && 'bg-mint-soft/35')} data-model-issue={needsAttention || undefined}>
       <div className="group grid min-w-0 grid-cols-[minmax(0,1fr)] items-center gap-3 px-4 py-3 sm:grid-cols-[minmax(180px,0.9fr)_minmax(260px,1.4fr)_auto] sm:px-5">
         <button
           type="button"
           onClick={() => configurable && setExpanded((value) => !value)}
           className="min-w-0 text-left"
         >
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="truncate font-mono text-[12.5px] font-semibold text-foreground">{modelId}</span>
-            {current && (
-              <Badge variant="success" className="shrink-0 px-1.5 py-0 text-[9.5px]">
-                {t('settings.models.current')}
-              </Badge>
-            )}
-          </span>
+          <span className="truncate font-mono text-[12.5px] font-semibold text-foreground">{modelId}</span>
         </button>
 
         <button

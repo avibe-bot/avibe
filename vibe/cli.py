@@ -3590,7 +3590,6 @@ def cmd_agent_models(args):
             agent=agent.name if agent else None,
             backend=backend,
             current=current,
-            default_model=options.get("default_model"),
             providers=page_providers if providers is not None else None,
             models=page_models,
             source=options.get("source"),

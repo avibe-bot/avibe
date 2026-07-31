@@ -258,20 +258,17 @@ Important config payload shape:
       "enabled": true,
       "cli_path": "opencode",
       "default_agent": null,
-      "default_model": null,
       "default_reasoning_effort": null,
       "error_retry_limit": 1
     },
     "claude": {
       "enabled": true,
       "cli_path": "claude",
-      "default_model": null,
       "idle_timeout_seconds": 600
     },
     "codex": {
       "enabled": true,
       "cli_path": "codex",
-      "default_model": null,
       "idle_timeout_seconds": 600
     }
   },

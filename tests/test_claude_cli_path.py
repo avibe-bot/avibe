@@ -25,7 +25,6 @@ class _ClaudeRuntimeConfig:
     permission_mode: str = "bypassPermissions"
     cwd: str = "/tmp/workdir"
     system_prompt: str | None = None
-    default_model: str | None = None
     cli_path: str | None = "/usr/local/bin/claude-proxy"
 
 
@@ -861,9 +860,12 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
-    controller.config.claude.default_model = "claude-sonnet-4-5"
     handler = SessionHandler(controller)
-    context = MessageContext(user_id="U123", channel_id="C123")
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"agent_session_target": {"model": "claude-sonnet-4-5"}},
+    )
 
     first_client = _run_session(handler, context)
     second_client = _run_session(handler, context)
@@ -1096,12 +1098,15 @@ def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypat
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
-    controller.config.claude.default_model = "claude-sonnet-4-5"
     handler = SessionHandler(controller)
-    context = MessageContext(user_id="U123", channel_id="C123")
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"agent_session_target": {"model": "claude-sonnet-4-5"}},
+    )
 
     client = _run_session(handler, context)
-    controller.config.claude.default_model = "claude-opus-4-1"
+    context.platform_specific["agent_session_target"]["model"] = "claude-opus-4-1"
 
     _run_session(handler, context)
     _run_session(handler, context)

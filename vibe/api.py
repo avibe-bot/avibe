@@ -5573,16 +5573,7 @@ def _effort_values(reasoning_entries: object) -> list[str]:
     return out
 
 
-def _backend_default_model(config: Optional[V2Config], backend: str) -> Optional[str]:
-    if config is None:
-        return None
-    agents = getattr(config, "agents", None)
-    backend_cfg = getattr(agents, backend, None) if agents is not None else None
-    value = getattr(backend_cfg, "default_model", None) if backend_cfg is not None else None
-    return value or None
-
-
-def _flat_catalog_models(catalog: dict, default_model: Optional[str]) -> list[dict]:
+def _flat_catalog_models(catalog: dict) -> list[dict]:
     """Shape claude_models()/codex_models() output into the unified models list."""
     reasoning_map = catalog.get("reasoning_options") or {}
     models: list[dict] = []
@@ -5593,7 +5584,6 @@ def _flat_catalog_models(catalog: dict, default_model: Optional[str]) -> list[di
             {
                 "value": model_id,
                 "label": (catalog.get("model_labels") or {}).get(model_id, model_id),
-                "default": bool(default_model) and model_id == default_model,
                 "reasoning_efforts": _effort_values(reasoning_map.get(model_id)),
             }
         )
@@ -5685,7 +5675,6 @@ def _opencode_model_options(
     return {
         "ok": True,
         "backend": "opencode",
-        "default_model": _backend_default_model(config, "opencode"),
         "default_provider": default_provider or None,
         "providers": providers_out,
         "models": models_out,
@@ -5706,8 +5695,8 @@ def agent_model_options(
     Single entry point wrapping ``claude_models`` / ``codex_models`` /
     ``opencode_options`` into one shape so the CLI and the Web UI can share it::
 
-        {ok, backend, default_model, models: [{value, default, reasoning_efforts,
-         provider?, source?}], providers?: [{id, name, custom}], source, live, notes}
+        {ok, backend, models: [{value, reasoning_efforts, provider?, source?}],
+         providers?: [{id, name, custom}], source, live, notes}
 
     ``provider`` filters OpenCode results (ignored for other backends). Narrowing
     to a single model is a presentation concern left to the caller.
@@ -5726,12 +5715,10 @@ def agent_model_options(
         data = claude_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "claude model lookup failed"}
-        default_model = _backend_default_model(config, "claude")
         result = {
             "ok": True,
             "backend": "claude",
-            "default_model": default_model,
-            "models": _flat_catalog_models(data, default_model),
+            "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),
             "notes": data.get("notes"),
@@ -5741,12 +5728,10 @@ def agent_model_options(
         data = codex_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "codex model lookup failed"}
-        default_model = _backend_default_model(config, "codex")
         result = {
             "ok": True,
             "backend": "codex",
-            "default_model": default_model,
-            "models": _flat_catalog_models(data, default_model),
+            "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),
             "notes": data.get("notes"),
@@ -9689,16 +9674,12 @@ async def _get_opencode_providers_async() -> dict:
     # it became a no-op (no state change to persist), silently
     # blocking users from picking Anthropic explicitly.
     default_provider: str | None = None
-    configured_default_model: str | None = None
     try:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "opencode", None)
         configured_default = getattr(cfg, "default_provider", None)
         if isinstance(configured_default, str) and configured_default.strip():
             default_provider = configured_default.strip()
-        raw_default_model = getattr(cfg, "default_model", None)
-        if isinstance(raw_default_model, str) and raw_default_model.strip():
-            configured_default_model = raw_default_model.strip()
     except Exception:
         pass
 
@@ -9876,12 +9857,6 @@ async def _get_opencode_providers_async() -> dict:
             default_provider=default_provider,
             provider_id=pid,
         )
-        if not preferred_model:
-            preferred_model = resolve_opencode_configured_default_model(
-                configured_default_model,
-                default_provider=default_provider,
-                provider_id=pid,
-            )
         if preferred_model:
             preferred_model = resolve_opencode_model_id(
                 config_raw,

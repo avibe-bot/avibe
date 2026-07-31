@@ -22,7 +22,6 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   menu_kind: 'fixed',
   selected_by_agent: null,
   selected_model_id: 'current-model',
-  current: null,
   sources: { policy: 'follow', order: [], eligibility: [] },
   supply_status: 'ok',
   model_supply: [{ model_id: 'supply-model', chain_length: 1 }],

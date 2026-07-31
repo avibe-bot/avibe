@@ -80,11 +80,6 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
   "selected_by_agent": "pm",
   "selected_model_id": "claude-opus-4-6",
   "selected_model_explicit": true,
-  "current": {
-    "model_id": "claude-opus-4-6",
-    "source_id": "src_anthkey01",
-    "channel": "hub"
-  },
   "sources": {
     "policy": "follow",
     "order": ["src_claudepro1", "src_anthkey01"],
@@ -132,8 +127,8 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
 ```
 
 `named_agents` lists every enabled named Vibe Agent whose backend matches this
-record. `effective_model_id` is the Agent's pinned model, otherwise the backend
-default. `supply_status` is derived independently for that effective model. The
+record. `effective_model_id` is the Agent's explicit model. `supply_status` is
+derived independently for that effective model. The
 list name and object shape are intentionally distinct from `SupplyGap.agents`,
 which is a list of bare names inside a mutation result.
 
@@ -141,11 +136,9 @@ which is a list of bare names inside a mutation result.
 user's explicit configuration request. FALSE means no explicit model selection,
 including a resolver-picked value or no selected model.
 
-For a fixed native menu, `current.model_id` is the effective upstream id for the
-selected source. It may therefore differ from `selected_model_id` without an
-explicit mapping when built-in native alias resolution chooses a discovered dated
-model. Chain and probe inputs remain the caller-facing `selected_model_id`; each
-candidate derives its own effective upstream id.
+AgentSupply does not project a backend-level serving head. Chain and probe responses
+carry the effective upstream model and source for the named model request; the
+Agents payload stays at per-named-Agent selection and supply-status grain.
 
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
@@ -167,8 +160,8 @@ per-backend unavailable set beside the complete eligibility inventory, while
 
 ### Honest null selection
 
-Hub mode does not invent a default. When neither the routed Vibe Agent nor the
-backend configuration pins a model:
+An isolated Model Hub service that is not connected to the Vibe Agent catalog may
+still have no projected selection:
 
 ```json
 {
@@ -176,13 +169,12 @@ backend configuration pins a model:
   "selected_by_agent": null,
   "selected_model_id": null,
   "selected_model_explicit": false,
-  "current": null,
   "supply_status": null
 }
 ```
 
-This means “no pinned selection.” Each turn still resolves against the model carried
-by that request, including the CLI's own default. `sources`, `model_supply`, and
+This means “no projected Agent selection.” Each turn still resolves against the
+model carried by that request. `sources`, `model_supply`, and
 `named_agents` remain present and non-null in Hub mode. Each eligibility row keeps
 its process availability but carries `in_current_model_chain: null`.
 
@@ -282,16 +274,14 @@ extra `source` or `flow` nesting is added.
 }
 ```
 
-`agents` is the set of enabled named Vibe Agents whose effective model is the
-menu-side `model_id`, including Agents that inherit the backend default. It is
-present and may be empty.
+`agents` is the set of enabled named Vibe Agents whose explicit model is the
+menu-side `model_id`. It is present and may be empty.
 
 The protected model set for a backend is the union of:
 
-1. effective models of enabled named Vibe Agents;
-2. the backend default;
-3. checked open-menu models;
-4. the menu-side `builtin_id` of mappings whose `enabled` is true.
+1. explicit models of enabled named Vibe Agents;
+2. checked open-menu models;
+3. the menu-side `builtin_id` of mappings whose `enabled` is true.
 
 The guard evaluates each protected `(backend, model)` against the post-mutation
 state. It counts only runnable suppliers in that backend's enabled effective order,

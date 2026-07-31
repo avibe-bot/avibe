@@ -37,7 +37,6 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   menu_kind: 'fixed',
   selected_by_agent: null,
   selected_model_id: 'claude-opus-4-6',
-  current: { model_id: 'claude-opus-4-6', source_id: 'src_a', channel: 'hub' },
   sources: { policy: 'follow', order: ['src_a'], eligibility: [] },
   supply_status: 'ok',
   model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1 }],
@@ -105,15 +104,15 @@ const render = (
 );
 
 describe('AgentCard model list', () => {
-  it('shows every model, the current marker, and the actual serving source', () => {
+  it('shows every model and the actual serving source without a current badge', () => {
     const html = render(
       [agent()],
       chains(chain('claude-opus-4-6'), chain('claude-sonnet-4-6')),
     );
     expect(html).toContain('claude-opus-4-6');
     expect(html).toContain('claude-sonnet-4-6');
-    expect(html).toContain(zh.settings.models.current);
     expect(html).toContain('当前由 Anthropic API Key 供给');
+    expect(html).not.toContain('>当前</');
   });
 
   it('explains an automatic switch on the current model row', () => {
@@ -146,7 +145,7 @@ describe('AgentCard model list', () => {
   });
 
   it('renders an honest row-zero state when no model is selected', () => {
-    const html = render([agent({ selected_model_id: null, current: null })], chains(chain('claude-opus-4-6')));
+    const html = render([agent({ selected_model_id: null })], chains(chain('claude-opus-4-6')));
     expect(html).toContain(zh.settings.models.emptySelection.title);
     expect(html).toContain(zh.settings.models.emptySelection.action);
   });
@@ -218,7 +217,6 @@ describe('AgentCard model list', () => {
       backend: 'opencode',
       menu_kind: 'open',
       selected_model_id: 'anthropic/claude-opus-4-6',
-      current: null,
       sources: {
         policy: 'custom',
         order: ['src_enabled'],
@@ -250,7 +248,6 @@ describe('AgentCard model list', () => {
         backend: 'opencode',
         menu_kind: 'open',
         selected_model_id: null,
-        current: null,
         model_supply: [],
         mappings: [],
         menu: { view: 'featured', checked: [] },
@@ -301,7 +298,7 @@ describe('AgentCard model list', () => {
   });
 
   it('keeps Direct honest and offers the managed-mode action instead of order editing', () => {
-    const html = render([agent({ mode: 'direct', sources: null, current: null })], {});
+    const html = render([agent({ mode: 'direct', sources: null })], {});
     expect(html).toContain(zh.settings.models.modelStatus.direct);
     expect(html).toContain(zh.settings.models.agents.enableManaged);
     expect(html).not.toContain(zh.settings.models.agents.sourceOrder);

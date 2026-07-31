@@ -2401,7 +2401,7 @@ class AgentAuthService:
             return {"ok": False, "error": "opencode_server_unavailable"}
 
         # Match normal OpenCode turns: caller override, the selected OpenCode
-        # agent's model, Avibe's V2 fallback, then the provider catalog.
+        # Agent's model, then the provider catalog.
         chosen_model = (model or "").strip()
         backend_config = self._resolve_backend_config("opencode")
         default_provider = getattr(backend_config, "default_provider", None)
@@ -2414,15 +2414,6 @@ class AgentAuthService:
             chosen_model = (
                 resolve_opencode_configured_default_model(
                     runtime_agent_model,
-                    default_provider=default_provider,
-                    provider_id=provider_id,
-                )
-                or ""
-            )
-        if not chosen_model and backend_config is not None:
-            chosen_model = (
-                resolve_opencode_configured_default_model(
-                    getattr(backend_config, "default_model", None),
                     default_provider=default_provider,
                     provider_id=provider_id,
                 )

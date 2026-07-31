@@ -1274,7 +1274,7 @@ class CodexAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
-        effective_model = explicit_model or (agent_definition.model if agent_definition else None) or self.codex_config.default_model
+        effective_model = explicit_model or (agent_definition.model if agent_definition else None)
         if getattr(self.controller, "model_hub_runtime", None) is not None:
             from modules.agents.model_hub import launch_for_context
 
