@@ -885,6 +885,39 @@ class SessionTurnManager:
             owned |= self._agent_run_ids_from_spec(sink)
         return owned
 
+    def teardown_exempt_run_ids(self, session_id: str) -> set[str]:
+        """Run ids a session teardown must NOT treat as interrupted: the caller's own.
+
+        The reporting half of :meth:`release_for_teardown`'s HFR-320 guard. That guard
+        makes the nested, in-dispatch release a no-op — the turn keeps running and
+        will settle by its own outcome — but a skip is only half an answer. The
+        teardown's pre-cancel snapshot (``_teardown_owned_run_ids``) still names this
+        turn's runs, and ``reconcile_session_teardown`` settles every claimed run whose
+        row is still ``running`` after the cancel leg. The turn that was deliberately
+        spared would therefore have its live run failed as ``backend_refresh`` while
+        the dispatch is still going, which is the exact outcome HFR-320 set out to
+        prevent (HFR-321). The reconciler must only settle work that was ACTUALLY
+        interrupted, so what was skipped has to leave the snapshot.
+
+        Ownership is read the same way :meth:`owned_agent_run_ids` reads it, off the
+        context the turn started under, so a coalesced turn exempts every id it is
+        settling rather than only its primary. The turn's streaming sink, if it has
+        one, is built from that same context spec by ``_turn_sink_identity`` and so
+        carries no additional ids.
+
+        Returns an empty set for every shape that is not the caller's own turn — no
+        session, no live turn, or a turn owned by another task, which is a turn this
+        teardown really is interrupting.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return set()
+        turn = self.in_flight.get(resolved)
+        if turn is None or turn.task is not asyncio.current_task():
+            return set()
+        return self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
+
     def busy_session_ids(self) -> set[str]:
         """Sessions whose gate is occupied by a live turn RIGHT NOW.
 
@@ -1894,6 +1927,12 @@ class SessionTurnManager:
         recreation succeeded, and ``stop_no_flush`` / ``flush_on_cancel`` would
         silently rewrite the still-running turn's flush intent. A turn that is not
         being released must leave here untouched.
+
+        Skipping the cancel is only half the exemption: the teardown's ownership
+        snapshot still names this turn's runs, and its reconciler settles claimed runs
+        whose rows are still ``running``. :meth:`teardown_exempt_run_ids` reports the
+        same decision to the snapshot so the spared turn's runs are not failed out
+        from under it (HFR-321).
         """
 
         resolved = str(session_id or "").strip()

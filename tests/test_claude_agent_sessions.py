@@ -710,6 +710,147 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(turn.stop_no_flush)
         self.assertFalse(turn.flush_on_cancel)
 
+    async def test_in_dispatch_recreation_does_not_reconcile_the_callers_own_run(self):
+        """HFR-321: sparing the caller's turn must also spare the caller's RUN.
+
+        The same in-dispatch client recreation as the HFR-320 case above, with the one
+        detail that case did not carry: the Workbench turn is executing a harness run,
+        so its context names a ``task_execution_id`` and the ``agent_runs`` row is
+        ``running`` with this session stamped on it.
+
+        HFR-320 stops at the cancel leg. ``release_for_teardown`` declines the calling
+        task's turn and returns untouched — but ``cancel_session_executions`` still
+        snapshotted that turn's run id as owned, and ``teardown_session_runs``
+        reconciles right behind the cancel: claimed ∩ this session's rows ∩ still
+        ``running`` selects the very run the guard just protected, and settles it
+        ``failed``/``backend_refresh``. The turn then completes normally and finds its
+        run already terminal, so the guarded terminal writer refuses the real outcome
+        and the user is told their live turn failed because a cached client was
+        rebuilt underneath it.
+
+        The exemption therefore has to reach the SNAPSHOT, not just the cancel: what a
+        teardown deliberately skipped was never interrupted, so it is not the
+        reconciler's to settle.
+        """
+
+        from sqlalchemy import update
+
+        from core.handlers.session_handler import SessionHandler
+        from core.scheduled_tasks import ScheduledTaskService
+        from core.session_turns import SessionTurnManager, Turn
+        from modules.agents.model_hub import ModelHubLaunch
+        from modules.im import MessageContext
+        from storage.db import create_sqlite_engine
+        from storage.models import agent_runs
+
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        session_id = "ses_selfreconcile_321"
+
+        class _Client:
+            def __init__(self, tag):
+                self.tag = tag
+                self.disconnected = False
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        controller.stored_session_mappings = {}
+        controller.sessions = SimpleNamespace(
+            find_session_ids_for_anchor=lambda anchor, workdir=None, **_kw: [session_id]
+        )
+        controller.set_agent_status = lambda *_args, **_kwargs: None
+        # Stores default to the per-test isolated ``AVIBE_HOME`` (tests/conftest.py).
+        service = ScheduledTaskService(controller=controller)
+        controller.scheduled_task_service = service
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+
+        # The run this turn is executing: ``running``, and associated with the session
+        # the nested teardown is about to reclaim — i.e. selectable by every leg of the
+        # reconciler's intersection except the one this fix restores.
+        run = service.request_store.enqueue_agent_run(
+            session_key="wechat-user",
+            message="the turn that recreated its own client",
+            agent_name="claude",
+        )
+        engine = create_sqlite_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .values(session_id=session_id, status="running")
+            )
+
+        handler = SessionHandler(controller)
+        controller.session_handler = handler
+        handler._build_claude_system_prompt = lambda **_kwargs: "prompt-v2"
+        handler.claude_system_prompts[runtime_key] = "prompt-v1"
+
+        stale = _Client("stale")
+        controller.claude_sessions[runtime_key] = stale
+        launch = ModelHubLaunch("claude", "direct", "opus", "opus", "opus")
+
+        turn_ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+        turn_ctx.platform_specific = {
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+        }
+
+        registered = asyncio.Event()
+        observed: dict = {}
+
+        async def _dispatch():
+            await registered.wait()
+            observed["reuse_returned"] = await handler._reuse_cached_claude_session_if_available(
+                composite_key=runtime_key,
+                base_session_id="wechat_o9",
+                working_path="/tmp/work",
+                context=turn_ctx,
+                session_key="wechat-user",
+                stored_claude_session_id=None,
+                current_model="opus",
+                agent_system_prompt=None,
+                model_hub_launch=launch,
+            )
+            controller.claude_sessions[runtime_key] = _Client("replacement")
+            # Read INSIDE the dispatch, while the turn is provably still alive: this
+            # is the moment the reconciler must not have settled anything.
+            observed["row_during_turn"] = service.request_store.get_run(run.id)
+            return "terminal_result"
+
+        turn_task = asyncio.create_task(_dispatch())
+        manager.in_flight[session_id] = Turn(task=turn_task, context=turn_ctx)
+        registered.set()
+
+        # Polled rather than awaited for the HFR-320 reason: a wedged turn would hang
+        # the suite on a plain await.
+        for _ in range(300):
+            if turn_task.done():
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(turn_task.done(), "the in-dispatch teardown wedged its own turn")
+        self.assertEqual(turn_task.result(), "terminal_result")
+
+        during = observed["row_during_turn"]
+        self.assertIsNotNone(during)
+        self.assertEqual(
+            during["status"],
+            "running",
+            "the caller's own run was reconciled while its turn was still executing",
+        )
+        self.assertIsNone(during["completed_at"])
+        self.assertNotIn("interrupt_reason", during["metadata"] or {})
+
+        # ...and because it was left alone, the turn's real outcome still lands: the
+        # guarded writer is scoped to ``queued|running`` and would refuse a row the
+        # teardown had already terminalized.
+        written = service.request_store.settle_without_result(
+            run.id, terminal_status="succeeded"
+        )
+        self.assertEqual(written, "succeeded")
+
     async def test_handle_stop_waits_for_in_flight_steering_write(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"

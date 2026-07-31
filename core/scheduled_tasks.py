@@ -464,6 +464,11 @@ class SessionCancellationResult:
     the very maps a teardown reconciler would consult, so a reconciler that looked
     afterwards would see a ``running`` row with no owner and could not tell an
     interrupted claim of ours from an unrelated row it must never touch.
+
+    It is the snapshot MINUS whatever the cancellation deliberately skipped: a run
+    the teardown spared because it belongs to the calling task is still executing and
+    still owns its own terminal write, so it is not interruption evidence and must
+    not reach a reconciler (HFR-321).
     """
 
     cancelled_count: int
@@ -2877,6 +2882,39 @@ class ScheduledTaskService:
             )
         return owned
 
+    def _teardown_exempt_run_ids(self, session_id: str) -> set[str]:
+        """Run ids the turn lane is deliberately NOT interrupting for this teardown.
+
+        Reads ``SessionTurnManager.teardown_exempt_run_ids`` — the reporting half of
+        the HFR-320 self-turn guard — through the same defensive adapter shape as
+        :meth:`_release_manager_turn`, so a controller without a turn manager is a
+        no-op rather than an exception on a teardown path.
+
+        The identity check the manager performs is about the CALLING task, which does
+        not change for the duration of this teardown, so the answer is read once
+        alongside the ownership snapshot rather than at the release call below.
+
+        A failure here degrades to "nothing exempt", which is the pre-HFR-321
+        behaviour: the reconciler may settle a run the turn lane spared. Fabricating
+        exemptions instead is not an option, and a teardown must not abort because its
+        bookkeeping raised.
+        """
+
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "teardown_exempt_run_ids", None)
+        if not callable(provider):
+            return set()
+        try:
+            return {str(run_id) for run_id in provider(session_id) if run_id}
+        except Exception:
+            logger.warning(
+                "Teardown snapshot: turn-lane self-exemption for session %s could not "
+                "be read; reconciling as if nothing was skipped",
+                session_id,
+                exc_info=True,
+            )
+            return set()
+
     async def _release_manager_turn(self, session_id: str, *, settled_by: str) -> bool:
         """Cancel the session's live Workbench turn with ``settled_by`` recorded first.
 
@@ -2952,6 +2990,19 @@ class ScheduledTaskService:
         3. the Workbench turn lane, which the scheduler maps never see because
            ``_execute_request`` hands an avibe-targeted turn to the gate and returns.
 
+        WHAT THIS CALL DELIBERATELY SKIPS LEAVES THE SNAPSHOT (HFR-321). Both lanes
+        exempt the CALLER'S OWN work — ``_cancel`` skips a task that ``is
+        current_task``, and ``release_for_teardown`` skips the turn owned by the
+        calling task — because cancelling yourself deadlocks (or, in the turn lane,
+        wedges on a self-await) and because the caller is still running and will
+        settle by its own outcome. A skipped run is therefore the one thing that was
+        provably NOT interrupted, so it is subtracted from the returned snapshot: the
+        reconciler settles what this teardown claimed AND could not reach, and a run
+        still executing in the calling task is neither. Subtracting here rather than in
+        the reconciler protects every caller at once — ``teardown_session_runs`` and
+        End's ``cancel_session_scheduler_lane`` + ``reconcile_session_runs`` — and
+        keeps the reconciler's predicate unweakened for the rows it really must settle.
+
         Returns the count of things actually interrupted plus the pre-cancel
         ownership snapshot; the cancelled tasks are awaited before returning, so a
         caller that reconciles afterwards sees settled rows rather than a race.
@@ -2963,6 +3014,13 @@ class ScheduledTaskService:
             return SessionCancellationResult(cancelled_count=0, claimed_run_ids=claimed_run_ids)
 
         current_task = self._current_asyncio_task()
+        # The turn lane's skip decision, read up front: the calling task is fixed for
+        # the whole teardown, and the turn is still in ``in_flight`` here whether or
+        # not the manager lane is consulted below. It is collected even when
+        # ``include_manager_lane=False`` because the question is "did THIS call
+        # interrupt that run", and the answer is no in both modes — End's own stop path
+        # owns the turn there and settles it with its own cause.
+        skipped_run_ids: set[str] = self._teardown_exempt_run_ids(resolved)
         cancelled_tasks: list["asyncio.Task[Any]"] = []
         cancelled_run_ids: set[str] = set()
 
@@ -2975,9 +3033,12 @@ class ScheduledTaskService:
             if task is current_task:
                 # Teardown invoked from inside the very execution it would cancel
                 # (an agent that evicts its own session). Cancelling and awaiting
-                # ourselves deadlocks; the run stays in ``claimed_run_ids`` so the
-                # reconciler can still account for it. Same exemption ``_begin_stop``
-                # makes.
+                # ourselves deadlocks, so the run is spared — the same exemption
+                # ``_begin_stop`` makes. Being spared is exactly why it must LEAVE
+                # ``claimed_run_ids``: it is still executing and will write its own
+                # terminal row, so reconciling it would fail a live run mid-flight
+                # (HFR-321).
+                skipped_run_ids.add(run_id)
                 logger.debug(
                     "Session teardown for %s skipped its own execution %s", resolved, run_id
                 )
@@ -3034,7 +3095,7 @@ class ScheduledTaskService:
             )
         return SessionCancellationResult(
             cancelled_count=cancelled_count,
-            claimed_run_ids=claimed_run_ids,
+            claimed_run_ids=frozenset(claimed_run_ids - skipped_run_ids),
         )
 
     def reconcile_session_teardown(

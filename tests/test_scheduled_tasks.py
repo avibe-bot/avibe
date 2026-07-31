@@ -3412,6 +3412,84 @@ def test_reconciler_does_not_settle_an_unrelated_running_row_on_the_same_session
     assert not (untouched["metadata"] or {}).get("interrupt_reason")
 
 
+def test_self_evicting_execution_is_not_reconciled_mid_flight(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-321: the run the cancel lane deliberately spared is not interrupted work.
+
+    The self-eviction shape: a turn reclaims the session it is itself executing in, so
+    ``_cancel`` finds its own task in ``_inflight_executions`` and skips it — awaiting
+    your own cancellation deadlocks, and ``_begin_stop`` makes the same exemption.
+
+    Skipping the cancel used to be the whole exemption: the run id stayed in
+    ``claimed_run_ids``, and the reconcile that ``teardown_session_runs`` runs one
+    line later selected it (ours ∩ this session ∩ still ``running``) and settled it
+    ``failed``/``evicted`` while the execution was mid-prompt. The turn then finished
+    and found its row already terminal, so its real outcome was refused by the guarded
+    writer. What a teardown could not touch is not what a teardown interrupted, so the
+    skip has to reach the snapshot the reconciler reads.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_name = _ensure_reservation_agent()
+    request_store = TaskExecutionStore()
+    observed: dict[str, Any] = {}
+
+    async def _evict_own_session(_controller, _context, _message) -> None:
+        # Inside the execution task: this is what makes the teardown reach its own
+        # run rather than somebody else's.
+        observed["result"] = await observed["service"].teardown_session_runs(
+            observed["session_id"],
+            settled_by=SETTLED_BY_EVICTED,
+        )
+        # Read while the turn is provably still running — asserting after completion
+        # would let the execution's own terminal write hide a wrongly reconciled row.
+        observed["row_during_turn"] = request_store.get_run(observed["run_id"])
+
+    controller = _SettlementControllerDouble(on_turn=_evict_own_session)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    observed["service"] = service
+    pinned_session_id = service._reserve_runtime_session(
+        agent_name=agent_name,
+        deliver_key="slack::channel::C123",
+        metadata=None,
+    )
+    observed["session_id"] = pinned_session_id
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        session_id=pinned_session_id,
+        prompt="a turn that evicts the session it is running in",
+        deliver_key="slack::channel::C123",
+        agent_name=agent_name,
+    )
+    observed["run_id"] = request.id
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        if execution is not None:
+            await execution
+
+    asyncio.run(_exercise())
+
+    result = observed["result"]
+    # The cancel provably could not reach it: skipping is the premise of this case.
+    assert result.cancelled_count == 0
+    assert result.reconciled_count == 0
+    assert request.id not in result.claimed_run_ids
+
+    during = observed["row_during_turn"]
+    assert during is not None
+    assert during["status"] == "running"
+    assert during["completed_at"] is None
+    assert not (during["metadata"] or {}).get("interrupt_reason")
+
+
 def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
     tmp_path: Path,
     monkeypatch,

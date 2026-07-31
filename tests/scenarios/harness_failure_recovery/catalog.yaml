@@ -2817,6 +2817,48 @@ scenarios:
     # stop_no_flush / flush_on_cancel, no idle stamp) and settles by its own outcome:
     # tests/test_internal_server.py::test_release_for_teardown_skips_the_callers_own_turn
     test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_in_dispatch_client_recreation_survives_its_own_teardown
+  - id: HFR-321
+    name: a run the teardown skipped is not reconciled as interrupted
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # PR2 review round 4, and the direct consequence of HFR-320 plus the self-skip the
+    # scheduler lane always had. Both lanes exempt the CALLER'S OWN work -- _cancel
+    # skips a task that is current_task, release_for_teardown skips the turn owned by
+    # the calling task -- but both left the skipped run id inside the claimed_run_ids
+    # snapshot cancel_session_executions returns.
+    # That snapshot is leg 1 of reconcile_session_teardown's three-way intersection,
+    # and teardown_session_runs runs the reconcile one line behind the cancel: claimed
+    # INTERSECT this session's rows INTERSECT still-running selected the very run the
+    # guard had just spared and settled it failed/<cause> while the turn was still
+    # executing. The turn then finished and found its row terminal, so the guarded
+    # writer (scoped queued|running) refused its real outcome -- the user is told a
+    # live turn failed because a cached client was rebuilt underneath it. The old
+    # _cancel comment claimed the run stayed in the snapshot FOR the reconciler, which
+    # was backwards: the reconciler must only settle work that was ACTUALLY
+    # interrupted, and what a teardown deliberately could not touch is the one thing
+    # it provably did not interrupt.
+    # FIX: the skip decision flows into the snapshot in both lanes.
+    # cancel_session_executions collects skipped_run_ids and returns
+    # claimed_run_ids = snapshot - skipped, which protects every caller at once
+    # (teardown_session_runs, and End's cancel_session_scheduler_lane +
+    # reconcile_session_runs, which carries the snapshot across its own stop). The
+    # scheduler lane adds the id in _cancel's current_task branch. The turn lane
+    # reports through SessionTurnManager.teardown_exempt_run_ids -- the reporting half
+    # of the HFR-320 guard, same identity check, same _agent_run_ids_from_spec
+    # extraction owned_agent_run_ids uses, so a coalesced turn exempts every id it is
+    # settling. release_for_teardown itself is unchanged: its no-mutation contract is
+    # pinned by HFR-320's tests, and a bool return cannot distinguish "skipped" from
+    # "no turn found". The reconciler's predicate is NOT weakened -- the fix is in
+    # what the snapshot claims.
+    # The exemption is collected even when include_manager_lane=False, because the
+    # question is "did THIS call interrupt that run" and the answer is no in both
+    # modes; End's own stop path owns and settles that turn with its own cause.
+    # A scheduler-lane twin carries this same id for the self-eviction shape (a turn
+    # that reclaims the session it is executing in):
+    # tests/test_scheduled_tasks.py::test_self_evicting_execution_is_not_reconciled_mid_flight
+    test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_in_dispatch_recreation_does_not_reconcile_the_callers_own_run
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
