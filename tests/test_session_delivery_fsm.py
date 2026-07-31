@@ -192,6 +192,57 @@ def test_turn_terminal_between_p1_observation_and_claim_has_one_owner(managers) 
     assert sum(row["message_id"] == outcome.message_id for row in rows) == 1
 
 
+def test_terminal_race_fallback_preserves_older_legacy_fifo(managers) -> None:
+    manager, terminal_manager, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    with engine.begin() as conn:
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="older legacy row",
+        )
+    observed = threading.Event()
+    release = threading.Event()
+    dispatched: list[str] = []
+
+    def blocked_identity(_backend, _session_id, logical_id):
+        observed.set()
+        assert release.wait(5)
+        return logical_id, "native-t1"
+
+    async def capture_run(_session_id, _context_value, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._active_identity = blocked_identity
+    manager._run = capture_run
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(
+            asyncio.run,
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p1",
+                    content="fallback",
+                ),
+                context=_context(),
+            ),
+        )
+        assert observed.wait(5)
+        assert asyncio.run(terminal_manager.terminalize_turn(turn_id))
+        release.set()
+        outcome = future.result(timeout=5)
+
+    with engine.connect() as conn:
+        fallback = delivery_store.get_delivery(conn, str(outcome.delivery_id))
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert dispatched == ["older legacy row"]
+    assert outcome.state == "queued"
+    assert fallback is not None
+    assert fallback["state"] == "queued"
+    assert [row["id"] for row in queued] == [outcome.message_id]
+
+
 def test_two_empty_p1_requests_cas_the_same_fifo_head_only(managers) -> None:
     """Scenario: MESSAGE-DELIVERY-010"""
     first, second, engine, _engine_b, _starts = managers
@@ -423,6 +474,48 @@ def test_definitive_refusal_racing_idle_drain_starts_same_message_once(managers)
     assert row["message_id"] == outcome.message_id
     assert row["priority"] == "p3"
     assert len([turn for turn in starts if turn != turn_id]) == 1
+
+
+def test_definitive_refusal_preserves_older_legacy_fifo(managers) -> None:
+    manager, terminal_manager, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    with engine.begin() as conn:
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="older legacy row",
+        )
+    dispatched: list[str] = []
+
+    async def capture_run(_session_id, _context_value, text, **_kwargs):
+        dispatched.append(text)
+
+    async def refused_after_terminal(_backend, _request):
+        assert await terminal_manager.terminalize_turn(turn_id)
+        return steer_result(SteerOutcome.REFUSED, reason="not_steerable")
+
+    manager._run = capture_run
+    manager._steer = refused_after_terminal
+    outcome = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="fallback",
+            ),
+            context=_context(),
+        )
+    )
+
+    with engine.connect() as conn:
+        fallback = delivery_store.get_delivery(conn, str(outcome.delivery_id))
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert dispatched == ["older legacy row"]
+    assert outcome.state == "queued"
+    assert fallback is not None
+    assert fallback["state"] == "queued"
+    assert [row["id"] for row in queued] == [outcome.message_id]
 
 
 def test_p0_successor_persistence_failure_never_calls_interrupt(managers, monkeypatch) -> None:
@@ -1856,6 +1949,44 @@ def test_legacy_submit_queues_behind_restored_durable_owner(managers) -> None:
     with engine.connect() as conn:
         queued = messages_service.list_queued(conn, "ses_fsm")
     assert [row["text"] for row in queued] == ["wait for restored native work"]
+
+
+def test_send_now_defers_behind_restored_durable_owner(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+
+    async def run():
+        turn_id, _context_value = await _activate(manager)
+
+        def enqueue() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn,
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    text="send after restored native work",
+                )
+            return True
+
+        manager.send_now = AsyncMock()
+        result = await manager.submit(
+            "ses_fsm",
+            _context(),
+            "send after restored native work",
+            enqueue=enqueue,
+            delivery_intent="send_now",
+        )
+        return turn_id, result
+
+    turn_id, result = asyncio.run(run())
+    assert result.route == "enqueued"
+    assert result.queue_persisted is True
+    assert result.target_was_busy is True
+    assert result.delivery_status == "deferred"
+    manager.send_now.assert_not_awaited()
+    assert starts == [turn_id]
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert [row["text"] for row in queued] == ["send after restored native work"]
 
 
 def test_idle_p3_preserves_older_legacy_fifo_head(managers) -> None:

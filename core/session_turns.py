@@ -1124,6 +1124,42 @@ class SessionTurnManager:
         )
         return str(row["id"])
 
+    @staticmethod
+    def _queue_heads(
+        conn: Connection,
+        session_id: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        durable_head = delivery_store.fifo_head(conn, session_id)
+        durable_message_ids = delivery_store.queued_message_ids(conn, session_id)
+        legacy_head = next(
+            (
+                row
+                for row in messages_service.list_queued(conn, session_id)
+                if str(row.get("id") or "") not in durable_message_ids
+            ),
+            None,
+        )
+        return durable_head, legacy_head
+
+    @staticmethod
+    def _legacy_queue_precedes(
+        durable_head: dict[str, Any] | None,
+        legacy_head: dict[str, Any] | None,
+    ) -> bool:
+        if legacy_head is None:
+            return False
+        if durable_head is None:
+            return True
+        legacy_key = (
+            str(legacy_head.get("created_at") or ""),
+            str(legacy_head.get("id") or ""),
+        )
+        durable_key = (
+            str(durable_head.get("created_at") or ""),
+            str(durable_head.get("id") or ""),
+        )
+        return legacy_key <= durable_key
+
     def _active_identity(
         self,
         backend: str,
@@ -1226,17 +1262,7 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             active = delivery_store.active_turn(conn, request.session_id)
-            head = delivery_store.fifo_head(conn, request.session_id)
-            durable_message_ids = delivery_store.queued_message_ids(
-                conn,
-                request.session_id,
-            )
-            legacy_rows = [
-                row
-                for row in messages_service.list_queued(conn, request.session_id)
-                if str(row.get("id") or "") not in durable_message_ids
-            ]
-            legacy_head = legacy_rows[0] if legacy_rows else None
+            head, legacy_head = self._queue_heads(conn, request.session_id)
             message_id = self._delivery_message(conn, request)
             if active is not None or head is not None or legacy_head is not None:
                 delivery_store.insert_delivery(
@@ -1254,17 +1280,7 @@ class SessionTurnManager:
                     raise RuntimeError("P3 Message projection lost ownership")
                 state = "queued"
                 if active is None:
-                    legacy_key = (
-                        str((legacy_head or {}).get("created_at") or ""),
-                        str((legacy_head or {}).get("id") or ""),
-                    )
-                    durable_key = (
-                        str((head or {}).get("created_at") or ""),
-                        str((head or {}).get("id") or ""),
-                    )
-                    drain_legacy = legacy_head is not None and (
-                        head is None or legacy_key <= durable_key
-                    )
+                    drain_legacy = self._legacy_queue_precedes(head, legacy_head)
                     drain_durable = not drain_legacy
             else:
                 turn_id = delivery_store.new_turn_id()
@@ -1314,6 +1330,8 @@ class SessionTurnManager:
         expected_native_id: str | None = None
         turn_id: str | None = None
         steer_backend = backend
+        drain_durable = False
+        drain_legacy = False
         state: str
         priority = "p1"
         with self._sqlite_engine().begin() as conn:
@@ -1349,8 +1367,8 @@ class SessionTurnManager:
             elif current is None:
                 turn_id = delivery_store.new_turn_id()
                 priority = "p3" if observed_id else "p1"
-                head = delivery_store.fifo_head(conn, request.session_id)
-                if priority == "p1" or head is None:
+                head, legacy_head = self._queue_heads(conn, request.session_id)
+                if priority == "p1" or (head is None and legacy_head is None):
                     delivery_store.insert_turn(
                         conn,
                         turn_id=turn_id,
@@ -1391,6 +1409,8 @@ class SessionTurnManager:
                     ):
                         raise RuntimeError("P1 FIFO fallback Message projection lost ownership")
                     state = "queued"
+                    drain_legacy = self._legacy_queue_precedes(head, legacy_head)
+                    drain_durable = not drain_legacy
             else:
                 delivery_store.insert_delivery(
                     conn,
@@ -1409,6 +1429,10 @@ class SessionTurnManager:
 
         if state == "starting" and turn_id:
             await self._start_persisted_turn(turn_id, context=context)
+        elif drain_legacy:
+            await self.flush_queue(request.session_id)
+        elif drain_durable:
+            await self.drain_delivery_queue(request.session_id)
         elif state == "steering" and turn_id and steer_attempt_id and expected_native_id:
             receipt = await self._attempt_steer(
                 steer_backend,
@@ -1548,6 +1572,8 @@ class SessionTurnManager:
         start_turn_id: str | None = None
         message_id: str | None = None
         state = "reconciling"
+        drain_durable = False
+        drain_legacy = False
         try:
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
@@ -1609,8 +1635,11 @@ class SessionTurnManager:
                     "receipt_body_json": json.dumps(body, sort_keys=True),
                     "steer_attempt_id": delivery.get("steer_attempt_id"),
                 }
-                head = delivery_store.fifo_head(conn, str(delivery["session_id"]))
-                if current is None and head is None:
+                head, legacy_head = self._queue_heads(
+                    conn,
+                    str(delivery["session_id"]),
+                )
+                if current is None and head is None and legacy_head is None:
                     start_turn_id = delivery_store.new_turn_id()
                     delivery_store.insert_turn(
                         conn,
@@ -1630,6 +1659,9 @@ class SessionTurnManager:
                 else:
                     values.update({"state": "queued", "target_turn_id": None})
                     state = "queued"
+                    if current is None:
+                        drain_legacy = self._legacy_queue_precedes(head, legacy_head)
+                        drain_durable = not drain_legacy
                 saved = delivery_store.cas_delivery(
                     conn,
                     delivery_id,
@@ -1651,7 +1683,9 @@ class SessionTurnManager:
 
         if start_turn_id:
             await self._start_persisted_turn(start_turn_id, context=context)
-        elif state == "queued":
+        elif drain_legacy:
+            await self.flush_queue(str(delivery["session_id"]))
+        elif drain_durable:
             target_session_id = str(delivery["session_id"])
             if await self.drain_delivery_queue(target_session_id):
                 with self._sqlite_engine().connect() as conn:
@@ -2395,10 +2429,12 @@ class SessionTurnManager:
 
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
-        busy = entry is not None and not entry.task.done()
-        if not busy and self._durable_schema_available():
+        runtime_busy = entry is not None and not entry.task.done()
+        durable_busy = False
+        if not runtime_busy and self._durable_schema_available():
             with self._sqlite_engine().connect() as conn:
-                busy = delivery_store.active_turn(conn, session_id) is not None
+                durable_busy = delivery_store.active_turn(conn, session_id) is not None
+        busy = runtime_busy or durable_busy
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
         if delivery_intent == "send_now":
@@ -2422,7 +2458,9 @@ class SessionTurnManager:
             queue_persisted = bool(enqueue()) if enqueue is not None else False
             delivery_status = None
             if queue_persisted and delivery_intent == "send_now":
-                if backend in self._draining_backends and not busy:
+                if durable_busy and not runtime_busy:
+                    delivery_status = "deferred"
+                elif backend in self._draining_backends and not busy:
                     # The row is durable, but a backend cutover deliberately owns
                     # when the next turn may start. Report the deferral instead of
                     # mislabelling the still-present queue as empty.
