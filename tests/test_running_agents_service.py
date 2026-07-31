@@ -1521,3 +1521,89 @@ def test_ending_an_idle_row_is_silent_and_settles_nothing(tmp_path, monkeypatch)
     assert survivor["status"] == "running"
     assert survivor["completed_at"] is None
     assert not (survivor["metadata"] or {}).get("interrupt_reason")
+
+
+def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
+    tmp_path, monkeypatch
+):
+    """HFR-324: End's idle branch must not terminalize a turn it deliberately spared.
+
+    The backend-switch shape that
+    ``test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend`` already
+    pins at the CANCEL leg, carried one step further to the ROW. A stale codex row
+    shares its session id with a Workbench turn that has since switched to claude;
+    the live-state recheck correctly refuses to treat that turn as this row's, so
+    End reclassifies the row idle and the canonical stop — the path that owns the
+    manager lane and settles what it stops — never runs at all.
+
+    What is left is ``cancel_session_scheduler_lane`` (``include_manager_lane=False``)
+    plus the idle branch's reconcile, and the snapshot handed between them used to
+    carry the manager lane's owned run ids: ids nothing in this call cancelled and
+    nothing self-skipped. The reconcile then selected the live claude turn's row
+    (ours INTERSECT this session INTERSECT still running) and settled it ``canceled``
+    while the turn was mid-prompt — and ``settle_run_terminal`` is scoped to
+    queued|running, so the turn's real outcome could never take the row back.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store, session_id="chat-1", message="a newer claude turn, still running"
+    )
+
+    # The same fixture shape as the cancel-leg test: an in-flight turn on this
+    # session whose target names a DIFFERENT backend than the row being ended.
+    inflight_ctx = types.SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"agent_backend": "claude", "session_anchor": "claude-base"}
+        }
+    )
+    inflight_entry = types.SimpleNamespace(
+        task=types.SimpleNamespace(done=lambda: False), context=inflight_ctx
+    )
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: True,
+        cancel=_AsyncFlag(),
+        in_flight={"chat-1": inflight_entry},
+        # The live turn owns the run: this is the only place that ownership is
+        # recorded by the time a reconcile looks.
+        owned_agent_run_ids=lambda: {run_id},
+    )
+
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: None,
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({}, pending=set())  # the codex base is genuinely idle
+    treg.clear_session = lambda b: None
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=treg,
+        _transports={"/w": transport},
+        _transport_last_activity={"/w": 0.0},
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = manager
+    controller.scheduled_task_service = service
+    service.controller = controller
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="chat-1", base_session_id="codex-base"
+        )
+    )
+
+    assert res["ok"] is True
+    # The newer backend's turn is still executing, so its row must still be open for
+    # its own outcome — not carrying a terminal status End invented for it.
+    survivor = request_store.get_run(run_id)
+    assert survivor is not None
+    assert survivor["status"] == "running"
+    assert survivor["completed_at"] is None
+    assert not (survivor["metadata"] or {}).get("interrupt_reason")
+    # ...and the guarded writer still accepts the turn's real result afterwards,
+    # which is precisely what a wrongly settled row makes impossible.
+    assert request_store.settle_without_result(run_id, terminal_status="succeeded") == "succeeded"

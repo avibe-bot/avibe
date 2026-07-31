@@ -1262,9 +1262,10 @@ async def end_running_agent(
         base_session_id=base_session_id,
         backend=backend,
     )
-    claimed_run_ids = await cancel_session_scheduler_lane(
+    scheduler_lane = await cancel_session_scheduler_lane(
         controller, teardown_session_id, settled_by=SETTLED_BY_STOPPED
     )
+    claimed_run_ids = scheduler_lane.claimed_run_ids
 
     if state == "active":
         # Capture the Claude OS pid BEFORE the stop disconnects the client — once
@@ -1283,11 +1284,20 @@ async def end_running_agent(
         # Both lanes have now settled and been awaited, so anything still ``running``
         # in this session is a claim neither reached. Reconcile BEFORE the teardown,
         # for the same reason the whole ordering exists.
+        #
+        # THE MANAGER LANE IS CLAIMED HERE AND ONLY HERE (HFR-324). The cancel above
+        # left that lane alone precisely so this stop could own it, and the stop has
+        # now run — against a turn the live-state recheck already confirmed belongs to
+        # THIS row, since a turn it could not attribute is what makes the state idle.
+        # So its runs are this End's interrupted work, and the reconcile is their
+        # backstop for the case the stop interrupted the turn without its own
+        # settlement running (HFR-107). The idle branch below has no such stop and
+        # claims nothing from that lane: the live turn there is somebody else's.
         await reconcile_session_runs(
             controller,
             teardown_session_id,
             settled_by=SETTLED_BY_STOPPED,
-            claimed_run_ids=claimed_run_ids,
+            claimed_run_ids=claimed_run_ids | scheduler_lane.manager_lane_run_ids,
         )
         # The canonical stop interrupts the turn (and releases its runtime gate via
         # the turn's own context — verified in Incus) but does NOT free the rest of

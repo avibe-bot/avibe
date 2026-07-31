@@ -891,7 +891,7 @@ class SessionTurnManager:
         The reporting half of :meth:`release_for_teardown`'s HFR-320 guard. That guard
         makes the nested, in-dispatch release a no-op — the turn keeps running and
         will settle by its own outcome — but a skip is only half an answer. The
-        teardown's pre-cancel snapshot (``_teardown_owned_run_ids``) still names this
+        teardown's pre-cancel snapshot (``_teardown_owned_run_id_lanes``) still names this
         turn's runs, and ``reconcile_session_teardown`` settles every claimed run whose
         row is still ``running`` after the cancel leg. The turn that was deliberately
         spared would therefore have its live run failed as ``backend_refresh`` while

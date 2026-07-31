@@ -469,10 +469,18 @@ class SessionCancellationResult:
     the teardown spared because it belongs to the calling task is still executing and
     still owns its own terminal write, so it is not interruption evidence and must
     not reach a reconciler (HFR-321).
+
+    ``unclaimed_manager_run_ids`` is the turn-lane ownership this call saw and did NOT
+    claim, populated only under ``include_manager_lane=False`` (HFR-324). It is not a
+    second helping of ``claimed_run_ids``: those ids were never interrupted here, so
+    the default reading is "live work belonging to someone else". It is reported at all
+    because a caller excludes that lane only when it owns the turn some other way, and
+    only that caller can say whether the path it actually took interrupted it.
     """
 
     cancelled_count: int
     claimed_run_ids: frozenset[str]
+    unclaimed_manager_run_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -2849,7 +2857,7 @@ class ScheduledTaskService:
         task.cancel()
         return True
 
-    def _teardown_owned_run_ids(self) -> set[str]:
+    def _teardown_owned_run_id_lanes(self) -> tuple[set[str], set[str]]:
         """Every run id this PROCESS is executing right now, for a teardown snapshot.
 
         Same two lanes as :meth:`_owned_agent_run_ids` — the drain lane's
@@ -2864,6 +2872,17 @@ class ScheduledTaskService:
         sweep to find later — never kill a healthy run. Raising here would instead
         abort the teardown itself, which is the one outcome that leaves the wedge in
         place, so a missing/failing turn lane degrades to the drain lane alone.
+
+        THE TWO LANES ARE RETURNED SEPARATELY BECAUSE ONLY ONE IS ALWAYS IN SCOPE
+        (HFR-324). Their UNION is the snapshot a teardown that cancels both lanes
+        claims, unchanged. A teardown that excludes the turn lane cancels nothing there
+        and self-skips nothing there, so it may claim the drain half only — and the
+        split has to be made here, at the one instant where both lanes are still
+        readable, rather than reconstructed later from maps the cancellation erases.
+
+        ``(drain lane, turn lane MINUS drain lane)``: an id both lanes report is a task
+        this process holds in ``_inflight_executions``, i.e. one the drain half really
+        can reach, so it belongs to that half in either mode.
         """
 
         owned = {str(run_id) for run_id in self._inflight_executions if run_id}
@@ -2871,16 +2890,17 @@ class ScheduledTaskService:
         provider = getattr(session_turns, "owned_agent_run_ids", None)
         if not callable(provider):
             logger.debug("Teardown snapshot: no turn-lane ownership provider available")
-            return owned
+            return owned, set()
         try:
-            owned |= {str(run_id) for run_id in provider() if run_id}
+            manager_owned = {str(run_id) for run_id in provider() if run_id}
         except Exception:
             logger.warning(
                 "Teardown snapshot: turn-lane ownership could not be read; "
                 "reconciling with the drain lane only",
                 exc_info=True,
             )
-        return owned
+            return owned, set()
+        return owned, manager_owned - owned
 
     def _teardown_exempt_run_ids(self, session_id: str) -> set[str]:
         """Run ids the turn lane is deliberately NOT interrupting for this teardown.
@@ -3003,15 +3023,46 @@ class ScheduledTaskService:
         End's ``cancel_session_scheduler_lane`` + ``reconcile_session_runs`` — and
         keeps the reconciler's predicate unweakened for the rows it really must settle.
 
+        AND A LANE THAT WAS NEVER IN SCOPE LEAVES IT WHOLE (HFR-324). The same rule
+        one step out: with ``include_manager_lane=False`` every manager-owned id is
+        un-cancelled by this call by definition, and un-skipped too — the self-skip
+        above speaks only for the CALLER'S OWN turn, not for every other turn the lane
+        holds. So the claim is built from the drain lane alone in that mode. A turn this
+        call deliberately leaves alive — one owned by a NEWER backend after a backend
+        switch, which End's live-state recheck refuses to attribute to the row being
+        ended — must not be reconciled into a terminal row. Leaving those ids in the
+        claim is exactly how End's idle branch settled a live turn ``canceled`` that its
+        real result (guarded to ``queued|running``) could never take back.
+
+        The ids are still REPORTED, in ``unclaimed_manager_run_ids``, because a caller
+        excludes the lane only when it owns that turn some other way, and the two ways
+        differ: the in-dispatch recreation site IS the turn (already exempt above, and
+        it settles by its own outcome), while End STOPS the turn on a path of its own —
+        but only on its active branch. Which one happened is the caller's fact, so the
+        primitive states what it left behind and refuses to guess for it.
+        RESIDUAL: on a branch that claims none of it, a manager-owned run that IS dead
+        but unsettled is left for the staleness sweep and restart recovery to find. An
+        unsettled run is recoverable; a wrongly terminalized live one is not.
+
         Returns the count of things actually interrupted plus the pre-cancel
         ownership snapshot; the cancelled tasks are awaited before returning, so a
         caller that reconciles afterwards sees settled rows rather than a race.
         """
 
-        claimed_run_ids = frozenset(self._teardown_owned_run_ids())
+        scheduler_run_ids, manager_run_ids = self._teardown_owned_run_id_lanes()
+        claimed_run_ids = frozenset(
+            scheduler_run_ids | manager_run_ids if include_manager_lane else scheduler_run_ids
+        )
+        unclaimed_manager_run_ids = (
+            frozenset() if include_manager_lane else frozenset(manager_run_ids)
+        )
         resolved = str(session_id or "").strip()
         if not resolved:
-            return SessionCancellationResult(cancelled_count=0, claimed_run_ids=claimed_run_ids)
+            return SessionCancellationResult(
+                cancelled_count=0,
+                claimed_run_ids=claimed_run_ids,
+                unclaimed_manager_run_ids=unclaimed_manager_run_ids,
+            )
 
         current_task = self._current_asyncio_task()
         # The turn lane's skip decision, read up front: the calling task is fixed for
@@ -3096,6 +3147,10 @@ class ScheduledTaskService:
         return SessionCancellationResult(
             cancelled_count=cancelled_count,
             claimed_run_ids=frozenset(claimed_run_ids - skipped_run_ids),
+            # The self-skip applies to whoever reads the ids, not to where they came
+            # from: a turn spared because it belongs to the calling task settles by its
+            # own outcome no matter which caller is offered it (HFR-321).
+            unclaimed_manager_run_ids=frozenset(unclaimed_manager_run_ids - skipped_run_ids),
         )
 
     def reconcile_session_teardown(

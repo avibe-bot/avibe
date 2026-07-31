@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 _WORKING_PATH_HEAD = re.compile(r"[A-Za-z]:[\\/]|[\\/]")
 
 __all__ = [
+    "SchedulerLaneCancellation",
     "cancel_session_scheduler_lane",
     "reconcile_session_runs",
     "resolve_teardown_session_ids",
@@ -233,12 +234,29 @@ async def teardown_session_runs(
     )
 
 
+class SchedulerLaneCancellation(NamedTuple):
+    """The two ownership halves a scheduler-lane-only cancellation hands its caller.
+
+    ``claimed_run_ids`` is interruption evidence: work this call cancelled, or held and
+    could not reach. It is safe to reconcile.
+
+    ``manager_lane_run_ids`` is NOT (HFR-324). Those runs belong to live turns this
+    call deliberately did not touch, so reconciling them settles work that is still
+    executing. They are reported because this helper's caller excluded the lane in
+    order to stop that turn on its own path — and may claim them only on the branch
+    where that stop actually ran.
+    """
+
+    claimed_run_ids: frozenset[str]
+    manager_lane_run_ids: frozenset[str]
+
+
 async def cancel_session_scheduler_lane(
     controller: Any,
     session_id: str,
     *,
     settled_by: str,
-) -> frozenset[str]:
+) -> SchedulerLaneCancellation:
     """Cancel only the scheduler lane, and hand back the pre-cancel ownership snapshot.
 
     For the ONE caller that owns the manager lane itself: the Running tab's End runs
@@ -250,15 +268,23 @@ async def cancel_session_scheduler_lane(
     rather than consumed here: the reconcile that follows the stop needs the ownership
     that existed BEFORE any of it began, and by then every map that recorded it has
     been cleared.
+
+    THE TURN LANE'S OWNERSHIP COMES BACK ON A SEPARATE CHANNEL (HFR-324). It used to
+    ride inside the claim, which reads as "this call interrupted these runs" and is
+    false for a lane the call was told to leave alone — End's idle branch, where the
+    stop never runs, reconciled a live turn's row into ``canceled`` on the strength of
+    it. Whether the caller's own stop earned that half is the caller's fact, not this
+    function's, so the two are kept apart and the caller unions them where it knows.
     """
 
+    empty = SchedulerLaneCancellation(frozenset(), frozenset())
     resolved = str(session_id or "").strip()
     if not resolved:
-        return frozenset()
+        return empty
     service = getattr(controller, "scheduled_task_service", None)
     canceller = getattr(service, "cancel_session_executions", None)
     if not callable(canceller):
-        return frozenset()
+        return empty
     try:
         result = await canceller(
             resolved, settled_by=settled_by, include_manager_lane=False
@@ -270,8 +296,11 @@ async def cancel_session_scheduler_lane(
             settled_by,
             exc_info=True,
         )
-        return frozenset()
-    return frozenset(getattr(result, "claimed_run_ids", frozenset()))
+        return empty
+    return SchedulerLaneCancellation(
+        claimed_run_ids=frozenset(getattr(result, "claimed_run_ids", frozenset())),
+        manager_lane_run_ids=frozenset(getattr(result, "unclaimed_manager_run_ids", frozenset())),
+    )
 
 
 async def reconcile_session_runs(

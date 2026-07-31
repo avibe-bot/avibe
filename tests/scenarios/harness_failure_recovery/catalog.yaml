@@ -2930,6 +2930,57 @@ scenarios:
     # teardown; restart recovery and the staleness sweep are the backstop. An
     # unsettled run is recoverable, a wrongly cancelled live turn is not.
     test: tests/test_session_teardown.py::test_teardown_refuses_ambiguous_exact_anchor_candidates
+  - id: HFR-324
+    name: a lane the teardown never entered is not claimed by its snapshot
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # PR2 review round 5, and HFR-321's principle one step out: from "what this call
+    # deliberately skipped" to "a lane this call was never in".
+    # cancel_session_executions(include_manager_lane=False) is End's mode -- it cancels
+    # the scheduler lane there and runs the canonical user-Stop path for the turn
+    # itself -- but the returned claimed_run_ids was still the FULL process snapshot,
+    # _inflight_executions UNION SessionTurnManager.owned_agent_run_ids. Manager-owned
+    # ids therefore rode into the snapshot un-cancelled by that call and un-skipped by
+    # it: HFR-321's self-exemption speaks only for the CALLER'S own turn, not for every
+    # other turn the lane holds.
+    # The live shape is the backend switch already modelled at the cancel leg by
+    # tests/test_running_agents_service.py::test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend:
+    # a stale codex row shares its session id with a Workbench turn that has since
+    # moved to claude. The live-state recheck correctly refuses to attribute that turn
+    # to the row, so End reclassifies idle and the canonical stop -- the path that owns
+    # the manager lane and settles what it stops -- never runs. What is left is
+    # cancel_session_scheduler_lane plus the idle branch's reconcile
+    # (running_agents.end_running_agent, the non-active branch), which selected the
+    # live turn's row (claimed INTERSECT this session INTERSECT still running) and
+    # settled it canceled mid-prompt. settle_run_terminal is scoped to queued|running,
+    # so the turn's real outcome could never take the row back.
+    # FIX: _teardown_owned_run_ids becomes _teardown_owned_run_id_lanes and returns the
+    # two halves it always computed -- (drain lane, turn lane MINUS drain lane) -- taken
+    # at the same pre-cancel instant. cancel_session_executions unions them for
+    # include_manager_lane=True (unchanged) and claims the drain half alone otherwise,
+    # reporting the turn half on a separate channel, SessionCancellationResult.
+    # unclaimed_manager_run_ids, which cancel_session_scheduler_lane hands back as
+    # SchedulerLaneCancellation.manager_lane_run_ids. An id BOTH lanes report stays in
+    # the drain half in either mode: that one is a task this call held and could reach.
+    # HFR-321's skipped_run_ids subtraction is unchanged and applies to both channels.
+    # WHY A CHANNEL AND NOT A DELETION: End's ACTIVE branch is the reason the lane is
+    # excluded in the first place -- its canonical stop owns that turn, against a turn
+    # the live-state recheck already attributed to THIS row (a turn it cannot attribute
+    # is exactly what makes the state idle) -- so that branch, and only that branch,
+    # unions the manager half into its reconcile. That keeps HFR-107's backstop: an End
+    # whose stop interrupts a turn whose own settlement never runs still records the
+    # row canceled. The idle branch has no stop and claims nothing there.
+    # The reconciler's predicate, the process-scoped (rather than session-filtered)
+    # shape of the snapshot, and the include_manager_lane=True behaviour
+    # eviction/cleanup callers depend on are all untouched.
+    # A direct unit-level twin carries this same id:
+    # tests/test_scheduled_tasks.py::test_scheduler_lane_only_cancel_drops_the_manager_lane_from_the_snapshot
+    # RESIDUAL: on the idle branch a manager-owned run that IS dead but unsettled is
+    # left unreconciled, for the staleness sweep and restart recovery to find. An
+    # unsettled run is recoverable; a wrongly terminalized live one is not.
+    test: tests/test_running_agents_service.py::test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

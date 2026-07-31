@@ -3170,6 +3170,91 @@ def test_cancel_session_executions_finds_a_create_per_run_execution(
     assert settled["metadata"]["interrupt_reason"] == "evicted"
 
 
+def test_scheduler_lane_only_cancel_drops_the_manager_lane_from_the_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-324: the snapshot may only claim ids this call could actually reach.
+
+    ``include_manager_lane=False`` is End's mode: it cancels the scheduler lane here
+    and runs the canonical user-Stop path for the turn itself. With the manager lane
+    out of scope, every manager-owned id is by definition un-cancelled by this call
+    and un-skipped by it too — the HFR-321 self-exemption only speaks for the caller's
+    own turn — so leaving those ids in ``claimed_run_ids`` hands the caller's reconcile
+    a licence to terminalize a turn that is still running (End's idle branch did
+    exactly that to a turn owned by a newer backend).
+
+    The scheduler half is kept in BOTH modes, including an id both lanes report: that
+    one really was in this call's reach.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    released: list[str] = []
+
+    async def _release(session_id: str, *, settled_by: str) -> bool:
+        released.append(f"{session_id}:{settled_by}")
+        return True
+
+    controller = _SettlementControllerDouble()
+    controller.session_turns = SimpleNamespace(
+        owned_agent_run_ids=lambda: {"run-manager", "run-both"},
+        release_for_teardown=_release,
+        teardown_exempt_run_ids=lambda _sid: set(),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def _exercise() -> None:
+        loop = asyncio.get_running_loop()
+        # Placeholder entries: only the KEYS are read for the snapshot, and neither
+        # session lookup names them, so nothing here is cancelled.
+        holders = {
+            "run-scheduler": loop.create_future(),
+            "run-both": loop.create_future(),
+        }
+        service._inflight_executions.update(holders)
+        try:
+            observed["excluded"] = await service.cancel_session_executions(
+                "session-hfr-324",
+                settled_by=SETTLED_BY_STOPPED,
+                include_manager_lane=False,
+            )
+            observed["released_after_excluded"] = list(released)
+            observed["included"] = await service.cancel_session_executions(
+                "session-hfr-324",
+                settled_by=SETTLED_BY_STOPPED,
+            )
+        finally:
+            for run_id, holder in holders.items():
+                holder.cancel()
+                service._inflight_executions.pop(run_id, None)
+
+    asyncio.run(_exercise())
+
+    excluded = observed["excluded"]
+    # Nothing in the manager lane was touched in that mode...
+    assert observed["released_after_excluded"] == []
+    # ...so nothing it owns may be claimed as this call's interrupted work.
+    assert "run-manager" not in excluded.claimed_run_ids
+    assert {"run-scheduler", "run-both"} <= excluded.claimed_run_ids
+    # It is still REPORTED, on the channel that says what it is: ownership this call
+    # left to the caller that stops that lane, for that caller to claim or not.
+    assert excluded.unclaimed_manager_run_ids == frozenset({"run-manager"})
+
+    included = observed["included"]
+    assert released == ["session-hfr-324:stopped"]
+    assert included.cancelled_count == 1
+    # The lane was in scope and was cancelled, so its ids are the reconciler's to settle.
+    assert {"run-manager", "run-both", "run-scheduler"} <= included.claimed_run_ids
+    assert included.unclaimed_manager_run_ids == frozenset()
+
+
 def test_session_scoped_reconciler_settles_a_map_missed_row(
     tmp_path: Path,
     monkeypatch,
