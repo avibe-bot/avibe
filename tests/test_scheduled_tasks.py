@@ -7876,13 +7876,20 @@ def _binding_env(tmp_path: Path, monkeypatch, *, backends=("claude", "codex"), d
     return db_path
 
 
-def _binding_service(tmp_path: Path, store: ScheduledTaskStore, calls: list) -> ScheduledTaskService:
+def _binding_service(
+    tmp_path: Path,
+    store: ScheduledTaskStore,
+    calls: list,
+    *,
+    language: str = "en",
+) -> ScheduledTaskService:
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         calls.append(message)
         return None
 
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
     controller = SimpleNamespace(
+        config=SimpleNamespace(language=language),
         platform_settings_managers={"slack": settings_manager},
         message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
     )
@@ -8138,6 +8145,48 @@ def test_execute_task_notifies_then_pauses_after_three_unresolvable_failures(
     failed_runs = service.request_store.list_runs(status="failed")
     assert len(failed_runs) == 3
     assert {(run.get("metadata") or {}).get("failure_code") for run in failed_runs} == {"unresolvable_target"}
+
+
+@pytest.mark.parametrize(
+    ("language", "retry_copy", "paused_copy"),
+    [
+        ("en", "cannot accept a turn (1/3)", "paused: pinned agent session"),
+        ("zh", "无法接收请求(1/3)", "已暂停:绑定的 Agent 会话"),
+    ],
+)
+def test_unresolvable_target_errors_follow_the_configured_language(
+    tmp_path: Path,
+    monkeypatch,
+    language: str,
+    retry_copy: str,
+    paused_copy: str,
+) -> None:
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [], language=language)
+
+    asyncio.run(service._run_task(task.id))
+    retry_error = store.get_task(task.id).last_error
+    assert retry_copy in retry_error
+    assert "sesdoesnotexist" in retry_error
+    assert f"vibe task update {task.id} --session-id <id>" in retry_error
+
+    asyncio.run(service._run_task(task.id))
+    asyncio.run(service._run_task(task.id))
+    paused_error = store.get_task(task.id).last_error
+    assert paused_copy in paused_error
+    assert "sesdoesnotexist" in paused_error
+    assert f"vibe task resume {task.id}" in paused_error
 
 
 def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:

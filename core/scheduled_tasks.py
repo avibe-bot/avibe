@@ -5635,11 +5635,12 @@ class ScheduledTaskService:
                 task_id=task.id,
                 reason=exc.reason,
                 previous_session_id=previous,
-                detail=(
-                    f"binding unresolved ({failure_number}/"
-                    f"{UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES}): {exc}. This definition "
-                    "will be paused after three consecutive unresolvable-target failures; "
-                    f"re-point it with `vibe task update {task.id} --session-id <id>`."
+                detail=self._t(
+                    "harness.run.bindingUnresolvedRetry",
+                    session=previous or "",
+                    attempt=failure_number,
+                    threshold=UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES,
+                    id=task.id,
                 ),
             )
 
@@ -5649,18 +5650,10 @@ class ScheduledTaskService:
             task_id=task.id,
             reason=exc.reason,
             previous_session_id=previous,
-            # The middle sentence is REASON-AGNOSTIC on purpose. It used to assert "the
-            # bound agent session no longer exists", which was already only true for
-            # ``reason == "missing"`` and is flatly contradicted by the ``reserved``
-            # refusal this same paragraph now carries ("…is reserved for the runtime and
-            # accepts no turn: … The bound agent session no longer exists"). ``{exc}``
-            # already states the specific reason first, so generalising the clause loses
-            # no information and removes the contradiction rather than adding a branch.
-            detail=(
-                f"paused: {exc}. That binding cannot be resolved, so this definition "
-                "would fail on every run. Re-point it with "
-                f"`vibe task update {task.id} --session-id <id>` and resume it with "
-                f"`vibe task resume {task.id}`."
+            detail=self._t(
+                "harness.run.bindingUnresolvedPaused",
+                session=previous or "",
+                id=task.id,
             ),
         )
 

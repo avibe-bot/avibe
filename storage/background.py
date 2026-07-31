@@ -732,6 +732,14 @@ OWED_NOTICE_STATE_SQL = (
     "CASE WHEN (json_valid(metadata_json) = 1) "
     "THEN json_extract(metadata_json, '$.owed_failure_notice.state') END"
 )
+#: The notice kind is not part of the eligibility index: it only distinguishes the
+#: exceptional canceled binding-change row after the indexed pending/backoff seek.
+#: Keep the same malformed-JSON guard as the indexed expressions so one damaged row
+#: cannot stop every notification from draining.
+OWED_NOTICE_KIND_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.owed_failure_notice.kind') END"
+)
 #: ``coalesce(..., '')`` is what keeps this a RANGE term. A missing or null
 #: ``next_attempt_at`` means "eligible now", and expressing that as
 #: ``(x IS NULL OR x <= now)`` is a disjunction, which SQLite cannot use as an index
@@ -4169,22 +4177,35 @@ class SQLiteBackgroundTaskStore:
         # These strings must stay byte-identical to the migration's; the query-plan
         # test fails if they drift, which is what keeps the duplication honest.
         notice_state = literal_column(OWED_NOTICE_STATE_SQL)
+        notice_kind = literal_column(OWED_NOTICE_KIND_SQL)
         next_attempt_at = literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL)
         stmt = (
-            # Both terminal VERDICTS, not just ``failed``. A binding-change notice is
+            # Both ordinary terminal VERDICTS, not just ``failed``. A binding-change notice is
             # stamped on the run that recovered the binding, and when the rebound
             # retry works that run settles ``succeeded`` — filtering on ``failed``
             # made the notice durable and permanently unreachable, which is the
             # silent-replacement bug this widening exists to close.
             #
+            # ``canceled`` is admitted only for that same notice kind. Stop can land
+            # AFTER the rebind and its notice commit but before terminal settlement;
+            # the rebind still happened, its durable marker prevents a later restamp,
+            # and excluding the row would strand the pending notice forever. Ordinary
+            # canceled runs still owe nothing and remain outside the drain.
+            #
             # Free of cost and of plan risk: ``ix_agent_runs_owed_notice`` indexes
             # ``(state, next_attempt_at, created_at, id)`` and NOT ``status``, so the
-            # seek is on the notice state either way and ``status`` stays a post-filter
-            # over the handful of rows that actually own a pending notice.
+            # seek is on the notice state either way and ``status``/``kind`` stay a
+            # post-filter over the handful of rows that actually own a pending notice.
             select(agent_runs)
             .where(
-                agent_runs.c.status.in_(
-                    [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                or_(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                    ),
+                    and_(
+                        agent_runs.c.status.in_(_status_query_values("canceled")),
+                        notice_kind == NOTICE_KIND_BINDING_CHANGE,
+                    ),
                 )
             )
             .where(
@@ -4277,11 +4298,11 @@ class SQLiteBackgroundTaskStore:
           the same UPDATE (``_merge_owed_failure_notice``), and the whole-blob write
           this used to issue put the binding blob over the top — the user told their
           session was swapped and never told the run failed.
-        * The row settles ``canceled``, and a ``pending`` notice landed on a status
-          ``list_owed_failure_notices`` excludes by design, making it durable and
-          undeliverable forever. ``canceled`` stays reserved for explicit stop
-          semantics: a user who pressed Stop outranks the rebind news, so the correct
-          outcome is no notice at all, not a deferred one.
+        * The row settles ``canceled`` before this CAS, so the stamp is refused: a Stop
+          that already won outranks binding news. This is distinct from Stop landing
+          AFTER the stamp committed. In that later ordering the rebind already happened
+          and its marker prevents a restamp, so ``list_owed_failure_notices`` admits
+          canceled rows carrying this specific notice kind.
         * The row settles ``succeeded`` — the ORDINARY outcome of the rebind this
           notice exists for — and a status CAS that refuses here loses the notice
           PERMANENTLY rather than deferring it. A successful settlement writes no
@@ -4309,9 +4330,9 @@ class SQLiteBackgroundTaskStore:
         ================ ==================================================
         ``failed``       refuse — its own failure notice owns the slot and
                          outranks this news
-        ``canceled``     refuse — the user's Stop outranks it, and the
-                         status is reserved: the drain excludes it, so a
-                         notice here would be durable and undeliverable
+        ``canceled``     refuse — the user's Stop won before this stamp;
+                         only a binding notice committed before a later
+                         Stop is admitted by the drain
         ``succeeded``    STAMP — no other writer owes anything, the slot is
                          legitimately owed, and
                          ``list_owed_failure_notices`` selects ``succeeded``

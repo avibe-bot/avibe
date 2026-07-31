@@ -26,7 +26,9 @@ from sqlalchemy import event, select
 
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
+    NOTICE_KIND_BINDING_CHANGE,
     NOTICE_KIND_FAILURE,
+    NOTICE_PENDING,
     NOTICE_SENT,
     OWED_FAILURE_NOTICE_KEY,
     OWED_NOTICE_INDEX,
@@ -9021,6 +9023,45 @@ def test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap(tmp_path: 
         "a canceled run must carry NO owed notice: the drain excludes ``canceled``, so "
         "one written here is durable and undeliverable forever"
     )
+    assert sqlite.list_owed_failure_notices() == []
+
+
+def test_a_binding_notice_committed_before_stop_remains_deliverable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A later Stop cannot strand news about a rebind that already committed."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-cancel-after-stamp", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-binding-cancel-after-stamp")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+
+    stamped = _binding_stamp(sqlite, run.id, task_id="task-binding-cancel-after-stamp")
+    assert stamped is not None
+    assert sqlite.cancel_run(run.id)
+    requests.complete(
+        claimed,
+        ok=False,
+        error="stopped",
+        task_id="task-binding-cancel-after-stamp",
+    )
+
+    assert sqlite.get_run(run.id)["status"] == "canceled"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None and notice["kind"] == NOTICE_KIND_BINDING_CHANGE
+    assert notice["state"] == NOTICE_PENDING
+    assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [run.id]
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+    asyncio.run(service._drain_failure_notices())
+
+    assert delivered == [notice["failure_id"]]
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_SENT
     assert sqlite.list_owed_failure_notices() == []
 
 
