@@ -62,6 +62,19 @@ class PlatformDescriptor:
     # same registry but is never a configurable IM platform. IM-only code paths
     # should select via ``im_platform_descriptors()`` / ``im_platform_ids()``
     # rather than re-deriving an ad-hoc workbench exclude.
+    #
+    # CONTRACT, load-bearing beyond that selection: ``kind`` is the axis of
+    # ``core/scheduled_tasks.py::LADDER_ACK_SOURCES``, where ("im", channel|user) is
+    # the one PERMISSIVE row — a failure notice sent there may be acknowledged on the
+    # id the send returned, with nothing persisted behind it. Declaring ``kind="im"``
+    # therefore asserts that this transport's send id was minted by a platform that
+    # actually reached a person. A transport that mints its own id locally (as
+    # ``AvibeBot.send_message`` does) must NOT be "im", or an owed notice can be
+    # marked delivered when nobody was told. The default stays for the sake of
+    # constructors outside the registry, but every descriptor IN ``PLATFORM_REGISTRY``
+    # states its kind, and ``test_every_registry_platform_declares_its_kind_explicitly``
+    # fails if a new one inherits it instead — a claim this strong should be made,
+    # not defaulted into.
     kind: str = "im"
 
     @property
@@ -148,6 +161,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         client_class="SlackBot",
         formatter_module="modules.im.formatters",
         formatter_class="SlackFormatter",
+        kind="im",
         credential_fields=("bot_token",),
         runtime_reconcile_fields=("bot_token", "app_token", "proxy_url"),
         capabilities=PlatformCapabilities(
@@ -172,6 +186,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         client_class="DiscordBot",
         formatter_module="modules.im.formatters",
         formatter_class="DiscordFormatter",
+        kind="im",
         credential_fields=("bot_token",),
         runtime_reconcile_fields=("bot_token", "proxy_url"),
         capabilities=PlatformCapabilities(
@@ -196,6 +211,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         client_class="TelegramBot",
         formatter_module="modules.im.formatters",
         formatter_class="TelegramFormatter",
+        kind="im",
         credential_fields=("bot_token",),
         runtime_reconcile_fields=("bot_token", "use_webhook", "webhook_url", "webhook_secret_token", "proxy_url"),
         capabilities=PlatformCapabilities(
@@ -221,6 +237,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         client_class="FeishuBot",
         formatter_module="modules.im.formatters",
         formatter_class="FeishuFormatter",
+        kind="im",
         credential_fields=("app_id", "app_secret"),
         runtime_reconcile_fields=("app_id", "app_secret", "domain", "proxy_url"),
         # NOTE: Feishu/Lark DOES support message deletion via the API
@@ -260,6 +277,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         client_class="WeChatBot",
         formatter_module="modules.im.formatters",
         formatter_class="WeChatFormatter",
+        kind="im",
         credential_fields=("bot_token",),
         runtime_reconcile_fields=("bot_token", "base_url", "cdn_base_url", "proxy_url"),
         capabilities=PlatformCapabilities(

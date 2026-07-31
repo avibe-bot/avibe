@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
@@ -7875,13 +7876,20 @@ def _binding_env(tmp_path: Path, monkeypatch, *, backends=("claude", "codex"), d
     return db_path
 
 
-def _binding_service(tmp_path: Path, store: ScheduledTaskStore, calls: list) -> ScheduledTaskService:
+def _binding_service(
+    tmp_path: Path,
+    store: ScheduledTaskStore,
+    calls: list,
+    *,
+    language: str = "en",
+) -> ScheduledTaskService:
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         calls.append(message)
         return None
 
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
     controller = SimpleNamespace(
+        config=SimpleNamespace(language=language),
         platform_settings_managers={"slack": settings_manager},
         message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
     )
@@ -8096,14 +8104,14 @@ def _spy_binding_notices(service: ScheduledTaskService) -> list:
     return notices
 
 
-def test_execute_task_pauses_and_notifies_when_pinned_session_is_missing(
+def test_execute_task_notifies_then_pauses_after_three_unresolvable_failures(
     tmp_path: Path, monkeypatch
 ) -> None:
     """HFR-054 — an unresolvable pinned session must not fire forever.
 
     ``resolve_session_id_target`` raises, ``_execute_task`` records the error and
-    leaves ``enabled=1``, so the definition re-fires and re-fails on every cron
-    minute with nobody told. The backstop pauses it and notifies once.
+    leaves ``enabled=1``, so the first failure must be visible while the stable
+    failure code drives the three-consecutive-failure auto-pause policy.
     """
     _binding_env(tmp_path, monkeypatch)
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -8121,7 +8129,11 @@ def test_execute_task_pauses_and_notifies_when_pinned_session_is_missing(
     service = _binding_service(tmp_path, store, calls)
     notices = _spy_binding_notices(service)
 
-    asyncio.run(service._run_task(task.id))
+    for attempt in range(1, 4):
+        asyncio.run(service._run_task(task.id))
+        current = store.get_task(task.id)
+        assert current is not None
+        assert current.enabled is (attempt < 3)
 
     updated = store.get_task(task.id)
     assert updated is not None
@@ -8129,8 +8141,52 @@ def test_execute_task_pauses_and_notifies_when_pinned_session_is_missing(
     assert updated.last_error
     assert "sesdoesnotexist" in updated.last_error
     assert not calls
-    assert len(notices) == 1
-    assert notices[0].action == "paused"
+    assert [notice.action for notice in notices] == ["failing", "paused"]
+    failed_runs = service.request_store.list_runs(status="failed")
+    assert len(failed_runs) == 3
+    assert {(run.get("metadata") or {}).get("failure_code") for run in failed_runs} == {"unresolvable_target"}
+
+
+@pytest.mark.parametrize(
+    ("language", "retry_copy", "paused_copy"),
+    [
+        ("en", "cannot accept a turn (1/3)", "paused: pinned agent session"),
+        ("zh", "无法接收请求(1/3)", "已暂停:绑定的 Agent 会话"),
+    ],
+)
+def test_unresolvable_target_errors_follow_the_configured_language(
+    tmp_path: Path,
+    monkeypatch,
+    language: str,
+    retry_copy: str,
+    paused_copy: str,
+) -> None:
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [], language=language)
+
+    asyncio.run(service._run_task(task.id))
+    retry_error = store.get_task(task.id).last_error
+    assert retry_copy in retry_error
+    assert "sesdoesnotexist" in retry_error
+    assert f"vibe task update {task.id} --session-id <id>" in retry_error
+
+    asyncio.run(service._run_task(task.id))
+    asyncio.run(service._run_task(task.id))
+    paused_error = store.get_task(task.id).last_error
+    assert paused_copy in paused_error
+    assert "sesdoesnotexist" in paused_error
+    assert f"vibe task resume {task.id}" in paused_error
 
 
 def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:
@@ -8154,7 +8210,8 @@ def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:
     )
     service = _binding_service(tmp_path, store, [])
 
-    asyncio.run(service._run_task(task.id))
+    for _ in range(3):
+        asyncio.run(service._run_task(task.id))
 
     updated = store.get_task(task.id)
     assert updated is not None
@@ -8198,12 +8255,11 @@ def test_create_once_rebinds_when_session_deleted(tmp_path: Path, monkeypatch) -
     assert notices[0].action == "rebound"
 
 
-def test_repeated_failures_do_not_notify_twice(tmp_path: Path, monkeypatch) -> None:
-    """HFR-054 — one broken binding is one notification, not one per fire.
+def test_repeated_binding_failures_notify_only_on_state_transitions(tmp_path: Path, monkeypatch) -> None:
+    """HFR-054 — one broken binding is not one notification per fire.
 
-    A daily cron on a dead session would otherwise notify daily. The dedup is
-    keyed on the failure signature, so re-firing the same unresolved binding
-    (a resumed-but-still-broken definition) stays quiet.
+    The first failing transition and the eventual pause are distinct; the middle
+    identical failure is deduplicated.
     """
     _binding_env(tmp_path, monkeypatch)
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -8220,13 +8276,88 @@ def test_repeated_failures_do_not_notify_twice(tmp_path: Path, monkeypatch) -> N
     service = _binding_service(tmp_path, store, [])
     notices = _spy_binding_notices(service)
 
-    for _ in range(2):
-        store.set_enabled(task.id, True)
-        current = store.get_task(task.id)
-        assert current is not None
-        asyncio.run(service._execute_task(current, execution_id="exec-1", disable_one_shot=False))
+    for _ in range(3):
+        asyncio.run(service._run_task(task.id))
 
-    assert len(notices) == 1
+    assert [notice.action for notice in notices] == ["failing", "paused"]
+
+
+def test_transient_resolver_errors_do_not_auto_pause_a_definition(tmp_path: Path, monkeypatch) -> None:
+    """Only the persisted unresolvable-target code drives auto-pause."""
+
+    from sqlalchemy.exc import OperationalError
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+
+    async def _transient_failure(**_kwargs):
+        raise OperationalError(
+            "SELECT agent_sessions.id ...",
+            {},
+            sqlite3.OperationalError("database is locked"),
+        )
+
+    service._execute_request = _transient_failure  # type: ignore[method-assign]
+    for _ in range(3):
+        asyncio.run(service._run_task(task.id))
+
+    saved = store.get_task(task.id)
+    assert saved is not None and saved.enabled is True
+    assert all(
+        not (run.get("metadata") or {}).get("failure_code") for run in service.request_store.list_runs(status="failed")
+    )
+
+
+def test_a_success_resets_the_unresolvable_target_auto_pause_streak(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The policy counts consecutive classified failures, not lifetime failures."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+
+    for _ in range(2):
+        asyncio.run(service._run_task(task.id))
+
+    current = store.get_task(task.id)
+    assert current is not None
+    queued = service.request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=current,
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+    service.request_store.complete(claimed, ok=True, task_id=task.id)
+
+    asyncio.run(service._run_task(task.id))
+
+    saved = store.get_task(task.id)
+    assert saved is not None and saved.enabled is True
+    latest = service.request_store.list_runs(status="failed")[-1]
+    assert "(1/3)" in str(latest.get("error") or "")
 
 
 def test_rebind_preserves_model_of_the_deleted_session(tmp_path: Path, monkeypatch) -> None:

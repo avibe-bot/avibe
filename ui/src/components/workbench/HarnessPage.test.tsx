@@ -9,6 +9,7 @@ import en from '../../i18n/en.json';
 import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
 import {
   DetailSession,
+  HealthBadge,
   RunDetail,
   RunTriggerChip,
   WatchDetail,
@@ -286,6 +287,50 @@ describe('DetailSession', () => {
 
     expect(html).toContain('No bound session');
     expect(html).not.toContain('<a ');
+  });
+});
+
+describe('HealthBadge', () => {
+  // The projection contract: ``unknown`` means health could not be computed, and
+  // must not read as a clean bill of health. Rendering it as nothing gave the
+  // operator a spotless Harness list at exactly the moment the failure signal
+  // was unavailable.
+  it('names an unknown health instead of dropping it', () => {
+    const label = i18n.t('harness.health.unknown');
+    expect(label).not.toBe('harness.health.unknown');
+
+    const html = render(<HealthBadge row={watch({ health: 'unknown', consecutive_failures: 3, recent_failures: 7 })} />);
+
+    expect(html).toContain(`>${label}<`);
+    // Muted, not pink or amber: a fault in the reporting path is not a verdict
+    // that the definition itself is failing.
+    expect(html).toContain('text-muted');
+    expect(html).not.toContain('text-pink');
+    expect(html).not.toContain('text-amber');
+  });
+
+  it('shows no count on an unknown row', () => {
+    // The counters come from the same unreadable history, so printing them
+    // would put a number on a row whose runs could not be read at all.
+    const label = i18n.t('harness.health.unknown');
+    const html = render(<HealthBadge row={watch({ health: 'unknown', consecutive_failures: 3, recent_failures: 7 })} />);
+
+    expect(html).toContain(`>${label}<`);
+    expect(html).not.toContain(`${label} 3`);
+    expect(html).not.toContain(`${label} 7`);
+  });
+
+  it('renders nothing for a healthy row', () => {
+    // A badge on every passing row is noise; silence here is what makes the
+    // unknown badge above worth looking at.
+    expect(render(<HealthBadge row={watch({ health: 'healthy', consecutive_failures: 0, recent_failures: 0 })} />)).toBe('');
+  });
+
+  it('still counts a failing row', () => {
+    const html = render(<HealthBadge row={watch({ health: 'failing', consecutive_failures: 4, recent_failures: 4 })} />);
+
+    expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
+    expect(html).toContain('text-pink');
   });
 });
 

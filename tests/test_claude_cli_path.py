@@ -617,6 +617,87 @@ def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path)
     assert env["AVIBE_NATIVE_SESSION_ID"] == "claude-native"
 
 
+def test_session_handler_injects_only_session_stable_creation_origin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The creation origin a Claude session may carry, and the two ids it may not.
+
+    Round 14 gate item 3 (review comment 5121007240): a Harness definition created by
+    ``vibe task add`` inside an Agent turn has to record the conversation it came from,
+    and this env is the only hop those ids can travel. But a Claude SDK client is spawned
+    ONCE per session with a fixed environment, and that same environment is what
+    ``_reuse_cached_claude_session_if_available`` compares to decide whether the cached
+    client is still valid. So:
+
+    * the session-owned ids (platform, channel, session key, workspace) are baked in —
+      that is what makes the notice able to name the conversation and rung (3) able to
+      address it;
+    * ``AVIBE_CALLER_USER_ID`` and ``AVIBE_CALLER_MESSAGE_ID`` are NOT. The message id
+      changes every turn, so including it would respawn Claude on every message; the
+      author changes per speaker in a shared channel, and
+      ``test_session_handler_reuses_cached_claude_client_when_system_prompt_is_unchanged``
+      pins that a channel session is shared across participants — so a baked-in author
+      would later attribute another participant's definition to them and DM the wrong
+      person.
+
+    The visible cost is a Claude-created definition having no deep link (every permalink
+    grammar needs the message id). Codex and OpenCode rewrite their caller env per turn
+    and keep the full origin; that asymmetry is the unit-level
+    ``test_a_session_scoped_caller_env_drops_only_the_per_turn_origin``.
+    """
+
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    # Keep the base session anchor at ``slack_C123`` (this file's session stub asserts
+    # it): without this the message id would become the anchor, which is a different
+    # decision from the one under test.
+    controller.im_client.should_use_message_id_for_channel_session = lambda _context=None: False
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        message_id="1710000000.000200",
+        platform_specific={
+            "team_id": "T0999",
+            "is_dm": False,
+            "agent_session_target": {
+                "id": "ses-parent",
+                "agent_backend": "claude",
+                "native_session_id": "claude-native",
+            },
+        },
+    )
+
+    _run_session(handler, context)
+
+    env = captured["options"].env
+    # The Slack adapter sets neither ``context.platform`` nor a payload ``platform``, so
+    # the handler's own resolver is what supplies it — captured here as well, because a
+    # missing platform would make the whole origin unnameable.
+    assert env["AVIBE_CALLER_PLATFORM"] == "slack"
+    assert env["AVIBE_CALLER_CHANNEL_ID"] == "C123"
+    assert env["AVIBE_CALLER_SESSION_KEY"] == "slack::channel::C123"
+    assert env["AVIBE_CALLER_WORKSPACE_ID"] == "T0999"
+
+    assert "AVIBE_CALLER_USER_ID" not in env, (
+        "a shared channel session must not bake in whichever participant spoke first"
+    )
+    assert "AVIBE_CALLER_MESSAGE_ID" not in env, (
+        "a per-message id here would respawn the Claude client on every turn"
+    )
+
+
 def test_session_handler_coalesces_concurrent_claude_client_creates(
     monkeypatch, tmp_path: Path
 ) -> None:

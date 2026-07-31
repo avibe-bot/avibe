@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,10 +11,27 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import and_, case, func, insert, or_, select, update
+from sqlalchemy import (
+    Integer,
+    Text,
+    and_,
+    case,
+    cast,
+    exists,
+    func,
+    insert,
+    literal,
+    literal_column,
+    or_,
+    select,
+    tuple_,
+    update,
+)
 
 from config import paths
+from config.platform_registry import PLATFORM_REGISTRY
 from storage.agent_session_rows import (
+    INBOX_SESSION_VISIBILITIES,
     reserve_write_lock,
     session_openable_in_chat,
     unchanged_text,
@@ -22,11 +39,13 @@ from storage.agent_session_rows import (
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
+    ensure_background_indexes,
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agent_runs, agent_sessions, run_definitions, scopes
+from storage.models import agent_runs, agent_sessions, messages, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 
 logger = logging.getLogger(__name__)
@@ -380,12 +399,17 @@ def definition_lifecycle_expression(definition_type: str):
         # ``None`` exactly when the instant is behind us — so the state and the
         # time printed beside it cannot contradict each other.
         #
-        # ``datetime()`` normalises offset-carrying timestamps before comparing
-        # the scheduled instant with SQLite's current UTC clock.
+        # SQLite cannot resolve an IANA timezone and treats a naive timestamp as
+        # UTC. The connection UDF delegates that resolution to the same stdlib
+        # rule the scheduler uses, then compares two epoch values in UTC.
         ended = and_(
             run_definitions.c.schedule_type == "at",
             run_definitions.c.run_at.is_not(None),
-            func.datetime(run_definitions.c.run_at) <= func.datetime("now"),
+            func.avibe_run_at_epoch(
+                run_definitions.c.run_at,
+                run_definitions.c.timezone,
+            )
+            <= (func.julianday("now") - literal(2440587.5)) * literal(86400.0),
         )
     return case(
         (in_flight, "running"),
@@ -671,6 +695,655 @@ SWEEP_REASON_ORPHANED = "orphaned"
 SWEEP_REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 SWEEP_REASON_QUEUE_HOLD_EXPIRED = "queue_hold_expired"
 
+#: ``agent_runs.metadata.owed_failure_notice`` — the durable record that a user
+#: still has to be told about one terminal failure.
+#:
+#: Stamped by whichever UPDATE actually transitions ``status`` to ``failed``, not
+#: by a list of call sites: that property is what makes a settlement path added
+#: later inherit the notice instead of having to remember it. The one exception is
+#: ``stamp_binding_change_notice``, and it is an exception precisely because there
+#: is no transition to ride — a rebind whose retry succeeds settles ``succeeded``
+#: and still owes the user the news. Guardedness is
+#: deliberately NOT part of the test — an ordinary synchronous failure
+#: terminalizes through the claimed-request completion, and excluding it would
+#: leave the most common failure of all with no notice to deliver.
+OWED_FAILURE_NOTICE_KEY = "owed_failure_notice"
+
+#: Expression index serving the drain's eligibility seek. Named here so the query,
+#: the migration and the query-plan test cannot drift apart.
+OWED_NOTICE_INDEX = "ix_agent_runs_owed_notice"
+
+#: The eligibility expressions, as literal SQL.
+#:
+#: Literal rather than composed with ``case()``/``func`` because SQLAlchemy renders
+#: the ``1`` and the JSON path as bound parameters, and SQLite will not match an
+#: index expression against a query expression containing binds — the index gets
+#: built and silently ignored.
+#:
+#: The ``CASE json_valid`` guard does two jobs. In the QUERY it stops one malformed
+#: blob from raising ``malformed JSON`` and failing the whole statement, which would
+#: silence every failure notification at once. In the INDEX it stops the same thing
+#: at WRITE time: an index expression is evaluated on every INSERT/UPDATE, so a bare
+#: ``json_extract`` would make a row with an unparseable blob unwritable.
+#:
+#: Columns are unqualified because SQLite rejects the "." operator inside an index
+#: expression. ``20260728_0040`` must keep these byte-identical.
+OWED_NOTICE_STATE_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.owed_failure_notice.state') END"
+)
+#: The notice kind is not part of the eligibility index: it only distinguishes the
+#: exceptional canceled binding-change row after the indexed pending/backoff seek.
+#: Keep the same malformed-JSON guard as the indexed expressions so one damaged row
+#: cannot stop every notification from draining.
+OWED_NOTICE_KIND_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.owed_failure_notice.kind') END"
+)
+#: ``coalesce(..., '')`` is what keeps this a RANGE term. A missing or null
+#: ``next_attempt_at`` means "eligible now", and expressing that as
+#: ``(x IS NULL OR x <= now)`` is a disjunction, which SQLite cannot use as an index
+#: constraint — the index would be named in the plan while the backoff was still
+#: filtered per row. The empty string sorts before every ISO instant, so a null
+#: reads as eligible through the same ``<=`` comparison.
+#:
+#: This also keeps notices stamped before the backoff column existed visible
+#: instead of silently unreachable forever.
+OWED_NOTICE_NEXT_ATTEMPT_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN coalesce(json_extract(metadata_json, '$.owed_failure_notice.next_attempt_at'), '') END"
+)
+
+#: The notice lifecycle, mirroring ``callback_status`` rather than inventing a
+#: second vocabulary: ``pending`` owes delivery, ``sent`` has evidence of it,
+#: ``skipped`` is a row the drain decided needs no user-visible notice (streak
+#: suppression), ``failed`` is a dead letter that exhausted its retries and stays
+#: visible instead of retrying forever.
+NOTICE_PENDING = "pending"
+NOTICE_SENT = "sent"
+NOTICE_SKIPPED = "skipped"
+NOTICE_FAILED = "failed"
+#: Terminal notice states: never delivered again, and no longer blocking a streak.
+NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
+
+
+class _UnstampableInstant(str):
+    """A ``next_attempt_at`` that is not JSON text, carried through an expectation.
+
+    A ``str`` subclass so the expectation stays a ``tuple[str, int, str]`` and every
+    caller that only passes it through, prints it or compares it keeps working, while
+    ``owed_notice_state_unchanged`` can recognize it by TYPE and re-assert the stored
+    value the only way SQLite makes reproducible: by its JSON type.
+
+    Why a JSON number cannot be re-asserted by its text. The guard compares
+    ``cast(json_extract(...) AS TEXT)`` against a Python string, and SQLite renders a
+    REAL with its own 15-significant-digit formatter: ``1e25`` reads back as
+    ``'1.0e+25'`` where Python's ``str`` gives ``'1e+25'``, and at the 15th digit the
+    two round differently (``-1.5063173670565552e-212`` -> ``...655`` in SQLite,
+    ``...656`` in Python). Guessing that text would refuse the write, and a refused
+    write on a row the listing ADMITS is the starvation this whole pair exists to
+    prevent: the row is selected first every tick — every numeric sorts before every
+    ISO instant — consumes a batch slot, and never transitions.
+
+    Asserting the TYPE is not a loosening of what the third element is FOR. It exists
+    to catch a concurrent DEFERRAL, which writes an ISO string
+    (``notice_write_expectation``'s docstring records why), so "still not text" catches
+    every deferral there can be. ``state`` and ``attempts`` are unchanged and still
+    carry single-flight: a competing claim consumes the attempt, so only one owner can
+    win regardless of how this element compares.
+    """
+
+    __slots__ = ()
+
+
+#: The expectation's ``next_attempt_at`` when the stored value is not JSON text — a
+#: shape no stamper writes, so it can only arrive from a hand-edited row or a foreign
+#: writer. Interned as one value so the guard has a single spelling to recognize.
+_NEXT_ATTEMPT_NOT_TEXT = _UnstampableInstant("<next_attempt_at:not-text>")
+
+
+def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int, str]:
+    """The ``(state, attempts, next_attempt_at)`` an owed-notice write was decided from.
+
+    Pass the result as ``update_owed_failure_notice(..., expect=...)``: one function so
+    the reading side and the predicate side normalize identically and cannot drift.
+    Never raises — ``attempts`` is JSON and a malformed value must read the same for
+    both sides rather than turning a guarded write into an error.
+
+    ALL THREE FIELDS THE DECISION READ, not just the two that identify a delivery
+    attempt. Eligibility is a function of ``state`` and ``next_attempt_at``
+    (``owed_notice_eligible``) and of ``attempts`` (``core.failure_notices.next_attempt``),
+    so a predicate over two of them leaves one way for a write to land on a world that
+    moved: a DEFERRAL writes only ``next_attempt_at`` and ``defer_reason``, leaving
+    ``(state, attempts)`` untouched, so a claimant that read before a concurrent
+    owner's deferral still matched its own expectation, won, and erased the deferral —
+    a second notice for one outage in the stale-cutoff lane, and a
+    ``DEFERRAL_RECHECK_SECONDS`` that any stale claimant could cancel.
+
+    Why this field and not ``updated_at``, which ``DefinitionWriteExpectation``
+    deliberately refuses: a row-version marker refuses benign writes and a freshly
+    stamped notice does not carry one at all, whereas ``next_attempt_at`` is stamped
+    unconditionally by every stamper (``_owed_failure_notice_for_transition`` and
+    ``stamp_binding_change_notice``) and a legacy notice that predates the field reads
+    ``""`` identically on both sides — the same ``coalesce(..., '')`` that keeps
+    ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` a range term.
+
+    One consequence is recorded rather than hidden: two owners deferring the same
+    notice from one read no longer BOTH land — the first moves the field the second
+    re-asserts. The refusal is correct, and observationally empty: the notice is
+    deferred either way, no attempt is consumed either way, and the two recheck
+    instants differ by the microseconds between two owners reading the clock. Pinned by
+    ``test_a_second_identical_deferral_loses_the_cas_without_changing_the_outcome``.
+    """
+
+    source = notice if isinstance(notice, dict) else {}
+    # CAST semantics, not int(): SQLite parses a numeric PREFIX ('3x' → 3,
+    # '1e100' → 1) and saturates at the i64 bounds, where int() raises or
+    # overflows past what the CAS will read back. A divergent read here is a
+    # claim that can never match — the row stays eligible and unchanged on every
+    # drain pass, occupying one of the ten batch slots forever.
+    attempts = sqlite_cast_integer(source.get("attempts"))
+    return (str(source.get("state") or ""), attempts, _expected_next_attempt_at(source))
+
+
+def _expected_next_attempt_at(source: dict[str, Any]) -> str:
+    """``next_attempt_at`` as SQLite will read it back for the guard's comparison.
+
+    Text is taken VERBATIM — not stripped, not re-formatted — because the guard
+    compares it against the stored blob through SQLite, which does neither; a stripped
+    copy would refuse a write over a padded instant that nobody raced. Missing and
+    null both read as ``""``, mirroring the ``coalesce(..., '')`` in
+    ``OWED_NOTICE_NEXT_ATTEMPT_SQL``.
+
+    Anything else — a JSON number, ``true``/``false``, an object, an array — is a shape
+    no stamper writes and whose SQLite text is not reproducible in Python, so it is
+    carried as ``_NEXT_ATTEMPT_NOT_TEXT`` and re-asserted by JSON type instead. Note
+    the falsiness traps this avoids by testing the raw value rather than ``or ""``:
+    a stored ``0`` is ``'0'`` to SQLite, not ``''``, and a stored ``true`` is ``'1'``,
+    not ``'True'`` — both of which read as an unraceable guard on the eligible row
+    they belong to.
+    """
+
+    raw = source.get("next_attempt_at")
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, str):
+        return raw
+    return _NEXT_ATTEMPT_NOT_TEXT
+
+
+def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
+    """Whether this notice may be acted on at *now*: ``pending`` and out of its wait.
+
+    The Python twin of ``OWED_NOTICE_STATE_SQL`` / ``OWED_NOTICE_NEXT_ATTEMPT_SQL``,
+    and it has to agree with them value for value — same relationship, and same
+    hazard, as ``notice_write_expectation`` and ``owed_notice_state_unchanged``. The
+    listing query seeks on those two index expressions and then re-checks the decoded
+    blob (the index is over a JSON path, so a row whose blob changed between the seek
+    and the read is worth re-reading), and ``_deliver_one_failure_notice`` re-reads
+    the row again before claiming it. Three copies of "is this eligible" is three
+    chances to disagree; one function is none.
+
+    ``next_attempt_at`` missing, null or empty means ELIGIBLE NOW, mirroring the
+    ``coalesce(..., '')`` in ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` — the empty string sorts
+    before every ISO instant, so both sides read an absent wait through the same
+    ``<=``. String comparison, for the same reason every other timestamp comparison
+    here is: ISO-8601 in UTC sorts lexicographically.
+
+    Agreement means agreeing with the comparison SQLITE makes, which for a value that
+    is not text is not the comparison Python makes. The indexed expression is compared
+    RAW, so SQLite compares STORAGE CLASSES: every INTEGER and REAL sorts before every
+    TEXT, making a numeric ``next_attempt_at`` eligible at every instant, and SQLite
+    never strips, so ``" 9999-01-01..."`` sorts before ``now`` on its leading space.
+    Reading those through ``str(...).strip() <= now`` said the opposite, and the
+    disagreement is not a difference of opinion the drain absorbs: the seek applies
+    ``LIMIT`` BEFORE this re-check, so such a row is selected, dropped without any
+    state transition, and selected again on the next tick forever — and because it
+    sorts FIRST, ten of them starve every valid notice behind them, silently, in a
+    drain that looks busy. So the shapes SQL admits are admitted here too, and the
+    drain ADVANCES them: the claim stamps a real instant over the unreadable one.
+    Degrade and advance, as ``notice_write_expectation`` does for ``attempts``.
+
+    THE WHOLE DOMAIN, decided explicitly rather than left to whichever of the two
+    languages happens to answer first. Only the first two rows are reachable through
+    this module's writers; the rest need a hand-edited row or a foreign writer, and are
+    given a stated treatment anyway because the failure mode of an unstated one is
+    silence:
+
+    ==================== ============ =============================================
+    stored value         eligible?    treatment
+    ==================== ============ =============================================
+    absent / null / ``""`` yes        no wait ever armed — ``coalesce(..., '')``
+    text                 ``value <= now``  UNSTRIPPED lexicographic compare, both
+                                      sides, because SQLite does not strip: a padded
+                                      instant is EARLY (``" 9999-…"`` sorts on its
+                                      leading space), never late
+    integer / real /     yes          numeric storage class sorts below every text
+    ``true`` / ``false``              bound, so SQL admits it at every instant;
+                                      admitted here too and NORMALIZED BY THE CLAIM,
+                                      which stamps a real instant over it. Bounded
+                                      progress: one pass and the row is a normal
+                                      notice again
+    object / array       NO           reads back as JSON text beginning ``{``/``[``,
+                                      which sorts above every ISO instant, so the
+                                      SEEK never returns it: it occupies no batch
+                                      slot and starves nothing. It also never
+                                      delivers. Chosen over admitting it in Python
+                                      only, which is the divergence this function
+                                      exists to remove; the underlying failure stays
+                                      visible through the definition's ``last_error``
+                                      and ``definition_health`` (the run is still
+                                      ``failed``), so what is lost is the push, not
+                                      the record. Pinned by
+                                      ``test_a_container_retry_instant_is_ineligible_
+                                      on_both_sides_and_starves_nothing``
+    ==================== ============ =============================================
+
+    The field carries two things that are one thing to this predicate: the retry
+    BACKOFF after a failed attempt, and the LEASE a claimant arms before it performs
+    the external send (see ``core.failure_notices.CLAIM_LEASE_SECONDS``). Both mean
+    "not this owner, not yet", so both are expressed as a future instant rather than
+    as a second column — which is also what makes the claim expire on its own if the
+    claimant dies.
+    """
+
+    if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
+        return False
+    raw = notice.get("next_attempt_at")
+    if raw is None or raw == "":
+        return True
+    if isinstance(raw, str):
+        return raw <= now
+    if isinstance(raw, (int, float)):
+        # Numeric storage class, so SQLite sorts it before every TEXT: eligible at any
+        # ``now``. ``bool`` is an ``int`` here and is one in SQLite too — ``json_extract``
+        # reads JSON ``true``/``false`` back as 1/0.
+        return True
+    # An object or an array reads back as its JSON TEXT, which begins with a brace or a
+    # bracket and therefore sorts above every ISO instant — ineligible on both sides,
+    # and spelled out as a comparison rather than hardcoded as ``False`` so the two
+    # sides stay one rule rather than two agreeing accidents.
+    return _json_dumps(raw) <= now
+
+
+#: ``attempts``, read in SQL. Unlike ``OWED_NOTICE_STATE_SQL`` this one is NOT pinned
+#: to an index expression and does not need to be: the guarded write is located by
+#: primary key, so this pair is a FILTER on one already-identified row rather than a
+#: seek term, and no plan depends on its text.
+#:
+#: It keeps the ``CASE json_valid`` shape for the WRITE-time reason that constant
+#: documents: a bare ``json_extract`` over a malformed blob raises ``malformed JSON``
+#: and fails the whole statement, which here would turn "this write lost a race" into
+#: an exception the drain logs on every pass.
+_OWED_NOTICE_ATTEMPTS_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.owed_failure_notice.attempts') END"
+)
+
+#: ``next_attempt_at``'s JSON TYPE, read in SQL. The only reproducible way to
+#: re-assert a stored value whose TEXT rendering is SQLite's own — see
+#: ``_UnstampableInstant``. Not index-pinned, for the reason
+#: ``_OWED_NOTICE_ATTEMPTS_SQL`` gives: this is a filter on a row already located by
+#: primary key, so no query plan depends on its text.
+#:
+#: Same ``CASE json_valid`` guard, same reason: ``json_type`` raises ``malformed JSON``
+#: on an unparseable blob and would fail the whole statement.
+_OWED_NOTICE_NEXT_ATTEMPT_TYPE_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_type(metadata_json, '$.owed_failure_notice.next_attempt_at') END"
+)
+
+
+def owed_notice_state_unchanged(expect: tuple[str, int, str]) -> list[Any]:
+    """Predicates re-asserting the ``(state, attempts, next_attempt_at)`` of a write.
+
+    The SQL twin of ``notice_write_expectation``, and normalized to agree with it
+    value for value — same relationship as ``reclaim_snapshot_marker`` and
+    ``_RECLAIM_SNAPSHOT_MARKER_SQL``, for the same reason: a predicate that read the
+    stored blob more strictly than the caller read it would refuse writes nobody
+    raced. ``coalesce`` because a missing/null key is 0 or ``""`` on the Python side
+    and would otherwise be NULL here, and NULL is not false — it would fail the guard
+    on every freshly stamped notice. ``CAST`` because JSON is untyped: ``"3"`` and
+    ``3.7`` are what ``int(...)`` makes of them.
+
+    Values a notice cannot legally hold (a state stored as a JSON number) may still
+    resolve differently on the two sides; when they do, SQL is the STRICTER one, so
+    the residue is a refused write and a retried notice, never a lost one.
+
+    THAT ARGUMENT DOES NOT EXTEND TO ``next_attempt_at``, and the exception is why the
+    third predicate has two forms. A refused write is harmless only for a row that is
+    also ineligible; a row this guard can never match while ``owed_notice_eligible``
+    keeps admitting it is selected first by every tick — every JSON number sorts before
+    every ISO instant — occupies a batch slot, and never transitions. So for a stored
+    value that is not JSON text, whose SQLite TEXT rendering is not reproducible in
+    Python, the guard re-asserts the JSON TYPE instead of the text. See
+    ``_UnstampableInstant`` for the rendering evidence and for why the type is a
+    faithful substitute here.
+
+    The text form reuses ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` VERBATIM under the
+    same outer ``coalesce``/``CAST`` shape as the other two, for the reason
+    ``owed_notice_absent`` gives: this is a filter on a row located by primary key so
+    no plan depends on its text, but a divergent copy of an indexed expression is
+    exactly how the eligibility index was built and silently ignored twice.
+    """
+
+    state, attempts, next_attempt_at = expect
+    if isinstance(next_attempt_at, _UnstampableInstant):
+        # The stored value is not JSON text, so its TEXT rendering is SQLite's own and
+        # not reproducible here (see ``_UnstampableInstant``): re-assert the type
+        # instead. ``coalesce`` to ``'null'`` because an absent key and a malformed blob
+        # both read as NULL, and NULL is not false — either would pass a bare
+        # ``NOT IN`` and let this guard match a row the caller never read.
+        third: Any = cast(
+            func.coalesce(literal_column(_OWED_NOTICE_NEXT_ATTEMPT_TYPE_SQL), "null"), Text
+        ).notin_(["text", "null"])
+    else:
+        third = (
+            cast(func.coalesce(literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL), ""), Text)
+            == next_attempt_at
+        )
+    return [
+        cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == state,
+        cast(func.coalesce(literal_column(_OWED_NOTICE_ATTEMPTS_SQL), 0), Integer) == attempts,
+        third,
+    ]
+
+
+def owed_notice_absent() -> list[Any]:
+    """Predicate for "this row owes no notice yet", evaluated by SQLite.
+
+    The SQL twin of the Python pre-check every STAMPING writer makes
+    (``_owed_failure_notice_for_transition`` and ``stamp_binding_change_notice``:
+    "an existing notice is never overwritten"), and normalized to agree with it —
+    ``coalesce`` because an absent key, a null state and a notice stored as
+    something other than an object all read as "no notice" on the Python side and
+    would be NULL here, and NULL is not false.
+
+    It exists for the writer that has no terminal transition to ride. A stamp folded
+    into the UPDATE that moves ``status`` to ``failed`` is already atomic with the
+    thing it depends on; ``stamp_binding_change_notice`` runs on a LIVE run, before
+    ``complete()``, so its "no existing notice" read and its write are two statements
+    and something else can terminalize in between. Same reason
+    ``owed_notice_state_unchanged`` exists, same fix.
+
+    Reuses ``OWED_NOTICE_STATE_SQL`` verbatim rather than spelling the JSON path
+    again: this is a FILTER on a row located by primary key, so no plan depends on
+    its text, but a divergent copy of that expression is exactly how the eligibility
+    index was built and silently ignored twice.
+    """
+
+    return [cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == ""]
+
+
+#: Mirror of ``core.failure_notices.NOTICE_KIND_*``, spelled as literals for the
+#: same reason ``RUN_INTERRUPTION_REASONS`` is below: ``core`` imports ``storage``,
+#: not the other way round. ``tests/test_harness_failure_visibility.py`` asserts the
+#: two agree so they cannot drift.
+#:
+#: The field is ADDITIVE. A notice stamped before it existed carries no ``kind`` and
+#: reads as ``failure``, and neither eligibility expression mentions it, so no index
+#: and no migration is involved.
+NOTICE_KIND_FAILURE = "failure"
+NOTICE_KIND_BINDING_CHANGE = "binding_change"
+
+#: How the drain proved delivery. ``receipt`` is a persisted ``messages`` row;
+#: ``delivery_only`` is a transport that returned an id whose row write failed —
+#: positive evidence the user was told, recorded explicitly rather than pretending
+#: the receipt exists.
+ACK_EVIDENCE_RECEIPT = "receipt"
+ACK_EVIDENCE_DELIVERY_ONLY = "delivery_only"
+
+#: Mirror of ``core.run_settlement.RUN_INTERRUPTION_REASONS``, spelled as literals
+#: for the same reason ``SWEEP_I18N_KEYS`` mirrors this module's sweep reasons:
+#: ``core`` imports ``storage``, not the other way round, and this module must stay
+#: importable without pulling ``core`` in. ``tests/test_harness_failure_visibility.py``
+#: asserts the two sets are equal so they cannot drift.
+RUN_INTERRUPTION_REASONS = frozenset(
+    {
+        "stopped",
+        "backend_refresh",
+        "evicted",
+        "restarted",
+        "lifetime_timeout",
+        SWEEP_REASON_ORPHANED,
+    }
+)
+
+#: ``metadata.interrupt_reason``, as literal SQL. ONE spelling, shared by every
+#: query that has to keep interruptions out of a definition's history — the health
+#: window and the failure streak — because a divergent copy is silent: the results
+#: stay correct and the planner just declines to match, which is precisely how the
+#: eligibility index was built and ignored twice (see ``OWED_NOTICE_STATE_SQL``).
+#:
+#: Literal, and unqualified, for the same two reasons as the eligibility
+#: expressions: SQLAlchemy renders a composed ``case()`` with BOUND PARAMETERS,
+#: which no index expression can match, and SQLite rejects the "." operator inside
+#: one. Nothing indexes this expression today — the streak's bound comes from
+#: ``(definition_id, created_at, id)`` and the interruption filter is evaluated on
+#: the handful of rows that seek touches — but keeping it index-shaped is what
+#: makes indexing it later a migration rather than a rewrite.
+#:
+#: The ``CASE json_valid`` guard is not optional: ``json_extract`` raises
+#: ``malformed JSON`` and fails the whole STATEMENT, so one unparseable blob would
+#: take out health for every definition in a batch, or the streak read for the
+#: whole drain. CASE evaluates lazily, so a malformed row degrades to "no interrupt
+#: reason" — the same way this module's Python ``_json_loads`` idiom degrades.
+INTERRUPT_REASON_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.interrupt_reason') END"
+)
+
+
+def _not_an_out_of_band_interruption() -> Any:
+    """SQL for "this row is not an out-of-band interruption".
+
+    MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``, never ``interrupt_reason IS NOT
+    NULL``. Nullness would also exclude ``no_terminal_result`` /
+    ``refused_concurrent_turn`` / ``transport_unavailable`` / ``queue_hold_expired``,
+    which are the ordinary per-fire failures this whole feature exists to surface.
+    """
+
+    reason = literal_column(INTERRUPT_REASON_SQL)
+    return or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS)))
+
+#: Derived health, per definition. No new state: both counters come from one
+#: indexed query over ``agent_runs``, so nothing has to be kept in sync or
+#: backfilled.
+HEALTH_FAILING = "failing"
+HEALTH_DEGRADED = "degraded"
+HEALTH_HEALTHY = "healthy"
+#: What a definition reads when its own history cannot be classified — a malformed
+#: ``metadata_json`` row, in practice. Distinct from ``healthy`` on purpose: a
+#: health signal that cannot be computed must not read as a clean bill.
+HEALTH_UNKNOWN = "unknown"
+
+#: The health window: the last N verdicts OR the last T hours, whichever is
+#: shorter. Both bounds live in the ``WHERE``/``LIMIT`` of one query rather than
+#: one of them in prose — bounded only by count, a definition that failed once and
+#: then stopped firing would read ``failing`` forever with no user action able to
+#: clear it.
+HEALTH_WINDOW_RUNS = 10
+HEALTH_WINDOW_HOURS = 72
+
+
+def _owed_failure_notice_for_transition(
+    run_id: str,
+    *,
+    status: Any,
+    metadata: dict[str, Any],
+    now: str,
+) -> Optional[dict[str, Any]]:
+    """The notice a terminal transition owes, or ``None`` when it owes nothing.
+
+    Only a ``failed`` transition owes one. ``succeeded`` has nothing to report, and
+    ``canceled`` is reserved for explicit user intent (``SETTLEMENT_TERMINAL_STATUS``
+    maps only ``stopped`` there, and the guarded writers map a ``cancel_requested``
+    row there) — telling a user their run failed because they stopped it is noise.
+
+    An existing notice is never overwritten. Re-stamping would reset ``attempts``
+    and resurrect a dead letter, so a row that already carries a notice keeps the
+    one it has whatever later writer touches it.
+    """
+
+    if normalize_run_status(status) != "failed":
+        return None
+    existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
+    if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+        return None
+    reason = str(metadata.get("interrupt_reason") or "").strip() or None
+    return {
+        "state": NOTICE_PENDING,
+        "attempts": 0,
+        # ALWAYS an instant, never ``None``. A nullable column forces the query into
+        # ``(x IS NULL OR x <= now)``, and a disjunction cannot be an index range
+        # term — which is how the backoff stayed unindexed while the plan still
+        # named the index. ``now`` means "eligible immediately".
+        "next_attempt_at": now,
+        # Run-derived so two drain passes over the same row produce ONE identity,
+        # and so the identity is available at drain time at all: deriving it from
+        # whatever context a pass happens to build would key it off a per-pass
+        # ``task_execution_id`` — or off ``uuid4`` when the rebuild supplies none —
+        # and re-send the notice every tick.
+        #
+        # WHICH run-derived form matters, and the two lanes need different ones.
+        #
+        # An ordinary failure reuses the bare run id, because that is exactly what
+        # the LIVE path's ``_failure_identity`` resolves to (it prefers
+        # ``task_execution_id``, which ``_build_context`` sets to the run id). A
+        # different spelling here would produce a different ``native_message_id``,
+        # so the drain's ``agent_message_exists`` lookup could not see a
+        # notification the live path had already delivered — and would send a
+        # second one for the same failure, defeating the dedup the whole receipt
+        # protocol rests on.
+        #
+        # An interruption must NOT collide with that. A run terminalized out of band
+        # may already carry an ordinary backend-failure notice against the same
+        # execution, and a shared identity would let the dedup silently swallow the
+        # D1 notice telling the user a deploy killed their run — the notices that
+        # matter most, lost to the mechanism meant to prevent duplicates.
+        #
+        # Which lane this is comes from MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``,
+        # never from the presence of a reason. ``interrupt_reason`` is the general
+        # marker for "terminalized by something other than its own backend result",
+        # and its commonest values — ``no_terminal_result``,
+        # ``refused_concurrent_turn``, ``transport_unavailable``,
+        # ``queue_hold_expired`` — are ordinary per-fire verdicts that belong in the
+        # suppressed failure lane. Minting ``interrupt:{run}:{reason}`` for those gave
+        # them an identity the live path never uses, and since the drain's id is
+        # AUTHORITATIVE that is one duplicate notification per failure.
+        "failure_id": (
+            f"interrupt:{run_id}:{reason}"
+            if reason in RUN_INTERRUPTION_REASONS
+            else run_id
+        ),
+        # Optional, and only ever a copy selector. The lane a notice belongs to is
+        # decided from this value's membership in ``RUN_INTERRUPTION_REASONS``, not
+        # from its presence.
+        "interrupt_reason": reason,
+        "error": None,
+        "ack_evidence": None,
+        "stamped_at": now,
+    }
+
+
+def _callback_parent_owns_failure_notice(
+    conn: Any,
+    *,
+    source_kind: Any,
+    parent_run_id: Any,
+) -> bool:
+    """Whether a callback child's parent already owns the user-visible notice."""
+
+    if str(source_kind or "").strip() != "callback":
+        return False
+    parent_id = str(parent_run_id or "").strip()
+    if not parent_id:
+        return False
+    raw_metadata = conn.execute(
+        select(agent_runs.c.metadata_json).where(agent_runs.c.id == parent_id).limit(1)
+    ).scalar_one_or_none()
+    metadata = _json_loads(raw_metadata, {})
+    notice = metadata.get(OWED_FAILURE_NOTICE_KEY) if isinstance(metadata, dict) else None
+    return isinstance(notice, dict) and bool(str(notice.get("state") or "").strip())
+
+
+def _merge_owed_failure_notice(
+    values: dict[str, Any],
+    *,
+    conn: Any,
+    run_id: str,
+    status: Any,
+    source_kind: Any,
+    parent_run_id: Any,
+    row_metadata_json: Any,
+    extra_metadata: Optional[dict[str, Any]] = None,
+    now: str,
+) -> None:
+    """Fold the owed notice into the ``metadata_json`` an UPDATE is about to write.
+
+    In-place on ``values`` so the stamp rides the SAME statement that transitions
+    the status. A stamp written by a second UPDATE could be lost to a crash between
+    the two, which is the whole failure mode the durable notice exists to close.
+
+    Takes the RAW COLUMN, not a decoded dict, because the decode is a decision this
+    choke point has to make rather than inherit. Every caller used to hand it
+    ``_json_loads(row["metadata_json"], {})`` and the fallback here turned anything
+    that was not a dict into ``{}``, so settling a row whose blob is unparseable — or
+    valid JSON that is not an object — REPLACED the column with just the notice.
+    Whatever those bytes were is not this feature's to destroy.
+
+    So an unreadable blob is READ-ONLY here: empty or NULL is a fresh ``{}`` base as
+    before, and anything non-empty that will not decode to an object skips the
+    metadata write ENTIRELY while the caller's terminal status/error/completed_at
+    transition still commits. The same answer the three precedents on this path
+    already give — the binding stamp refuses malformed rows through ``json_valid``,
+    ``update_owed_failure_notice`` returns ``None`` when the metadata is not a dict,
+    and ``list_owed_failure_notices`` excludes them ("a row whose metadata will not
+    parse cannot hold a readable notice anyway").
+
+    RESIDUAL, stated rather than hidden: such a row settles ``failed`` and never owes
+    a notice, so its failure is visible in the run list and in derived health but is
+    never delivered as a message. That was ALREADY true — the eligibility query
+    excludes malformed rows, so a notice written here would have been durable and
+    unreachable — and it is the direction every other reader on this path chose.
+    """
+
+    if isinstance(row_metadata_json, (bytes, bytearray)):
+        row_metadata_json = bytes(row_metadata_json).decode("utf-8", "replace")
+    if row_metadata_json is None or (
+        isinstance(row_metadata_json, str) and not row_metadata_json.strip()
+    ):
+        merged: dict[str, Any] = {}
+    else:
+        decoded = _json_loads(row_metadata_json if isinstance(row_metadata_json, str) else None, None)
+        if not isinstance(decoded, dict):
+            logger.warning(
+                "run %s has unreadable metadata_json; settling it without touching the "
+                "column, so it records no owed failure notice",
+                run_id,
+            )
+            return
+        merged = decoded
+    if extra_metadata:
+        merged.update(extra_metadata)
+    notice = None
+    if not _callback_parent_owns_failure_notice(
+        conn,
+        source_kind=source_kind,
+        parent_run_id=parent_run_id,
+    ):
+        notice = _owed_failure_notice_for_transition(
+            run_id,
+            status=status,
+            metadata=merged,
+            now=now,
+        )
+    if notice is None and not extra_metadata:
+        return
+    if notice is not None:
+        merged[OWED_FAILURE_NOTICE_KEY] = notice
+    values["metadata_json"] = _json_dumps(merged)
+
 
 def normalize_run_status(status: Any) -> str:
     return RUN_STATUS_ALIASES.get(str(status or "").strip(), str(status or "").strip() or "queued")
@@ -685,6 +1358,21 @@ def _stronger_terminal_status(current: Any, incoming: Any) -> str:
     ):
         return current_status
     return incoming_status
+
+
+#: When a run SETTLED, as one expression shared by every read that orders a
+#: definition's history by it — the health window and the last-success seek.
+#:
+#: ``COALESCE`` rather than bare ``completed_at``: master does not treat terminal and
+#: ``completed_at IS NOT NULL`` as the same condition (``list_pending_callbacks`` tests
+#: them separately), and ordering must not silently reorder a row on the day one
+#: terminal writer stops stamping it.
+#:
+#: ONE OBJECT, not two spellings, for the reason ``INTERRUPT_REASON_SQL`` is also
+#: shared by name: this is the second key of ``ix_agent_runs_definition_settled``
+#: (migration ``20260728_0039``), and a retyped copy that drifts is one the planner
+#: silently stops matching while the results stay correct.
+_SETTLED_AT = func.coalesce(agent_runs.c.completed_at, agent_runs.c.created_at)
 
 
 def _status_query_values(status: str) -> list[str]:
@@ -862,6 +1550,104 @@ def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> d
     return metadata
 
 
+def cancel_not_requested() -> Any:
+    """SQL for "still nobody has asked to cancel this run", evaluated by SQLite.
+
+    The SQL twin of the Python read ``bool(row["cancel_requested"])`` that every
+    guarded terminal writer branches on, and normalized to agree with it —
+    ``coalesce`` because a NULL column reads as "not requested" on the Python side and
+    NULL is not false here, ``CAST`` because JSON-free but untyped storage means a
+    text ``'0'`` must not read as truthy. Same relationship, and the same reason, as
+    ``notice_write_expectation`` and ``owed_notice_state_unchanged``.
+
+    WHY IT BELONGS IN THE TERMINAL ``WHERE``. ``cancel_run`` is a separate
+    transaction. It can land between a guarded writer's snapshot SELECT and that
+    writer's UPDATE — pysqlite starts no transaction for the read, so the snapshot is
+    genuinely older than the write — and ``cancel_requested`` is the ONLY signal
+    distinguishing "this run failed" from "the user pressed Stop". A writer that reads
+    it in Python and then does not re-assert it overwrites the Stop with ``failed``
+    and, worse, stamps an owed failure notice: the user is told their task broke
+    because they cancelled it.
+
+    A FILTER on a row already located by primary key, so no query plan depends on its
+    text.
+    """
+
+    return cast(func.coalesce(agent_runs.c.cancel_requested, 0), Integer) == 0
+
+
+def _cancel_aware_terminal_status(
+    row: Any,
+    requested_status: Any,
+) -> tuple[str, list[Any]]:
+    """Decide one terminal status and return the CAS guards for that snapshot."""
+
+    status = normalize_run_status(requested_status)
+    cancel_requested = bool(row["cancel_requested"])
+    if cancel_requested and status == "failed":
+        status = "canceled"
+    guards = [
+        agent_runs.c.status.in_(
+            _status_query_values("queued") + _status_query_values("running")
+        )
+    ]
+    if not cancel_requested:
+        guards.append(cancel_not_requested())
+    return status, guards
+
+
+def _coalesced_terminal_write(
+    conn: Any, row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
+) -> Optional[tuple[dict[str, Any], list[Any]]]:
+    """The values and the CAS predicates one coalesced run's settlement needs.
+
+    ``None`` means "write nothing": the row was already settled by another actor.
+    Without that skip the UPDATE rewrites a row wholesale — a ``record_run_output``
+    success that landed first becomes ``failed`` — because the write carries no status
+    predicate of its own.
+
+    The two branches guard DIFFERENTLY, and that asymmetry is the point:
+
+    * the ``canceled`` branch is reached because the snapshot ALREADY saw the cancel,
+      so it keeps ``canceled`` in its status list and falls through — a
+      cancel-requested row goes on being normalized to ``canceled`` exactly as before,
+      and a second cancel landing under it changes nothing it would write;
+    * the ``succeeded``/``failed`` branch is reached because the snapshot saw NO
+      cancel, so it re-asserts that (``cancel_not_requested``) and DROPS ``canceled``
+      from its status list. Both halves are needed: the status predicate stops the
+      write landing on a row already flipped to ``canceled`` by ``cancel_run`` (which
+      does that for a queued row), and the ``cancel_requested`` predicate stops it
+      landing on a RUNNING row where ``cancel_run`` set only the flag.
+    """
+
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES and status != "canceled":
+        return None
+    values: dict[str, Any] = {"updated_at": now}
+    nonterminal = _status_query_values("queued") + _status_query_values("running")
+    if bool(row["cancel_requested"]) or status == "canceled":
+        values["status"] = "canceled"
+        values["completed_at"] = now
+        predicates = [agent_runs.c.status.in_(nonterminal + _status_query_values("canceled"))]
+    else:
+        values["status"] = "succeeded" if ok else "failed"
+        values["completed_at"] = now
+        if error is not None:
+            values["error"] = error
+        predicates = [agent_runs.c.status.in_(nonterminal), cancel_not_requested()]
+    _merge_owed_failure_notice(
+        values,
+        conn=conn,
+        run_id=run_id,
+        status=values["status"],
+        source_kind=row["source_kind"],
+        parent_run_id=row["parent_run_id"],
+        row_metadata_json=row["metadata_json"],
+        now=now,
+    )
+    return values, predicates
+
+
 def complete_coalesced_agent_runs_for_workbench_in_connection(
     conn: Any,
     run_ids: list[str],
@@ -888,21 +1674,36 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
     completed_ids: list[str] = []
     for run_id in normalized_run_ids:
         row = rows.get(run_id)
-        if row is None:
-            continue
-        status = normalize_run_status(row["status"])
-        values: dict[str, Any] = {"updated_at": now}
-        if bool(row["cancel_requested"]) or status == "canceled":
-            values["status"] = "canceled"
-            values["completed_at"] = now
-        else:
-            values["status"] = "succeeded" if ok else "failed"
-            values["completed_at"] = now
-            if error is not None:
-                values["error"] = error
-        result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
-        if result.rowcount:
-            completed_ids.append(run_id)
+        # ONE re-read on a refused write, never a loop. A refusal means the row moved
+        # under the batch snapshot, so the decision has to be made again from what the
+        # row NOW says — otherwise a run the user cancelled mid-flight is simply left
+        # ``running`` and nothing ever settles it, which trades a wrong status for a
+        # zombie. The retry is bounded at one because its own snapshot already sees the
+        # cancel: a second racing writer would have to land inside the retry itself,
+        # and this runs on the Workbench completion path where an unbounded retry is
+        # its own outage.
+        for final_attempt in (False, True):
+            if row is None:
+                break
+            plan = _coalesced_terminal_write(
+                conn, row, run_id=run_id, ok=ok, error=error, now=now
+            )
+            if plan is None:
+                break
+            values, predicates = plan
+            result = conn.execute(
+                update(agent_runs).where(agent_runs.c.id == run_id).where(*predicates).values(**values)
+            )
+            if result.rowcount:
+                completed_ids.append(run_id)
+                break
+            if final_attempt:
+                break
+            row = (
+                conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                .mappings()
+                .first()
+            )
     _defer_run_ids_updated_from_connection(conn, completed_ids)
     return completed_ids
 
@@ -1348,6 +2149,7 @@ class SQLiteBackgroundTaskStore:
             ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
         if not background_tables_ready(self.db_path):
             initialize_background_tables(self.db_path)
+        ensure_background_indexes(self.db_path)
         self.engine = create_sqlite_engine(self.db_path)
         self._probe = SqliteInvalidationProbe(self.engine)
 
@@ -1435,6 +2237,31 @@ class SQLiteBackgroundTaskStore:
         return self._upsert_definition(
             self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
         )
+
+    def upsert_scheduled_task_with_binding_notice(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation,
+        notice: dict[str, Any],
+    ) -> bool:
+        """Commit a recovery marker and its owed notice as one durable effect."""
+
+        with self.engine.begin() as conn:
+            self.stamp_binding_change_notice(_conn=conn, **notice)
+            landed = upsert_definition_in_connection(
+                conn,
+                self._scheduled_task_values(payload),
+                expect=expect,
+                definition_type="scheduled task",
+            )
+            if not landed:
+                # A normal return from ``engine.begin()`` COMMITs. The notice was
+                # written earlier in this transaction, so an explicit rollback is
+                # what keeps a refused definition CAS from publishing stale news.
+                conn.rollback()
+                return False
+        return True
 
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
@@ -2217,6 +3044,134 @@ class SQLiteBackgroundTaskStore:
                 )
         _publish_run_rows_updated([row_to_publish])
 
+    def definition_lifecycle_state(
+        self, definition_id: str, *, definition_type: str = "task"
+    ) -> Optional[str]:
+        """One definition's canonical lifecycle state, from the shared expression.
+
+        ``definition_lifecycle_expression`` evaluated for a single row — the same
+        CASE every list and count surface reads, so a consumer rendering copy
+        beside the badge cannot reach a different answer by re-deriving the state
+        in Python. The expression resolves an offset-free ``run_at`` in the stored
+        IANA timezone through the same rule as ``compute_next_run_at``; the state
+        and the displayed next fire therefore cannot disagree during the zone's
+        UTC-offset interval. ``None`` when the definition row does not exist.
+        """
+
+        resolved = str(definition_id or "").strip()
+        if not resolved:
+            return None
+        statement = (
+            select(definition_lifecycle_expression(definition_type))
+            .select_from(run_definitions)
+            .where(run_definitions.c.id == resolved)
+            .limit(1)
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).first()
+        return None if row is None else str(row[0])
+
+    def run_callback_state(self, run_id: str) -> Optional[str]:
+        """This run's effective callback delivery state, or ``None`` without one.
+
+        Read FRESH, at decision time, rather than trusted from the drain's listing:
+        the owed-notice batch is listed once per pass and each row is then decided
+        one at a time, so by the time a row is reached ``_drain_callbacks`` may
+        already have moved its callback from ``pending`` to ``sent`` — and the
+        notice decision keyed on the stale copy would defer a row whose blocker is
+        already resolved, or worse, deliver beside a callback that just landed.
+        A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
+        callback child. The user has the callback only after that child succeeds and
+        records delivery evidence. A persisted result row is evidence only while its
+        target Session is admitted by the Inbox; a recorded native send id for a real
+        IM conversation is transport evidence in its own right because it is returned
+        only after delivery. Archiving or deleting the local Session afterwards cannot
+        revoke that completed send. Workbench ids are synthetic and never qualify on
+        their own, while a receipt in suppressed background history proves persistence,
+        not visibility. This read joins the child and target Session and projects the
+        state the notice lane actually needs: queued/running is pending, succeeded with
+        effective delivery evidence is sent, and every other terminal outcome releases
+        the notice as failed. All three lookups are primary-key probes in one statement.
+
+        ``None`` means "no callback exists for this run" (no target session), which
+        is different from a callback whose status column is empty — a target with
+        no recorded status has never been armed, and the caller treats both as
+        no-shield.
+        """
+
+        parent = agent_runs.alias("callback_parent")
+        child = agent_runs.alias("callback_child")
+        callback_session = agent_sessions.alias("callback_session")
+        persisted_receipt = (
+            select(literal(1))
+            .select_from(messages)
+            .where(messages.c.session_id == child.c.session_id)
+            .where(messages.c.type == "result")
+            .where(func.json_valid(messages.c.metadata_json) == 1)
+            .where(
+                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
+                == child.c.id
+            )
+            .correlate(child)
+            .exists()
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    parent.c.callback_session_id,
+                    parent.c.callback_status,
+                    parent.c.callback_run_id,
+                    child.c.status,
+                    persisted_receipt,
+                    callback_session.c.status,
+                    callback_session.c.visibility,
+                    child.c.legacy_session_key,
+                    child.c.message_ids_json,
+                )
+                .select_from(
+                    parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
+                        callback_session,
+                        callback_session.c.id == child.c.session_id,
+                    )
+                )
+                .where(parent.c.id == str(run_id))
+                .limit(1)
+            ).first()
+        if row is None or not str(row[0] or "").strip():
+            return None
+        callback_status = str(row[1] or "").strip() or None
+        callback_run_id = str(row[2] or "").strip()
+        if callback_status != "sent" or not callback_run_id:
+            return callback_status
+        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
+        if child_status in {"queued", "running"}:
+            return "pending"
+        target_key_parts = self._parse_session_key(row[7])
+        message_ids = _json_loads(row[8], [])
+        descriptor = (
+            PLATFORM_REGISTRY.get(target_key_parts[0])
+            if target_key_parts is not None
+            else None
+        )
+        has_native_im_receipt = (
+            descriptor is not None
+            and descriptor.kind == "im"
+            and target_key_parts is not None
+            and target_key_parts[1] in {"channel", "user"}
+            and isinstance(message_ids, list)
+            and any(str(message_id or "").strip() for message_id in message_ids)
+        )
+        target_is_visible = (
+            str(row[5] or "").strip() != "archived"
+            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
+        )
+        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
+        if child_status == "succeeded" and (
+            has_native_im_receipt or has_visible_persisted_receipt
+        ):
+            return "sent"
+        return "failed"
+
     def update_callback_status(
         self,
         run_id: str,
@@ -2444,28 +3399,57 @@ class SQLiteBackgroundTaskStore:
                     if deferred_result_text is not None
                     else visible_text
                 )
-                terminal_values: dict[str, Any] = {
-                    "status": normalize_run_status(effective_terminal_status),
+                base_terminal_values: dict[str, Any] = {
                     # Structured outputs remain available in result_payload, but
                     # result_text is the one terminal result used by callbacks.
                     "result_text": terminal_result_text,
-                    "completed_at": now,
-                    "updated_at": now,
                 }
                 if effective_terminal_error is not None:
-                    terminal_values["error"] = str(effective_terminal_error)
-                transition = conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == run_id)
-                    .where(
-                        agent_runs.c.status.in_(
-                            _status_query_values("queued")
-                            + _status_query_values("running")
-                        )
+                    base_terminal_values["error"] = str(effective_terminal_error)
+
+                # One bounded re-read mirrors ``settle_run_terminal``. A Stop on a
+                # running row changes only ``cancel_requested``; the first CAS loses,
+                # then the second decision sees the flag and settles canceled.
+                terminal_row = row
+                for final_attempt in (False, True):
+                    if normalize_run_status(terminal_row["status"]) in TERMINAL_RUN_STATUSES:
+                        break
+                    status, guards = _cancel_aware_terminal_status(
+                        terminal_row, effective_terminal_status
                     )
-                    .values(**terminal_values)
-                )
-                terminal_transition = bool(transition.rowcount)
+                    terminal_values = {
+                        **base_terminal_values,
+                        "status": status,
+                        "completed_at": now,
+                        "updated_at": now,
+                    }
+                    _merge_owed_failure_notice(
+                        terminal_values,
+                        conn=conn,
+                        run_id=run_id,
+                        status=status,
+                        source_kind=terminal_row["source_kind"],
+                        parent_run_id=terminal_row["parent_run_id"],
+                        row_metadata_json=terminal_row["metadata_json"],
+                        now=now,
+                    )
+                    transition = conn.execute(
+                        update(agent_runs)
+                        .where(agent_runs.c.id == run_id)
+                        .where(*guards)
+                        .values(**terminal_values)
+                    )
+                    if transition.rowcount:
+                        terminal_transition = True
+                        break
+                    if final_attempt:
+                        break
+                    terminal_row = (
+                        conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                        .mappings()
+                        .one()
+                    )
+                row = terminal_row
                 if not terminal_transition:
                     # The row was already terminal, so the guarded UPDATE above
                     # matched nothing and ``result_text`` -- the one terminal
@@ -2547,6 +3531,9 @@ class SQLiteBackgroundTaskStore:
         result_text: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        task_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> Optional[str]:
         """Terminalize a non-terminal run in one guarded write.
 
@@ -2562,6 +3549,14 @@ class SQLiteBackgroundTaskStore:
         write. Rows carrying a deferred terminal intent are left alone — the Activity
         lifecycle owns those.
 
+        ``task_id`` / ``session_key`` / ``session_id`` are the identity columns the
+        claimed-request completion resolves late (a ``scheduled`` row learns its real
+        target only once the task definition has been read). They are facts about
+        WHICH conversation the run belongs to, not claims about its outcome, so they
+        are written whether or not the status transition lands — otherwise routing
+        the completion through this guarded writer would lose them on exactly the
+        rows another actor settled first.
+
         Returns the terminal status actually written, or ``None`` when nothing was
         written (already terminal, deferred, or missing).
         """
@@ -2573,46 +3568,77 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
-            if not row or normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+            if not row:
                 return None
-            result_payload = _json_loads(row["result_payload_json"], {})
-            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
-                # The Activity lifecycle already owns this row's terminal state.
-                return None
-            status = normalize_run_status(terminal_status)
-            if row["cancel_requested"] and status == "failed":
-                status = "canceled"
-            values: dict[str, Any] = {
-                "status": status,
-                "completed_at": now,
-                "updated_at": now,
-            }
-            if error is not None:
-                values["error"] = str(error)
-            if result_text is not None:
-                values["result_text"] = str(result_text)
-            if metadata:
-                merged = _json_loads(row["metadata_json"], {})
-                if not isinstance(merged, dict):
-                    merged = {}
-                merged.update(metadata)
-                values["metadata_json"] = _json_dumps(merged)
-            transition = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(
-                    agent_runs.c.status.in_(
-                        _status_query_values("queued") + _status_query_values("running")
-                    )
+            identity: dict[str, Any] = {}
+            if task_id is not None:
+                identity["definition_id"] = task_id
+            if session_key is not None:
+                identity["legacy_session_key"] = session_key
+            if session_id is not None:
+                identity["session_id"] = session_id
+            if identity:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(**identity, updated_at=now)
                 )
-                .values(**values)
-            )
-            if transition.rowcount:
-                written_status = status
-                row_to_publish = dict(
-                    conn.execute(
-                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
-                    ).mappings().one()
+            # ONE re-read on a refused write, never a loop, for the reason
+            # ``cancel_not_requested`` gives: refusing the write is only half the fix,
+            # because a run left ``running`` with nothing to settle it is the zombie
+            # this writer exists to prevent. The second pass re-decides from the row as
+            # it now stands, which is where the cancel is visible, so it writes
+            # ``canceled`` rather than being refused again.
+            for final_attempt in (False, True):
+                if row is None:
+                    break
+                if normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                    return None
+                result_payload = _json_loads(row["result_payload_json"], {})
+                if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                    # The Activity lifecycle already owns this row's terminal state.
+                    return None
+                status, guards = _cancel_aware_terminal_status(row, terminal_status)
+                values: dict[str, Any] = {
+                    "status": status,
+                    "completed_at": now,
+                    "updated_at": now,
+                }
+                if error is not None:
+                    values["error"] = str(error)
+                if result_text is not None:
+                    values["result_text"] = str(result_text)
+                _merge_owed_failure_notice(
+                    values,
+                    conn=conn,
+                    run_id=run_id,
+                    status=status,
+                    source_kind=row["source_kind"],
+                    parent_run_id=row["parent_run_id"],
+                    row_metadata_json=row["metadata_json"],
+                    extra_metadata=metadata or None,
+                    now=now,
+                )
+                # ``_cancel_aware_terminal_status`` re-asserts the cancellation fact
+                # this branch read. A running cancel changes only the flag, so a status
+                # predicate alone cannot stop a stale failure from overwriting Stop.
+                transition = conn.execute(
+                    update(agent_runs).where(agent_runs.c.id == run_id).where(*guards).values(**values)
+                )
+                if transition.rowcount:
+                    written_status = status
+                    row_to_publish = dict(
+                        conn.execute(
+                            select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                        ).mappings().one()
+                    )
+                    break
+                if final_attempt:
+                    break
+                row = (
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                    .mappings()
+                    .first()
                 )
         _publish_run_rows_updated([row_to_publish])
         return written_status
@@ -2696,49 +3722,75 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if not row:
                 return False
-            result_payload = _json_loads(row["result_payload_json"], {})
-            if not isinstance(result_payload, dict):
-                return False
-            deferred_status = str(result_payload.get("deferred_terminal_status") or "").strip()
-            if not deferred_status:
-                return False
-            result_payload.pop("deferred_terminal_status", None)
-            deferred_error = result_payload.pop("deferred_terminal_error", None)
-            deferred_result_text = result_payload.pop("deferred_terminal_result_text", None)
-            status = (
-                _stronger_terminal_status(deferred_status, terminal_status)
-                if terminal_status
-                else normalize_run_status(deferred_status)
-            )
-            values: dict[str, Any] = {
-                "status": status,
-                "completed_at": now,
-                "updated_at": now,
-                "result_payload_json": _json_dumps(result_payload),
-            }
-            effective_error = deferred_error if deferred_error is not None else error
-            if effective_error is not None:
-                values["error"] = str(effective_error)
-            if deferred_result_text is not None:
-                values["result_text"] = str(deferred_result_text)
-            transition = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(
-                    agent_runs.c.status.in_(
-                        _status_query_values("queued")
-                        + _status_query_values("running")
+            # A deferred failure is still subordinate to Stop. Re-decide once when
+            # the cancellation CAS loses so a running row becomes canceled instead
+            # of remaining a zombie or receiving a false failure notice.
+            for final_attempt in (False, True):
+                if normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                    break
+                result_payload = _json_loads(row["result_payload_json"], {})
+                if not isinstance(result_payload, dict):
+                    break
+                deferred_status = str(
+                    result_payload.get("deferred_terminal_status") or ""
+                ).strip()
+                if not deferred_status:
+                    break
+                result_payload.pop("deferred_terminal_status", None)
+                deferred_error = result_payload.pop("deferred_terminal_error", None)
+                deferred_result_text = result_payload.pop(
+                    "deferred_terminal_result_text", None
+                )
+                requested_status = (
+                    _stronger_terminal_status(deferred_status, terminal_status)
+                    if terminal_status
+                    else normalize_run_status(deferred_status)
+                )
+                status, guards = _cancel_aware_terminal_status(row, requested_status)
+                values: dict[str, Any] = {
+                    "status": status,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "result_payload_json": _json_dumps(result_payload),
+                }
+                effective_error = deferred_error if deferred_error is not None else error
+                if effective_error is not None:
+                    values["error"] = str(effective_error)
+                if deferred_result_text is not None:
+                    values["result_text"] = str(deferred_result_text)
+                _merge_owed_failure_notice(
+                    values,
+                    conn=conn,
+                    run_id=run_id,
+                    status=status,
+                    source_kind=row["source_kind"],
+                    parent_run_id=row["parent_run_id"],
+                    row_metadata_json=row["metadata_json"],
+                    now=now,
+                )
+                transition = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(*guards)
+                    .values(**values)
+                )
+                if transition.rowcount:
+                    transitioned = True
+                    row_to_publish = dict(
+                        conn.execute(
+                            select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                        ).mappings().one()
                     )
+                    break
+                if final_attempt:
+                    break
+                row = (
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                    .mappings()
+                    .first()
                 )
-                .values(**values)
-            )
-            transitioned = bool(transition.rowcount)
-            if transitioned:
-                row_to_publish = dict(
-                    conn.execute(
-                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
-                    ).mappings().one()
-                )
+                if row is None:
+                    break
         _publish_run_rows_updated([row_to_publish])
         return transitioned
 
@@ -2813,27 +3865,37 @@ class SQLiteBackgroundTaskStore:
         Returns ``True`` when a write actually happened.
         """
 
+        instant = at or _utc_now_iso()
+        raw_metadata = func.coalesce(agent_runs.c.metadata_json, "{}")
+        metadata = case(
+            (func.json_valid(raw_metadata) == 1, raw_metadata),
+            else_=literal("{}"),
+        )
         with self.engine.begin() as conn:
-            row = conn.execute(
-                select(agent_runs.c.status, agent_runs.c.metadata_json)
-                .where(agent_runs.c.id == run_id)
-                .limit(1)
-            ).mappings().first()
-            if not row or normalize_run_status(row["status"]) != "queued":
-                return False
-            metadata = _json_loads(row["metadata_json"], {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            if metadata.get("last_skip_reason") == reason:
-                return False
-            metadata["last_skip_reason"] = reason
-            metadata["last_skip_at"] = at or _utc_now_iso()
-            conn.execute(
+            result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
-                .values(metadata_json=_json_dumps(metadata))
+                .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                .where(
+                    cast(
+                        func.coalesce(
+                            func.json_extract(metadata, "$.last_skip_reason"), ""
+                        ),
+                        Text,
+                    )
+                    != reason
+                )
+                .values(
+                    metadata_json=func.json_set(
+                        metadata,
+                        "$.last_skip_reason",
+                        reason,
+                        "$.last_skip_at",
+                        instant,
+                    )
+                )
             )
-        return True
+        return bool(result.rowcount)
 
     def _clear_transport_skip_evidence(self, run_ids: set[str]) -> int:
         """Forget a ``transport_unavailable`` stamp whose outage has demonstrably ended.
@@ -2849,29 +3911,32 @@ class SQLiteBackgroundTaskStore:
         it will be reconsidered, with a fresh ``last_skip_at``, next sweep.
         """
 
-        cleared = 0
+        normalized_ids = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        if not normalized_ids:
+            return 0
+        raw_metadata = func.coalesce(agent_runs.c.metadata_json, "{}")
+        metadata = case(
+            (func.json_valid(raw_metadata) == 1, raw_metadata),
+            else_=literal("{}"),
+        )
         with self.engine.begin() as conn:
-            for run_id in sorted(run_ids):
-                row = conn.execute(
-                    select(agent_runs.c.status, agent_runs.c.metadata_json)
-                    .where(agent_runs.c.id == run_id)
-                    .limit(1)
-                ).mappings().first()
-                if not row or normalize_run_status(row["status"]) != "queued":
-                    continue
-                metadata = _json_loads(row["metadata_json"], {})
-                if not isinstance(metadata, dict):
-                    continue
-                if metadata.get("last_skip_reason") != SKIP_REASON_TRANSPORT_UNAVAILABLE:
-                    continue
-                metadata.pop("last_skip_reason", None)
-                metadata.pop("last_skip_at", None)
-                conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == run_id)
-                    .values(metadata_json=_json_dumps(metadata))
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id.in_(normalized_ids))
+                .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                .where(
+                    cast(func.json_extract(metadata, "$.last_skip_reason"), Text)
+                    == SKIP_REASON_TRANSPORT_UNAVAILABLE
                 )
-                cleared += 1
+                .values(
+                    metadata_json=func.json_remove(
+                        metadata,
+                        "$.last_skip_reason",
+                        "$.last_skip_at",
+                    )
+                )
+            )
+        cleared = int(result.rowcount or 0)
         if cleared:
             logger.debug("Cleared recovered transport skip evidence on %s harness run(s)", cleared)
         return cleared
@@ -3069,6 +4134,1147 @@ class SQLiteBackgroundTaskStore:
                 )
             )
         return swept
+
+    # --- owed failure notices -------------------------------------------------
+
+    def list_owed_failure_notices(self, *, limit: int = 20, now: Optional[str] = None) -> list[dict[str, Any]]:
+        """Runs owing a user-visible failure notice whose backoff has elapsed.
+
+        Ordered by ``(created_at, id)`` so the drain sees a streak's earliest row
+        first and the canonical choice is deterministic.
+
+        **Eligibility is decided in SQL, before the limit.** An earlier revision
+        filtered the notice state in Python and argued there was no filter-after-LIMIT
+        hazard because the limit applied after ordering. That was right about
+        correctness and silent about cost, which is the part that mattered: with no
+        state predicate and no SQL ``LIMIT``, the steady state — every historical
+        failure already ``sent``/``skipped``/``failed`` — made this tick scan and
+        JSON-decode the ENTIRE failed-run history every two seconds to return an empty
+        list, at a cost growing without bound over the database's lifetime.
+
+        ``json_valid`` guards the extraction inside a ``CASE``, for the same reason as
+        the health window and with a sharper consequence: ``json_extract`` raises
+        ``malformed JSON`` and fails the whole STATEMENT, so one unparseable blob would
+        stop the drain finding ANY owed notice — every failure notification in the
+        system silenced by a single bad row. A row whose metadata will not parse cannot
+        hold a readable notice anyway, so it is excluded rather than rescued.
+
+        The Python re-check below is kept as a second layer: it tolerates a notice
+        stored as something other than a dict, and it is now cheap because only
+        eligible rows reach it. It may only re-decide rows whose BLOB CHANGED between
+        the seek and the read — it may never be narrower than the predicate above.
+        Narrower means a row that is selected inside the limit and dropped outside it,
+        with no state transition to stop it being selected again: a permanent hole in
+        the batch. ``owed_notice_eligible`` is therefore normalized to the comparison
+        SQLite makes here, storage classes and all.
+        """
+
+        instant = now or _utc_now_iso()
+        owed: list[dict[str, Any]] = []
+        # Literal SQL, NOT a composed ``case(...)``: SQLAlchemy renders the ``1`` and
+        # the JSON path as BOUND PARAMETERS, and SQLite cannot match an index
+        # expression against a query expression containing binds. The composed form
+        # produced a correct result and silently kept the full scan — the index was
+        # built, ignored, and nothing said so.
+        #
+        # These strings must stay byte-identical to the migration's; the query-plan
+        # test fails if they drift, which is what keeps the duplication honest.
+        notice_state = literal_column(OWED_NOTICE_STATE_SQL)
+        notice_kind = literal_column(OWED_NOTICE_KIND_SQL)
+        next_attempt_at = literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL)
+        stmt = (
+            # Both ordinary terminal VERDICTS, not just ``failed``. A binding-change notice is
+            # stamped on the run that recovered the binding, and when the rebound
+            # retry works that run settles ``succeeded`` — filtering on ``failed``
+            # made the notice durable and permanently unreachable, which is the
+            # silent-replacement bug this widening exists to close.
+            #
+            # ``canceled`` is admitted only for that same notice kind. Stop can land
+            # AFTER the rebind and its notice commit but before terminal settlement;
+            # the rebind still happened, its durable marker prevents a later restamp,
+            # and excluding the row would strand the pending notice forever. Ordinary
+            # canceled runs still owe nothing and remain outside the drain.
+            #
+            # Free of cost and of plan risk: ``ix_agent_runs_owed_notice`` indexes
+            # ``(state, next_attempt_at, created_at, id)`` and NOT ``status``, so the
+            # seek is on the notice state either way and ``status``/``kind`` stay a
+            # post-filter over the handful of rows that actually own a pending notice.
+            select(agent_runs)
+            .where(
+                or_(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                    ),
+                    and_(
+                        agent_runs.c.status.in_(_status_query_values("canceled")),
+                        notice_kind == NOTICE_KIND_BINDING_CHANGE,
+                    ),
+                )
+            )
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(notice_state == NOTICE_PENDING)
+            # A pure range term, so the index can CONSTRAIN it instead of the engine
+            # filtering every pending entry per row. ISO-8601 in UTC sorts
+            # lexicographically, which every other timestamp comparison here relies on.
+            .where(next_attempt_at <= instant)
+            # Ordered on the index prefix, so there is no temp sort AND the LIMIT can
+            # short-circuit. Batch order is not load-bearing for correctness — the
+            # canonical notice is chosen by ``failure_streak_decision``, not by arrival
+            # order — and least-recently-deferred-first is the fairer sequence anyway.
+            .order_by(next_attempt_at, agent_runs.c.created_at, agent_runs.c.id)
+            .limit(max(1, limit))
+        )
+        with self.engine.connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                notice = _json_loads(row["metadata_json"], {})
+                notice = notice.get(OWED_FAILURE_NOTICE_KEY) if isinstance(notice, dict) else None
+                # The same predicate the delivery pass re-checks before it claims, so
+                # the listing and the claim cannot disagree about what "eligible" is.
+                # A row whose wait has not elapsed is skipped rather than delivered,
+                # which is what keeps a failing transport from firing every 2 s — and,
+                # since a claimant's lease is written to the same field, what keeps a
+                # second owner out of a delivery already in flight.
+                if not owed_notice_eligible(notice, instant):
+                    continue
+                owed.append(self._run_from_row(row))
+                if len(owed) >= max(1, limit):
+                    break
+        return owed
+
+    def stamp_binding_change_notice(
+        self,
+        run_id: str,
+        *,
+        task_id: str,
+        signature: str,
+        action: str,
+        reason: str,
+        previous_session_id: Optional[str],
+        new_session_id: Optional[str],
+        settings_preserved: bool,
+        now: Optional[str] = None,
+        _conn: Any = None,
+    ) -> Optional[dict[str, Any]]:
+        """Owe the user a notice about a session binding that was replaced.
+
+        The one notice a TERMINAL TRANSITION cannot stamp. Every other owed notice is
+        folded into the UPDATE that moves a run to ``failed``
+        (``_merge_owed_failure_notice``), which is what makes a settlement path added
+        later inherit it for free. A rebind whose retry SUCCEEDS produces no failed
+        transition at all — ``error`` is ``None`` and the row settles ``succeeded`` —
+        so the news that the user's pinned session was swapped had no writer and no
+        reader. This is that writer, and it is deliberately the only one. The normal
+        caller commits this notice and the definition's durable dedup marker in the
+        same transaction, so neither effect can survive without the other.
+
+        Everything downstream is unchanged. The blob has the same shape as a failure
+        notice plus an additive ``kind``/``binding``, so the drain's receipt, backoff
+        and dead-letter protocol carries it without a parallel path.
+
+        Identity is ``binding:{task_id}:{signature}`` — the transition's own key, not
+        the run's. A rebind that somehow re-stamps against a later run therefore
+        collides on the notification the user already has, rather than sending a
+        second one; and it can never collide with the bare run id an ordinary backend
+        failure uses for the SAME run, which is the mistake the interruption lane
+        already had to be taught (see ``_owed_failure_notice_for_transition``).
+
+        Never over an existing notice: a genuine failure notice on this row outranks
+        the binding news, and re-stamping would reset ``attempts`` and resurrect a
+        dead letter.
+
+        And never onto a run something else TERMINALIZED in the meantime. This is the
+        one owed-notice writer with no terminal transition to ride — it runs on a live
+        run, before ``complete()`` — so its read and its write are two statements, and
+        under pysqlite ``engine.begin()`` holds no lock across the first (no ``BEGIN``
+        is emitted for a bare SELECT; see ``upsert_definition_in_connection`` and
+        ``update_owed_failure_notice``). Round 7 audited this stamp and excused it as
+        "a pre-read stamp", which was right about the ORDER and wrong about the
+        CONNECTION: a second one can settle the row in that gap, and there are three
+        damage directions — two the CAS must refuse, and one it must NOT.
+
+        * The terminal writer settles ``failed`` and stamps its OWN failure notice in
+          the same UPDATE (``_merge_owed_failure_notice``), and the whole-blob write
+          this used to issue put the binding blob over the top — the user told their
+          session was swapped and never told the run failed.
+        * The row settles ``canceled`` before this CAS, so the stamp is refused: a Stop
+          that already won outranks binding news. This is distinct from Stop landing
+          AFTER the stamp committed. In that later ordering the rebind already happened
+          and its marker prevents a restamp, so ``list_owed_failure_notices`` admits
+          canceled rows carrying this specific notice kind.
+        * The row settles ``succeeded`` — the ORDINARY outcome of the rebind this
+          notice exists for — and a status CAS that refuses here loses the notice
+          PERMANENTLY rather than deferring it. A successful settlement writes no
+          notice of its own, so the slot is left empty. The store-level method also
+          remains correct when called outside the combined marker transaction: refusing
+          this direction would silently lose the news that the pinned session changed.
+
+        So the read is re-asserted in the WHERE clause — the status the SELECT saw,
+        verbatim, no cancellation request, plus ``owed_notice_absent()`` — and the
+        loss is read off ``rowcount``, the ``DefinitionWriteExpectation`` idiom
+        ``update_owed_failure_notice`` already follows. ``json_set`` rather than a
+        composed blob for the same atomicity reason one level down: the run is LIVE
+        here, so sibling metadata
+        keys are being written concurrently (the sweep's ``interrupt_reason``, the
+        settler's ``ok`` marker), and a status+notice CAS over a whole-blob write
+        would still clobber whichever of those landed in the gap. Only the one key
+        this method owns is written.
+
+        A lost CAS then re-reads the row ONCE and decides on the WINNER's status. The
+        policy is TOTAL over the terminal statuses, so no outcome falls through to an
+        accidental default:
+
+        ================ ==================================================
+        winner           outcome
+        ================ ==================================================
+        ``failed``       refuse — its own failure notice owns the slot and
+                         outranks this news
+        ``canceled``     refuse — the user's Stop won before this stamp;
+                         only a binding notice committed before a later
+                         Stop is admitted by the drain
+        ``succeeded``    STAMP — no other writer owes anything, the slot is
+                         legitimately owed, and
+                         ``list_owed_failure_notices`` selects ``succeeded``
+                         precisely to carry it
+        anything else    refuse — still live (nothing terminalized, so the
+                         loss was the notice slot or a malformed blob),
+                         slot occupied, or unreadable metadata
+        ================ ==================================================
+
+        EXACTLY ONE retry, and the reason is CONVERGENCE rather than luck. It is NOT
+        that the first no-op UPDATE holds a write lock — an UPDATE that matches zero
+        rows may never escalate to RESERVED, so nothing here can be argued from lock
+        acquisition. It is that ``succeeded`` is TERMINAL to every GUARDED writer:
+        ``settle_run_terminal`` and the rest of the terminal set are conditioned on a
+        non-terminal status, so none of them can move the row once the re-read sees
+        ``succeeded``, and the retry's status predicate cannot go stale a second time.
+        The notice slot is equally settled: another stamp on this run sees the occupied
+        slot, and no terminal transition remains to stamp a failure notice.
+        The remaining writer that can touch this row is a sibling-key ``json_set`` (the
+        sweep's ``interrupt_reason``), which changes neither the status nor the slot and
+        so cannot make the retry lose.
+
+        Not claimed: that the status is IMMUTABLE. ``update_run_status`` writes by id
+        with no status predicate, and the cancel-bookkeeping and requeue paths reach it
+        (``mark_run_canceled``, ``requeue``); on an already-terminal row that is a
+        caller bug, but it is reachable prose-wise and the argument must not pretend
+        otherwise. It is harmless HERE either way: such a write inside this window
+        moves the status off the re-read value, the retry's CAS matches zero rows, and
+        the method returns ``None``. The failure mode of a broken invariant is a lost
+        notice, never a notice mis-stamped onto a row that moved — so a second failure
+        would mean something upstream is wrong, not that a third attempt would help.
+        """
+
+        instant = now or _utc_now_iso()
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row:
+                return None
+            if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
+                return None
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                return None
+            existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
+            if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+                return None
+            notice = {
+                "state": NOTICE_PENDING,
+                "attempts": 0,
+                # Always an instant, never ``None`` — see the eligibility expressions.
+                "next_attempt_at": instant,
+                "failure_id": f"binding:{task_id}:{signature}",
+                "kind": NOTICE_KIND_BINDING_CHANGE,
+                # No interruption: the lane is decided by ``kind``, and leaving this
+                # ``None`` keeps ``is_interruption`` answering the same question it
+                # always did rather than becoming a two-meaning field.
+                "interrupt_reason": None,
+                "binding": {
+                    "task_id": task_id,
+                    "action": action,
+                    "reason": reason,
+                    "previous_session_id": previous_session_id,
+                    "new_session_id": new_session_id,
+                    "settings_preserved": bool(settings_preserved),
+                },
+                "error": None,
+                "ack_evidence": None,
+                "stamped_at": instant,
+            }
+            # ``coalesce`` so a row that has never carried metadata is stamped rather
+            # than refused: ``json_set(NULL, …)`` is NULL, which would erase the column.
+            # ``json_valid`` over the SAME expression so a MALFORMED blob is refused
+            # instead of raising ``malformed JSON`` out of the rebind path — the write-time
+            # half of the discipline ``OWED_NOTICE_STATE_SQL`` documents (HFR-084). Refused
+            # rather than repaired: the previous whole-blob write silently replaced an
+            # unreadable blob with a fresh one, discarding whatever else was in it.
+            metadata_source = func.coalesce(agent_runs.c.metadata_json, "{}")
+
+            def _stamp_against(observed_status: Any) -> int:
+                """The guarded write, conditioned on status and no explicit Stop."""
+
+                return conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    # The status the SELECT read, verbatim rather than normalized:
+                    # this is a compare-and-swap on the value that was actually seen,
+                    # and widening it through ``_status_query_values`` would let an
+                    # alias transition slip past the guard.
+                    .where(agent_runs.c.status == observed_status)
+                    # An explicit Stop outranks binding-recovery news. This closes
+                    # both shapes: queued Stop already changed the status to canceled;
+                    # running Stop changed only cancel_requested.
+                    .where(cancel_not_requested())
+                    .where(*owed_notice_absent())
+                    .where(func.json_valid(metadata_source) == 1)
+                    .values(
+                        metadata_json=func.json_set(
+                            metadata_source,
+                            f"$.{OWED_FAILURE_NOTICE_KEY}",
+                            func.json(_json_dumps(notice)),
+                        ),
+                        updated_at=instant,
+                    )
+                ).rowcount
+
+            if _stamp_against(row["status"]):
+                return notice
+
+            # The CAS lost. Re-read ONCE and decide on the winner: see the policy
+            # table above. Only a ``succeeded`` winner is retried, because it is the
+            # only terminal status that writes no notice of its own and so leaves a
+            # slot this method legitimately owes.
+            settled = (
+                conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.metadata_json)
+                    .where(agent_runs.c.id == run_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            winner = normalize_run_status(settled["status"]) if settled else None
+            if winner == "succeeded":
+                later = _json_loads(settled["metadata_json"], {})
+                occupant = later.get(OWED_FAILURE_NOTICE_KEY) if isinstance(later, dict) else None
+                slot_is_empty = isinstance(later, dict) and not (
+                    isinstance(occupant, dict) and str(occupant.get("state") or "").strip()
+                )
+                # The retry re-asserts the RE-READ status, not the original one, and
+                # keeps ``owed_notice_absent()``/``json_valid`` unchanged — so it is
+                # the same compare-and-swap over a fresher observation, never a
+                # weakened one. Terminal status plus single-stamper marker is what
+                # makes one attempt sufficient; there is no loop.
+                if slot_is_empty and _stamp_against(settled["status"]):
+                    return notice
+
+            # NOTHING was written. Reporting ``None`` rather than the composed notice
+            # matters for the same reason it does in ``update_owed_failure_notice``:
+            # the caller must not treat its own view as what the row now says.
+            logger.debug(
+                "binding notice for %s not stamped: read status %r, settled as %r, "
+                "and that outcome either owns the notice slot or reserves it",
+                run_id,
+                row["status"],
+                None if settled is None else settled["status"],
+            )
+            return None
+
+    def update_owed_failure_notice(
+        self,
+        run_id: str,
+        *,
+        expect: Optional[tuple[str, int, str]] = None,
+        **fields: Any,
+    ) -> Optional[dict[str, Any]]:
+        """Merge fields into one run's owed notice, in a single guarded write.
+
+        Guarded on the notice still EXISTING rather than on the run's status: the run
+        is already terminal by construction, and the thing that must not be clobbered
+        is a notice another pass resolved.
+
+        ``expect`` adds the second half of that: the ``(state, attempts,
+        next_attempt_at)`` the caller DECIDED FROM, as ``notice_write_expectation`` read
+        it, re-asserted here so a write cannot land behind a newer one. Existence alone is not enough for the
+        drain, which checks service ownership ONCE at the top of a pass and then
+        AWAITS delivery: a lock handoff can lapse the outgoing owner's lease while its
+        coroutine is still suspended in that send, so the incoming owner reads the same
+        pending notice, delivers it and acknowledges, and the resumed pass then writes
+        its stale ``pending`` retry or ``failed`` dead letter over the ``sent``. The
+        ``failed`` direction is the one that hurts: it is terminal, so a receipt the
+        user already has is buried for good.
+
+        The predicate goes in the UPDATE's WHERE clause, not in Python, for the reason
+        ``upsert_definition_in_connection`` spells out: the SELECT below reserves
+        nothing — pysqlite emits no ``BEGIN`` for a bare SELECT, so the write lock is
+        first taken by the UPDATE — and a comparison made in the gap between them is a
+        check-then-act that two passes can both pass. Evaluated by SQLite in the
+        writing statement, the loser matches zero rows and is detected by ``rowcount``.
+        ``attempts`` is part of the predicate so two passes that both read attempt N
+        cannot both consume it. DELIBERATELY NOT ``updated_at`` — see
+        ``DefinitionWriteExpectation``: a row-version guard refuses benign writes, and
+        a freshly stamped notice carries no such marker at all.
+
+        The loser SILENTLY no-ops (``None``, nothing written) instead of raising. It has
+        nothing to repair — the next 2 s tick re-reads whatever the winner settled — and
+        an exception would be caught by the drain's per-row handler and logged on every
+        handoff. ``expect=None`` keeps the unguarded merge for the stamp/rewind callers,
+        which write no predicate and so behave exactly as before.
+
+        ``expect`` is keyword-only AND declared before ``**fields`` on purpose:
+        ``fields`` is merged verbatim into the notice blob, so a positional or
+        trailing spelling would silently persist the expectation as notice content.
+        """
+
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row:
+                return None
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                return None
+            notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+            if not isinstance(notice, dict):
+                return None
+            merged = dict(notice)
+            merged.update(fields)
+            merged["updated_at"] = now
+            metadata[OWED_FAILURE_NOTICE_KEY] = merged
+            stmt = update(agent_runs).where(agent_runs.c.id == run_id)
+            if expect is not None:
+                stmt = stmt.where(*owed_notice_state_unchanged(expect))
+            result = conn.execute(
+                stmt.values(metadata_json=_json_dumps(metadata), updated_at=now)
+            )
+            if expect is not None and not result.rowcount:
+                # LOST, and nothing was written. Reporting ``None`` rather than the
+                # payload matters: the caller must not treat its own merged view as
+                # what the row now says.
+                logger.debug(
+                    "owed failure notice for %s moved from %s; stale write dropped",
+                    run_id,
+                    expect,
+                )
+                return None
+            return merged
+
+    def owed_failure_notice(self, run_id: str) -> Optional[dict[str, Any]]:
+        run = self.get_run(run_id)
+        notice = (run or {}).get("metadata") or {}
+        notice = notice.get(OWED_FAILURE_NOTICE_KEY) if isinstance(notice, dict) else None
+        return notice if isinstance(notice, dict) else None
+
+    def _definition_history_scope(self, definition_id: str, *columns: Any) -> Any:
+        """One definition's history, minus every row class that is not a verdict.
+
+        Same exclusions as the health window and for the same reasons — most
+        sharply, the watch supervisor heartbeat flips its predecessor to
+        ``succeeded`` on every write, and a ``succeeded`` row bearing the watch's
+        ``definition_id`` sitting between two failures CLOSES the streak, so every
+        watch failure would read as a first failure and notify. Fixing only the
+        deferral predicate would trade a permanent silence for daily spam.
+
+        Interruptions are dropped HERE, in SQL, rather than while classifying: they
+        are transparent to a streak — neither joining one nor closing one — so a row
+        the classifier would skip must never reach it, exactly as the health window
+        argues. Letting one join would absorb a D1 notice into an unrelated streak
+        and skip it as a duplicate.
+        """
+
+        return (
+            select(*columns)
+            .where(agent_runs.c.definition_id == definition_id)
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(_not_an_out_of_band_interruption())
+        )
+
+    def consecutive_definition_failures_with_code(
+        self,
+        definition_id: str,
+        failure_code: str,
+        *,
+        limit: int,
+    ) -> int:
+        """Count a bounded suffix of failed verdicts carrying ``failure_code``.
+
+        The current run is still ``running`` when binding recovery asks, so this
+        reads only prior terminal verdicts. A success or a differently-classified
+        failure closes the suffix; canceled and out-of-band interruption rows are
+        transparent through ``_definition_history_scope``.
+        """
+
+        if limit <= 0:
+            return 0
+        statement = (
+            self._definition_history_scope(
+                str(definition_id),
+                agent_runs.c.status,
+                agent_runs.c.metadata_json,
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("succeeded") + _status_query_values("failed")))
+            .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
+            .limit(limit)
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).all()
+        count = 0
+        for status, metadata_json in rows:
+            if normalize_run_status(status) != "failed":
+                break
+            metadata = _json_loads(metadata_json, {})
+            if not isinstance(metadata, dict) or metadata.get("failure_code") != failure_code:
+                break
+            count += 1
+        return count
+
+    def failure_streak_decision(self, definition_id: str, run_id: str) -> dict[str, Any]:
+        """The three facts ``core.failure_notices.decide`` needs, in ONE statement.
+
+        Not the streak. The drain never wanted a streak — it wanted to know whether
+        this run belongs to one, whether anybody in it has already told the user, and
+        which row is the one still trying. Returning the rows themselves was what made
+        the read cost the streak's LENGTH and forced the caller to redo the
+        classification in Python.
+
+        ``in_streak``
+            ``run_id`` is a verdict of this definition — not an interruption, not a
+            heartbeat, not another definition's run, not nonterminal. When it is
+            ``False`` the other two facts are ``False``/``None`` BY CONSTRUCTION
+            rather than by a Python guard: the window predicates carry an
+            anchor-membership term, so a run that belongs to no streak yields an empty
+            window instead of the definition's whole history.
+        ``has_sent_elsewhere``
+            some OTHER row of the same streak has notice state ``sent``. Evidence of
+            delivery anywhere in the streak makes this row a duplicate.
+        ``earliest_pending_id``
+            the earliest still-``pending`` row of the streak by ``(created_at, id)``:
+            the canonical notice. ``failed`` (dead-lettered) and ``skipped`` rows drop
+            out, which is how promotion works — a streak whose canonical exhausted its
+            retries still owes the user the news.
+
+        The streak is still exactly what it was: the run of verdicts strictly between
+        the two ``succeeded`` rows bracketing this one, so a success on either side
+        closes it and the next failure after a recovery notifies again.
+
+        WHY ONE STATEMENT, and this is the whole point of the shape (two reasons, both
+        load-bearing):
+
+        1. ONE SNAPSHOT. pysqlite does not open a transaction for reads, so three bare
+           ``SELECT``s saw three different databases. A success settling between the
+           "following success" seek and the range query MERGES two streaks: the later
+           streak's rows are then read as members of the earlier one, and a ``sent``
+           notice belonging to the earlier outage makes ``decide`` answer SKIP for a
+           LIVE one. That is a lost notice — the D1 direction, not the duplicate
+           direction. The previous docstring argued the reads were safe because "every
+           row they read is already SETTLED", which is true of each row individually
+           and says nothing about which rows the WINDOW contains; the boundaries are
+           what moves. One statement is one SQLite read snapshot, so the boundaries and
+           the rows inside them are read from the same database.
+        2. A BOUNDED READ. The range query materialised every row of the streak and
+           JSON-decoded each one. For a definition that has never succeeded the streak
+           IS the lifetime, and ``2 * len(streak) + 2`` decodes is O(lifetime) — the
+           bound HFR-095 claimed was a bound on the answer, which is only a bound when
+           the answer is small. Three scalars cross into Python now and NO metadata
+           blob is decoded here at all: the notice states are compared inside SQLite
+           through ``OWED_NOTICE_STATE_SQL``.
+
+        Every term is a seek on ``ix_agent_runs_definition_streak``
+        (``(definition_id, created_at, id)``, migration ``20260729_0042``): the same
+        two row-value boundary seeks as before, then the window itself constrained on
+        BOTH ends — ``(definition_id=? AND (created_at,id)>(?,?) AND
+        (created_at,id)<(?,?))``.
+        """
+
+        succeeded = _status_query_values("succeeded")
+        verdicts = succeeded + _status_query_values("failed")
+        # The sequence key, as a ROW VALUE. ``created_at`` alone is not a position:
+        # these are application-written ISO strings and several writers stamp a whole
+        # batch with one value, so a bare ``created_at <`` both loses rows tied with a
+        # boundary and can leave a SUCCESS inside the window — which silently merges
+        # two streaks into one and skips the second one's notice as a duplicate. A row
+        # value keeps the tie-break IN the comparison, and SQLite can constrain
+        # ``(created_at, id) < (?, ?)`` with an index instead of sorting.
+        position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
+
+        # The anchor's position, as a SUBQUERY rather than a value fetched first. That
+        # is the difference between one statement and two, and therefore between one
+        # snapshot and two.
+        anchor_created = (
+            self._definition_history_scope(definition_id, agent_runs.c.created_at)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.status.in_(verdicts))
+            .limit(1)
+            .scalar_subquery()
+        )
+        here = tuple_(anchor_created, literal(str(run_id)))
+
+        def _closing_success(column: Any, before: bool) -> Any:
+            """One element of the nearest bracketing success's position."""
+
+            stmt = self._definition_history_scope(definition_id, column).where(
+                agent_runs.c.status.in_(succeeded)
+            )
+            if before:
+                stmt = stmt.where(position < here).order_by(
+                    agent_runs.c.created_at.desc(), agent_runs.c.id.desc()
+                )
+            else:
+                stmt = stmt.where(position > here).order_by(
+                    agent_runs.c.created_at, agent_runs.c.id
+                )
+            return stmt.limit(1).scalar_subquery()
+
+        # AN ABSENT BOUNDARY IS A SENTINEL, NOT A DROPPED PREDICATE. The three-statement
+        # form knew at build time whether each seek had found anything and simply
+        # omitted the term when it had not; a single statement cannot, and expressing
+        # it as ``(boundary IS NULL OR position > boundary)`` would make the term a
+        # DISJUNCTION, which SQLite cannot use as an index constraint — the plan would
+        # name the index while the range stayed a per-row filter, which is the exact
+        # failure ``20260728_0040`` shipped and HFR-086 pinned.
+        #
+        # Below every position: the empty string, which sorts at or below every value
+        # of both keys. The one position it excludes is ``('', '')`` itself — a row
+        # with an empty primary key AND an empty ``created_at``, which no writer can
+        # produce (``enqueue_run`` stamps an id and an ISO instant on every row).
+        #
+        # Above every position: the definition's own LAST ``created_at`` with a
+        # character appended. This is derived rather than a magic high constant because
+        # a constant would have to out-sort every possible ``created_at`` byte string
+        # and nothing guarantees that, while ``X < X || 'x'`` holds for every ``X``
+        # under BINARY collation (``X`` is a strictly shorter prefix). It is found by
+        # the same ``LIMIT 1`` index seek as the boundaries, not by a ``max()`` over
+        # the definition.
+        above_every_position = func.coalesce(
+            select(agent_runs.c.created_at)
+            .where(agent_runs.c.definition_id == definition_id)
+            .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
+            .limit(1)
+            .scalar_subquery(),
+            "",
+        ) + literal("x")
+        opened = tuple_(
+            func.coalesce(_closing_success(agent_runs.c.created_at, True), ""),
+            func.coalesce(_closing_success(agent_runs.c.id, True), ""),
+        )
+        closed = tuple_(
+            func.coalesce(_closing_success(agent_runs.c.created_at, False), above_every_position),
+            func.coalesce(_closing_success(agent_runs.c.id, False), ""),
+        )
+
+        # The notice state, read by SQLite. ``OWED_NOTICE_STATE_SQL`` referenced rather
+        # than retyped, under the same ``coalesce``/``CAST`` shape
+        # ``owed_notice_state_unchanged`` uses and normalized to agree with the Python
+        # side value for value: a notice that is not an object, a state stored as a
+        # number, and a malformed blob all read as "not this state" on both sides.
+        notice_state = cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text)
+
+        def _window(*columns: Any) -> Any:
+            return (
+                self._definition_history_scope(definition_id, *columns)
+                .where(agent_runs.c.status.in_(verdicts))
+                # ANCHOR MEMBERSHIP, as a window term. Without it a ``run_id`` that is
+                # not a verdict of this definition leaves both boundaries NULL, both
+                # sentinels apply, and the "window" becomes the definition's ENTIRE
+                # history — unbounded, and answering about a streak the run is not in.
+                # The old form got this from an early ``return []``; a single statement
+                # has to say it in SQL. It is an uncorrelated term, so SQLite evaluates
+                # it once and skips the subquery outright when it is false.
+                .where(anchor_created.isnot(None))
+                .where(position > opened)
+                .where(position < closed)
+            )
+
+        statement = select(
+            exists(
+                self._definition_history_scope(definition_id, literal(1))
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(verdicts))
+            ).label("in_streak"),
+            # ``id != run_id``: evidence of delivery by SOMEBODY ELSE. This row's own
+            # ``sent`` state is not evidence that it is a duplicate.
+            exists(
+                _window(literal(1))
+                .where(agent_runs.c.id != run_id)
+                .where(notice_state == NOTICE_SENT)
+            ).label("has_sent_elsewhere"),
+            _window(agent_runs.c.id)
+            .where(notice_state == NOTICE_PENDING)
+            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .limit(1)
+            .scalar_subquery()
+            .label("earliest_pending_id"),
+        )
+
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        earliest = (row or {}).get("earliest_pending_id")
+        return {
+            "in_streak": bool((row or {}).get("in_streak")),
+            "has_sent_elsewhere": bool((row or {}).get("has_sent_elsewhere")),
+            "earliest_pending_id": str(earliest) if earliest is not None else None,
+        }
+
+    def earliest_unsettled_run_before(
+        self,
+        definition_id: str,
+        *,
+        created_at: str,
+        run_id: str,
+        stale_after_seconds: Optional[float] = None,
+        now: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """An earlier-created execution of this definition that has not settled.
+
+        The streak is only computable over a settled PREFIX. ``create_per_run``
+        definitions hold no execution lock, so executions genuinely overlap and
+        completion order need not follow ``created_at``: a later-created run can fail
+        first, become canonical and send, and then an earlier-created run fails and
+        becomes the new earliest — a second notice for one outage.
+
+        ``watch_runtime`` is excluded, and that exclusion is load-bearing in the
+        opposite direction from the streak's: the heartbeat is earlier-created and
+        permanently nonterminal, so every failed watch run would defer behind its own
+        supervisor forever and never deliver a notice at all.
+
+        ``stale_after_seconds`` bounds the wait. The plan's argument for an unbounded
+        wait is that "settling every nonterminal run is precisely what PR1/PR2/PR7
+        guarantee" — but PR2/PR4/PR7 are not landed, so on the current tree a queued
+        row for a paused definition can sit nonterminal indefinitely and the notice
+        would never be delivered. Past the cap the row is treated as settled, which
+        risks a duplicate notice rather than a lost one; the plan chooses that
+        direction explicitly ("a duplicated notice is a papercut, a lost one is the
+        D1 violation"). Remove the cap once those PRs land.
+
+        Both filters are SQL TERMS, not a Python ``continue``. This runs once per
+        pending owed notice on the two-second drain tick, exactly like the eligibility
+        lookup and the streak read, and it was the last read in that path deciding in
+        Python what the index could decide for it: selecting every queued/running row
+        for the definition made a definition holding a large nonterminal backlog — a
+        paused ``create_per_run`` task, a queue drained slower than it fills — pay that
+        whole backlog per notice per tick to answer a question whose answer is at most
+        one row. ``ORDER BY created_at, id LIMIT 1`` over ``ix_agent_runs_definition_streak``
+        (``(definition_id, created_at, id)``, migration ``20260729_0042``) is the same
+        answer as the first row the loop accepted.
+        """
+
+        instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
+        # The anchor position as a ROW VALUE, for the reason ``failure_streak_decision``
+        # spells out: ``created_at`` alone is not a position, because several writers stamp
+        # a whole batch with one value, and a row value keeps the tie-break IN the
+        # comparison where SQLite can constrain it with the index.
+        position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
+        here = tuple_(literal(str(created_at)), literal(str(run_id)))
+        stmt = (
+            select(agent_runs.c.id, agent_runs.c.created_at, agent_runs.c.status)
+            .where(agent_runs.c.definition_id == definition_id)
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values("queued") + _status_query_values("running")
+                )
+            )
+            .where(position < here)
+            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .limit(1)
+        )
+        if stale_after_seconds is not None:
+            # ONE DOCUMENTED DIVERGENCE from the Python filter this replaces. That one
+            # asked ``_parse_iso_instant`` and SKIPPED the staleness test when the
+            # answer was ``None``, so a row whose ``created_at`` cannot be parsed read
+            # as fresh and blocked the notice for as long as it stayed nonterminal —
+            # which, for an unparseable timestamp, is a wait nothing can bound. A
+            # lexicographic cutoff has no such escape and may class the same value as
+            # stale, treating it as settled. That is the duplicate-not-lost direction
+            # the cap itself already chose, so it is the acceptable side to land on.
+            # Pinned by ``test_an_unparseable_created_at_reads_as_stale_rather_than_as_a_blocker``.
+            #
+            # ``>=`` because the Python test skipped on ``> stale_after_seconds``: a row
+            # exactly at the cap was kept, and it still is.
+            cutoff = (instant - timedelta(seconds=stale_after_seconds)).isoformat()
+            stmt = stmt.where(agent_runs.c.created_at >= cutoff)
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            return None
+        return {"id": row["id"], "created_at": row["created_at"], "status": row["status"]}
+
+    # --- derived definition health -------------------------------------------
+    #
+    # ONE STATEMENT, and per definition a BOUNDED SEEK. Those two requirements pull
+    # in opposite directions and both are load-bearing, so the shape is not a matter
+    # of taste:
+    #
+    # * one statement, because ``_enrich_definitions`` resolves the whole page here
+    #   (see the ``definition health`` lookup: "Derived health for the whole page in
+    #   one query") and ``test_a_page_costs_a_fixed_number_of_queries`` pins a page's
+    #   statement count at a fixed budget this read holds exactly one slot in. That
+    #   budget is #1033's invariant: the per-row enrichment it replaced issued a query
+    #   per row, and a 30-row page paid it thirty times over. A statement per
+    #   definition here would put it straight back.
+    # * a bounded seek, because ``HEALTH_WINDOW_RUNS`` advertises ten verdicts and the
+    #   window-function form it replaced had to rank the definition's ENTIRE 72 h
+    #   window before ``position <= 10`` could discard anything. On a definition firing
+    #   every minute that is thousands of rows examined per list row, and the
+    #   settled-time index cannot stop early because ``row_number()`` needs them all.
+    #
+    # The one shape that does both, SQLite having no ``LATERAL``: iterate the id list
+    # as a virtual table (``json_each``) and answer each id with a CORRELATED scalar
+    # subquery that seeks ``(definition_id, settled DESC, id DESC)`` and stops at
+    # ``LIMIT HEALTH_WINDOW_RUNS``, aggregated into one JSON blob per definition. The
+    # measured plan is a bounded ``SEARCH`` with no ``SCAN agent_runs`` and no temp
+    # B-tree; the residual ``SCAN d`` walks the id list and ``SCAN recent`` walks the
+    # already-limited ten-row co-routine. There is no ranking step left, which is the
+    # literal ask: the limit is applied before anything ranks.
+    #
+    # The honest framing of the trade: the budget invariant counts STATEMENTS because
+    # statement dispatch was the per-row cost #1033 removed. N bounded seeks are the
+    # irreducible work of answering N health questions — what changed is that each is
+    # now a ten-row early exit instead of a full-window rank, paid inside one dispatch.
+    #
+    # ORDER IS RE-ESTABLISHED IN PYTHON. ``json_group_array`` makes no promise about
+    # the order it aggregates in — the inner ``ORDER BY`` is what bounds the seek, not
+    # what orders the array — so the blob is sorted by ``(settled, id)`` descending
+    # after decoding. Ten entries per definition, so it costs nothing, and relying on
+    # the aggregate's incidental order would be a badge that flips between reads with
+    # no write in between.
+    #
+    # ``agent_runs`` filtered to one definition is a history of ROWS, and health is
+    # a function of settled OUTCOMES only. Four row classes therefore have to be
+    # excluded, and every one of them by predicate rather than while classifying,
+    # because the ``LIMIT`` is applied to whatever the predicates let through —
+    # anything the classifier would ignore must never reach it:
+    #
+    # 1. the watch supervisor heartbeat (``run_type = watch_runtime``), which shares
+    #    the watch's ``definition_id``, is refreshed to the waiter's ``started_at``
+    #    on every restart, and flips its predecessor to ``succeeded`` — so it both
+    #    presents as the newest "run" and closes a failure streak;
+    # 2. nonterminal executions: a failing recurring definition's next fire is the
+    #    newest row for the definition and is not an outcome, so reading "the latest
+    #    run failed" off it reports an actively failing definition as healthy for the
+    #    whole duration of its next attempt;
+    # 3. ``canceled``: a cancellation is the absence of an outcome, so N cancelled
+    #    retries would displace the failure they are supposed to be transparent to;
+    # 4. out-of-band interruptions — but by MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``,
+    #    never by ``interrupt_reason IS NOT NULL``. Nullness would also exclude
+    #    ``no_terminal_result`` / ``refused_concurrent_turn`` / ``transport_unavailable``
+    #    / ``queue_hold_expired``, which are the ordinary per-fire failures this
+    #    whole feature exists to surface.
+
+    def last_success_settled_at(
+        self,
+        definition_id: str,
+        *,
+        conn: Any = None,
+    ) -> Optional[str]:
+        """When this definition last SUCCEEDED, or ``None`` if it never has.
+
+        D5 requires the failure notice's body to say "when it last succeeded", and no
+        read for it existed. This is that read and nothing more: ONE instant, so ONE
+        row.
+
+        The seek is the ``_health_rows`` seek with the window predicates removed —
+        ``ix_agent_runs_definition_settled`` (``(definition_id, coalesce(completed_at,
+        created_at) desc, id desc)``, migration ``20260728_0039``) supplies both the
+        equality and the order, so ``LIMIT 1`` early-exits on the index with nothing
+        sorted. Every filter is a SQL TERM rather than a Python ``continue``: this runs
+        once per notice on the two-second drain tick, and a definition with a long
+        history must not pay for it (the HFR-068 lesson).
+
+        THREE SPELLINGS SHARED BY NAME, never retyped — ``_SETTLED_AT`` (the index's own
+        second key), ``_status_query_values("succeeded")`` (the column holds legacy
+        spellings alongside canonical ones, so a literal ``'succeeded'`` would miss every
+        row written as ``completed``) and the ``settled DESC, id DESC`` tie-break (these
+        timestamps are application-written ISO strings and several writers stamp a whole
+        batch with one value, so without the secondary key "the last success" is whichever
+        row SQLite happens to return first).
+
+        ``watch_runtime`` is excluded for the same reason the health window excludes it:
+        the supervisor heartbeat is not the definition succeeding, and it flips to
+        ``succeeded`` on every restart — so without this term a permanently broken watch
+        would report a fresh "last succeeded" instant on every service restart.
+        """
+
+        statement = (
+            select(_SETTLED_AT)
+            .where(agent_runs.c.definition_id == str(definition_id))
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("succeeded")))
+            .order_by(_SETTLED_AT.desc(), agent_runs.c.id.desc())
+            .limit(1)
+        )
+        if conn is not None:
+            value = conn.execute(statement).scalar_one_or_none()
+        else:
+            with self.engine.connect() as active:
+                value = active.execute(statement).scalar_one_or_none()
+        text_value = str(value or "").strip()
+        return text_value or None
+
+    def _health_rows(
+        self,
+        definition_ids: Sequence[str],
+        *,
+        now: Optional[str] = None,
+        conn: Any = None,
+    ) -> dict[str, list[Optional[str]]]:
+        """Each definition's last N verdicts within T hours, newest first.
+
+        ``None`` in place of a verdict means the row is UNREADABLE — its
+        ``metadata_json`` will not parse — so nothing about it can be classified and
+        ``_classify_health`` degrades the whole definition to ``HEALTH_UNKNOWN``. It is
+        carried as a value rather than raised, because the window is per definition and
+        one bad row must not take the page down (HFR-072).
+        """
+
+        ids = [str(value or "").strip() for value in definition_ids]
+        ids = [value for value in dict.fromkeys(ids) if value]
+        if not ids:
+            return {}
+        instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
+        cutoff = (instant - timedelta(hours=HEALTH_WINDOW_HOURS)).isoformat()
+
+        settled_at = _SETTLED_AT
+        # Not a literal ``('succeeded', 'failed')``: the column holds legacy
+        # spellings alongside canonical ones, so a literal list would miss every row
+        # written as ``completed`` and report a healthy definition as failing.
+        verdicts = _status_query_values("succeeded") + _status_query_values("failed")
+
+        # The id list travels as ONE json parameter and is iterated as a virtual
+        # table, so the bound-parameter count is constant in the number of definitions
+        # — which is what lets the unpaged harness list stay a single statement where
+        # an ``IN`` list had to be chunked by ``_id_batches``.
+        id_list = func.json_each(_json_dumps(ids)).table_valued("value").alias("d")
+        # READABILITY, selected alongside the verdict rather than read separately — see
+        # the note on ``json_array`` below for why it belongs in this statement.
+        #
+        # A NULL or empty column is VALID: an absent blob is not an unreadable one, and
+        # ``json_valid(NULL)`` is NULL while ``json_valid('')`` is 0, both of which would
+        # otherwise mark every metadata-free run unreadable.
+        #
+        # Valid is NOT enough: ``json_valid('[]')`` and ``json_valid('"value"')`` are 1,
+        # but the metadata SCHEMA — an object with keys — cannot be read out of a
+        # top-level array, string, number, boolean, or JSON null, so those rows are
+        # exactly as unclassifiable as a malformed blob and get the same treatment.
+        # The type check sits in a CASE branch BEHIND the validity check, deliberately:
+        # ``json_type`` on malformed input raises and would fail the whole statement —
+        # the very failure mode the ``json_valid`` guards exist to prevent (HFR-072) —
+        # and SQLite evaluates CASE branches lazily, so the invalid arm never reaches it.
+        _metadata_blob = func.coalesce(func.nullif(agent_runs.c.metadata_json, ""), "{}")
+        readable = case(
+            (func.json_valid(_metadata_blob) == 1, func.json_type(_metadata_blob) == "object"),
+            else_=literal(False),
+        )
+        recent = (
+            select(
+                settled_at.label("settled"),
+                agent_runs.c.id.label("id"),
+                agent_runs.c.status.label("status"),
+                readable.label("readable"),
+            )
+            # Correlated to the id currently being iterated, which is what makes the
+            # LIMIT below per-definition rather than per-batch.
+            .where(agent_runs.c.definition_id == id_list.c.value)
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(agent_runs.c.status.in_(verdicts))
+            .where(settled_at >= cutoff)
+            # The same expression the streak read excludes interruptions with, shared
+            # by NAME rather than retyped: two copies of a JSON extract drift
+            # silently, and the copy that drifts is the one the planner stops
+            # matching. Its ``CASE json_valid`` guard is also what keeps one
+            # unparseable blob from failing the whole statement (HFR-072).
+            .where(_not_an_out_of_band_interruption())
+            # ``id DESC`` is a required tie-break, not tidiness: these timestamps are
+            # application-written ISO strings and several writers stamp a whole batch
+            # with ONE value, so without a secondary key "the newest run" is whichever
+            # row SQLite happens to return first and the badge can flip between reads
+            # with no write in between. ``list_pending_callbacks`` already orders this
+            # way one screen away — and both keys are the index's own, so the order is
+            # free and the LIMIT early-exits on it.
+            .order_by(settled_at.desc(), agent_runs.c.id.desc())
+            .limit(HEALTH_WINDOW_RUNS)
+            # Explicit: the inner seek must NOT put the id list in its own FROM, or
+            # every definition would answer with every definition's runs.
+            .correlate(id_list)
+            .subquery("recent")
+        )
+        # ``settled`` and ``id`` are carried out of SQL, not dropped, because the sort
+        # has to be redone in Python — see the block comment: ``json_group_array``
+        # promises no order.
+        #
+        # READABILITY IS THE FOURTH ELEMENT, and it travels inside the SAME statement
+        # rather than as a second read, because the page budget invariant holds this
+        # lookup to one statement and the window predicates are pinned byte-identical by
+        # the round-10/11 plan tests. ``INTERRUPT_REASON_SQL``'s ``CASE json_valid``
+        # guard keeps ONE bad blob from failing the whole statement (HFR-072) — it was
+        # never a claim that the row is classifiable, and a NULL extract passes
+        # ``reason IS NULL``, so without this element a malformed row was counted as an
+        # ordinary verdict and a definition whose history could not be read got a
+        # confident ``healthy`` or ``failing``. ``HEALTH_UNKNOWN``'s own docstring
+        # promises unknown for exactly this row.
+        blob = select(
+            func.json_group_array(
+                func.json_array(recent.c.settled, recent.c.id, recent.c.status, recent.c.readable)
+            )
+        ).scalar_subquery()
+        statement = select(id_list.c.value.label("definition_id"), blob.label("verdicts"))
+
+        verdicts_by_definition: dict[str, list[Optional[str]]] = {}
+
+        def _collect(active: Any) -> None:
+            for row in active.execute(statement):
+                entries = _json_loads(row[1], [])
+                if not isinstance(entries, list) or not entries:
+                    # A definition with no verdicts is ABSENT from the mapping rather
+                    # than mapped to an empty list, exactly as the batched form was:
+                    # ``_classify_health`` already defaults a missing id to no
+                    # verdicts, and inventing a key here would change what
+                    # ``definition_health_batch`` reports for a never-run definition.
+                    continue
+                rows = [entry for entry in entries if isinstance(entry, list) and len(entry) == 4]
+                rows.sort(key=lambda entry: (str(entry[0] or ""), str(entry[1] or "")), reverse=True)
+                verdicts_by_definition[str(row[0])] = [
+                    # Raw column values, so the legacy spellings ``_status_query_values``
+                    # deliberately matched have to be normalized here — the batched form
+                    # did the same one line down. An unreadable row carries ``None``
+                    # instead of a verdict it has no standing to report.
+                    normalize_run_status(entry[2]) if entry[3] else None
+                    for entry in rows
+                ]
+
+        if conn is not None:
+            _collect(conn)
+        else:
+            with self.engine.connect() as owned:
+                _collect(owned)
+        return verdicts_by_definition
+
+    @staticmethod
+    def _classify_health(verdicts: list[Optional[str]]) -> dict[str, Any]:
+        """Health from one definition's verdicts, newest first.
+
+        ``failing`` when the latest verdict failed, ``degraded`` when the latest
+        succeeded but a failure is still inside the window, ``healthy`` otherwise.
+        Deliberately weaker than acknowledgment: it answers "has this been unhealthy
+        recently", not "has a human seen it". A single success downgrades ``failing``
+        to ``degraded`` rather than erasing it, which is the P6 bug, and the window
+        ages out on its own so nothing has to be dismissed.
+
+        A ``None`` verdict is an UNREADABLE row (``_health_rows``), and ONE of them
+        anywhere in the window degrades the whole definition to ``HEALTH_UNKNOWN``
+        rather than being skipped. Skipping is not the conservative choice it looks
+        like: both answers this function can give are claims over the WHOLE window —
+        ``failing`` reads the newest verdict and ``healthy`` asserts the absence of a
+        failure across all of them — so a window with a hole in it cannot support
+        either. The counters go out as ``(0, 0)``, the same shape
+        ``definition_health_batch`` reports when the read itself fails, so a caller
+        rendering "N consecutive failures" beside an unknown badge cannot print a
+        number that was never computed.
+        """
+
+        if any(status is None for status in verdicts):
+            return {
+                "health": HEALTH_UNKNOWN,
+                "consecutive_failures": 0,
+                "recent_failures": 0,
+            }
+
+        consecutive = 0
+        for status in verdicts:
+            if status != "failed":
+                break
+            consecutive += 1
+        recent = sum(1 for status in verdicts if status == "failed")
+        if consecutive:
+            health = HEALTH_FAILING
+        elif recent:
+            health = HEALTH_DEGRADED
+        else:
+            health = HEALTH_HEALTHY
+        return {
+            "health": health,
+            "consecutive_failures": consecutive,
+            "recent_failures": recent,
+        }
+
+    def definition_health_batch(
+        self,
+        definition_ids: Sequence[str],
+        *,
+        now: Optional[str] = None,
+        conn: Any = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Derived health for many definitions in one indexed query.
+
+        A read failure degrades to ``unknown`` for every definition rather than
+        propagating: the health badge must not be the only thing standing between a
+        bad row and an empty Harness list, and ``last_error`` renders independently
+        of it.
+        """
+
+        ids = [str(value or "").strip() for value in definition_ids]
+        ids = [value for value in dict.fromkeys(ids) if value]
+        if not ids:
+            return {}
+        try:
+            verdicts_by_definition = self._health_rows(ids, now=now, conn=conn)
+        except Exception:
+            logger.warning("definition health lookup failed; reporting unknown", exc_info=True)
+            return {
+                definition_id: {
+                    "health": HEALTH_UNKNOWN,
+                    "consecutive_failures": 0,
+                    "recent_failures": 0,
+                }
+                for definition_id in ids
+            }
+        return {
+            definition_id: self._classify_health(verdicts_by_definition.get(definition_id, []))
+            for definition_id in ids
+        }
+
+    def definition_health(
+        self,
+        definition_id: str,
+        *,
+        now: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Derived health for one definition."""
+
+        batch = self.definition_health_batch([definition_id], now=now)
+        return batch.get(
+            str(definition_id or "").strip(),
+            {"health": HEALTH_HEALTHY, "consecutive_failures": 0, "recent_failures": 0},
+        )
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}
@@ -3443,6 +5649,18 @@ class SQLiteBackgroundTaskStore:
                 "watch runtimes",
                 lambda: self._watch_runtimes(conn, [row.get("id") for row in rows]),
             )
+        # Derived health for the whole page in one query. It goes here rather than in
+        # a per-surface payload builder because this is the only chokepoint the CLI,
+        # the list endpoint and the detail pane all pass through — and the Harness
+        # detail pane has no fetch of its own, it re-renders the row the list
+        # returned, so a field that is not on the row cannot reach it.
+        health = _lookup(
+            "definition health",
+            lambda: self.definition_health_batch(
+                [row.get("id") for row in rows if row.get("id")],
+                conn=conn,
+            ),
+        )
         if any(row.get("lifecycle_state") == "running" for row in rows):
             started = _lookup(
                 "in-flight run starts",
@@ -3465,6 +5683,14 @@ class SQLiteBackgroundTaskStore:
                     else [key_summaries.get(row.get(field) or "") for field in _DEFINITION_SESSION_KEY_FIELDS],
                 )
             )
+            row_health = health.get(row.get("id") or "") or {
+                "health": HEALTH_UNKNOWN,
+                "consecutive_failures": 0,
+                "recent_failures": 0,
+            }
+            row["health"] = row_health["health"]
+            row["consecutive_failures"] = row_health["consecutive_failures"]
+            row["recent_failures"] = row_health["recent_failures"]
             state = row.get("lifecycle_state")
             row["lifecycle_detail"] = definition_lifecycle_detail(
                 lifecycle_state=state,

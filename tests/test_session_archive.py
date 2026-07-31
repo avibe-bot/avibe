@@ -478,6 +478,64 @@ def test_archived_session_excluded_from_inbox(monkeypatch, tmp_path: Path) -> No
         assert sid not in messages_service.unread_counts_by_session(conn, platform="avibe")
 
 
+def test_the_reserved_workspace_notice_session_cannot_be_archived(tmp_path: Path) -> None:
+    """Archive is terminal, so it must not be reachable for the notice fallback row.
+
+    D5 rung (5) resolves to a reserved workspace-notifications session
+    (``storage.agent_session_rows.resolve_workspace_notice_session``). That row is
+    ``foreground`` on purpose — ``background`` is filtered out of
+    ``list_inbox_sessions``, which would hide the very notice the rung exists to show
+    — so it appears in ordinary session lists and is ONE CLICK from this function.
+
+    Archiving it is the worst reachable outcome in the whole ladder, and it is silent:
+    ``persist_agent_message``'s ``_session_row`` has no status filter, so a later
+    notice still WRITES its row and still earns its persisted receipt, so the rung
+    ACKS and the notice is marked ``sent`` — while ``list_inbox_sessions`` excludes
+    archived sessions, so there is no card, no ``inbox.session.updated`` and no push.
+    Every subsequent caller-less failure would be recorded as delivered into a surface
+    nothing displays, permanently. That is D1 broken again by D1's own fix.
+
+    Two independent defences, and this is the first: refuse at the door. The second is
+    ``resolve_workspace_notice_session``'s heal, pinned by
+    ``test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_notice``,
+    which covers a row archived out of band or before this guard existed.
+    """
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+
+    db_path = tmp_path / "vibe.sqlite"
+    engine = create_sqlite_engine(db_path)
+    SQLiteSessionsService(db_path).close()  # create_all
+    with engine.begin() as conn:
+        reserved = resolve_workspace_notice_session(conn, title="Workspace notifications")
+    assert reserved == WORKSPACE_NOTICE_SESSION_ID
+
+    with engine.begin() as conn:
+        with pytest.raises(PermissionError) as exc:
+            wss.archive_session(conn, reserved)
+    # A machine code, because the localized copy lives in ``vibe/i18n`` at the HTTP
+    # boundary where the language is known — storage carries no user-facing text.
+    assert getattr(exc.value, "code", None) == "reserved_session"
+
+    with engine.connect() as conn:
+        assert wss.is_session_archived(conn, reserved) is False, (
+            "the refusal has to leave the row usable, not half-torn-down"
+        )
+    # And an ordinary session is unaffected: the guard is keyed on the reserved
+    # identity, not on "looks like a notification session".
+    service = SQLiteSessionsService(db_path)
+    try:
+        ordinary = _bind_session(service, channel="C9", anchor="slack_C9", native="nat1")
+    finally:
+        service.close()
+    with engine.begin() as conn:
+        wss.archive_session(conn, ordinary)
+    with engine.connect() as conn:
+        assert wss.is_session_archived(conn, ordinary) is True
+
+
 def test_is_session_archived_flag(tmp_path: Path) -> None:
     """The shared write-guard accessor flips with the session's status."""
     db_path = tmp_path / "vibe.sqlite"

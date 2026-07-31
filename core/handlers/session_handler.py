@@ -228,7 +228,7 @@ class SessionHandler(BaseHandler):
             )
             return None
 
-        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        caller_env = self._caller_env_for_context(context)
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude SDK client for %s because caller context env changed",
@@ -296,7 +296,7 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
         )
-        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        caller_env = self._caller_env_for_context(context)
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
@@ -423,6 +423,37 @@ class SessionHandler(BaseHandler):
             context.platform
             or (context.platform_specific or {}).get("platform")
             or getattr(self.config, "platform", "slack")
+        )
+
+    def _caller_env_for_context(self, context: MessageContext) -> dict[str, str]:
+        """Caller identity AND creation origin for the Agent subprocess env.
+
+        The typed context is passed alongside the platform payload because an
+        IM-created Harness definition is created by an Agent run executing
+        ``vibe task add`` — this env is the only channel between the conversation that
+        asked for it and the ``created_by.caller`` row that records where it came from.
+        Dropping the ids here is what left the failure ladder's owner-DM rung dormant
+        and the notice unable to name its origin.
+
+        The platform is resolved through ``_get_context_platform`` rather than off the
+        context alone, so the captured origin agrees with the platform every other
+        session-scoped decision in this handler is made with (the Slack adapter sets
+        neither ``context.platform`` nor a payload ``platform``).
+
+        SESSION-STABLE ONLY, and that is not a shortcut. This env is baked into a Claude
+        SDK client at spawn and is also the value compared to decide whether a cached
+        client may be reused, so a field that changes per turn would respawn the Agent on
+        every message, and a field that changes per author would attribute one
+        participant's definition to another. ``CallerContext.session_stable`` documents
+        both, and what a Claude-created definition therefore keeps: the conversation, not
+        the author or the individual message.
+        """
+
+        return caller_env_for_platform_payload(
+            getattr(context, "platform_specific", None),
+            message=context,
+            fallback_platform=self._get_context_platform(context),
+            session_stable_only=True,
         )
 
     def should_allocate_scheduled_anchor(self, context: MessageContext, source: str = "human") -> bool:
@@ -1057,7 +1088,7 @@ class SessionHandler(BaseHandler):
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
         if model_hub_launch is not None:
             claude_env = build_claude_hub_env(claude_env, model_hub_launch)
-        claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
+        claude_env.update(self._caller_env_for_context(context))
         prepend_vendored_git_to_path(
             claude_env,
             base_env=os.environ,
@@ -1124,7 +1155,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
-        setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
+        setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
             client,

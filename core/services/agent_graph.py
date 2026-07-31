@@ -674,6 +674,18 @@ def _filter_nodes(
         else:
             target = f"avibe::project::{project}"
             result = [n for n in result if n["scope_id"] == target]
+    # A ``system`` session is the RUNTIME's own row (today: the workspace-notifications
+    # sink that harness failure notices fall back to — see
+    # ``storage.agent_session_rows.resolve_workspace_notice_session``). It is not agent
+    # work, has no backend and runs no turns, so it is not a node under EITHER toggle;
+    # ``include_background`` is a user preference about the user's own hidden sessions and
+    # does not mean "show me the runtime's". Excluded EXPLICITLY rather than left to the
+    # ``!= 'background'`` test below, which admits by default: today the row owns no runs
+    # so it never even becomes a candidate, but a single run pointing at it (a repaired
+    # ``session_id``, an imported row, a future self-heal run) would otherwise make it a
+    # History-view node counted as ``foreground``. Pinned by
+    # ``tests/test_workspace_system_session.py``.
+    result = [n for n in result if n.get("visibility") != "system"]
     if not include_background:
         result = [n for n in result if n.get("visibility") != "background"]
     return result
@@ -719,6 +731,9 @@ def _prefilter_candidate_rows(
         return r.get("status") == "archived" or archived_project
 
     result = [r for r in rows if not _hidden(r)]
+    # Mirror _filter_nodes' unconditional ``system`` exclusion here too, so a runtime row
+    # cannot consume the run-load cap on its way to being dropped.
+    result = [r for r in result if (r.get("visibility") or "foreground") != "system"]
     if not include_background:
         result = [r for r in result if (r.get("visibility") or "foreground") != "background"]
     if project and project != "all":

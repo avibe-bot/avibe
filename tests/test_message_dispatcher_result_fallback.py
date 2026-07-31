@@ -611,6 +611,110 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
+    async def test_workbench_run_settles_only_after_result_persistence(self):
+        """A callback child stays pending until its Workbench receipt exists."""
+
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "ses-1",
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "callback-run",
+            },
+        )
+
+        def _persist(*_args, **_kwargs):
+            dispatcher._record_agent_run_terminal_result.assert_not_called()
+            return {"id": "persisted-result"}
+
+        with mock.patch("core.message_dispatcher.persist_agent_message", side_effect=_persist):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "callback complete",
+                output=MessageOutput(
+                    completes_turn=True,
+                    completes_run=True,
+                    run_id="callback-run",
+                ),
+            )
+
+        dispatcher._record_agent_run_terminal_result.assert_called_once()
+
+    async def test_workbench_persistence_failure_does_not_settle_the_run(self):
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "ses-1",
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "callback-run",
+            },
+        )
+
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            side_effect=RuntimeError("write failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "write failed"):
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "callback complete",
+                    output=MessageOutput(
+                        completes_turn=True,
+                        completes_run=True,
+                        run_id="callback-run",
+                    ),
+                )
+
+        dispatcher._record_agent_run_terminal_result.assert_not_called()
+
+    async def test_workbench_duplicate_persistence_receipt_can_settle_the_run(self):
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "ses-1",
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "callback-run",
+            },
+        )
+
+        with (
+            mock.patch("core.message_dispatcher.persist_agent_message", return_value=None),
+            mock.patch(
+                "core.message_dispatcher.agent_message_exists",
+                side_effect=[False, True],
+            ),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "callback complete",
+                output=MessageOutput(
+                    completes_turn=True,
+                    completes_run=True,
+                    run_id="callback-run",
+                    idempotency_key="stable-output",
+                ),
+            )
+
+        dispatcher._record_agent_run_terminal_result.assert_called_once()
+
     async def test_suppressed_delivery_is_persisted_without_platform_send(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)

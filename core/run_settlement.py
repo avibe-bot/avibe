@@ -89,6 +89,96 @@ INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
 
+#: Reserved for ``docs/plans/harness-run-reliability.md`` (PR2 / PR4 / PR7). Named
+#: here now because the classification below has to be closed over them before
+#: they are written, or each PR would have to remember to widen it.
+INTERRUPT_REASON_EVICTED: Final = "evicted"
+INTERRUPT_REASON_RESTARTED: Final = "restarted"
+INTERRUPT_REASON_LIFETIME_TIMEOUT: Final = "lifetime_timeout"
+
+#: The run could not be dispatched at all because the session it delivers to no
+#: longer exists (``UnresolvableSessionTarget`` with ``reason == "missing"``).
+#:
+#: #1060's field evidence is the whole argument for naming this one. A watch pinned
+#: to a session that later ceased to exist failed three deliveries and stopped, and
+#: the only cause recorded anywhere was ``last_exit_code = 75`` — the user's own
+#: configured ``--retry-exit-code``, i.e. the waiter's HEALTHY "nothing new yet"
+#: signal. The reporter's second ask was literally "a cause field distinct from the
+#: last exit code": ``delivery_target_missing`` is not ``exited 75``, and anyone
+#: debugging from the exit code alone starts by investigating a working waiter.
+INTERRUPT_REASON_DELIVERY_TARGET_MISSING: Final = "delivery_target_missing"
+
+
+#: Per-fire failure classes recorded by the DISPATCH path itself.
+#:
+#: A third source vocabulary rather than an entry in ``SETTLEMENT_I18N_KEYS`` or
+#: ``SWEEP_I18N_KEYS``, because it has a third origin and the honest derivation
+#: downstream depends on saying so. Those two describe a run that WAS dispatched:
+#: a settlement is how a live turn's waiter was released, and a sweep reason is what
+#: a run's vanished owner left behind. This one is recorded BEFORE any turn exists —
+#: the executor could not resolve the target, so nothing was ever dispatched to
+#: release or to orphan.
+#:
+#: A frozenset and not a map, deliberately. ``SETTLEMENT_I18N_KEYS`` /
+#: ``SWEEP_I18N_KEYS`` exist because their reasons ARE the run's user-visible
+#: ``error`` column and therefore need a translated long description. A dispatch
+#: failure already has a better one: the exception's own text names the missing
+#: session id ("agent session id not found: sesd46nxp3cz5"), which is strictly more
+#: informative than any generic sentence this module could supply. Adding a
+#: ``harness.run.interrupted.*`` twin would be copy that never renders.
+#:
+#: What these values DO need is the short parenthetical LABEL for the notice body,
+#: which lives with the other labels in
+#: ``core.failure_notices.NOTICE_FAILURE_CLASS_I18N_KEYS``.
+DISPATCH_FAILURE_REASONS: Final = frozenset({INTERRUPT_REASON_DELIVERY_TARGET_MISSING})
+
+
+#: ``interrupt_reason`` values that terminate ONE run out of band and say nothing
+#: about whether its definition works.
+#:
+#: This set exists because ``interrupt_reason`` is NOT a synonym for "interrupted".
+#: It is the general marker for "terminalized by something other than its own
+#: backend result", and most of the values it carries are ordinary per-fire
+#: verdicts: a turn that ended without dispatching an agent
+#: (``no_terminal_result``), a refused concurrent turn, a run whose transport was
+#: never available, a queue hold that expired, a delivery target that no longer
+#: exists. Those recur on every fire, are exactly the failures P6 exists to surface,
+#: and must count toward a definition's health and share one suppression streak.
+#:
+#: ``delivery_target_missing`` is the sharpest case of that rule and is deliberately
+#: ABSENT below. A definition pinned to a deleted session fails on EVERY fire, so
+#: admitting it here would give it an unsuppressed notice per fire, mint an
+#: ``interrupt:{run}:{reason}`` identity the live path never uses, and take it out of
+#: the health window — reporting a permanently broken watch as healthy while
+#: notifying about it forever. It is a per-fire verdict about the definition, which
+#: is exactly what this set excludes.
+#:
+#: The values below are the opposite shape. Each terminates a specific run from
+#: outside — a deploy, an eviction, a lifetime cap, a supervisor whose process
+#: vanished, a user pressing Stop — at most once per run, and re-firing the
+#: definition is expected to work. So they:
+#:
+#: * stay OUT of the derived health window (they are not evidence about the
+#:   definition), and
+#: * stay OUT of the consecutive-failure streak, notifying per run instead
+#:   (bounded by the number of runs, so there is nothing to suppress).
+#:
+#: The discriminator has to be membership here rather than ``interrupt_reason IS
+#: NOT NULL``: nullness excludes the common failure population, which reports a
+#: permanently broken definition as healthy AND gives every one of its failures an
+#: unsuppressed notice — P6 and the daily spam it forbids, at the same time.
+RUN_INTERRUPTION_REASONS: Final = frozenset(
+    {
+        SETTLED_BY_STOPPED,
+        SETTLED_BY_BACKEND_REFRESH,
+        INTERRUPT_REASON_EVICTED,
+        INTERRUPT_REASON_RESTARTED,
+        INTERRUPT_REASON_LIFETIME_TIMEOUT,
+        # The sweep's "owner vanished" class: a process restart by another name.
+        "orphaned",
+    }
+)
+
 
 # ----- user-visible reason text -------------------------------------------
 #

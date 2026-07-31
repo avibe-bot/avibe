@@ -6,6 +6,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
+import { selectApiErrorFields } from '../../context/ApiContext';
 import type { VaultRequest, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ToastProvider } from '../../context/ToastContext';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
@@ -18,8 +20,10 @@ import {
   isSessionReadOnly,
   isShowPageActive,
   markSessionArchived,
+  sessionReadOnlyReason,
   showPageControlActions,
   transcriptSelectionActions,
+  WORKSPACE_NOTICE_SESSION_ID,
 } from './sessionArchived';
 import { SecretRequestCard } from '../ui/secret-request-card';
 
@@ -275,7 +279,7 @@ describe('read-only header withdraws the Show Page controls', () => {
           disable: () => undefined,
           setMode: () => undefined,
         }}
-        readOnly
+        readOnlyReason="archived"
       />,
     );
     // The header did render (so the absences below are not a blank component).
@@ -411,7 +415,7 @@ describe('archived conflicts converge whatever the verb', () => {
           disable: () => undefined,
           setMode: () => undefined,
         }}
-        readOnly
+        readOnlyReason="archived"
       />,
     );
     expect(markup).toContain('Model Hub');
@@ -425,6 +429,177 @@ describe('archived conflicts converge whatever the verb', () => {
     expect(en.chat.archived.editBlocked).toBeTruthy();
     expect(en.chat.archived.sendBlocked).toBeTruthy();
     expect(en.chat.archived.editBlocked).not.toBe(en.chat.archived.sendBlocked);
+  });
+});
+
+// ── Codex review round 15 (storage/messages_service.py:1207) ──────────────────
+// The reserved workspace-notifications session is ``visibility === 'system'``, which
+// admits it to the Inbox on purpose — so its card is a clickable chat. Archive was the
+// only read-only reason the chat surface knew, so that card opened a fully writable
+// composer into a row the runtime owns ("no backend and no turns"): typing into it
+// dispatched a real agent turn and mixed conversation into the failure-notice
+// transcript. The server now answers ``403 reserved_session`` there; this pins the
+// client half — the affordances go, and the copy does NOT claim the row is archived.
+describe('a runtime-owned system session is read-only for its own reason', () => {
+  const systemSession = () => session({ visibility: 'system', agent_name: null, agent_backend: '' });
+
+  it('reads read-only from the visibility projection, not from the status', () => {
+    expect(sessionReadOnlyReason(session())).toBeNull();
+    expect(isSessionReadOnly(session())).toBe(false);
+
+    const owned = systemSession();
+    expect(owned.status).toBe('active'); // NOT archived — the point of the reason
+    expect(sessionReadOnlyReason(owned)).toBe('system');
+    expect(isSessionReadOnly(owned)).toBe(true);
+
+    // The two assignable visibilities stay ordinary chats. ``background`` is hidden
+    // from lists but is still the USER's session and still accepts turns.
+    expect(sessionReadOnlyReason(session({ visibility: 'background' }))).toBeNull();
+    expect(sessionReadOnlyReason(session({ visibility: 'foreground' }))).toBeNull();
+    // A payload from an older client that predates the field is not read-only.
+    expect(sessionReadOnlyReason(session({ visibility: undefined }))).toBeNull();
+    expect(sessionReadOnlyReason(null)).toBeNull();
+    // Terminal lifecycle outranks ownership when a system row is somehow archived.
+    expect(sessionReadOnlyReason(session({ visibility: 'system', status: 'archived' }))).toBe('archived');
+  });
+
+  it('recognizes the reserved session by IDENTITY when its visibility has drifted', () => {
+    // The server's ``session_is_runtime_owned`` is two tests OR'd: the visibility
+    // projection AND the reserved identity, because the reserved row heals its
+    // visibility only lazily — on the next notice. Between an out-of-band update
+    // and that heal, the Inbox (which admits foreground) still reaches the row as
+    // ``foreground``; a visibility-only client predicate would render the
+    // composer, route picker and fork controls just to collect
+    // ``403 reserved_session`` on every one. Identity must lock it alone.
+    const drifted = session({
+      id: WORKSPACE_NOTICE_SESSION_ID,
+      visibility: 'foreground',
+      agent_name: null,
+      agent_backend: '',
+    });
+    expect(drifted.status).toBe('active');
+    expect(sessionReadOnlyReason(drifted)).toBe('system');
+    expect(isSessionReadOnly(drifted)).toBe(true);
+    // And the identity constant mirrors the server's, character for character —
+    // a drifted copy of THIS string is the whole point of the check.
+    expect(WORKSPACE_NOTICE_SESSION_ID).toBe('ses-workspace-notices');
+    // An ordinary foreground session with an ordinary id stays writable.
+    expect(sessionReadOnlyReason(session({ id: 'sesordinary01', visibility: 'foreground' }))).toBeNull();
+  });
+
+  it('withdraws every session write the same way archive does', () => {
+    // One reason feeds all of them, so the transcript/Show Page/header affordances
+    // cannot diverge per reason — this is what makes the new reason safe by
+    // construction rather than by auditing each site.
+    const readOnly = isSessionReadOnly(systemSession());
+    expect(readOnly).toBe(true);
+    expect(transcriptSelectionActions(systemSession(), readOnly)).toEqual({
+      quote: false,
+      askInNew: false,
+    });
+    expect(showPageControlActions(readOnly, true)).toEqual({
+      visualize: false,
+      share: false,
+      annotate: false,
+    });
+    expect(isShowPageActive(readOnly, true)).toBe(false);
+  });
+
+  it('renders a System badge and no invented agent route', () => {
+    const markup = render(
+      <ChatHeaderBar
+        session={systemSession()}
+        agents={[]}
+        defaultAgentName="claude"
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnlyReason="system"
+      />,
+    );
+    expect(markup).toContain('Model Hub'); // the header did render
+    expect(markup).toContain(en.common.systemSession);
+    // It is not archived, so it must not say so...
+    expect(markup).not.toContain(en.common.archived);
+    // ...and it has no backend, so the default agent's name must not be borrowed as
+    // this session's route (the archived header's fallback would have printed it).
+    expect(markup).not.toContain('claude');
+    expect(markup).not.toContain(en.newSession.defaultAgent);
+    // Same withdrawn cluster as the archived header: Back only.
+    expect(countButtons(markup)).toBe(1);
+    expect(markup).not.toContain('Visualize');
+    expect(markup).not.toContain('Share');
+  });
+
+  it('tells the composer what this session receives instead of calling it archived', () => {
+    const markup = render(
+      <Composer
+        onSend={() => undefined}
+        onStop={() => undefined}
+        disabled
+        placeholder={en.chat.compose.placeholderSystem}
+      />,
+    );
+    expect(markup).toContain(en.chat.compose.placeholderSystem);
+    expect(markup).not.toContain(en.chat.compose.placeholderArchived);
+    // Inert, exactly like the archived composer.
+    expect(countDisabledButtons(markup)).toBe(countButtons(markup));
+  });
+
+  it('reports the coded 403 as a sentence, not as "[object Object]"', () => {
+    // The composer is inert, so this body is only reachable from a client whose loaded
+    // payload predates ``visibility`` (the field is optional for exactly that reason) —
+    // which is precisely the case that must not render an object cast to a string. The
+    // send path uses a RAW apiFetch, so ``handleApiError`` never runs and the branch has
+    // to apply the shared selector itself.
+    const coded = {
+      ok: false,
+      code: 'reserved_session',
+      message: 'This session only receives Avibe’s workspace failure notifications.',
+      error: {
+        code: 'reserved_session',
+        message: 'This session only receives Avibe’s workspace failure notifications.',
+      },
+    };
+    const parsed = selectApiErrorFields(coded, 'HTTP 403');
+    expect(parsed?.code).toBe('reserved_session');
+    expect(parsed?.fallback).toBe(coded.message);
+    expect(String(parsed?.fallback)).not.toBe('[object Object]');
+    // The pre-fix expression, kept as the refutation.
+    expect(String(coded.error)).toBe('[object Object]');
+    // A flat legacy body still resolves to its sentence, so the branch is unchanged
+    // for every route that has not adopted the coded shape.
+    expect(selectApiErrorFields({ error: 'text or content is required' }, 'HTTP 400')?.fallback).toBe(
+      'text or content is required',
+    );
+  });
+
+  it('has its own copy in both bundles, distinct from the archived wording', () => {
+    // A read-only reason with borrowed copy is the defect this reason exists to avoid:
+    // "This session is archived" is false on a row that was never archived.
+    for (const bundle of [en, zh]) {
+      expect(bundle.chat.compose.placeholderSystem).toBeTruthy();
+      expect(bundle.chat.compose.placeholderSystem).not.toBe(bundle.chat.compose.placeholderArchived);
+      expect(bundle.common.systemSession).toBeTruthy();
+      expect(bundle.common.systemSession).not.toBe(bundle.common.archived);
+      // The machine code the server's 403 carries, for a client that surfaces it
+      // through the shared ``errors.<code>`` resolution.
+      expect(bundle.errors.reserved_session).toBeTruthy();
+    }
+    // en/zh parity: the Chinese bundle must not be the English string.
+    expect(zh.chat.compose.placeholderSystem).not.toBe(en.chat.compose.placeholderSystem);
+    expect(zh.common.systemSession).not.toBe(en.common.systemSession);
   });
 });
 

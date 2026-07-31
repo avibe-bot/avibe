@@ -46,11 +46,31 @@ def _catalog_types() -> tuple[str, ...]:
     return tuple(_catalog_document()["types"])
 
 
-def _sequence_params(statement: Any) -> set[tuple[str, ...]]:
+def _message_type_sequences(statement: Any) -> set[tuple[str, ...]]:
+    """Every message-TYPE set a query binds, i.e. each expanding IN/NOT IN over
+    ``messages.c.type``.
+
+    Scoped to that column by bound-parameter NAME: SQLAlchemy names an expanding
+    parameter after the column it compares, so ``messages.c.type.in_(...)`` binds
+    ``type_1``, ``type_2``, … and no other column in these queries compiles to that
+    prefix. The scoping is the point — this module's contract is the message-type
+    catalog, and these queries also bind sequences over OTHER columns whose contents
+    are somebody else's decision:
+
+    ``list_inbox_sessions`` / ``unread_counts`` / ``unread_counts_by_session`` now also
+    bind ``agent_sessions.c.visibility`` (``INBOX_SESSION_VISIBILITIES`` ==
+    ``('foreground', 'system')``) since the reserved workspace-notifications row became
+    a ``system`` surface — a session-projection decision pinned by
+    ``tests/test_workspace_system_session.py``. Collecting every sequence indiscriminately
+    made that legitimate change fail three catalog assertions, which says the filter
+    belongs here rather than in the expectations: adding the visibility tuple to each
+    expected set would have this module re-pin a contract it does not own (and go red
+    again on the next non-type IN-list).
+    """
     return {
         tuple(value)
-        for value in statement.compile().params.values()
-        if isinstance(value, (list, tuple))
+        for name, value in statement.compile().params.items()
+        if isinstance(value, (list, tuple)) and (name == "type" or name.startswith("type_"))
     }
 
 
@@ -78,7 +98,7 @@ def test_searchable_types_match_current_default_query() -> None:
 
     expected = ("user", "harness", "annotation", "result")
     assert types_with("searchable") == expected
-    assert _sequence_params(connection.statements[-1]) == {expected}
+    assert _message_type_sequences(connection.statements[-1]) == {expected}
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
@@ -90,7 +110,7 @@ def test_inbox_activity_types_match_current_constant() -> None:
 def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     connection = _CaptureConnection()
     messages_service.list_inbox_sessions(connection)
-    current_query_sets = _sequence_params(connection.statements[-1])
+    current_query_sets = _message_type_sequences(connection.statements[-1])
 
     expected_preview = ("result", "notify", "error")
     expected_settlement = ("result", "notify", "error", "silent")
@@ -116,7 +136,7 @@ def test_unread_types_match_current_queries(query: Any) -> None:
 
     expected = ("result",)
     assert types_with("unread") == expected
-    assert _sequence_params(connection.statements[-1]) == {expected}
+    assert _message_type_sequences(connection.statements[-1]) == {expected}
 
 
 def test_input_turn_pairs_match_current_constant() -> None:

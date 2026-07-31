@@ -805,6 +805,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     request.context.platform_specific or {},
                     base_env=os.environ,
                     working_dir=request.working_path,
+                    # The creation origin travels with the identity: an OpenCode shell
+                    # command running ``vibe task add`` sources this binding, and it is
+                    # the only place the conversation behind the definition is visible.
+                    message=request.context,
+                    fallback_platform=platform,
                 )
             except Exception:
                 logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)

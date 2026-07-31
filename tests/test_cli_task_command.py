@@ -3308,3 +3308,328 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         f"enabled={None if live is None else live.enabled!r} while the row says "
         f"name={stored.name!r} enabled={stored.enabled!r}"
     )
+
+
+# --- the reserved workspace-notifications Session is not an admission target --
+#
+# Round-16 review thread 3678900318, confirmed blocking as comment 5124692513. The
+# reserved row (``ses-workspace-notices``) exists to HOLD failure notices and accepts no
+# turn: no backend, no dispatch. A round-15 guard closed the Web composer
+# (``POST /api/sessions/<id>/messages``); every CLI door reaches the runtime through
+# ``resolve_session_id_target`` instead, and that resolver refused only ARCHIVED rows
+# while this one is deliberately kept ACTIVE.
+#
+# The maintainer's evidence contract is ZERO SIDE EFFECTS at each door, not merely a
+# non-zero exit: no definition row, no queued Run, no ``messages`` row, nothing
+# dispatched. Each test below therefore asserts the absences explicitly rather than
+# trusting the return code, and each carries a POSITIVE CONTROL in the same test so a
+# guard that simply refused everything could not pass it.
+#
+# Subordinate coverage under HFR-094; no new scenario id.
+
+
+def _capture_stderr_text(func, *args) -> tuple[int, str]:
+    """Like ``_capture_stderr_json``, but WITHOUT parsing.
+
+    The refusal tests below have to assert the EXIT CODE before they touch the payload.
+    Against ``d00bc038`` the command succeeds, writes its success payload to stdout and
+    leaves stderr empty — so a helper that parses first turns the real regression signal
+    ("this was admitted") into a ``JSONDecodeError`` about an empty string, which names
+    neither the lane nor the defect.
+    """
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        result = func(*args)
+    return result, stderr.getvalue()
+
+
+def _no_caller_context(monkeypatch) -> None:
+    """Run the command as a BARE terminal invocation.
+
+    ``caller_context_from_env`` keys off ``AVIBE_SESSION_ID``, which is set inside every
+    Avibe-hosted Agent shell — including the one a coding agent runs these tests from. Left
+    alone it changes the command under test (it defaults the target Session and relaxes the
+    session-policy validation) and stamps the caller into ``metadata.created_by``, so the
+    same test exercises a different path locally than it does in CI. Deleted rather than
+    replaced: the lane being pinned is a human typing the command.
+    """
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+
+def _reserved_session_cli_db(tmp_path: Path):
+    """A migrated CLI state DB holding the reserved row plus one ordinary session.
+
+    Both rows in ONE database because the point is DISCRIMINATION: the same command,
+    the same store and the same resolver must refuse one id and accept the other, which
+    a test with only the reserved row cannot show.
+
+    Returns ``(db_path, agent_store, ordinary_session_id)``.
+    """
+    from storage.agent_session_rows import resolve_workspace_notice_session
+    from storage.importer import ensure_sqlite_state
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
+            "ses-workspace-notices"
+        )
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        ordinary = service.bind_agent_session(
+            scope_key="slack::channel::C900",
+            agent_name="worker",
+            session_anchor="slack_C900",
+            native_session_id="native-C900",
+        )
+    finally:
+        service.close()
+    assert ordinary
+    return db_path, agent_store, ordinary
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_hint"),
+    [
+        (
+            "en",
+            "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
+        ),
+        (
+            "zh",
+            "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+        ),
+    ],
+)
+def test_reserved_session_cli_hint_uses_the_configured_backend_locale(
+    language: str,
+    expected_hint: str,
+) -> None:
+    exc = cli.UnresolvableSessionTarget(
+        "reserved",
+        session_id="ses-workspace-notices",
+        reason="reserved",
+    )
+    with patch.object(
+        cli.V2Config,
+        "load",
+        return_value=SimpleNamespace(language=language),
+    ):
+        error = cli._reserved_session_cli_error(exc)
+
+    assert error.hint == expected_hint
+
+
+def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
+    from sqlalchemy import text as sa_text
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        return [
+            tuple(row)
+            for row in conn.execute(
+                sa_text(
+                    "SELECT author, type, content_text FROM messages "
+                    "WHERE session_id = :sid ORDER BY created_at, id"
+                ),
+                {"sid": session_id},
+            )
+        ]
+
+
+def test_task_add_refuses_the_reserved_session_with_no_side_effects(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``vibe task add --session-id ses-workspace-notices`` is refused at ADMISSION.
+
+    The definition is the durable half of the hole: once persisted, every future fire
+    re-resolves the same pin, so a definition that got in would have to be discovered
+    and paused rather than simply never accepted. ``cmd_task_add`` reaches
+    ``_resolve_agent_for_target`` — and through it ``resolve_session_id_target`` —
+    BEFORE it writes anything, so the shared resolver guard closes this door with no
+    CLI-local exception of its own. That is the mechanism the maintainer asked for: one
+    shared-target fix, not another route-local special case.
+
+    Zero side effects, asserted as absences (comment 5124692513): no definition in the
+    store, no queued Run, and the reserved transcript untouched.
+
+    POSITIVE CONTROL in the same test: the ordinary session id, through the identical
+    command and store, IS accepted. A guard that refused every ``--session-id`` would
+    fail here.
+    """
+    _no_caller_context(monkeypatch)
+    db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path)
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_task_add(
+        ["--session-id", "ses-workspace-notices", "--cron", "0 * * * *", "--message", "hello"]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+    ):
+        result, stderr_text = _capture_stderr_text(cli.cmd_task_add, args)
+
+    assert result == 1, (
+        "``vibe task add --session-id ses-workspace-notices`` was ADMITTED. The reserved "
+        "row accepts no turn, so every future fire of this definition would resolve a "
+        f"target that cannot take one. stdout={capsys.readouterr().out!r}"
+    )
+    payload = json.loads(stderr_text)
+    assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the refusal must be TYPED, not swallowed by the broad handler's generic "
+        "``task_command_failed``. ``reserved_session`` is the same token the Web surface "
+        "already answers with, so one client vocabulary covers both: "
+        f"{payload}"
+    )
+    assert "reserved for the runtime" in payload["error"], (
+        f"the refusal has to say WHY, in the diagnostic the resolver owns: {payload}"
+    )
+    assert "ses-workspace-notices" in payload["error"], (
+        f"and it has to name the session that was refused: {payload}"
+    )
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
+
+    # --- zero side effects --------------------------------------------------
+    assert cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json").list_tasks() == [], (
+        "a definition pinned to a row that takes no turns must never be PERSISTED: "
+        "every later fire would re-resolve the same pin"
+    )
+    assert store.list_tasks() == [], "and the live store the command used must agree"
+    assert request_store.list_pending() == [], (
+        "creation does not fire, and a refused creation may not queue anything either"
+    )
+    assert _message_rows(db_path, "ses-workspace-notices") == [], (
+        "nothing may be written into the runtime's own row"
+    )
+
+    # --- positive control: the ordinary session is accepted -----------------
+    ok_args = _parse_task_add(
+        ["--session-id", ordinary, "--cron", "0 * * * *", "--message", "hello"]
+    )
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+    ):
+        assert cli.cmd_task_add(ok_args) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True
+    assert accepted["definition"]["session_id"] == ordinary, (
+        "the guard must not have narrowed ordinary session targeting: "
+        f"{accepted['definition']}"
+    )
+    assert [task.session_id for task in store.list_tasks()] == [ordinary]
+
+
+def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The direct lane named in the finding, as a test rather than a hand probe.
+
+    ``vibe agent run --session-id ses-workspace-notices --message … --no-callback`` is
+    the exact command quoted in review thread 3678900318. Against ``d00bc038`` it
+    returned ``ok: true`` with EXIT 0 and left a QUEUED ``agent_run`` request whose
+    ``session_id`` was the reserved row — a real turn on its way into a machine-owned
+    session with an empty ``agent_backend``, which is what "accepts no turn" was
+    supposed to forbid.
+
+    ``--no-callback`` is load-bearing, not noise: without it the command stops earlier
+    on ``missing_async_callback``, which would let this test pass on a tree with the hole
+    wide open. The flag is what makes the run reach admission.
+
+    Zero side effects: no queued Run (the durable artifact the scheduler would have
+    picked up) and no ``messages`` row. Positive control: the ordinary session queues.
+    """
+    _no_caller_context(monkeypatch)
+    db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path)
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(
+        [
+            "--async",
+            "--no-callback",
+            "--session-id",
+            "ses-workspace-notices",
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        result, stderr_text = _capture_stderr_text(cli.cmd_agent_run, args)
+
+    assert result == 1, (
+        "``vibe agent run --session-id ses-workspace-notices --message … --no-callback`` "
+        "returned success — the exact command from review thread 3678900318, admitted. "
+        f"stdout={capsys.readouterr().out!r} pending="
+        f"{[r.session_id for r in request_store.list_pending()]}"
+    )
+    payload = json.loads(stderr_text)
+    assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the gate's remaining ask (comment 5124964406): direct Agent admission fell "
+        "through ``cmd_agent_run``'s broad ``except Exception`` and reported "
+        "``task_command_failed``, so a caller had only prose to branch on. The refusal "
+        f"must stay typed and coded at the consuming CLI surface: {payload}"
+    )
+    assert "reserved for the runtime" in payload["error"], (
+        f"the resolver's own diagnostic has to reach the caller: {payload}"
+    )
+    assert "ses-workspace-notices" in payload["error"]
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
+
+    # --- zero side effects --------------------------------------------------
+    assert request_store.list_pending() == [], (
+        "against d00bc038 this held one queued agent_run for the reserved session; a "
+        "queued Run is the artifact the scheduler would dispatch"
+    )
+    assert cli.TaskExecutionStore(tmp_path / "task_requests").list_pending() == [], (
+        "and durably so, not only in the store instance the command happened to hold"
+    )
+    assert _message_rows(db_path, "ses-workspace-notices") == [], (
+        "no turn side effect of any kind lands in the runtime's own row"
+    )
+
+    # --- positive control: the ordinary session still runs ------------------
+    ok_args = _parse_agent_run(
+        ["--async", "--no-callback", "--session-id", ordinary, "--message", "hello"]
+    )
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        assert cli.cmd_agent_run(ok_args) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True
+    assert [request.session_id for request in request_store.list_pending()] == [ordinary], (
+        "an ordinary Session must still be able to take a direct Agent Run: "
+        f"{[r.session_id for r in request_store.list_pending()]}"
+    )

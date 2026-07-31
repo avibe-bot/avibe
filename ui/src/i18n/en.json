@@ -53,6 +53,7 @@
     "disable": "Disable",
     "disabled": "Disabled",
     "archived": "Archived",
+    "systemSession": "System",
     "default": "Default",
     "running": "Running",
     "stopped": "Stopped",
@@ -1186,6 +1187,7 @@
     "missing_share_id": "Enter a custom link first.",
     "not_public": "Make the Show Page public first to change its link.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
+    "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
     "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
     "icon_required": "Choose an icon file to upload.",
@@ -2923,6 +2925,11 @@
     "run": {
       "definitionDeleted": "(deleted)"
     },
+    "health": {
+      "failing": "failing",
+      "degraded": "degraded",
+      "unknown": "health unknown"
+    },
     "lifecycle": {
       "running": "Running",
       "waiting": "Waiting",
@@ -3070,6 +3077,7 @@
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
       "placeholderArchived": "This session is archived — read-only",
+      "placeholderSystem": "Avibe posts workspace notifications here — this session does not accept messages",
       "hint": "Enter to send",
       "send": "Send",
       "queueSend": "Send to queue",

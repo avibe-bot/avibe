@@ -5,7 +5,7 @@ import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, 
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
-import { useApi } from '../../context/ApiContext';
+import { selectApiErrorFields, useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
@@ -54,8 +54,10 @@ import {
   isSessionReadOnly,
   isShowPageActive,
   markSessionArchived,
+  sessionReadOnlyReason,
   showPageControlActions,
   transcriptSelectionActions,
+  type SessionReadOnlyReason,
 } from './sessionArchived';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
@@ -172,6 +174,13 @@ export const ChatPage: React.FC = () => {
   // re-route, no transcript control that would write to the session, and no Show
   // Page controls (archive takes the page offline and refuses to create one, so
   // Visualize and Share could only fail; see showPageControlActions).
+  //
+  // A ``visibility === 'system'`` session is read-only for a DIFFERENT reason and to
+  // the same depth: the runtime owns the row (the workspace-notifications session the
+  // Inbox links to) and the messages POST answers 403 ``reserved_session``. The reason
+  // is carried alongside because only the COPY differs — nothing here may call such a
+  // session archived.
+  const readOnlyReason = sessionReadOnlyReason(session);
   const readOnly = isSessionReadOnly(session);
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
@@ -1341,10 +1350,23 @@ export const ChatPage: React.FC = () => {
         }
         if (!response.ok) {
           setWorking(false);
-          // Routes answer ``{"error": ...}``; ``detail`` is only FastAPI's own
-          // validation shape. Try both before the bare status code.
+          // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
+          // CODED shape (``{"error": {code, message}, code, message}``) — the
+          // runtime-owned session's ``403 reserved_session`` is the latter, and
+          // ``String(body.error)`` renders that object as literal "[object Object]".
+          // This is a raw ``apiFetch``, so ``handleApiError`` never runs; reuse its own
+          // selector instead of re-deriving the precedence, and localize by code the
+          // same way, so a coded refusal reads as a sentence here too. ``detail`` is
+          // only FastAPI's own validation shape.
+          const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
           throw new Error(
-            body?.error ? String(body.error) : body?.detail ? String(body.detail) : `HTTP ${response.status}`,
+            parsed
+              ? parsed.code
+                ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+                : parsed.fallback
+              : body?.detail
+                ? String(body.detail)
+                : `HTTP ${response.status}`,
           );
         }
         if (body?.already_answered) {
@@ -2017,7 +2039,7 @@ export const ChatPage: React.FC = () => {
           onShareOpenChange={setShareOpen}
           annotation={annotation}
           onAnnotateOpenChange={setAnnotateOpen}
-          readOnly={readOnly}
+          readOnlyReason={readOnlyReason}
         />
 
       {showPageActive && showPageUrl && (
@@ -2139,7 +2161,7 @@ export const ChatPage: React.FC = () => {
           onDraftChange={onDraftChange}
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
-          readOnly={readOnly}
+          readOnlyReason={readOnlyReason}
         />
       </div>
       </div>
@@ -2507,12 +2529,15 @@ interface ComposeProps {
   onDraftChange: (text: string) => void;
   onSearchAgents: ComposerProps['onSearchAgents'];
   onSearchSessions: ComposerProps['onSearchSessions'];
-  // Archived session: the composer is inert and explains why.
-  readOnly: boolean;
+  // Read-only session: the composer is inert and explains why — which is the reason
+  // this is the REASON and not a boolean. "Archived, read-only" is the wrong sentence
+  // on a runtime-owned row that was never archived.
+  readOnlyReason: SessionReadOnlyReason | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnly }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
   const { t } = useTranslation();
+  const readOnly = readOnlyReason !== null;
   return (
     // shrink-0 pins the bar at the bottom of the fixed-height chat container; the
     // gradient fades the transcript out behind it (no opaque band / hard border)
@@ -2541,7 +2566,16 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, se
         // chat and lets this placeholder win. autoFocus is dropped so opening an
         // archived chat doesn't pop the keyboard on an inert box.
         disabled={readOnly}
-        placeholder={readOnly ? t('chat.compose.placeholderArchived') : undefined}
+        placeholder={
+          readOnlyReason === 'system'
+            ? // A runtime-owned row (the workspace-notifications session): the server
+              // answers ``403 reserved_session`` here, so say what it receives rather
+              // than "archived", which it is not.
+              t('chat.compose.placeholderSystem')
+            : readOnlyReason === 'archived'
+              ? t('chat.compose.placeholderArchived')
+              : undefined
+        }
         autoFocus={!readOnly}
       />
     </div>
@@ -2565,18 +2599,20 @@ interface ChatHeaderBarProps {
   onShareOpenChange?: (open: boolean) => void;
   annotation: AnnotationBridge;
   onAnnotateOpenChange?: (open: boolean) => void;
-  // Archived session: the title and the agent route render as static text — the
-  // server refuses both edits with 409 — and the Show Page action cluster is
-  // withdrawn entirely (see showPageControlActions).
-  readOnly: boolean;
+  // Read-only session: the title and the agent route render as static text — the
+  // server refuses both edits (409 archived / 403 reserved) — and the Show Page action
+  // cluster is withdrawn entirely (see showPageControlActions). The REASON, not a
+  // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
+  readOnlyReason: SessionReadOnlyReason | null;
 }
 
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason }) => {
   const { t } = useTranslation();
+  const readOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2633,15 +2669,20 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
         </Button>
         <TitleField key={session.id} title={session.title} onCommit={(title) => onPatch({ title })} readOnly={readOnly} />
         {/* Hidden while the Show Page is open so the view gets the full width.
-            On an archived session the route is frozen, so show it as static text
-            plus an Archived badge instead of an interactive picker. */}
+            On a read-only session the route is frozen, so show it as static text
+            plus a badge naming WHY instead of an interactive picker. A runtime-owned
+            row has no backend at all (``agent_backend`` is empty by design), so the
+            agent name — which would fall back to the default agent's, naming a route
+            this session will never run — is omitted there rather than invented. */}
         {!showPageMode && readOnly && (
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
-            <span className="truncate text-[12px] font-medium text-muted">
-              {session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
-            </span>
+            {readOnlyReason === 'archived' && (
+              <span className="truncate text-[12px] font-medium text-muted">
+                {session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
+              </span>
+            )}
             <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px] font-bold">
-              {t('common.archived')}
+              {readOnlyReason === 'system' ? t('common.systemSession') : t('common.archived')}
             </Badge>
           </div>
         )}

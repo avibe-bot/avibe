@@ -51,6 +51,64 @@
       "fallbackResult": {
         "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
+      },
+      "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
+      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
+    },
+    "notice": {
+      "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
+      "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "error": "错误:{error}",
+      "unknownError": "未记录错误信息",
+      "definition": "任务 ID:{id}",
+      "paused": "该任务当前已暂停,恢复前不会再次触发:vibe task resume {id}",
+      "taskFinished": "这个一次性任务已经结束,不会再次触发。",
+      "nextRun": "下次运行时间:{when}",
+      "rerun": "立即重跑:vibe task run {id};查看详情:vibe task show {id}",
+      "watchPaused": "该监视当前已暂停,恢复前不会再次监视:vibe watch resume {id}",
+      "watchRetired": "该监视已经结束,不会再次监视。",
+      "watchShow": "查看详情:vibe watch show {id}",
+      "rebound": "[Avibe Harness] 后台任务「{name}」绑定的 Agent 会话已不存在,已自动重新绑定到新会话并继续运行。",
+      "reboundSessions": "原会话:{previous} → 新会话:{new}",
+      "reboundSettingsPreserved": "已保留原会话的工作目录、Agent 与模型设置。",
+      "reboundSettingsReset": "无法恢复原会话的设置,该任务现在使用当前作用域的默认配置。",
+      "reboundRepin": "如需改绑到其他会话:vibe task update {id} --session-id <session-id>",
+      "show": "查看详情:vibe task show {id}",
+      "definitionDeleted": "该定义已不存在,无法重跑、恢复或改绑,只保留这次运行的记录。",
+      "runInspect": "查看这次运行:vibe runs show {id}",
+      "workspaceSession": "工作区通知",
+      "workspaceSessionProtected": "该会话用于接收 Avibe 的工作区失败通知，无法归档或修改。",
+      "workspaceSessionReadOnly": "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+      "failureClass": "失败类型:{failureClass}",
+      "lastSucceeded": "上次成功时间:{when}",
+      "origin": "创建位置:{origin}",
+      "originLink": "打开创建它的那条消息:{url}",
+      "originChannel": "{platform} 频道 {channel}",
+      "originChannelThread": "{platform} 频道 {channel}(话题 {thread})",
+      "originDirect": "{platform} 上与 {user} 的私聊",
+      "platform": {
+        "slack": "Slack",
+        "discord": "Discord",
+        "telegram": "Telegram",
+        "lark": "飞书/Lark",
+        "wechat": "微信",
+        "avibe": "Avibe 工作台"
+      },
+      "class": {
+        "noTerminalResult": "本轮结束时 Agent 没有返回任何结果",
+        "refusedConcurrentTurn": "所属会话中已有另一轮在执行",
+        "transportUnavailable": "投递目标平台不可达",
+        "queueHoldExpired": "在队列中等待超时",
+        "deliveryTargetMissing": "它要投递的 Agent 会话已不存在"
+      },
+      "reason": {
+        "stopped": "被手动停止",
+        "backendRefresh": "所用的 Agent 运行时被刷新",
+        "evicted": "所属会话被回收",
+        "restarted": "服务重启",
+        "lifetimeTimeout": "所属会话达到生命周期上限",
+        "orphaned": "已无任何执行在推进它",
+        "unknown": "原因在这次运行之外"
       }
     }
   },
