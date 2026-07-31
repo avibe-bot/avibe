@@ -6,9 +6,11 @@ import pytest
 from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 
+from core.scheduled_tasks import TaskExecutionStore
 from core.vibe_agents import (
     AGENT_ARCHIVE_METADATA_KEY,
     AgentArchiveError,
+    AgentNameValidationError,
     AgentUnavailableError,
     VibeAgentStore,
     normalize_agent_name,
@@ -454,6 +456,87 @@ def test_direct_write_rejects_a_new_agent_that_reuses_the_selected_name(tmp_path
         agent_store.close()
 
 
+def test_claim_refresh_normalizes_a_legacy_run_name_before_pinning_identity(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    try:
+        agent = agent_store.create(name="project-manager", backend="claude")
+        background.enqueue_run(
+            {
+                "id": "run_legacy_spelling",
+                "agent_name": "PROJECT-MANAGER",
+                "request_type": "scheduled",
+                "status": "queued",
+                "message": "continue",
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+
+        pinned = background.refresh_run_agent_reference("run_legacy_spelling")
+
+        assert pinned == {"agent_id": agent.id, "agent_name": agent.name}
+        stored = background.get_run("run_legacy_spelling")
+        assert stored is not None
+        assert stored["agent_id"] == agent.id
+        assert stored["agent_name"] == agent.name
+    finally:
+        background.close()
+        agent_store.close()
+
+
+def test_existing_definition_enqueue_pins_the_post_archive_agent_identity(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    requests = TaskExecutionStore(tmp_path / "task_requests")
+    requests._sqlite = background
+    try:
+        _create_archive_fallback(agent_store)
+        original = agent_store.create(name="pm", backend="claude")
+        with agent_store.engine.begin() as conn:
+            conn.execute(
+                run_definitions.insert().values(
+                    id="task_enqueue_race",
+                    definition_type="scheduled",
+                    name="enqueue race",
+                    agent_name=original.name,
+                    enabled=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    metadata_json="{}",
+                )
+            )
+
+        stale_agent_name = original.name
+        archived = agent_store.archive(original.name)
+        assert archived is not None
+
+        queued = requests.enqueue_definition_run(
+            definition_id="task_enqueue_race",
+            run_type="scheduled",
+            source_kind="scheduler",
+            session_key="",
+            session_id=None,
+            post_to=None,
+            deliver_key=None,
+            prompt="continue",
+            agent_name=stale_agent_name,
+            session_policy="create_once",
+        )
+
+        assert queued.agent_id == original.id
+        assert queued.agent_name == archived.archived_name
+        stored = background.get_run(queued.id)
+        assert stored is not None
+        assert stored["agent_id"] == original.id
+        assert stored["agent_name"] == archived.archived_name
+    finally:
+        background.close()
+        agent_store.close()
+
+
 def test_rename_moves_references_and_default_without_changing_agent_identity(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
@@ -849,16 +932,20 @@ def test_archive_rolls_back_when_reference_migration_fails(tmp_path, monkeypatch
 def test_user_agent_names_cannot_enter_internal_namespace(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
-        with pytest.raises(ValueError, match="reserved for Avibe"):
+        with pytest.raises(AgentNameValidationError) as create_reserved:
             store.create(name="_hidden", backend="codex")
+        assert create_reserved.value.code == "agent_name_reserved"
         store.create(name="worker", backend="codex")
-        with pytest.raises(ValueError, match="reserved for Avibe"):
+        with pytest.raises(AgentNameValidationError) as rename_reserved:
             store.rename("worker", "_hidden")
+        assert rename_reserved.value.code == "agent_name_reserved"
         for invalid_name in ("review/team", r"review\team"):
-            with pytest.raises(ValueError, match="path separators"):
+            with pytest.raises(AgentNameValidationError) as create_path:
                 store.create(name=invalid_name, backend="codex")
-            with pytest.raises(ValueError, match="path separators"):
+            assert create_path.value.code == "agent_name_path_separator"
+            with pytest.raises(AgentNameValidationError) as rename_path:
                 store.rename("worker", invalid_name)
+            assert rename_path.value.code == "agent_name_path_separator"
     finally:
         store.close()
 

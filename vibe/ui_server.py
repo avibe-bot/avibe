@@ -3662,7 +3662,7 @@ def vibe_agents_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vibe_agent(request.json or {}))
+        return _vibe_agent_result_response(api.create_vibe_agent(request.json or {}))
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 
@@ -3693,7 +3693,7 @@ def vibe_agent_patch(name):
     from vibe import api
 
     try:
-        return jsonify(api.update_vibe_agent(name, request.json or {}))
+        return _vibe_agent_result_response(api.update_vibe_agent(name, request.json or {}))
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 

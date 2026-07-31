@@ -2830,6 +2830,29 @@ def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
     assert result["message"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
 
 
+def test_vibe_agent_api_localizes_reserved_create_and_rename_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        staticmethod(lambda: type("Config", (), {"language": "zh"})()),
+    )
+
+    create_result = api.create_vibe_agent({"name": "_hidden", "backend": "codex"})
+    api.create_vibe_agent({"name": "worker", "backend": "codex"})
+    rename_result = api.update_vibe_agent("worker", {"name": "review/team"})
+
+    assert create_result == {
+        "ok": False,
+        "code": "agent_name_reserved",
+        "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",
+        "hint": "请选择不以下划线 `_` 开头的 Agent 名称。",
+    }
+    assert rename_result["ok"] is False
+    assert rename_result["code"] == "agent_name_path_separator"
+    assert rename_result["message"] == "Agent 名称不能包含 `/` 或 `\\`。"
+
+
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 

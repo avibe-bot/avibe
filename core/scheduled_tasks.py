@@ -1654,25 +1654,29 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
-        return self.enqueue(
-            TaskExecutionRequest(
-                id=uuid4().hex[:12],
-                request_type=run_type,
-                task_id=definition_id,
-                session_key=session_key,
-                session_id=session_id,
-                post_to=post_to,
-                deliver_key=deliver_key,
-                prompt=prompt,
-                message=prompt,
-                source_kind=source_kind,
-                source_actor=source_actor,
-                parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                session_policy=session_policy,
-                metadata=dict(metadata or {}),
-            )
+        request = TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type=run_type,
+            task_id=definition_id,
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            prompt=prompt,
+            message=prompt,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            session_policy=session_policy,
+            metadata=dict(metadata or {}),
         )
+        if self._sqlite is None:
+            return self.enqueue(request)
+        identity = self._sqlite.enqueue_definition_run(self.queued_run_payload(request))
+        request.agent_name = identity.get("agent_name")
+        request.agent_id = identity.get("agent_id")
+        return request
 
     def enqueue_hook_send(
         self,

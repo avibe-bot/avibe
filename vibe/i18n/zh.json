@@ -176,6 +176,16 @@
         "hint": "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
       }
     },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",
+        "hint": "请选择不以下划线 `_` 开头的 Agent 名称。"
+      },
+      "agent_name_path_separator": {
+        "message": "Agent 名称不能包含 `/` 或 `\\`。",
+        "hint": "请选择不含路径分隔符的 Agent 名称。"
+      }
+    },
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",

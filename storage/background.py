@@ -95,6 +95,28 @@ def _require_enabled_agent_identity(
         raise ValueError(f"agent '{name}' was archived, disabled, renamed, or replaced before the write")
 
 
+def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict[str, str]]:
+    """Resolve legacy spelling to the catalog's canonical durable identity."""
+
+    cleaned_name = str(agent_name or "").strip()
+    if not cleaned_name:
+        return None
+    from core.vibe_agents import normalize_agent_name
+
+    try:
+        normalized_name = normalize_agent_name(cleaned_name)
+    except ValueError:
+        return None
+    row = conn.execute(
+        select(agents.c.id, agents.c.name)
+        .where(agents.c.normalized_name == normalized_name)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    return {"id": str(row["id"]), "name": str(row["name"])}
+
+
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
     """The instant a one-shot ``run_at`` names, in the task's own timezone.
 
@@ -2545,6 +2567,31 @@ class SQLiteBackgroundTaskStore:
                 )
             enqueue_run_in_connection(conn, values)
 
+    def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Optional[str]]:
+        """Pin an existing definition run to its current Agent under one write lock."""
+
+        values = self._run_values(payload)
+        definition_id = str(values.get("definition_id") or "").strip()
+        if not definition_id:
+            raise ValueError("definition id is required")
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            definition = conn.execute(
+                select(run_definitions.c.agent_name)
+                .where(run_definitions.c.id == definition_id)
+                .limit(1)
+            ).mappings().first()
+            if definition is not None:
+                current_name = str(definition["agent_name"] or "").strip() or None
+                identity = _resolve_agent_identity_by_name(conn, current_name)
+                values["agent_name"] = identity["name"] if identity else current_name
+                values["agent_id"] = identity["id"] if identity else None
+            enqueue_run_in_connection(conn, values)
+        return {
+            "agent_name": values["agent_name"],
+            "agent_id": values["agent_id"],
+        }
+
     def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:
         """Pin a claimed run to an Agent id while serialized with archive/rename."""
 
@@ -2570,16 +2617,7 @@ class SQLiteBackgroundTaskStore:
                     .limit(1)
                 ).mappings().first()
             elif agent_name:
-                agent = conn.execute(
-                    select(agents.c.id, agents.c.name)
-                    .where(
-                        or_(
-                            agents.c.name == agent_name,
-                            agents.c.normalized_name == agent_name,
-                        )
-                    )
-                    .limit(1)
-                ).mappings().first()
+                agent = _resolve_agent_identity_by_name(conn, agent_name)
             if agent is None:
                 return {"agent_id": agent_id or None, "agent_name": agent_name or None}
             canonical_id = str(agent["id"])

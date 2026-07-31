@@ -89,6 +89,15 @@ class AgentArchiveError(ValueError):
         self.agent_name = str(agent_name)
 
 
+class AgentNameValidationError(ValueError):
+    """A public Agent name violates a catalog namespace rule."""
+
+    def __init__(self, *, code: str, agent_name: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.agent_name = str(agent_name)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -114,9 +123,15 @@ def _matches_agent_reference(value: Any, reference_names: frozenset[str]) -> boo
 def _validated_public_agent_name(name: str) -> tuple[str, str]:
     raw_name = str(name or "").strip()
     if raw_name.startswith("_"):
-        raise ValueError("agent names starting with '_' are reserved for Avibe")
+        raise AgentNameValidationError(
+            code="agent_name_reserved",
+            agent_name=raw_name,
+        )
     if "/" in raw_name or "\\" in raw_name:
-        raise ValueError("agent names cannot contain path separators")
+        raise AgentNameValidationError(
+            code="agent_name_path_separator",
+            agent_name=raw_name,
+        )
     return raw_name, normalize_agent_name(raw_name)
 
 

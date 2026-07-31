@@ -47,7 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import AgentArchiveError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchiveError, AgentNameValidationError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
@@ -3901,6 +3901,21 @@ def cmd_agent_create(args):
         )
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentNameValidationError as exc:
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        key = f"error.agentNameValidation.{exc.code}"
+        _print_task_error(
+            TaskCliError(
+                i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+                details={"agent": exc.agent_name},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1

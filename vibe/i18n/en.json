@@ -176,6 +176,16 @@
         "hint": "Keep another enabled Agent available when archiving the current default."
       }
     },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent names starting with `_` are reserved for Avibe.",
+        "hint": "Choose an Agent name that does not start with `_`."
+      },
+      "agent_name_path_separator": {
+        "message": "Agent names cannot contain `/` or `\\`.",
+        "hint": "Choose an Agent name without path separators."
+      }
+    },
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",

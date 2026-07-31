@@ -69,6 +69,7 @@ from modules.agents.catalog import (
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
     AgentArchiveError,
+    AgentNameValidationError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
@@ -1380,16 +1381,19 @@ def create_vibe_agent(payload: dict) -> dict:
         raise ValueError("Agent metadata must be an object")
     store = VibeAgentStore()
     try:
-        agent = store.create(
-            name=str(payload.get("name") or "").strip(),
-            backend=validate_agent_backend(str(payload.get("backend") or "")),
-            description=payload.get("description"),
-            model=payload.get("model"),
-            reasoning_effort=payload.get("reasoning_effort") or payload.get("effort"),
-            system_prompt=payload.get("system_prompt"),
-            metadata=metadata,
-            enabled=_parse_agent_enabled_field(payload, default=True),
-        )
+        try:
+            agent = store.create(
+                name=str(payload.get("name") or "").strip(),
+                backend=validate_agent_backend(str(payload.get("backend") or "")),
+                description=payload.get("description"),
+                model=payload.get("model"),
+                reasoning_effort=payload.get("reasoning_effort") or payload.get("effort"),
+                system_prompt=payload.get("system_prompt"),
+                metadata=metadata,
+                enabled=_parse_agent_enabled_field(payload, default=True),
+            )
+        except AgentNameValidationError as exc:
+            return _agent_name_validation_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1441,10 +1445,27 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
+        try:
+            agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
+        except AgentNameValidationError as exc:
+            return _agent_name_validation_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
+
+
+def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentNameValidation.{exc.code}"
+    return {
+        "ok": False,
+        "code": exc.code,
+        "message": backend_t(f"{key}.message", lang, agent=exc.agent_name),
+        "hint": backend_t(f"{key}.hint", lang, agent=exc.agent_name),
+    }
 
 
 def remove_vibe_agent(name: str) -> dict:

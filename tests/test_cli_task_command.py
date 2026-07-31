@@ -2825,6 +2825,22 @@ def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:
     assert payload["agent"]["reasoning_effort"] == "high"
 
 
+def test_agent_create_localizes_reserved_name_error(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    args = _parse_agent(["create", "_hidden", "--backend", "codex"])
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_agent_create, args)
+
+    assert result == 1
+    assert payload["code"] == "agent_name_reserved"
+    assert payload["error"] == "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。"
+    assert payload["hint"] == "请选择不以下划线 `_` 开头的 Agent 名称。"
+
+
 def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
