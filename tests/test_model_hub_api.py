@@ -626,7 +626,7 @@ def test_disabled_gate_preserves_existing_model_hub_config_bytes(monkeypatch):
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
-    """Scenarios: MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
+    """Scenarios: MH-SRC-REFRESH-001, MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
 
     service, store, adapter = _service(tmp_path)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
