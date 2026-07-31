@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import re
 from contextlib import ExitStack
-from typing import Any, NamedTuple, Optional
+from typing import Any, Iterator, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,9 @@ __all__ = [
     "SchedulerLaneCancellation",
     "cancel_session_scheduler_lane",
     "hold_session_admission",
+    "iter_composite_split_candidates",
     "reconcile_session_runs",
+    "resolve_composite_teardown_split",
     "resolve_teardown_session_ids",
     "split_composite_session_key",
     "teardown_composite_session_runs",
@@ -83,6 +85,16 @@ def split_composite_session_key(composite_key: Optional[str]) -> tuple[str, str]
     better identified from the left, and the fallback preserves today's answer for
     non-path keys (``"a:b"`` -> ``("a", "b")``). Returns ``(anchor, "")`` for a key
     with no separator at all.
+
+    THE ONE THING THE RULE CANNOT DO is tell which colon the key added when an ANCHOR
+    SUFFIX also looks like a path head — a subagent or routing agent literally named
+    ``/review`` makes ``base:/review:/repo`` well-formed under two readings (HFR-335).
+    That is not a gap in this function: no rule over the string alone can decide it,
+    and this one still has to answer. Settlement paths call
+    :func:`resolve_composite_teardown_split` instead, which enumerates the readings
+    via :func:`iter_composite_split_candidates` and checks them against storage,
+    falling back to the answer here when none resolves. This function's behaviour is
+    unchanged and remains correct for every anchor that is not itself path-shaped.
     """
 
     resolved = str(composite_key or "").strip()
@@ -98,6 +110,152 @@ def split_composite_session_key(composite_key: Optional[str]) -> tuple[str, str]
     if not separator:
         return resolved, ""
     return anchor, working_path
+
+
+def iter_composite_split_candidates(
+    composite_key: Optional[str],
+) -> "Iterator[tuple[str, str]]":
+    """Every split of a composite key that could plausibly be the real one.
+
+    :func:`split_composite_session_key` has to answer with ONE pair, so it applies
+    HFR-129's first-match rule. This yields the whole set the rule chooses from —
+    every colon whose remainder starts like an absolute path — for the callers that
+    can afford to check a candidate against storage instead of inferring.
+
+    LONGEST ANCHOR FIRST, which is the reverse of the lexical rule and deliberate.
+    The ambiguity only exists because an ANCHOR SUFFIX managed to look like the head
+    of a path, and a longer anchor is the reading that consumes more of the key as
+    what the key literally spells; the short reading wins by default only because
+    nothing better was available. Callers walk this in order and stop at the first
+    anchor storage actually knows, so the ordering is a preference, not a verdict.
+
+    Yields nothing when no colon is followed by a path head at all — the case
+    :func:`split_composite_session_key` answers with its historical ``rpartition``
+    fallback, which has no candidates to choose between.
+    """
+
+    resolved = str(composite_key or "").strip()
+    if not resolved:
+        return
+    candidates: list[tuple[str, str]] = []
+    separator_index = resolved.find(":")
+    while separator_index != -1:
+        working_path = resolved[separator_index + 1 :]
+        if _WORKING_PATH_HEAD.match(working_path):
+            candidates.append((resolved[:separator_index], working_path))
+        separator_index = resolved.find(":", separator_index + 1)
+    yield from reversed(candidates)
+
+
+def _anchor_names_any_row(
+    controller: Any,
+    *,
+    session_anchor: str,
+    workdir: Optional[str],
+    agent_backend: Optional[str],
+) -> bool:
+    """Whether storage knows this anchor at all, WITHOUT the HFR-323 refusal.
+
+    Deliberately not :func:`resolve_teardown_session_ids`, which answers ``[]`` both
+    for "no such anchor" and for "several candidates, refusing to pick". Those are
+    opposite facts here: the first means this split is wrong, the second means it is
+    RIGHT and its scope is unsafe. Collapsing them would make an ambiguous-but-correct
+    split look unresolvable and hand the teardown on to a later, wronger candidate.
+    """
+
+    anchor = str(session_anchor or "").strip()
+    if not anchor:
+        return False
+    sessions = getattr(controller, "sessions", None)
+    finder = getattr(sessions, "find_session_ids_for_anchor", None)
+    if not callable(finder):
+        return False
+    try:
+        resolved = finder(
+            anchor,
+            workdir=workdir or None,
+            agent_backend=str(agent_backend or "").strip() or None,
+        )
+    except Exception:
+        logger.debug(
+            "Session teardown: could not probe split candidate anchor %s",
+            anchor,
+            exc_info=True,
+        )
+        return False
+    return any(str(session_id or "").strip() for session_id in (resolved or []))
+
+
+def resolve_composite_teardown_split(
+    controller: Any,
+    composite_key: Optional[str],
+    *,
+    agent_backend: Optional[str] = None,
+    preferred_anchor: Optional[str] = None,
+) -> tuple[str, str]:
+    """Split a composite key, breaking lexical ties against stored anchors (HFR-335).
+
+    WHY THE LEXICAL RULE IS NOT ENOUGH. Subagent and routing-agent names are accepted
+    as arbitrary non-empty strings, and the anchor embeds them
+    (``{platform}_{thread}:{agent_name}``) before the working path is appended. An
+    agent named ``/review`` therefore yields ``base:/review:/repo``, where TWO colons
+    are followed by something matching ``_WORKING_PATH_HEAD``. HFR-129's first-match
+    rule takes the earlier one and hands the teardown anchor ``base`` with workdir
+    ``/review:/repo`` — a pair no ``agent_sessions`` row matches. The resolve comes
+    back empty, and the callers read empty as "nothing to settle" and dismantle the
+    runtime with its runs still ``running``. That is the exact silent teardown skip
+    HFR-129 was written to remove, arrived at from the other direction.
+
+    NO RULE OVER THE STRING ALONE CAN FIX IT. Both readings are well-formed keys; the
+    information about which colon the key added is simply not in the key once anchor
+    suffixes may look like paths. So this asks the only party that knows: storage.
+    Candidates are walked longest-anchor-first and the FIRST whose anchor names a real
+    row wins.
+
+    THE COMMON CASE PAYS NOTHING. Ordinary anchors contain no path-looking segment, so
+    they produce a single candidate and take the fast path with ZERO extra reads —
+    ``preferred_anchor`` (End's row, which already carries its base session id) short-
+    circuits even the multi-candidate walk. Only genuinely ambiguous keys touch the DB,
+    and only until one candidate answers.
+
+    AN AMBIGUOUS RESOLUTION STILL COUNTS AS RESOLVING (HFR-323). If the winning split's
+    anchor names several live sessions, this still returns it and lets
+    :func:`resolve_teardown_session_ids` refuse to cancel any of them. The refusal is
+    about SCOPE SAFETY — which of several same-everything sessions is provably this
+    runtime — and not about whether the split was read correctly. Skipping on to a
+    later candidate would let a worse split slip past a guard that had already
+    correctly identified the right anchor, converting a deliberate no-op into a wrong
+    teardown.
+
+    FALLS BACK TO THE LEXICAL ANSWER when no candidate resolves, which keeps HFR-129's
+    behaviour byte-for-byte for every real anchor and for every caller with no sessions
+    facade at all (headless runs, the test doubles). RESIDUAL, and the reason that
+    fallback is safe FOR SETTLEMENT: an anchor that resolves nowhere has no rows to
+    settle, so choosing the wrong split among unresolvable candidates changes nothing
+    that could be settled. It is only a wrong ANSWER, never a wrong ACTION.
+    """
+
+    candidates = list(iter_composite_split_candidates(composite_key))
+    if len(candidates) < 2:
+        # One candidate or none: the lexical splitter already agrees, and there is
+        # nothing to disambiguate. No DB read on the overwhelmingly common path.
+        return split_composite_session_key(composite_key)
+
+    preferred = str(preferred_anchor or "").strip()
+    if preferred:
+        for anchor, working_path in candidates:
+            if anchor == preferred:
+                return anchor, working_path
+
+    for anchor, working_path in candidates:
+        if _anchor_names_any_row(
+            controller,
+            session_anchor=anchor,
+            workdir=working_path,
+            agent_backend=agent_backend,
+        ):
+            return anchor, working_path
+    return split_composite_session_key(composite_key)
 
 
 def _scheduled_task_service(controller: Any) -> Any:
@@ -480,9 +638,20 @@ async def teardown_composite_session_runs(
     include_manager_lane: bool = True,
     admission_holds: Optional[ExitStack] = None,
 ) -> int:
-    """:func:`teardown_runtime_session_runs` keyed by a Claude composite session key."""
+    """:func:`teardown_runtime_session_runs` keyed by a Claude composite session key.
 
-    anchor, working_path = split_composite_session_key(composite_key)
+    The split goes through :func:`resolve_composite_teardown_split` rather than the
+    lexical splitter (HFR-335): this is a SETTLEMENT path, so a key whose anchor
+    embeds a path-looking agent name must not resolve to nothing and be read as
+    "no runs to settle". Single-candidate keys — every ordinary anchor — are answered
+    without touching the database.
+    """
+
+    anchor, working_path = resolve_composite_teardown_split(
+        controller,
+        composite_key,
+        agent_backend=agent_backend,
+    )
     if not anchor:
         return 0
     return await teardown_runtime_session_runs(

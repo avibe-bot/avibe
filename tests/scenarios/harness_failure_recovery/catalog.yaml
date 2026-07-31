@@ -3471,6 +3471,66 @@ scenarios:
     # tests/test_running_agents_service.py::
     # test_end_holds_admission_through_the_backend_teardown_without_draining.
     test: tests/test_internal_server.py::test_codex_eviction_holds_admission_and_drains_after_transport_removal
+  - id: HFR-335
+    name: >-
+      the composite split is disambiguated against stored anchors when an agent name
+      looks like a path
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 11, and the other side of HFR-129. Subagent and routing-agent
+    # names are accepted as arbitrary non-empty strings, and the composite anchor
+    # embeds them ({platform}_{thread}:{agent_name}) BEFORE the working path is
+    # appended -- see _base_from_composite's docstring and core/handlers/
+    # message_handler.py:434/438.
+    # THE BUG: an agent named "/review" yields base:/review:/repo, in which TWO colons
+    # are followed by something matching _WORKING_PATH_HEAD. HFR-129's FIRST-match rule
+    # takes the earlier one -> anchor "base", workdir "/review:/repo" -> no
+    # agent_sessions row matches -> resolve_teardown_session_ids returns empty -> every
+    # caller (Claude eviction, cleanup, shutdown, End) reads empty as "no runs to
+    # settle" and dismantles the runtime with its runs still running. Exactly the
+    # silent teardown skip HFR-129 was written to remove, reached from the other side.
+    # PURE LEXICAL INFERENCE IS UNWINNABLE once anchor suffixes can match the path
+    # head: both readings are well-formed and the key no longer records which colon it
+    # added.
+    # FIX, scoped to where settlement correctness lives and NOT to how keys are built:
+    # iter_composite_split_candidates(key) yields every path-shaped reading LONGEST
+    # ANCHOR FIRST (the reverse of the lexical rule -- the longer reading takes more of
+    # the key at face value, and the short one only ever won by default), and
+    # resolve_composite_teardown_split walks them, taking the first whose anchor names
+    # a real row. Wired into teardown_composite_session_runs and into End's
+    # _teardown_session_id fallback.
+    # THE PROBE IS NOT resolve_teardown_session_ids, deliberately: that answers [] both
+    # for "no such anchor" and for HFR-323's ambiguity refusal, which are opposite facts
+    # here. _anchor_names_any_row calls the finder directly, so AN AMBIGUOUS RESOLUTION
+    # COUNTS AS RESOLVING -- that split wins and the refusal stands on it. Walking on
+    # would take a wrong split and hand it to a resolve with no live rows to protect,
+    # converting a deliberate no-op into a teardown against the wrong identity. The
+    # refusal is about scope safety, not about split validity.
+    # CONSERVATISM: single-candidate keys (every ordinary anchor) take the fast path
+    # with ZERO extra reads, and End's rows short-circuit via preferred_anchor. Windows
+    # drive keys (base:C:/repo) do become two-candidate and pay one wasted read; the
+    # answer is unchanged. When NO candidate resolves the lexical first-match answer
+    # stands, so HFR-129 is preserved byte-for-byte, as is every caller with no
+    # sessions facade at all.
+    # RESIDUAL, and why the fallback is safe FOR SETTLEMENT: an anchor that resolves
+    # nowhere has no runs to settle, so a wrong split among unresolvable candidates is
+    # a wrong ANSWER and never a wrong ACTION. Second residual: the snapshot's
+    # display-only split (_base_from_composite / the snapshot loop) stays lexical, so a
+    # Running-tab row for such a session can render a truncated base/workdir. Nothing
+    # is settled on the strength of it and a DB read per rendered row is the wrong
+    # trade; both sites carry a comment saying so.
+    # Companions: tests/test_session_teardown.py::
+    # test_composite_split_candidates_enumerate_the_path_shaped_readings (extends the
+    # HFR-129 unit family with the /review case),
+    # ::test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone
+    # (resolver spy: no reads on single-candidate keys, first-match on unresolvable
+    # ones), ::test_composite_split_takes_an_ambiguous_resolution_and_lets_the_refusal
+    # _stand (HFR-323 interaction), and tests/test_running_agents_service.py::
+    # test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage /
+    # ::test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads.
+    test: tests/test_session_teardown.py::test_composite_split_disambiguates_against_stored_anchors
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

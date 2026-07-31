@@ -40,6 +40,7 @@ from core.session_teardown import (
     cancel_session_scheduler_lane,
     hold_session_admission,
     reconcile_session_runs,
+    resolve_composite_teardown_split,
     resolve_teardown_session_ids,
     split_composite_session_key,
 )
@@ -88,6 +89,16 @@ def _base_from_composite(composite_key: str) -> str:
     can be found by counting colons. ``split_composite_session_key`` owns that
     boundary for every caller; this snapshot must agree with it, because the
     base it recovers is what End hands to the teardown resolve.
+
+    LEXICAL, AND KNOWINGLY SO (HFR-335). A path-looking agent name makes the boundary
+    genuinely ambiguous, and only storage can break the tie — but this helper feeds
+    the snapshot's DISPLAY fields and, through ``_effective_base_session_id``, the
+    anchor End passes down as a HINT. Where the answer decides what gets settled,
+    ``_teardown_session_id`` re-derives it through
+    ``resolve_composite_teardown_split`` instead. Residual, accepted: a Running-tab
+    row for such a session can show a truncated base/workdir. Nothing is settled on
+    the strength of it, and paying a database read per row to render a label is the
+    wrong trade.
     """
     base, _workdir = split_composite_session_key(composite_key)
     return base
@@ -168,6 +179,9 @@ def _collect_claude(
         # composite_key is ``{base}:{abs_workdir}``; split once for both halves,
         # through the shared splitter so a colon inside the path (``C:\repo``,
         # ``/tmp/a:b``) does not truncate the workdir this row displays.
+        # DISPLAY ONLY, so the lexical split stands (HFR-335): the storage-verified
+        # one costs a read per ambiguous row and buys a label, and every settlement
+        # decision re-derives the split for itself in ``_teardown_session_id``.
         ck_base, ck_workdir = split_composite_session_key(composite_key)
         base = getattr(client, "_vibe_runtime_base_session_id", None) or ck_base
         native = getattr(client, "_vibe_native_session_id", None)
@@ -868,18 +882,35 @@ def _teardown_session_id(
     ``candidates[0]`` is never an arbitrary pick: the resolve refuses an ambiguous
     answer outright and returns nothing (HFR-323), so the list is one id or empty,
     and empty means End settles no runs rather than ending somebody else's session.
+
+    THE SPLIT IS STORAGE-VERIFIED HERE, unlike the display path (HFR-335). This
+    fallback is a SETTLEMENT resolve, so a composite key whose anchor embeds a
+    path-looking subagent or routing-agent name (``base:/review:/repo``) must not be
+    split lexically into an anchor that matches no row — End would then settle
+    nothing and tear the runtime down anyway. When the row already carries its
+    ``base_session_id`` that anchor is handed down as ``preferred_anchor``, which
+    picks the matching candidate outright and costs no extra read; it also keeps the
+    WORKDIR half consistent with the anchor End is actually using, which the lexical
+    split could not promise once the two disagree.
     """
 
     resolved = str(session_id or "").strip()
     if resolved:
         return resolved
-    anchor = _effective_base_session_id(base_session_id, composite_key)
+    anchor_hint = str(base_session_id or "").strip()
+    split_anchor, split_workdir = resolve_composite_teardown_split(
+        controller,
+        composite_key,
+        agent_backend=str(backend or "").strip() or None,
+        preferred_anchor=anchor_hint,
+    )
+    anchor = anchor_hint or split_anchor
     if not anchor:
         return ""
     candidates = resolve_teardown_session_ids(
         controller,
         session_anchor=anchor,
-        workdir=_workdir_from_composite(composite_key),
+        workdir=split_workdir or None,
         agent_backend=str(backend or "").strip() or None,
     )
     return candidates[0] if candidates else ""

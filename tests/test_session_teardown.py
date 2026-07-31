@@ -25,6 +25,8 @@ from core.run_settlement import SETTLED_BY_EVICTED
 from core.scheduled_tasks import ScheduledTaskService
 from core.session_teardown import (
     hold_session_admission,
+    iter_composite_split_candidates,
+    resolve_composite_teardown_split,
     resolve_teardown_session_ids,
     split_composite_session_key,
     teardown_composite_session_runs,
@@ -44,6 +46,7 @@ def _seed_session(
     legacy_scope_key: str,
     agent_backend: str,
     workdir: str | None,
+    session_anchor: str = ANCHOR,
 ) -> str:
     service = store._service
     assert service is not None
@@ -57,7 +60,7 @@ def _seed_session(
             scope_id=scope_id,
             agent_backend=agent_backend,
             agent_variant=agent_backend,
-            session_anchor=ANCHOR,
+            session_anchor=session_anchor,
             native_session_id=f"{agent_backend}-{legacy_scope_key}",
             workdir=workdir,
             metadata={"legacy_scope_key": legacy_scope_key},
@@ -606,3 +609,278 @@ def test_controller_shutdown_settlement_holds_admission_without_draining() -> No
     # backends ``cleanup_sync`` is about to tear down.
     assert manager._teardown_drain_owed == set()
     assert manager._teardown_drain_tasks == {}
+
+
+def test_composite_split_disambiguates_against_stored_anchors(tmp_path: Path) -> None:
+    """HFR-335: an agent name that LOOKS like a path defeats a purely lexical split.
+
+    Subagent and routing-agent names are accepted as arbitrary non-empty strings, and
+    the composite anchor embeds them: ``{platform}_{thread}:{agent_name}``, with the
+    working path appended after that. So a user who names an agent ``/review`` — or
+    anything else starting with a slash or a drive letter — produces
+    ``base:/review:/repo``, in which TWO colons are followed by something that looks
+    like the head of an absolute path.
+
+    HFR-129's first-match rule then splits at the wrong one: anchor ``base``, workdir
+    ``/review:/repo``. That pair matches no ``agent_sessions`` row, the resolve comes
+    back empty, and every caller — Claude eviction, cleanup, shutdown, End — reads
+    that as "no runs to settle" and dismantles the runtime with its runs still
+    ``running``. Exactly the silent teardown skip HFR-129 existed to remove, reached
+    from the other side.
+
+    PURE LEXICAL INFERENCE IS UNWINNABLE HERE. Once an anchor suffix can match
+    ``_WORKING_PATH_HEAD``, no rule over the string alone can know which colon the key
+    added — both readings are well-formed. So the tie is broken against STORAGE, which
+    is the only thing that actually knows: enumerate every candidate split, longest
+    anchor first, and take the first whose anchor resolves to a real row.
+    """
+
+    workdir = str(tmp_path / "repo")
+    agent_anchor = f"{ANCHOR}:/review"
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        owner_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_owner",
+            agent_backend="claude",
+            workdir=workdir,
+            session_anchor=agent_anchor,
+        )
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        composite_key = f"{agent_anchor}:{workdir}"
+
+        async def _exercise() -> tuple[bool, str | None]:
+            owner_task = _live_turn(manager, owner_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                owner_turn = manager.in_flight.get(owner_id)
+                return owner_task.done(), getattr(owner_turn, "cancel_settled_by", None)
+            finally:
+                owner_task.cancel()
+                await asyncio.gather(owner_task, return_exceptions=True)
+
+        owner_done, owner_cause = asyncio.run(_exercise())
+
+        # Pre-fix: the key split at the colon before ``/review``, the anchor matched no
+        # row, and the turn was left running while the backend went away under it.
+        assert owner_done is True
+        assert owner_cause == SETTLED_BY_EVICTED
+
+        # The lexical splitter is UNCHANGED — it still answers HFR-129's first match,
+        # which is exactly the wrong half here. The fix is the storage-verified layer
+        # on top, not a new guess inside the splitter.
+        assert split_composite_session_key(composite_key) == (
+            ANCHOR,
+            f"/review:{workdir}",
+        )
+    finally:
+        store.close()
+
+
+def test_composite_split_candidates_enumerate_the_path_shaped_readings() -> None:
+    """HFR-335, at the helper level: the candidate set the storage check chooses from.
+
+    Companion to ``test_composite_key_split_preserves_windows_drive_paths``, which
+    pins what the LEXICAL rule answers. This pins what it was choosing BETWEEN, and
+    the order the storage-verified layer walks them in — longest anchor first, because
+    the ambiguity only arises when an anchor suffix looks like a path head, and the
+    longer reading is the one that takes more of the key at face value.
+    """
+
+    # The finding's shape: a routing agent literally named ``/review``. Two readings,
+    # and the lexical rule takes the one this list puts LAST.
+    assert list(iter_composite_split_candidates("base:/review:/repo")) == [
+        ("base:/review", "/repo"),
+        ("base", "/review:/repo"),
+    ]
+    assert split_composite_session_key("base:/review:/repo") == (
+        "base",
+        "/review:/repo",
+    )
+
+    # An ordinary subagent name is not path-shaped, so there is exactly ONE candidate
+    # and the callers take the fast path with no database read at all.
+    assert list(iter_composite_split_candidates("slack_T1:reviewer:/work")) == [
+        ("slack_T1:reviewer", "/work")
+    ]
+    # A POSIX workdir containing a colon likewise: ``x:y`` is not a path head.
+    assert list(iter_composite_split_candidates("a:/tmp/x:y")) == [("a", "/tmp/x:y")]
+
+    # A Windows drive path DOES produce a second reading, because ``/repo`` after the
+    # drive colon is itself a path head. Longest-first probes the bogus ``base:C``
+    # anchor first; it names no row, so the real split wins on the next candidate.
+    # One wasted read on Windows keys, and the answer is unchanged.
+    assert list(iter_composite_split_candidates("base:C:/repo")) == [
+        ("base:C", "/repo"),
+        ("base", "C:/repo"),
+    ]
+
+    # Nothing path-shaped anywhere: no candidates, and the lexical rpartition
+    # fallback is untouched.
+    assert list(iter_composite_split_candidates("a:b")) == []
+    assert list(iter_composite_split_candidates("slack_T1:reviewer:relative")) == []
+    assert list(iter_composite_split_candidates(None)) == []
+    assert list(iter_composite_split_candidates("   ")) == []
+
+
+def test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone(
+    tmp_path: Path,
+) -> None:
+    """HFR-335's two conservatism guarantees, both asserted against a resolver spy.
+
+    (1) SINGLE-CANDIDATE KEYS COST NOTHING. Every ordinary anchor produces one
+    reading, so the disambiguation must not fire at all — otherwise the fix taxes the
+    overwhelmingly common teardown with database reads to re-derive an answer that was
+    never in doubt.
+
+    (2) UNRESOLVABLE MULTI-CANDIDATE KEYS FALL BACK TO FIRST MATCH. When storage knows
+    none of the readings, HFR-129's answer stands unchanged. That is safe precisely
+    BECAUSE nothing resolved: an anchor with no rows has no runs to settle, so a wrong
+    split there is a wrong answer and never a wrong action.
+    """
+
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        facade = SessionsFacade(store)
+        probes: list[tuple] = []
+        real_finder = facade.find_session_ids_for_anchor
+
+        def _spy(anchor, *, workdir=None, agent_backend=None):
+            probes.append((anchor, workdir, agent_backend))
+            return real_finder(anchor, workdir=workdir, agent_backend=agent_backend)
+
+        controller = SimpleNamespace(
+            sessions=SimpleNamespace(find_session_ids_for_anchor=_spy)
+        )
+
+        # (1) One candidate -> the lexical answer, and the resolver is never asked.
+        assert resolve_composite_teardown_split(
+            controller, f"{ANCHOR}:/repo", agent_backend="claude"
+        ) == (ANCHOR, "/repo")
+        assert probes == []
+
+        # (2) Two candidates, neither stored -> first match, exactly as before.
+        probes.clear()
+        composite_key = "base:/review:/repo"
+        assert resolve_composite_teardown_split(
+            controller, composite_key, agent_backend="claude"
+        ) == split_composite_session_key(composite_key)
+        # It DID try, longest anchor first, and gave up rather than guessing further.
+        assert [probe[0] for probe in probes] == ["base:/review", "base"]
+
+        # A caller with no sessions facade at all (headless runs, test doubles) is the
+        # same fallback, without raising on a path that is already tearing something
+        # down.
+        assert resolve_composite_teardown_split(
+            SimpleNamespace(), composite_key
+        ) == split_composite_session_key(composite_key)
+    finally:
+        store.close()
+
+
+def test_composite_split_takes_an_ambiguous_resolution_and_lets_the_refusal_stand(
+    tmp_path: Path,
+) -> None:
+    """HFR-335 x HFR-323: resolving ambiguously still counts as resolving.
+
+    Two live scopes can share an anchor, backend and workdir, and when they do
+    ``resolve_teardown_session_ids`` refuses to cancel any of them (HFR-323) — an
+    unsettled run is recoverable, a wrongly cancelled live turn is not.
+
+    The interaction to get right is what the SPLIT does about that. Both scopes here
+    answer to the path-shaped anchor ``{ANCHOR}:/review``, so the first candidate
+    resolves — ambiguously. It must still WIN. Walking on to the next candidate
+    because this one "returned nothing" would take a split that is simply wrong and
+    hand it to a resolve that has no live rows to protect, quietly converting a
+    deliberate refusal into a teardown against the wrong identity. The ambiguity
+    refusal is about which session is provably this runtime; it is not evidence that
+    the key was read wrongly.
+    """
+
+    workdir = str(tmp_path / "repo")
+    agent_anchor = f"{ANCHOR}:/review"
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        first_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_one",
+            agent_backend="claude",
+            workdir=workdir,
+            session_anchor=agent_anchor,
+        )
+        second_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_two",
+            agent_backend="claude",
+            workdir=workdir,
+            session_anchor=agent_anchor,
+        )
+        assert first_id != second_id
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        composite_key = f"{agent_anchor}:{workdir}"
+
+        # The split lands on the anchor storage actually knows, ambiguity and all.
+        assert resolve_composite_teardown_split(
+            controller, composite_key, agent_backend="claude"
+        ) == (agent_anchor, workdir)
+        # ...and THAT anchor is the one the refusal then applies to.
+        assert (
+            resolve_teardown_session_ids(
+                controller,
+                session_anchor=agent_anchor,
+                workdir=workdir,
+                agent_backend="claude",
+            )
+            == []
+        )
+
+        async def _exercise() -> tuple[bool, bool]:
+            first_task = _live_turn(manager, first_id, "claude")
+            second_task = _live_turn(manager, second_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                return first_task.done(), second_task.done()
+            finally:
+                for task in (first_task, second_task):
+                    task.cancel()
+                await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+        first_done, second_done = asyncio.run(_exercise())
+
+        # Neither live turn is cancelled: the refusal survived the new split layer.
+        assert first_done is False
+        assert second_done is False
+        assert manager.in_flight[first_id].cancel_settled_by is None
+        assert manager.in_flight[second_id].cancel_settled_by is None
+    finally:
+        store.close()

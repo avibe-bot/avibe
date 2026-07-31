@@ -2004,3 +2004,77 @@ def test_end_holds_admission_through_the_backend_teardown_without_draining(monke
     # ...and nothing was drained: Stop does not flush the queue it left behind.
     assert manager._teardown_drain_owed == set()
     assert manager._teardown_drain_tasks == {}
+
+
+def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage():
+    """HFR-335: End's fallback resolve is a settlement path, so its split is verified.
+
+    ``_teardown_session_id`` falls back to the runtime identity whenever the
+    Running-tab row carries no ``session_id`` — a row built purely from live state. A
+    composite key whose anchor embeds a path-looking routing-agent name
+    (``base:/review:/repo``) splits lexically into an anchor that matches no row, so
+    the fallback would resolve NOTHING and End would tear the runtime down with its
+    runs still ``running``.
+
+    Both halves matter: the anchor must be the stored one, and the workdir must be its
+    complement — a teardown that resolves the right anchor against ``/review:/repo``
+    matches nothing either.
+    """
+    anchor = "slack_T1:/review"
+    workdir = "/repo"
+    probes = []
+
+    def _find(probe_anchor, *, workdir=None, agent_backend=None):
+        probes.append((probe_anchor, workdir, agent_backend))
+        if probe_anchor == anchor and workdir == "/repo":
+            return ["sess-review"]
+        return []
+
+    controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+
+    resolved = running_agents._teardown_session_id(
+        controller,
+        session_id=None,
+        composite_key=f"{anchor}:{workdir}",
+        base_session_id=None,
+        backend="claude",
+    )
+
+    assert resolved == "sess-review"
+    # Longest anchor first, so the stored one is the FIRST thing tried — the lexical
+    # reading (``slack_T1`` + ``/review:/repo``) is never used.
+    assert probes[0][:2] == (anchor, "/repo")
+    assert all(probe[1] != "/review:/repo" for probe in probes)
+
+
+def test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads():
+    """HFR-335: a row that already knows its anchor short-circuits the candidate walk.
+
+    ``preferred_anchor`` exists so the common End case pays nothing for the
+    disambiguation: the Running-tab row carries ``base_session_id``, which IS the
+    anchor, so the matching candidate is picked outright. It also fixes the workdir
+    half — pairing the row's anchor with a lexically-split workdir would resolve
+    nothing even though the anchor was right.
+    """
+    anchor = "slack_T1:/review"
+    probes = []
+
+    def _find(probe_anchor, *, workdir=None, agent_backend=None):
+        probes.append((probe_anchor, workdir, agent_backend))
+        return ["sess-review"] if workdir == "/repo" else []
+
+    controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+
+    resolved = running_agents._teardown_session_id(
+        controller,
+        session_id=None,
+        composite_key=f"{anchor}:/repo",
+        base_session_id=anchor,
+        backend="claude",
+    )
+
+    assert resolved == "sess-review"
+    # Exactly one read: the real resolve. The candidate probe never ran.
+    assert probes == [(anchor, "/repo", "claude")]
