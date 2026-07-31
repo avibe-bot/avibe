@@ -403,6 +403,170 @@ def test_interrupt_reason_survives_a_crash_between_defer_and_settle(tmp_path: Pa
     assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
 
 
+def test_parked_interrupt_reason_survives_settlement_through_record_run_output(
+    tmp_path: Path,
+) -> None:
+    """HFR-329 — ``settle_deferred_run`` is not the only consumer of the parked intent.
+
+    HFR-110 taught ``defer_run_terminal`` to park ``interrupt_reason`` and taught
+    ``settle_deferred_run`` to fold it into the guarded terminal UPDATE. It did not
+    teach the OTHER settling consumer of that family. ``record_run_output`` also pops
+    the deferred fields — status, error, result text — and applies them, and it is the
+    path a parked run takes whenever the backend's terminal output arrives before an
+    Activity lifecycle gets around to settling the intent. It popped three of the four
+    fields and never looked at the fourth, so the run settled with NO
+    ``interrupt_reason``: the notice picked the ordinary ``fail:`` lane instead of
+    ``interrupt:{run}:{reason}``, and derived health counted an out-of-band
+    interruption as one of the definition's own failures. Two user-visible systems
+    wrong, and the parked metadata left behind in ``result_payload_json`` forever for
+    a later reader to replay.
+
+    Driven through the REAL park road, not a hand-built payload: the manager lane's
+    ``_settle_agent_run_without_result`` with an eviction cause and an Activity that
+    owns the row, which is ``_park_or_settle_run`` withholding the settle (HFR-325).
+    """
+
+    from types import SimpleNamespace
+
+    from core.run_settlement import SETTLED_BY_EVICTED
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-parked", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-parked")
+    assert requests.claim(run.id) is not None
+    # The association a session teardown selects on, stamped where the reservation
+    # writes it.
+    assert sqlite.stamp_run_session_id(run.id, session_id="ses-parked") is True
+    assert sqlite.get_run(run.id)["status"] == "running"
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: True),
+        ),
+    )
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    assert (
+        service._settle_agent_run_without_result(
+            run.id,
+            settled_by=SETTLED_BY_EVICTED,
+            error="the session was reclaimed mid-turn",
+        )
+        is True
+    )
+
+    parked = sqlite.get_run(run.id)
+    assert parked["status"] == "running", "the Activity owns the row; nothing settles yet"
+    assert parked["result_payload"]["deferred_terminal_status"] == "failed"
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+
+    # The backend's terminal output arrives on the OTHER settling road. The delivered
+    # outcome loses the arbitration (``_stronger_terminal_status`` ranks ``failed``
+    # above ``succeeded``), so the parked cause is what actually settles this row and
+    # must ride the same guarded UPDATE.
+    result = sqlite.record_run_output(
+        run.id,
+        output_id="out-1",
+        text="the Activity's last words",
+        terminal_status="succeeded",
+    )
+    assert result["terminal_transition"] is True
+
+    settled = sqlite.get_run(run.id)
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+    notice = settled["metadata"][OWED_FAILURE_NOTICE_KEY]
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["failure_id"] == f"interrupt:{run.id}:evicted", (
+        "the interruption lane identity; the bare run id is the ordinary-failure one "
+        "and would let the dedup swallow this notice behind a backend failure for the "
+        "same execution"
+    )
+    # The whole deferred family is consumed by this settlement — a key left behind is
+    # a latent replay for the next reader of ``result_payload``.
+    assert not [
+        key
+        for key in (settled.get("result_payload") or {})
+        if key.startswith("deferred_terminal_")
+    ]
+
+    # And the second user-visible system: an out-of-band interruption is excluded from
+    # the definition's own failure history by MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``.
+    assert "evicted" in RUN_INTERRUPTION_REASONS
+    health = sqlite.definition_health("task-parked")
+    assert health["recent_failures"] == 0, (
+        "an eviction is not one of the definition's failures; counting it drives the "
+        "health badge and the auto-pause streak off a fault the definition did not have"
+    )
+    assert health["consecutive_failures"] == 0
+
+
+def test_a_parked_cause_does_not_mislabel_an_outcome_that_outranks_it(
+    tmp_path: Path,
+) -> None:
+    """HFR-329, §10.3 companion — the parked metadata rides only the status it won.
+
+    The mirror of the test above, and the reason the merge is CONDITIONAL rather than
+    unconditional. §10.3's rule is equality: no writer may leave a row carrying a
+    description that contradicts the status it settled. ``interrupt_reason`` is such a
+    description, and a stronger one than result text — it selects the notice identity
+    AND removes the row from derived health — so folding a parked cause into a
+    settlement that cause did not win would suppress a genuine backend failure from
+    the definition's history and mint an interruption identity for it.
+
+    ``defer_run_terminal`` is called directly here, unlike the test above: the
+    disagreement is not producible through the park road, which only ever parks
+    ``canceled`` for ``stopped`` and passes no metadata with it
+    (``_terminalize_cancelled_request`` nulls the metadata on the canceled branch).
+    The store-level contract still has to hold for it.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-outranked", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-outranked")
+    assert requests.claim(run.id) is not None
+    assert sqlite.defer_run_terminal(
+        run.id,
+        terminal_status="canceled",
+        metadata={"interrupt_reason": "stopped"},
+    )
+
+    # ``failed`` outranks ``canceled``, so the DELIVERED outcome wins the arbitration.
+    result = sqlite.record_run_output(
+        run.id,
+        output_id="out-1",
+        text="the backend blew up",
+        terminal_status="failed",
+        error="backend blew up",
+    )
+    assert result["terminal_transition"] is True
+
+    settled = sqlite.get_run(run.id)
+    assert settled["status"] == "failed"
+    assert "interrupt_reason" not in (settled.get("metadata") or {}), (
+        "a cause that lost the arbitration must not describe the outcome that won it"
+    )
+    notice = settled["metadata"][OWED_FAILURE_NOTICE_KEY]
+    assert notice["failure_id"] == run.id, (
+        "the ordinary-failure identity, which is what the live path's dedup key "
+        "resolves to; an interruption identity here is one duplicate notification"
+    )
+    assert notice["interrupt_reason"] is None
+    # Consumed either way: the deferred intent was settled by this call, so no key of
+    # the family may survive it.
+    assert not [
+        key
+        for key in (settled.get("result_payload") or {})
+        if key.startswith("deferred_terminal_")
+    ]
+    # The failure is the definition's own, and stays in its history.
+    health = sqlite.definition_health("task-outranked")
+    assert health["recent_failures"] == 1
+    assert health["consecutive_failures"] == 1
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 

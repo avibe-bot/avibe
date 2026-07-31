@@ -3164,6 +3164,60 @@ scenarios:
     # Companion carrying this same id (the enqueue-stamp root cause):
     # tests/test_scheduled_tasks.py::test_definition_run_enqueue_stamps_the_agent_backend
     test: tests/test_running_agents_service.py::test_end_refuses_to_cancel_an_unprovable_scheduler_lane
+  - id: HFR-329
+    name: a parked interrupt cause survives settlement through record_run_output
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 8, and HFR-110 left unfinished. HFR-110 added a FOURTH field to
+    # the deferred-terminal family -- deferred_terminal_metadata, carrying the
+    # interrupt_reason a teardown records at park time -- and taught exactly ONE
+    # consumer about it: settle_deferred_run. record_run_output is the family's OTHER
+    # SETTLING consumer. It popped deferred_terminal_status / _error / _result_text and
+    # applied them, and never looked at the fourth, so a run whose intent was parked
+    # (HFR-127 / HFR-325, a blocking Activity owning the row) and whose backend output
+    # then arrived on THIS road settled with no interrupt_reason at all.
+    # TWO USER-VISIBLE SYSTEMS, from one missing merge:
+    # 1. NOTICE IDENTITY. _owed_failure_notice_for_transition reads interrupt_reason
+    #    from the merged metadata and picks the lane by MEMBERSHIP in
+    #    RUN_INTERRUPTION_REASONS. Without the cause the run took the ordinary-failure
+    #    identity (the bare run id) instead of interrupt:{run}:{reason} -- the shared
+    #    identity the drain's dedup can silently swallow behind an ordinary backend
+    #    failure notice for the same execution, which is precisely the D1 loss HFR-102
+    #    exists to prevent.
+    # 2. DERIVED HEALTH. The health window and the failure streak exclude out-of-band
+    #    interruptions by that same membership, so an eviction was counted as one of
+    #    the definition's own failures and drove the badge and auto-pause off a fault
+    #    the definition did not have.
+    # Plus the stale key itself: unpopped, deferred_terminal_metadata stayed in
+    # result_payload_json forever, a parked cause with no settlement left to reach.
+    # FIX: pop all four (ALWAYS -- this call consumes the intent either way) and merge
+    # the metadata via extra_metadata into the SAME guarded terminal UPDATE, exactly as
+    # settle_deferred_run does.
+    # THE MERGE IS CONDITIONAL, per §10.3 equality: the parked cause rides along IFF
+    # normalize_run_status(the status that actually settles) equals the deferred one --
+    # the cause won or tied the arbitration. Decided INSIDE the bounded re-read against
+    # the status that attempt writes, never the pre-loop value, because
+    # _cancel_aware_terminal_status can turn failed into canceled on the second pass.
+    # A superseded cause is dropped and logged at debug. Stricter than the sibling
+    # deferred_error, which still overrides unconditionally (unchanged): text
+    # contradictions are §10.3-guarded separately by the equality backfill, whereas a
+    # wrongly merged interrupt_reason is wrong in BOTH systems above at once.
+    # The already-terminal backfill branch drops it too: the notice is never re-stamped,
+    # so a cause written after another writer's transition could not reach the lane
+    # decision -- too late is the same as never (HFR-110).
+    # LESSON, §10.10's "four symptoms, four patches, one root left standing" applied to
+    # a data family rather than an emitter: a field added to a shared payload must be
+    # applied at EVERY consumer the family names, and the audit is the fix. The other
+    # five readers were audited and are read-only gates keying on
+    # deferred_terminal_status alone (list_deferred_runs, settle_without_result's
+    # deferred-owner decline, recover_processing_runs' and sweep_stale_runs'
+    # exemptions, the teardown reconciler's) -- they consume nothing and are untouched.
+    # Companion carrying this same id (the §10.3 half -- a parked canceled cause must
+    # not mislabel a delivered failure that outranks it, and must still be consumed):
+    # tests/test_harness_failure_visibility.py::test_a_parked_cause_does_not_mislabel_an_outcome_that_outranks_it
+    test: tests/test_harness_failure_visibility.py::test_parked_interrupt_reason_survives_settlement_through_record_run_output
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
