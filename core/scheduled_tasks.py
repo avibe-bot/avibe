@@ -470,6 +470,21 @@ class SessionCancellationResult:
     claimed_run_ids: frozenset[str]
 
 
+@dataclass(frozen=True)
+class SessionTeardownResult:
+    """What one full teardown settled: the cancellation plus the reconcile behind it.
+
+    ``reconciled_count`` is expected to be ZERO and is worth reporting for exactly
+    that reason. The cancel is the mechanism; the reconcile is the backstop, so a
+    non-zero value is evidence that some claim escaped the two lookup joins — a
+    signal about the joins, not routine work.
+    """
+
+    cancelled_count: int
+    reconciled_count: int
+    claimed_run_ids: frozenset[str]
+
+
 #: Durable definition-metadata key recording the last binding recovery, so a
 #: definition that keeps hitting the same dead session is reported once and not
 #: once per cron minute.
@@ -1883,6 +1898,19 @@ class TaskExecutionStore:
             not in TERMINAL_RUN_STATUSES
         ]
 
+    def list_open_runs_for_session(self, session_id: str) -> list[dict[str, Any]]:
+        """Still-open Runs associated with one session.
+
+        Empty on the legacy file store, and that is a statement rather than a gap:
+        nothing there ever writes a run <-> session association, so "no rows" is the
+        honest answer to "which runs belong to this session" on that backend, not a
+        lookup that failed.
+        """
+
+        if self._sqlite is None:
+            return []
+        return self._sqlite.list_open_runs_for_session(session_id)
+
     def find_callback_run(
         self,
         *,
@@ -3007,6 +3035,191 @@ class ScheduledTaskService:
         return SessionCancellationResult(
             cancelled_count=cancelled_count,
             claimed_run_ids=claimed_run_ids,
+        )
+
+    def reconcile_session_teardown(
+        self,
+        session_id: str,
+        *,
+        settled_by: str,
+        claimed_run_ids: "frozenset[str] | set[str]",
+    ) -> int:
+        """Settle the runs a session teardown interrupted that the cancel did not reach.
+
+        Runs AFTER :meth:`cancel_session_executions` has awaited its cancellations, so
+        in the happy path it finds nothing: the cancelled execution's own handler
+        already wrote the terminal row. It exists for the cases where no handler will
+        ever run — an execution whose in-memory entry was lost, a turn whose task had
+        already exited, a claim this process holds through a path the two lookup joins
+        cannot express.
+
+        SELECTION IS A THREE-WAY INTERSECTION, and each leg answers a different
+        question that the other two cannot:
+
+        1. ``claimed_run_ids`` — the PRE-CANCEL ownership snapshot. "Was this run ours
+           to interrupt?" By the time this method runs, ``_on_execution_done`` and
+           ``SessionTurnManager._run``'s ``finally`` have erased the live maps, so the
+           snapshot is the only surviving proof. Without it a ``running`` row is
+           indistinguishable from one another process (or a future execution that
+           acquired the session microseconds ago) legitimately owns.
+        2. ``agent_runs.session_id`` — "Was it running in the session being torn
+           down?" This is the DB half, and it is what catches the ``create_per_run``
+           row that no session-keyed map ever knew about: its association was stamped
+           at reservation precisely so this query can find it. Because the snapshot in
+           (1) is process-scoped rather than session-filtered, that row survives the
+           intersection instead of being excluded by the very map-miss it exists for.
+        3. The narrowed predicate below — "Was it actually interrupted?"
+
+        THE PREDICATE IS NARROWER THAN THE WRITER'S GUARD, ON PURPOSE.
+        ``settle_run_terminal`` accepts ``queued|running``; this selection accepts far
+        less, and the narrowing lives here rather than in the writer because it is a
+        statement about teardown, not about settlement in general. Excluded:
+
+        - ``queued`` rows that never started. A queued run pinned to the session is
+          FUTURE work, not interrupted work — nothing has happened to it yet, no
+          prompt has been sent, and failing it would destroy a dispatch that is still
+          perfectly valid after the session is recreated.
+        - gate-parked followers carrying ``workbench_queue_holds_run``. Their
+          ``running`` means "accepted, not yet started" — the same carve-out D1 records
+          for restart recovery. Terminalizing one destroys work that was always going
+          to run and prevents no duplicate prompt, because no prompt was ever sent.
+        - ``watch_runtime`` rows: the waiter-process heartbeat, not an agent turn.
+        - rows carrying a deferred terminal intent: the Activity lifecycle owns their
+          terminal state, and the intent already records what they will settle as.
+
+        The last two are exactly the exemptions ``recover_processing_runs`` and
+        ``sweep_stale_runs`` already honour. They are re-stated here rather than
+        shared, because those two are PR7's to change and this one must not move when
+        they do.
+
+        Status and copy come only from ``core.run_settlement``'s tables; this site
+        contributes the cause. ``interrupt_reason`` is written only for causes that
+        settle to something other than ``canceled`` — a user's own Stop is not an
+        interruption and is owed no notice. The guarded writer folds the owed-notice
+        stamp into the same UPDATE, so PR6's drain delivers; nothing here calls the
+        live emitter.
+
+        Returns how many rows this pass actually settled.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved or not claimed_run_ids:
+            # No session, or this process owned nothing when the teardown began.
+            # Either way there is provably nothing this teardown may settle, and
+            # skipping the read keeps the happy path free of a query.
+            return 0
+        owned = {str(run_id) for run_id in claimed_run_ids if run_id}
+        if not owned:
+            return 0
+        try:
+            rows = self.request_store.list_open_runs_for_session(resolved)
+        except Exception:
+            logger.warning(
+                "Session %s teardown reconcile could not read its open runs",
+                resolved,
+                exc_info=True,
+            )
+            return 0
+        if not rows:
+            return 0
+
+        terminal_status = SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed")
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(
+                settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_INTERRUPTED]
+            )
+        )
+        metadata = (
+            {"interrupt_reason": settled_by} if terminal_status != "canceled" else None
+        )
+        settled = 0
+        for row in rows:
+            run_id = str(row.get("id") or "").strip()
+            if not run_id or run_id not in owned:
+                # Leg 1: never ours, so never ours to settle.
+                continue
+            if str(row.get("status") or "") != "running":
+                # Leg 3a: queued work survives a teardown.
+                continue
+            if str(row.get("run_type") or "") == "watch_runtime":
+                continue
+            result_payload = row.get("result_payload")
+            if isinstance(result_payload, dict) and result_payload.get(
+                "deferred_terminal_status"
+            ):
+                continue
+            row_metadata = row.get("metadata")
+            if isinstance(row_metadata, dict) and row_metadata.get(
+                "workbench_queue_holds_run"
+            ):
+                # Leg 3b: parked behind the gate, i.e. accepted but not started.
+                continue
+            try:
+                written = self.request_store.settle_without_result(
+                    run_id,
+                    terminal_status=terminal_status,
+                    error=error_text,
+                    metadata=metadata,
+                )
+            except Exception:
+                logger.warning(
+                    "Session %s teardown reconcile failed to settle run %s as %s",
+                    resolved,
+                    run_id,
+                    settled_by,
+                    exc_info=True,
+                )
+                continue
+            if written:
+                settled += 1
+        if settled:
+            self._drain_dirty = True
+            logger.warning(
+                "Session %s teardown reconciled %d run(s) the cancellation did not "
+                "reach; settled %s (%s)",
+                resolved,
+                settled,
+                terminal_status,
+                settled_by,
+            )
+        return settled
+
+    async def teardown_session_runs(
+        self,
+        session_id: str,
+        *,
+        settled_by: str,
+        include_manager_lane: bool = True,
+    ) -> SessionTeardownResult:
+        """Cancel, await, then reconcile — the whole settlement half of a teardown.
+
+        THE ORDER IS THE CONTRACT, and it is why this exists as one method rather than
+        as two calls at each entry. Cancel first so the live handlers write their own
+        terminal rows with their own knowledge; await so those writes have landed;
+        reconcile only afterwards, over what the cancel provably could not reach. An
+        entry that reconciled first would settle rows that were about to settle
+        themselves, and an entry that skipped the await would race its own reconcile.
+
+        Every run-blind teardown calls this BEFORE dismantling the backend, for the
+        reason the whole PR exists: a torn-down backend can no longer settle its own
+        turn, so a settlement deferred past teardown is a settlement that never
+        happens.
+        """
+
+        cancellation = await self.cancel_session_executions(
+            session_id,
+            settled_by=settled_by,
+            include_manager_lane=include_manager_lane,
+        )
+        reconciled = self.reconcile_session_teardown(
+            session_id,
+            settled_by=settled_by,
+            claimed_run_ids=cancellation.claimed_run_ids,
+        )
+        return SessionTeardownResult(
+            cancelled_count=cancellation.cancelled_count,
+            reconciled_count=reconciled,
+            claimed_run_ids=cancellation.claimed_run_ids,
         )
 
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:

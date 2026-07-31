@@ -2802,6 +2802,248 @@ def test_cancel_session_executions_finds_a_create_per_run_execution(
     assert settled["metadata"]["interrupt_reason"] == "evicted"
 
 
+def test_session_scoped_reconciler_settles_a_map_missed_row(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-113: the DB association is what catches the claim the maps lost.
+
+    The reconciler's whole job is the row no in-memory join can name. This drives the
+    real failure: a ``create_per_run`` execution — the one policy with no session lock
+    key at all — whose dedicated ``run id -> session id`` entry has gone missing, so
+    BOTH scheduler-lane lookups come up empty and the cancellation reaches nothing.
+    What survives is the pair the reconciler intersects: the row's ``session_id``,
+    stamped at reservation precisely for this, and the pre-cancel ownership snapshot,
+    which is process-scoped rather than session-filtered for precisely this — a
+    session-filtered snapshot would have excluded the very row it exists to find.
+
+    Asserted with the cause and the owed notice, not just terminality: a row settled
+    without ``interrupt_reason`` tells the user nothing about why, and one without the
+    stamp is a failure PR6's drain will never deliver.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_name = _ensure_reservation_agent()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        prompt="a runtime-session turn whose association was lost",
+        deliver_key="slack::channel::C123",
+        agent_name=agent_name,
+        session_policy="create_per_run",
+        run_type="watch",
+    )
+    turn_started, on_turn = _hanging_turn()
+    controller = _SettlementControllerDouble(on_turn=on_turn)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        # The map miss itself. Everything else about the execution stays real: it is
+        # still in ``_inflight_executions`` (so still in the snapshot) and its row
+        # still names the session (so still selectable).
+        reserved = service._execution_session_ids.pop(request.id)
+        observed["reserved"] = reserved
+        assert service._session_lock_cache.get(reserved) is None
+        assert service._session_lock_owners == {}
+        observed["result"] = await service.teardown_session_runs(
+            reserved,
+            settled_by=SETTLED_BY_EVICTED,
+        )
+        execution = service._inflight_executions.get(request.id)
+        if execution is not None:
+            execution.cancel()
+            await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    result = observed["result"]
+    # The cancel provably could not reach it — which is the condition this backstop
+    # exists for, so asserting it is what keeps the test honest about what settled.
+    assert result.cancelled_count == 0
+    assert result.reconciled_count == 1
+    assert request.id in result.claimed_run_ids
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+    notice = settled["metadata"]["owed_failure_notice"]
+    assert notice["state"] == "pending"
+    assert notice["failure_id"] == f"interrupt:{request.id}:evicted"
+
+
+def _running_run_for_session(
+    request_store: TaskExecutionStore,
+    *,
+    session_id: str,
+    prompt: str,
+    status: str = "running",
+    metadata: Optional[dict[str, Any]] = None,
+) -> str:
+    """A run row associated with ``session_id``, forced to ``status``.
+
+    Written straight to the row because the reconciler's predicate reads the ROW, and
+    reproducing each excluded shape through its real producer (the gate, the watch
+    supervisor) would test those producers instead of the selection.
+    """
+
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message=prompt,
+        agent_name="codex",
+    )
+    engine = create_sqlite_engine()
+    values: dict[str, Any] = {"session_id": session_id, "status": status}
+    if metadata is not None:
+        values["metadata_json"] = json.dumps(metadata)
+    with engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == request.id).values(**values))
+    return request.id
+
+
+def test_queued_not_started_run_survives_teardown_reconciliation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-114: a queued run pinned to the session is future work, not lost work.
+
+    Nothing has happened to it — no prompt sent, no side effect, no partial turn — so
+    there is no duplicate to prevent and nothing to report. Failing it would destroy a
+    dispatch that is still perfectly valid once the session is recreated, which is why
+    the reconciler's predicate is narrower than ``settle_run_terminal``'s
+    ``queued|running`` guard: the writer would happily take this row.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=_SettlementControllerDouble(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    run_id = _running_run_for_session(
+        request_store,
+        session_id="session-teardown-114",
+        prompt="dispatched after the session comes back",
+        status="queued",
+    )
+
+    settled_count = service.reconcile_session_teardown(
+        "session-teardown-114",
+        settled_by=SETTLED_BY_EVICTED,
+        # Owned by this process AND on the torn-down session: both other legs of the
+        # intersection are satisfied, so only the predicate can spare this row.
+        claimed_run_ids=frozenset({run_id}),
+    )
+
+    assert settled_count == 0
+    survivor = request_store.get_run(run_id)
+    assert survivor is not None
+    assert survivor["status"] == "queued"
+    assert survivor["completed_at"] is None
+    assert not (survivor["metadata"] or {}).get("interrupt_reason")
+
+
+def test_gate_parked_follower_survives_teardown_reconciliation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-123: ``running`` on a parked follower means "accepted", not "mid-turn".
+
+    D1's carve-out. A follower holding a workbench queue slot has been admitted but
+    never started, so terminalizing it destroys work that was always going to run and
+    prevents no duplicate prompt. The row's status alone cannot tell the two apart —
+    only ``workbench_queue_holds_run`` can — which is why the exemption is read off
+    the metadata rather than derived from the status.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=_SettlementControllerDouble(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    run_id = _running_run_for_session(
+        request_store,
+        session_id="session-teardown-123",
+        prompt="parked behind the live turn",
+        metadata={"workbench_queue_holds_run": True},
+    )
+
+    settled_count = service.reconcile_session_teardown(
+        "session-teardown-123",
+        settled_by=SETTLED_BY_EVICTED,
+        claimed_run_ids=frozenset({run_id}),
+    )
+
+    assert settled_count == 0
+    survivor = request_store.get_run(run_id)
+    assert survivor is not None
+    assert survivor["status"] == "running"
+    assert not (survivor["metadata"] or {}).get("interrupt_reason")
+
+
+def test_reconciler_does_not_settle_an_unrelated_running_row_on_the_same_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-125: sharing a session is not evidence that WE interrupted a run.
+
+    A session id selects rows; it does not prove ownership. Another process — or a
+    later execution that acquired the session after the snapshot — can hold a
+    perfectly live claim on the same session, and settling it would kill a healthy
+    run and hand its user a failure notice for something that never failed. The
+    pre-cancel snapshot is the only surviving proof of which claims were ours, so it
+    is a required leg of the intersection rather than an optimisation.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=_SettlementControllerDouble(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    ours = _running_run_for_session(
+        request_store,
+        session_id="session-teardown-125",
+        prompt="our interrupted claim",
+    )
+    theirs = _running_run_for_session(
+        request_store,
+        session_id="session-teardown-125",
+        prompt="somebody else's live claim",
+    )
+
+    settled_count = service.reconcile_session_teardown(
+        "session-teardown-125",
+        settled_by=SETTLED_BY_EVICTED,
+        claimed_run_ids=frozenset({ours}),
+    )
+
+    assert settled_count == 1
+    interrupted = request_store.get_run(ours)
+    assert interrupted is not None
+    assert interrupted["status"] == "failed"
+    assert interrupted["metadata"]["interrupt_reason"] == "evicted"
+
+    untouched = request_store.get_run(theirs)
+    assert untouched is not None
+    assert untouched["status"] == "running"
+    assert untouched["completed_at"] is None
+    assert not (untouched["metadata"] or {}).get("interrupt_reason")
+
+
 def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
     tmp_path: Path,
     monkeypatch,

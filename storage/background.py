@@ -2874,6 +2874,42 @@ class SQLiteBackgroundTaskStore:
                 deferred.append(self._run_from_row(row))
         return deferred
 
+    def list_open_runs_for_session(self, session_id: str) -> list[dict[str, Any]]:
+        """Every still-open Run associated with one session, newest last.
+
+        The DB half of a session teardown. A teardown knows which session it is
+        reclaiming and needs the rows that session may still owe a terminal write —
+        including the ones no in-memory map can name, which is the whole reason this
+        read exists rather than a walk over ``_inflight_executions``: a
+        ``create_per_run`` execution has no session lock key by design, so its only
+        durable association is the ``session_id`` stamped onto the row at reservation
+        (:meth:`stamp_run_session_id`).
+
+        Deliberately UNFILTERED beyond "this session, not terminal". It returns
+        ``queued`` rows, gate-parked holders and ``watch_runtime`` heartbeats too,
+        because the decision about which of those a teardown may settle is a policy
+        the caller owns and must state in one visible place — a read that quietly
+        pre-narrowed would hide half the predicate in SQL where no reviewer of the
+        settlement rule would look for it.
+
+        Read-only: no row is written, so a caller that only wants to look costs
+        nothing.
+        """
+
+        resolved = str(session_id or "").strip()
+        if not resolved:
+            return []
+        with self.engine.connect() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.session_id == resolved)
+                    .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                ).mappings()
+            )
+        return [self._run_from_row(row) for row in rows]
+
     def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
         terminal_statuses = _status_query_values("succeeded") + _status_query_values("failed") + _status_query_values("canceled")
         with self.engine.connect() as conn:
