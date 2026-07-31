@@ -3546,7 +3546,18 @@ def vibe_agents_get():
             "true",
             "yes",
         }
-        return jsonify(api.get_vibe_agents(backend=request.args.get("backend") or None, include_disabled=include_disabled))
+        include_archived = str(request.args.get("include_archived") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        return jsonify(
+            api.get_vibe_agents(
+                backend=request.args.get("backend") or None,
+                include_disabled=include_disabled,
+                include_archived=include_archived,
+            )
+        )
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 
@@ -6532,7 +6543,7 @@ async def sessions_bootstrap(session_id: str):
         draft = messages_service.get_draft(conn, session_id)
 
     try:
-        agents_payload = vibe_api.get_vibe_agents(include_disabled=False)
+        agents_payload = vibe_api.get_vibe_agents(include_disabled=False, include_archived=True)
     except Exception:
         logger.exception("sessions_bootstrap: failed to load Vibe Agents")
         agents_payload = {"agents": [], "default_agent_name": None}

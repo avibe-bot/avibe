@@ -47,7 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchiveError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
@@ -2503,7 +2503,7 @@ def _resolve_agent_for_target(
         requested = store.require_enabled(agent_name) if agent_name else None
         if session_id:
             target = resolve_session_id_target(session_id)
-            session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            session_agent = store.require_reference(target.agent_name) if target.agent_name else None
             if requested is not None and session_agent is not None and requested.name != session_agent.name:
                 raise TaskCliError(
                     "agent does not match the existing session agent",
@@ -2537,7 +2537,7 @@ def _resolve_agent_for_target(
         if session_key:
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
-                return store.require_enabled(scope_target.agent_name)
+                return store.require_reference(scope_target.agent_name)
 
         return store.get_default_agent()
     finally:
@@ -2559,7 +2559,7 @@ def _resolve_agent_for_session_reservation(
     store = _agent_store()
     try:
         if resolved_agent_name:
-            return store.require_enabled(resolved_agent_name)
+            return store.require_reference(resolved_agent_name)
         return store.get_default_agent()
     finally:
         store.close()
@@ -2730,10 +2730,13 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
         return {
             "id": payload["id"],
             "name": payload["name"],
+            "display_name": payload["display_name"],
             "backend": payload["backend"],
             "model": payload["model"],
             "reasoning_effort": payload["reasoning_effort"],
             "enabled": payload["enabled"],
+            "archived": payload["archived"],
+            "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
@@ -3897,26 +3900,28 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
 def cmd_agent_remove(args):
     try:
         store = _agent_store()
-        counts = store.reference_counts(args.name)
-        if any(counts.values()):
-            raise TaskCliError(
-                f"agent '{args.name}' is still referenced",
-                code="agent_in_use",
-                hint="Reassign or remove the referencing scopes, sessions, tasks, or watches before deleting this Agent.",
-                details={"agent": args.name, "references": counts},
-            )
         try:
-            removed = store.remove(args.name)
-        except ValueError as exc:
+            archived = store.archive(args.name)
+        except AgentArchiveError as exc:
             raise TaskCliError(
                 str(exc),
-                code="agent_builtin",
-                hint="Built-in default Agents are created from enabled Backends and cannot be deleted.",
+                code=exc.code,
+                hint=(
+                    "Built-in default Agents are created from enabled Backends and cannot be deleted."
+                    if exc.code == "agent_builtin"
+                    else "Keep another enabled Agent available when archiving the current default."
+                ),
                 details={"agent": args.name},
             ) from exc
-        if not removed:
+        if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
-        _print_cli_payload("agent", removed_agent=args.name)
+        _print_cli_payload(
+            "agent",
+            removed_agent=archived.original_name,
+            archived_agent=_agent_payload(archived.agent, brief=True),
+            references=archived.references,
+            default_agent_name=archived.default_agent_name,
+        )
         return 0
     except Exception as exc:
         _print_task_error(exc)

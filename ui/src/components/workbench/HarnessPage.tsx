@@ -399,7 +399,7 @@ export const HarnessPage: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     api
-      .listVibeAgents({ includeDisabled: true })
+      .listVibeAgents({ includeDisabled: true, includeArchived: true })
       .then((res) => {
         if (cancelled) return;
         const map: Record<string, VibeAgentBrief> = {};
@@ -1790,15 +1790,17 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   return (
     <div className="flex min-w-0 items-center gap-2">
       <Bot className="size-3.5 shrink-0 text-violet" />
-      <span className="shrink-0 text-[12px] font-medium text-foreground">{agentName}</span>
+      <span className="shrink-0 text-[12px] font-medium text-foreground">{agent?.display_name || agentName}</span>
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
-      <Link
-        to="/agents"
-        className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
-      >
-        {t('harness.detail.openInAgents')}
-        <ArrowUpRight className="size-3" />
-      </Link>
+      {!agent?.archived && (
+        <Link
+          to="/agents"
+          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
+        >
+          {t('harness.detail.openInAgents')}
+          <ArrowUpRight className="size-3" />
+        </Link>
+      )}
     </div>
   );
 };

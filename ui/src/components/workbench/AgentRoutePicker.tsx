@@ -142,15 +142,18 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const currentAgent = displayValue.agent_name;
   const currentModel = displayValue.model;
   const currentEffort = displayValue.reasoning_effort;
-  const triggerLabel = (routeIsDefault && defaultLabel) || currentAgent || defaultLabel || t('chat.pickAgent');
-  const compactTriggerLabel = currentAgent || defaultLabel || t('chat.pickAgent');
+  const currentAgentLabel = displayedAgent?.display_name || currentAgent;
+  const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
+  const compactTriggerLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
 
   const allowedBackendSet = useMemo(
     () => new Set((allowedBackends ?? []).map((item) => item.trim()).filter(Boolean)),
     [allowedBackends],
   );
   const visibleAgents = useMemo(
-    () => (allowedBackendSet.size === 0 ? agents : agents.filter((agent) => allowedBackendSet.has(agent.backend))),
+    () => agents.filter(
+      (agent) => agent.enabled && !agent.archived && (allowedBackendSet.size === 0 || allowedBackendSet.has(agent.backend)),
+    ),
     [agents, allowedBackendSet],
   );
 

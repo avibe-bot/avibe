@@ -628,12 +628,12 @@ export type ApiContextType = {
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
-  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean; includeArchived?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
-  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
+  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
   listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -827,11 +827,14 @@ export type WorkbenchSessionUpdate = {
 export type VibeAgentBrief = {
   id: string;
   name: string;
+  display_name: string;
   description: string | null;
   backend: string;
   model: string | null;
   reasoning_effort: string | null;
   enabled: boolean;
+  archived: boolean;
+  archived_at: string | null;
   source: string;
   updated_at: string;
 };
@@ -940,6 +943,7 @@ export type SkillsCheckResult = {
 };
 
 export type VibeAgentUpdatePayload = {
+  name?: string;
   description?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
@@ -2904,6 +2908,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.backend) search.set('backend', params.backend);
       if (params?.includeDisabled) search.set('include_disabled', '1');
+      if (params?.includeArchived) search.set('include_archived', '1');
       const qs = search.toString();
       return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
     },

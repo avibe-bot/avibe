@@ -2792,6 +2792,22 @@ def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
     assert updated["agent"]["model"] == "gpt-5.5"
 
 
+def test_vibe_agent_api_delete_archives_and_hides_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    api.create_vibe_agent({"name": "reviewer", "backend": "codex"})
+
+    removed = api.remove_vibe_agent("reviewer")
+
+    assert removed["ok"] is True
+    assert removed["removed_agent"] == "reviewer"
+    assert removed["archived_agent"]["name"].startswith("_archived_")
+    assert removed["archived_agent"]["display_name"] == "reviewer"
+    assert removed["archived_agent"]["archived"] is True
+    assert "reviewer" not in [agent["name"] for agent in api.get_vibe_agents(include_disabled=True)["agents"]]
+    archived = api.get_vibe_agents(include_disabled=True, include_archived=True)["agents"]
+    assert removed["archived_agent"]["name"] in [agent["name"] for agent in archived]
+
+
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 

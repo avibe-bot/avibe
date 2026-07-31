@@ -1309,7 +1309,7 @@ class Controller:
         )
         try:
             if agent_name:
-                return self.vibe_agent_store.require_enabled(agent_name)
+                return self.vibe_agent_store.require_reference(agent_name)
             default_agent = self.vibe_agent_store.get_default_agent()
             if default_agent is not None:
                 return default_agent

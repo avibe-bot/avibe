@@ -2588,7 +2588,6 @@
     "importFailed": "Import failed: {{error}}",
     "importNoneFound": "No {{backend}} agents found on disk to import.",
     "renameSuccess": "Agent renamed",
-    "renameKeptOld": "Agent renamed (old one kept due to references)",
     "searchPlaceholder": "Search agents…",
     "backendFilter": "Backend",
     "backendAll": "All",
@@ -2597,8 +2596,7 @@
     "empty": "No agents yet. Create one to start a conversation.",
     "selectPrompt": "Select an agent to view its configuration.",
     "makeDefault": "Make default",
-    "deleteConfirm": "Delete agent \"{{name}}\"? This cannot be undone.",
-    "deleteInUse": "Agent \"{{name}}\" is currently in use by one or more channels and cannot be deleted.",
+    "deleteConfirm": "Archive agent \"{{name}}\"? It will disappear from Agents, while existing sessions and automations keep their saved configuration.",
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",

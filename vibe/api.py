@@ -68,6 +68,7 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    AgentArchiveError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
@@ -1308,11 +1309,14 @@ def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
         return {
             "id": payload["id"],
             "name": payload["name"],
+            "display_name": payload["display_name"],
             "description": payload["description"],
             "backend": payload["backend"],
             "model": payload["model"],
             "reasoning_effort": payload["reasoning_effort"],
             "enabled": payload["enabled"],
+            "archived": payload["archived"],
+            "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
@@ -1328,12 +1332,20 @@ def _parse_agent_enabled_field(payload: dict, *, default: Optional[bool] = None)
     raise ValueError("Agent enabled must be a JSON boolean")
 
 
-def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = False) -> dict:
+def get_vibe_agents(
+    *,
+    backend: Optional[str] = None,
+    include_disabled: bool = False,
+    include_archived: bool = False,
+) -> dict:
     _ensure_builtin_default_agents()
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
-        agents = store.list_agents(include_disabled=include_disabled)
+        agents = store.list_agents(
+            include_disabled=include_disabled,
+            include_archived=include_archived,
+        )
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
@@ -1386,8 +1398,6 @@ def create_vibe_agent(payload: dict) -> dict:
 def update_vibe_agent(name: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
-    if "name" in payload and str(payload.get("name") or "").strip() and str(payload.get("name")).strip() != name:
-        raise ValueError("Agent name is immutable")
     if "backend" in payload:
         raise ValueError("Agent backend is immutable")
 
@@ -1422,12 +1432,16 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
     unknown = sorted(set(payload) - allowed_fields - {"name"})
     if unknown:
         raise ValueError(f"Unsupported Agent fields: {', '.join(unknown)}")
-    if not kwargs:
+    new_name = str(payload.get("name") or "").strip() if "name" in payload else ""
+    renaming = bool(new_name and new_name != name)
+    if renaming and kwargs:
+        raise ValueError("Agent rename cannot be combined with other field updates")
+    if not kwargs and not renaming:
         raise ValueError("No editable Agent fields were provided")
 
     store = VibeAgentStore()
     try:
-        agent = store.update(name, **kwargs)
+        agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1436,25 +1450,23 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        counts = store.reference_counts(name)
-        if any(counts.values()):
-            return {
-                "ok": False,
-                "code": "agent_in_use",
-                "message": f"agent '{name}' is still referenced",
-                "references": counts,
-            }
         try:
-            removed = store.remove(name)
-        except ValueError as exc:
+            archived = store.archive(name)
+        except AgentArchiveError as exc:
             return {
                 "ok": False,
-                "code": "agent_builtin",
+                "code": exc.code,
                 "message": str(exc),
             }
-        if not removed:
+        if archived is None:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}
-        return {"ok": True, "removed_agent": name}
+        return {
+            "ok": True,
+            "removed_agent": archived.original_name,
+            "archived_agent": _vibe_agent_payload(archived.agent, brief=True),
+            "references": archived.references,
+            "default_agent_name": archived.default_agent_name,
+        }
     finally:
         store.close()
 
@@ -4116,7 +4128,7 @@ def get_settings(platform: Optional[str] = None) -> dict:
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents()
+    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
     return payload
 
 

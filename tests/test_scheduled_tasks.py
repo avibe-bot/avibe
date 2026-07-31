@@ -9928,7 +9928,7 @@ def test_rebind_propagates_an_operational_fault_instead_of_resetting_the_route(
     def _contended(self, name):  # noqa: ANN001
         raise OperationalError("SELECT agents.id ...", {}, sqlite3.OperationalError("database is locked"))
 
-    monkeypatch.setattr(VibeAgentStore, "require_enabled", _contended)
+    monkeypatch.setattr(VibeAgentStore, "require_reference", _contended)
 
     reloaded = store.get_task(task.id)
     assert reloaded is not None

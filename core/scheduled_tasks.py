@@ -5999,7 +5999,7 @@ class ScheduledTaskService:
         try:
             scope_target = self._resolve_scope_agent_target(scope_id) if scope_id and not agent_name else _ScopeAgentTarget(None)
             resolved_agent_name = agent_name or scope_target.agent_name
-            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
+            agent = agent_store.require_reference(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
         finally:
             agent_store.close()
         if agent is None:

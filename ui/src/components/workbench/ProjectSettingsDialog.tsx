@@ -37,7 +37,7 @@ export const ProjectSettingsDialog: React.FC<{
     if (!open) return;
     let cancelled = false;
     api
-      .listVibeAgents({ includeDisabled: false })
+      .listVibeAgents({ includeDisabled: false, includeArchived: true })
       .then((res) => {
         if (!cancelled) setAgents(res.agents);
       })

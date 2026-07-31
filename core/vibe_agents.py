@@ -12,7 +12,7 @@ from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 import yaml
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -27,6 +27,8 @@ DEFAULT_AGENT_NAME = "default"
 DEFAULT_AGENT_META_KEY = "default_agent_name"
 BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "lock_delete": True}
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
+AGENT_ARCHIVE_METADATA_KEY = "_avibe_archive"
+ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
 SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
 RECOMMENDED_AGENT_MODELS = {
     "claude": "claude-opus-5",
@@ -65,6 +67,14 @@ class AgentUnavailableError(ValueError):
         self.reason = str(reason)
 
 
+class AgentArchiveError(ValueError):
+    """A catalog rule refused an otherwise valid archive request."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -101,6 +111,32 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return default
 
 
+def _rewrite_scope_agent_name(raw: str | None, old_name: str, new_name: str) -> tuple[str, bool]:
+    payload = _json_loads(raw, {})
+    if not isinstance(payload, dict):
+        return raw or "{}", False
+    routing = payload.get("routing")
+    if not isinstance(routing, dict):
+        return raw or "{}", False
+    changed = False
+    for key in ("agent_name", "agent"):
+        if routing.get(key) == old_name:
+            routing[key] = new_name
+            changed = True
+    return (_json_dumps(payload), True) if changed else (raw or "{}", False)
+
+
+def _rewrite_definition_agent_name(raw: str | None, old_name: str, new_name: str) -> tuple[str, bool]:
+    payload = _json_loads(raw, {})
+    if not isinstance(payload, dict):
+        return raw or "{}", False
+    snapshot = payload.get("session_settings_snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("agent_name") != old_name:
+        return raw or "{}", False
+    snapshot["agent_name"] = new_name
+    return _json_dumps(payload), True
+
+
 @dataclass(frozen=True)
 class VibeAgent:
     id: str
@@ -115,11 +151,34 @@ class VibeAgent:
     source: str = "user"
     source_ref: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    archived_at: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["archived"] = self.archived_at is not None
+        payload["display_name"] = archived_agent_original_name(self) or self.name
+        return payload
+
+
+@dataclass(frozen=True)
+class AgentArchiveResult:
+    agent: VibeAgent
+    original_name: str
+    archived_name: str
+    references: dict[str, int]
+    default_agent_name: Optional[str] = None
+
+
+def archived_agent_original_name(agent: VibeAgent) -> Optional[str]:
+    if agent.archived_at is None:
+        return None
+    archive_metadata = agent.metadata.get(AGENT_ARCHIVE_METADATA_KEY)
+    if not isinstance(archive_metadata, dict):
+        return None
+    original_name = str(archive_metadata.get("original_name") or "").strip()
+    return original_name or None
 
 
 @dataclass(frozen=True)
@@ -171,17 +230,28 @@ class VibeAgentStore:
                 result = conn.execute(
                     agents.update()
                     .where(agents.c.backend == backend)
+                    .where(agents.c.archived_at.is_(None))
                     .where(agents.c.model.is_(None) | (func.trim(agents.c.model) == ""))
                     .values(model=model, updated_at=now)
                 )
                 updated += int(result.rowcount or 0)
         return updated
 
-    def list_agents(self, *, include_disabled: bool = True) -> list[VibeAgent]:
+    def list_agents(
+        self,
+        *,
+        include_disabled: bool = True,
+        include_archived: bool = False,
+    ) -> list[VibeAgent]:
         with self.engine.connect() as conn:
             stmt = select(agents).order_by(agents.c.name)
             if not include_disabled:
-                stmt = stmt.where(agents.c.enabled == 1)
+                if include_archived:
+                    stmt = stmt.where(or_(agents.c.enabled == 1, agents.c.archived_at.is_not(None)))
+                else:
+                    stmt = stmt.where(agents.c.enabled == 1)
+            if not include_archived:
+                stmt = stmt.where(agents.c.archived_at.is_(None))
             rows = conn.execute(stmt).mappings()
             return [self._from_row(row) for row in rows]
 
@@ -205,7 +275,23 @@ class VibeAgentStore:
 
     def require_enabled(self, name: str) -> VibeAgent:
         agent = self.require(name)
-        if not agent.enabled:
+        if not agent.enabled or agent.archived_at is not None:
+            raise AgentUnavailableError(
+                f"agent '{agent.name}' is disabled", agent_name=agent.name, reason="disabled"
+            )
+        return agent
+
+    def require_reference(self, name: str) -> VibeAgent:
+        """Resolve a durable Agent reference, including a disabled archive."""
+
+        agent = self.require(name)
+        archive_metadata = agent.metadata.get(AGENT_ARCHIVE_METADATA_KEY)
+        archived_was_enabled = (
+            archive_metadata.get("was_enabled", True)
+            if isinstance(archive_metadata, dict)
+            else True
+        )
+        if not agent.enabled and (agent.archived_at is None or not archived_was_enabled):
             raise AgentUnavailableError(
                 f"agent '{agent.name}' is disabled", agent_name=agent.name, reason="disabled"
             )
@@ -225,12 +311,15 @@ class VibeAgentStore:
         metadata: Optional[dict[str, Any]] = None,
         enabled: bool = True,
     ) -> VibeAgent:
+        raw_name = str(name or "").strip()
+        if raw_name.startswith("_"):
+            raise ValueError("agent names starting with '_' are reserved for Avibe")
         normalized = normalize_agent_name(name)
         normalized_backend = validate_agent_backend(backend)
         now = _utc_now_iso()
         agent = VibeAgent(
             id=uuid4().hex[:12],
-            name=str(name).strip(),
+            name=raw_name,
             normalized_name=normalized,
             backend=normalized_backend,
             description=_clean_optional(description),
@@ -263,6 +352,8 @@ class VibeAgentStore:
         enabled: Any = _UNSET,
     ) -> VibeAgent:
         existing = self.require(name)
+        if existing.archived_at is not None:
+            raise ValueError(f"agent '{name}' is archived and cannot be edited")
         values: dict[str, Any] = {"updated_at": _utc_now_iso()}
         if description is not _UNSET:
             values["description"] = _clean_optional(description)
@@ -283,6 +374,132 @@ class VibeAgentStore:
     def set_enabled(self, name: str, enabled: bool) -> VibeAgent:
         return self.update(name, enabled=enabled)
 
+    def rename(self, name: str, new_name: str) -> VibeAgent:
+        raw_new_name = str(new_name or "").strip()
+        if raw_new_name.startswith("_"):
+            raise ValueError("agent names starting with '_' are reserved for Avibe")
+        new_normalized = normalize_agent_name(raw_new_name)
+        old_normalized = normalize_agent_name(name)
+        now = _utc_now_iso()
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    select(agents).where(agents.c.normalized_name == old_normalized).limit(1)
+                ).mappings().first()
+                if row is None:
+                    raise AgentUnavailableError(
+                        f"agent '{name}' not found", agent_name=name, reason="missing"
+                    )
+                agent = self._from_row(row)
+                if agent.archived_at is not None:
+                    raise ValueError(f"agent '{name}' is archived and cannot be renamed")
+                if is_builtin_default_agent(agent):
+                    raise ValueError(f"agent '{agent.name}' is built in and cannot be renamed")
+                if new_normalized == agent.normalized_name:
+                    if raw_new_name == agent.name:
+                        return agent
+                collision = conn.execute(
+                    select(agents.c.id)
+                    .where(agents.c.normalized_name == new_normalized)
+                    .where(agents.c.id != agent.id)
+                    .limit(1)
+                ).first()
+                if collision is not None:
+                    raise ValueError(f"agent '{new_name}' already exists")
+
+                conn.execute(
+                    agents.update()
+                    .where(agents.c.id == agent.id)
+                    .values(name=raw_new_name, normalized_name=new_normalized, updated_at=now)
+                )
+                self._rewrite_references(conn, old_name=agent.name, new_name=raw_new_name)
+                if self._default_agent_name(conn) == agent.name:
+                    self._write_default_agent_name(conn, raw_new_name, now=now)
+        except IntegrityError as exc:
+            raise ValueError(f"agent '{new_name}' already exists") from exc
+        return self.require(raw_new_name)
+
+    def archive(self, name: str) -> Optional[AgentArchiveResult]:
+        normalized = normalize_agent_name(name)
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agents).where(agents.c.normalized_name == normalized).limit(1)
+            ).mappings().first()
+            if row is None:
+                return None
+            agent = self._from_row(row)
+            if is_builtin_default_agent(agent):
+                raise AgentArchiveError(
+                    f"agent '{agent.name}' is built in and cannot be deleted",
+                    code="agent_builtin",
+                )
+            if agent.archived_at is not None:
+                raise AgentArchiveError(
+                    f"agent '{agent.name}' is already archived",
+                    code="agent_already_archived",
+                )
+
+            default_name = self._default_agent_name(conn)
+            replacement = None
+            if default_name == agent.name:
+                replacement = self._archive_default_replacement(conn, agent)
+                if replacement is None:
+                    raise AgentArchiveError(
+                        "the default Agent cannot be archived without another enabled Agent",
+                        code="agent_no_default_replacement",
+                    )
+
+            archived_name = f"{ARCHIVED_AGENT_NAME_PREFIX}{uuid4().hex}"
+            archived_normalized = normalize_agent_name(archived_name)
+            while conn.execute(
+                select(agents.c.id).where(agents.c.normalized_name == archived_normalized).limit(1)
+            ).first() is not None:
+                archived_name = f"{ARCHIVED_AGENT_NAME_PREFIX}{uuid4().hex}"
+                archived_normalized = normalize_agent_name(archived_name)
+
+            references = self._reference_counts(conn, agent.name)
+            archive_metadata = {
+                "original_name": agent.name,
+                "archived_at": now,
+                "was_enabled": agent.enabled,
+            }
+            metadata = {**agent.metadata, AGENT_ARCHIVE_METADATA_KEY: archive_metadata}
+            conn.execute(
+                agents.update()
+                .where(agents.c.id == agent.id)
+                .values(
+                    name=archived_name,
+                    normalized_name=archived_normalized,
+                    enabled=0,
+                    metadata_json=_json_dumps(metadata),
+                    archived_at=now,
+                    updated_at=now,
+                )
+            )
+            self._rewrite_references(conn, old_name=agent.name, new_name=archived_name)
+            if replacement is not None:
+                self._write_default_agent_name(conn, replacement.name, now=now)
+
+            archived_agent = VibeAgent(
+                **{
+                    **asdict(agent),
+                    "name": archived_name,
+                    "normalized_name": archived_normalized,
+                    "enabled": False,
+                    "metadata": metadata,
+                    "archived_at": now,
+                    "updated_at": now,
+                }
+            )
+            return AgentArchiveResult(
+                agent=archived_agent,
+                original_name=agent.name,
+                archived_name=archived_name,
+                references=references,
+                default_agent_name=replacement.name if replacement is not None else default_name,
+            )
+
     def remove(self, name: str) -> bool:
         agent = self.get(name)
         if agent is None:
@@ -295,27 +512,113 @@ class VibeAgentStore:
             return bool(result.rowcount)
 
     def reference_counts(self, name: str) -> dict[str, int]:
-        normalized = normalize_agent_name(name)
-        agent = self.get(normalized)
+        agent = self.get(name)
         if agent is None:
             return {}
         with self.engine.connect() as conn:
-            scope_count = conn.execute(
-                select(scope_settings.c.scope_id).where(scope_settings.c.agent_name == agent.name)
-            ).fetchall()
-            session_count = conn.execute(
-                select(agent_sessions.c.id).where(agent_sessions.c.agent_name == agent.name)
-            ).fetchall()
-            definition_count = conn.execute(
-                select(run_definitions.c.id)
-                .where(run_definitions.c.agent_name == agent.name)
-                .where(run_definitions.c.deleted_at.is_(None))
-            ).fetchall()
+            return self._reference_counts(conn, agent.name)
+
+    @staticmethod
+    def _reference_counts(conn: Any, name: str) -> dict[str, int]:
         return {
-            "scopes": len(scope_count),
-            "sessions": len(session_count),
-            "definitions": len(definition_count),
+            "scopes": int(
+                conn.execute(
+                    select(func.count()).select_from(scope_settings).where(scope_settings.c.agent_name == name)
+                ).scalar_one()
+            ),
+            "sessions": int(
+                conn.execute(
+                    select(func.count()).select_from(agent_sessions).where(agent_sessions.c.agent_name == name)
+                ).scalar_one()
+            ),
+            "definitions": int(
+                conn.execute(
+                    select(func.count())
+                    .select_from(run_definitions)
+                    .where(run_definitions.c.agent_name == name)
+                    .where(run_definitions.c.deleted_at.is_(None))
+                ).scalar_one()
+            ),
         }
+
+    @staticmethod
+    def _rewrite_references(conn: Any, *, old_name: str, new_name: str) -> None:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.agent_name == old_name)
+            .values(agent_name=new_name)
+        )
+
+        scope_rows = conn.execute(
+            select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)
+        ).mappings().all()
+        for row in scope_rows:
+            values: dict[str, Any] = {}
+            if row["agent_name"] == old_name:
+                values["agent_name"] = new_name
+            settings, changed = _rewrite_scope_agent_name(row["settings_json"], old_name, new_name)
+            if changed:
+                values["settings_json"] = settings
+            if values:
+                conn.execute(
+                    scope_settings.update()
+                    .where(scope_settings.c.scope_id == row["scope_id"])
+                    .values(**values)
+                )
+
+        definition_rows = conn.execute(
+            select(run_definitions.c.id, run_definitions.c.agent_name, run_definitions.c.metadata_json)
+        ).mappings().all()
+        for row in definition_rows:
+            values = {}
+            if row["agent_name"] == old_name:
+                values["agent_name"] = new_name
+            metadata, changed = _rewrite_definition_agent_name(row["metadata_json"], old_name, new_name)
+            if changed:
+                values["metadata_json"] = metadata
+            if values:
+                conn.execute(
+                    run_definitions.update()
+                    .where(run_definitions.c.id == row["id"])
+                    .values(**values)
+                )
+
+    @staticmethod
+    def _default_agent_name(conn: Any) -> Optional[str]:
+        value = conn.execute(
+            select(state_meta.c.value_json).where(state_meta.c.key == DEFAULT_AGENT_META_KEY).limit(1)
+        ).scalar_one_or_none()
+        payload = _json_loads(value, None)
+        return str(payload).strip() if payload else None
+
+    @staticmethod
+    def _write_default_agent_name(conn: Any, name: str, *, now: str) -> None:
+        conn.execute(state_meta.delete().where(state_meta.c.key == DEFAULT_AGENT_META_KEY))
+        conn.execute(
+            state_meta.insert().values(
+                key=DEFAULT_AGENT_META_KEY,
+                value_json=_json_dumps(name),
+                updated_at=now,
+            )
+        )
+
+    @staticmethod
+    def _archive_default_replacement(conn: Any, archived: VibeAgent) -> Optional[VibeAgent]:
+        rows = conn.execute(
+            select(agents)
+            .where(agents.c.id != archived.id)
+            .where(agents.c.enabled == 1)
+            .where(agents.c.archived_at.is_(None))
+            .order_by(agents.c.name)
+        ).mappings()
+        candidates = [VibeAgentStore._from_row(row) for row in rows]
+        for candidate in candidates:
+            if candidate.backend == archived.backend and is_builtin_default_agent(candidate):
+                return candidate
+        for candidate in candidates:
+            if candidate.backend == archived.backend:
+                return candidate
+        return candidates[0] if candidates else None
 
     def import_candidates(self, candidates: Iterable[AgentImportCandidate]) -> AgentImportResult:
         imported: list[VibeAgent] = []
@@ -459,11 +762,7 @@ class VibeAgentStore:
 
     def get_default_agent_name(self) -> Optional[str]:
         with self.engine.connect() as conn:
-            value = conn.execute(
-                select(state_meta.c.value_json).where(state_meta.c.key == DEFAULT_AGENT_META_KEY).limit(1)
-            ).scalar_one_or_none()
-        payload = _json_loads(value, None)
-        return str(payload).strip() if payload else None
+            return self._default_agent_name(conn)
 
     def set_default_agent_name(self, name: str) -> None:
         agent = self.require_enabled(name)
@@ -507,6 +806,7 @@ class VibeAgentStore:
             source=row["source"],
             source_ref=row["source_ref"],
             metadata=_json_loads(row["metadata_json"], {}),
+            archived_at=row.get("archived_at"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -526,6 +826,7 @@ class VibeAgentStore:
             "source": agent.source,
             "source_ref": agent.source_ref,
             "metadata_json": _json_dumps(agent.metadata),
+            "archived_at": agent.archived_at,
             "created_at": agent.created_at,
             "updated_at": agent.updated_at,
         }

@@ -101,6 +101,22 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     assert payload["error"] == "agent 'worker' is disabled"
 
 
+def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="worker", backend="codex")
+        with patch("vibe.cli._agent_store", return_value=agent_store):
+            assert cli.cmd_agent_remove(_parse_agent(["remove", "worker"])) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed_agent"] == "worker"
+        assert payload["archived_agent"]["name"].startswith("_archived_")
+        assert payload["archived_agent"]["display_name"] == "worker"
+        assert agent_store.get("worker") is None
+    finally:
+        agent_store.close()
+
+
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     for index in range(25):

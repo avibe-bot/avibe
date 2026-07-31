@@ -2616,6 +2616,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const readOnly = readOnlyReason !== null;
   const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
+  const sessionAgent = session.agent_name ? agents.find((agent) => agent.name === session.agent_name) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
   // resumed by the backend that created it — or while a turn is RUNNING (the
   // in-flight turn binds its native on the current route any moment); mirrors
@@ -2679,7 +2680,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           <div className="flex min-w-0 shrink-0 items-center gap-1.5">
             {readOnlyReason === 'archived' && (
               <span className="truncate text-[12px] font-medium text-muted">
-                {session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
+                {sessionAgent?.display_name || session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
               </span>
             )}
             <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px] font-bold">

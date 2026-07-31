@@ -595,6 +595,7 @@ def _ensure_agents_table(conn: sqlite3.Connection, tables: set[str]) -> bool:
             source varchar not null,
             source_ref text,
             metadata_json text not null,
+            archived_at varchar,
             created_at varchar not null,
             updated_at varchar not null,
             constraint uq_agents_normalized_name unique (normalized_name)
@@ -612,6 +613,9 @@ def _repair_initial_required_columns(conn: sqlite3.Connection, tables: set[str])
         columns = _column_names(conn, "agents")
         if "enabled" not in columns:
             conn.execute('alter table "agents" add column "enabled" INTEGER not null default 1')
+            changed = True
+        if "archived_at" not in columns:
+            conn.execute('alter table "agents" add column "archived_at" VARCHAR')
             changed = True
     if "scope_settings" in tables:
         columns = _column_names(conn, "scope_settings")
