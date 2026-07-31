@@ -462,6 +462,7 @@ def requeue_prewrite_failure(
         values={
             "state": "queued",
             "target_turn_id": None,
+            "successor_turn_id": None,
             "receipt_outcome": outcome,
         },
     )

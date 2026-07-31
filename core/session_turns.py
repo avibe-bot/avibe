@@ -1403,7 +1403,12 @@ class SessionTurnManager:
                     delivery_id,
                     expected_version=int(current_head["version"]),
                     expected_states=("queued",),
-                    values={"priority": "p1", "state": "starting", "target_turn_id": turn_id},
+                    values={
+                        "priority": "p1",
+                        "state": "starting",
+                        "target_turn_id": turn_id,
+                        "successor_turn_id": None,
+                    },
                 )
                 if claimed is None:
                     raise RuntimeError("FIFO head start CAS lost after writer reservation")
@@ -1862,7 +1867,11 @@ class SessionTurnManager:
                 str(head["id"]),
                 expected_version=int(head["version"]),
                 expected_states=("queued",),
-                values={"state": "starting", "target_turn_id": turn_id},
+                values={
+                    "state": "starting",
+                    "target_turn_id": turn_id,
+                    "successor_turn_id": None,
+                },
             )
             if claimed is None:
                 raise RuntimeError("FIFO drain CAS lost after writer reservation")

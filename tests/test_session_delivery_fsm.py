@@ -787,6 +787,49 @@ def test_definitive_context_failure_requeues_without_quarantining(managers) -> N
     assert prewrite_turn is not None
 
 
+def test_p0_successor_prewrite_failure_releases_stale_successor_reference(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def prepare_successor():
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        delivery = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement",
+            ),
+            context=_context(),
+        )
+        claimed = manager._terminalize_durable_turn(turn_id, "canceled")
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return delivery, str(claimed["successor_turn_id"])
+
+    delivery, successor_id = asyncio.run(prepare_successor())
+    assert successor_id
+
+    def missing_context(_session_id):
+        raise LookupError("session routing unavailable")
+
+    manager._build_context = missing_context
+    assert not asyncio.run(manager._start_persisted_turn(successor_id))
+
+    with engine.connect() as conn:
+        queued = delivery_store.get_delivery(conn, str(delivery.delivery_id))
+    assert queued is not None
+    assert queued["state"] == "queued"
+    assert queued["target_turn_id"] is None
+    assert queued["successor_turn_id"] is None
+
+
 def test_empty_p0_unknown_receipt_completes_only_on_exact_terminal_proof(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
 
