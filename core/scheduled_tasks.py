@@ -1690,6 +1690,7 @@ class TaskExecutionStore:
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
             self.build_hook_send(
@@ -1706,7 +1707,8 @@ class TaskExecutionStore:
                 source_actor=source_actor,
                 parent_run_id=parent_run_id,
                 metadata=metadata,
-            )
+            ),
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
     def build_hook_send(

@@ -105,6 +105,7 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = cli.VibeAgentStore(db_path)
     try:
+        agent_store.create(name="archive-fallback", backend="codex")
         agent = agent_store.create(name="pm", backend="codex")
         store = cli.ScheduledTaskStore()
         task = store.add_task(
@@ -157,6 +158,7 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
 def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
+        agent_store.create(name="archive-fallback", backend="codex")
         agent_store.create(name="worker", backend="codex")
         with patch("vibe.cli._agent_store", return_value=agent_store):
             assert cli.cmd_agent_remove(_parse_agent(["remove", "worker"])) == 0
@@ -1794,6 +1796,41 @@ def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, cap
     assert "vibe hook send is deprecated" in payload["deprecation_warning"]
     assert "--no-callback" in payload["deprecation_warning"]
     assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
+
+
+def test_hook_send_guards_an_explicit_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--agent",
+            "worker",
+            "--message",
+            "hello",
+        ]
+    )
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent = agent_store.create(name="worker", backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == agent.name
+    assert captured["expected_enabled_agent_id"] == agent.id
 
 
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:

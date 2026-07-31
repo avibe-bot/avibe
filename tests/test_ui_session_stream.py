@@ -507,6 +507,7 @@ def test_create_and_patch_session_reject_archived_agent(isolated_state, tmp_path
 
     store = VibeAgentStore()
     try:
+        store.create(name="archive-fallback", backend="codex")
         original = store.create(name="retired-reviewer", backend="codex")
         archived = store.archive("retired-reviewer")
         assert archived is not None
@@ -622,6 +623,17 @@ def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tm
         agent.name,
         agent.backend,
     )
+
+    cleared_response = client.patch(
+        f"/api/sessions/{plain_response.get_json()['id']}",
+        json={"agent_name": None},
+        headers=headers,
+    )
+    assert cleared_response.status_code == 200
+    cleared = cleared_response.get_json()
+    assert cleared["agent_id"] is None
+    assert cleared["agent_name"] is None
+    assert cleared["agent_backend"] == ""
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):

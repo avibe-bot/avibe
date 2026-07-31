@@ -6785,6 +6785,9 @@ async def sessions_update(session_id: str):
     should_check_backend_lock = "agent_backend" in updatable
     requested_backend = updatable.get("agent_backend")
     identity_requested = "agent_id" in updatable or "agent_name" in updatable
+    if identity_requested and not (updatable.get("agent_id") or updatable.get("agent_name")):
+        updatable["agent_id"] = None
+        updatable["agent_name"] = None
     if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
         try:
             with engine.begin() as conn:

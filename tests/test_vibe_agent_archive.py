@@ -33,6 +33,10 @@ NOW = "2026-07-31T14:00:00+00:00"
 SCOPE_ID = "avibe::project::proj_archive"
 
 
+def _create_archive_fallback(store: VibeAgentStore) -> None:
+    store.create(name="archive-fallback", backend="codex")
+
+
 def _race_archive_at_agent_read(
     primary: VibeAgentStore,
     competitor: VibeAgentStore,
@@ -423,6 +427,7 @@ def test_direct_write_rejects_a_new_agent_that_reuses_the_selected_name(tmp_path
     agent_store = VibeAgentStore(db_path)
     background = SQLiteBackgroundTaskStore(db_path)
     try:
+        _create_archive_fallback(agent_store)
         original = agent_store.create(name="pm", backend="claude")
         archived = agent_store.archive(original.name)
         assert archived is not None
@@ -484,6 +489,7 @@ def test_rename_moves_references_and_default_without_changing_agent_identity(tmp
 def test_archive_invalidates_stale_definition_writes_for_direct_and_snapshot_bindings(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
+        _create_archive_fallback(store)
         store.create(name="pm", backend="claude")
         rows = (
             {"id": "task_direct", "agent_name": "pm", "metadata_json": "{}"},
@@ -609,6 +615,40 @@ def test_archive_rolls_back_when_default_has_no_replacement(tmp_path) -> None:
         store.close()
 
 
+def test_archive_protects_the_only_effective_default_without_explicit_metadata(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="only-agent", backend="codex")
+        assert store.get_default_agent_name() is None
+        assert store.get_default_agent().id == original.id
+
+        with pytest.raises(ValueError, match="without another enabled Agent"):
+            store.archive(original.name)
+
+        assert store.require(original.name).id == original.id
+        assert store.get_default_agent_name() is None
+    finally:
+        store.close()
+
+
+def test_archive_persists_replacement_for_the_effective_fallback_default(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="alpha", backend="codex")
+        replacement = store.create(name="beta", backend="claude")
+        assert store.get_default_agent_name() is None
+        assert store.get_default_agent().id == original.id
+
+        result = store.archive(original.name)
+
+        assert result is not None
+        assert result.default_agent_name == replacement.name
+        assert store.get_default_agent_name() == replacement.name
+        assert store.get_default_agent().id == replacement.id
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     "stored_name",
     ("project-manager", "PROJECT-MANAGER", "Project Manager", "Project.Manager"),
@@ -616,6 +656,7 @@ def test_archive_rolls_back_when_default_has_no_replacement(tmp_path) -> None:
 def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: str) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
+        _create_archive_fallback(store)
         original = store.create(name="Project Manager", backend="claude")
         _seed_references(store, stored_name)
 
@@ -656,9 +697,59 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
         store.close()
 
 
+@pytest.mark.parametrize("bind_by_id", (False, True))
+def test_late_native_bind_preserves_archived_session_routing_name(tmp_path, bind_by_id: bool) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    service = None
+    try:
+        _create_archive_fallback(store)
+        original = store.create(name="Project Manager", backend="claude")
+        _seed_references(store, original.name)
+        with store.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == "ses_archive")
+                .values(agent_id=original.id)
+            )
+        result = store.archive(original.name)
+        assert result is not None
+
+        service = SQLiteSessionsService(store.db_path)
+        if bind_by_id:
+            bound = service.bind_agent_session_by_id(
+                session_id="ses_archive",
+                native_session_id="native-pm",
+                vibe_agent_id=original.id,
+                vibe_agent_name=original.name,
+                vibe_agent_backend=original.backend,
+            )
+        else:
+            bound = service.bind_agent_session(
+                scope_key="avibe::project::proj_archive",
+                agent_name=original.backend,
+                session_anchor="ses_archive",
+                native_session_id="native-pm",
+                vibe_agent_id=original.id,
+                vibe_agent_name=original.name,
+            )
+
+        assert bound == "ses_archive"
+        with store.engine.connect() as conn:
+            session = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == "ses_archive")
+            ).mappings().one()
+        assert session["agent_id"] == original.id
+        assert session["agent_name"] == result.archived_name
+    finally:
+        if service is not None:
+            service.close()
+        store.close()
+
+
 def test_archive_refuses_to_overwrite_malformed_definition_metadata(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
+        _create_archive_fallback(store)
         original = store.create(name="pm", backend="claude")
         with store.engine.begin() as conn:
             conn.execute(
@@ -692,6 +783,7 @@ def test_archive_refuses_to_overwrite_malformed_definition_metadata(tmp_path) ->
 def test_archive_rolls_back_when_reference_migration_fails(tmp_path, monkeypatch) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
+        _create_archive_fallback(store)
         original = store.create(name="worker", backend="codex")
 
         def fail_reference_migration(*_args, **_kwargs):

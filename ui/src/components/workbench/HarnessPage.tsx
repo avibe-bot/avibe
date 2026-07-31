@@ -816,6 +816,7 @@ export const HarnessPage: React.FC = () => {
           {tab === 'runs' && (
             <RunsList
               runs={runs}
+              agentsByName={agentsByName}
               loading={loading}
               hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
@@ -858,7 +859,7 @@ export const HarnessPage: React.FC = () => {
                 pending={!!pendingMutation[selectedWatch.id]}
               />
             ) : selectedRun ? (
-              <RunDetail run={selectedRun} />
+              <RunDetail run={selectedRun} agent={agentsByName[selectedRun.agent_name ?? '']} />
             ) : null}
           </div>
         )}
@@ -1414,6 +1415,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
 
 interface RunsListProps {
   runs: HarnessRun[];
+  agentsByName: Record<string, VibeAgentBrief>;
   loading: boolean;
   hasStoredRows: boolean;
   selectedId: string | null;
@@ -1426,6 +1428,7 @@ interface RunsListProps {
 
 const RunsList: React.FC<RunsListProps> = ({
   runs,
+  agentsByName,
   loading,
   hasStoredRows,
   selectedId,
@@ -1480,7 +1483,9 @@ const RunsList: React.FC<RunsListProps> = ({
                   {run.agent_name && (
                     <span className="inline-flex min-w-0 items-center gap-1">
                       <Bot className="size-3 shrink-0" />
-                      <span className="truncate">{run.agent_name}</span>
+                      <span className="truncate">
+                        {agentDisplayName(run.agent_name, agentsByName[run.agent_name])}
+                      </span>
                     </span>
                   )}
                   <RunSessionLabel run={run} />
@@ -1558,9 +1563,17 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 
 interface RunDetailProps {
   run: HarnessRun;
+  agent?: VibeAgentBrief;
 }
 
-export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+export function agentDisplayName(
+  agentName: string | null | undefined,
+  agent?: Pick<VibeAgentBrief, 'display_name'>,
+): string {
+  return agent?.display_name || agentName || '—';
+}
+
+export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
@@ -1594,7 +1607,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         <span className="text-[12px] text-foreground">{typeLabel}</span>
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
-        <span className="text-[12px] text-foreground">{run.agent_name || '—'}</span>
+        <span className="text-[12px] text-foreground">{agentDisplayName(run.agent_name, agent)}</span>
         {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>

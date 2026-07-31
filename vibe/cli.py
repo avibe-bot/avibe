@@ -3570,6 +3570,9 @@ def cmd_hook_send(args):
             agent_name=agent.name if agent else None,
             run_type="agent_run",
             source_kind="cli",
+            expected_enabled_agent_id=(
+                agent.id if agent is not None and bool(getattr(args, "agent", None)) else None
+            ),
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         _print_cli_payload(

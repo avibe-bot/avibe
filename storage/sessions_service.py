@@ -78,6 +78,18 @@ def _require_enabled_agent_identity(
         )
 
 
+def _catalog_agent_name_value(agent_id: str | None, fallback_name: str) -> Any:
+    """Resolve an Agent's current routing name in the statement that persists it."""
+
+    cleaned_id = str(agent_id or "").strip()
+    if not cleaned_id:
+        return fallback_name
+    return func.coalesce(
+        select(agents.c.name).where(agents.c.id == cleaned_id).limit(1).scalar_subquery(),
+        fallback_name,
+    )
+
+
 def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> bool:
     """Return True iff a row's ``native_session_id`` should be written now.
 
@@ -590,6 +602,11 @@ class SQLiteSessionsService:
     ) -> str | None:
         """Bind a backend-native session id to the stable Vibe session row."""
         now = _utc_now_iso()
+        persisted_agent_name = (
+            _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            if vibe_agent_name is not None
+            else None
+        )
         with self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
@@ -616,7 +633,7 @@ class SQLiteSessionsService:
                     native_session_id=encoded_session_id,
                     workdir=requested_workdir,
                     agent_id=vibe_agent_id,
-                    agent_name=vibe_agent_name,
+                    agent_name=persisted_agent_name,
                     model=None,
                     reasoning_effort=None,
                     metadata={"legacy_scope_key": str(scope_key)},
@@ -655,7 +672,14 @@ class SQLiteSessionsService:
             if vibe_agent_id is not None:
                 values["agent_id"] = vibe_agent_id
             if vibe_agent_name is not None:
-                values["agent_name"] = vibe_agent_name
+                values["agent_name"] = (
+                    case(
+                        (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                        else_=persisted_agent_name,
+                    )
+                    if vibe_agent_id is not None
+                    else persisted_agent_name
+                )
             # WRITE-ONCE: a row's native_session_id is bound exactly once and never
             # changed. Never let a recapture, fork, subagent, or any fallback
             # overwrite an existing native (product invariant — one agent session ↔
@@ -786,7 +810,15 @@ class SQLiteSessionsService:
         if vibe_agent_id is not None:
             values["agent_id"] = vibe_agent_id
         if vibe_agent_name is not None:
-            values["agent_name"] = vibe_agent_name
+            persisted_agent_name = _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            values["agent_name"] = (
+                case(
+                    (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                    else_=persisted_agent_name,
+                )
+                if vibe_agent_id is not None
+                else persisted_agent_name
+            )
         requested_backend = (
             str(vibe_agent_backend or "") if vibe_agent_backend is not None else None
         )

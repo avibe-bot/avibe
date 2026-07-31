@@ -590,8 +590,9 @@ class VibeAgentStore:
                 )
 
             default_name = self._default_agent_name(conn)
+            effective_default = self._effective_default_agent(conn)
             replacement = None
-            if default_name == agent.name:
+            if effective_default is not None and effective_default.id == agent.id:
                 replacement = self._archive_default_replacement(conn, agent)
                 if replacement is None:
                     raise AgentArchiveError(
@@ -905,6 +906,39 @@ class VibeAgentStore:
             if candidate.backend == archived.backend:
                 return candidate
         return candidates[0] if candidates else None
+
+    @staticmethod
+    def _effective_default_agent(conn: Any) -> Optional[VibeAgent]:
+        explicit_name = VibeAgentStore._default_agent_name(conn)
+        if explicit_name:
+            explicit = conn.execute(
+                select(agents)
+                .where(agents.c.normalized_name == normalize_agent_name(explicit_name))
+                .where(agents.c.enabled == 1)
+                .where(agents.c.archived_at.is_(None))
+                .limit(1)
+            ).mappings().first()
+            if explicit is not None:
+                return VibeAgentStore._from_row(explicit)
+
+        fallback = conn.execute(
+            select(agents)
+            .where(agents.c.normalized_name == normalize_agent_name(DEFAULT_AGENT_NAME))
+            .where(agents.c.enabled == 1)
+            .where(agents.c.archived_at.is_(None))
+            .limit(1)
+        ).mappings().first()
+        if fallback is not None:
+            return VibeAgentStore._from_row(fallback)
+
+        first_enabled = conn.execute(
+            select(agents)
+            .where(agents.c.enabled == 1)
+            .where(agents.c.archived_at.is_(None))
+            .order_by(agents.c.name)
+            .limit(1)
+        ).mappings().first()
+        return VibeAgentStore._from_row(first_enabled) if first_enabled is not None else None
 
     def import_candidates(self, candidates: Iterable[AgentImportCandidate]) -> AgentImportResult:
         imported: list[VibeAgent] = []
