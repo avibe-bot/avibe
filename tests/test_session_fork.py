@@ -1568,6 +1568,60 @@ def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
     assert result.fork.trim_latest_running_turn is False
 
 
+def test_earlier_same_second_silent_terminal_does_not_close_latest_input(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    base = 1_800_000_000_000_000
+    timestamp = "2026-08-01T00:00:00Z"
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(
+                    agent_sessions.c.id == source_id
+                )
+            ).scalar_one()
+            conn.execute(
+                agent_events.insert().values(
+                    id=f"evt_{base + 1_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    event_type="silent_terminal",
+                    visibility="trace",
+                    content_json="{}",
+                    metadata_json="{}",
+                    source="agent",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            conn.execute(
+                messages.insert().values(
+                    id=f"msg_{base + 2_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    type="user",
+                    source="user",
+                    content_text="new still-running input",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+
+
 def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
     tmp_path: Path, monkeypatch
 ) -> None:

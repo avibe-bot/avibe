@@ -107,9 +107,23 @@ def _legacy_event_id(bind, message_id: str, event_type: str) -> str:
 
 def _migrate_legacy_trace(bind, row: sa.RowMapping) -> None:
     event_type = "tool_call" if row["type"] == "tool_call" else "silent_terminal"
+    metadata = _metadata(row["metadata_json"])
+    metadata.update(
+        {
+            "legacy_message_id": row["id"],
+            "legacy_message_type": row["type"],
+            "legacy_message_snapshot": {
+                **_message_snapshot(row),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "delivered_at": row["delivered_at"],
+            },
+            "migration_revision": revision,
+        }
+    )
     existing = bind.execute(
         sa.text(
-            "select id from agent_events "
+            "select id, metadata_json from agent_events "
             "where session_id is :session_id and event_type = :event_type "
             "and json_valid(metadata_json) = 1 "
             "and json_extract(metadata_json, '$.legacy_message_id') = :message_id limit 1"
@@ -121,15 +135,16 @@ def _migrate_legacy_trace(bind, row: sa.RowMapping) -> None:
         },
     ).first()
     if existing:
+        existing_metadata = _metadata(existing[1])
+        existing_metadata.update(metadata)
+        bind.execute(
+            sa.text(
+                "update agent_events set metadata_json = :metadata_json "
+                "where id = :id"
+            ),
+            {"id": existing[0], "metadata_json": _json(existing_metadata)},
+        )
         return
-    metadata = _metadata(row["metadata_json"])
-    metadata.update(
-        {
-            "legacy_message_id": row["id"],
-            "legacy_message_type": row["type"],
-            "migration_revision": revision,
-        }
-    )
     bind.execute(
         sa.text(
             "insert into agent_events ("
@@ -790,6 +805,60 @@ def _restore_legacy_drafts(bind) -> None:
         )
 
 
+def _restore_legacy_trace_messages(bind) -> None:
+    rows = bind.execute(
+        sa.text(
+            "select metadata_json from agent_events "
+            "where event_type in ('tool_call', 'silent_terminal') "
+            "and json_valid(metadata_json) = 1 "
+            "and json_extract(metadata_json, '$.migration_revision') = :revision"
+        ),
+        {"revision": revision},
+    ).mappings()
+    for row in rows:
+        metadata = _metadata(row["metadata_json"])
+        legacy_type = metadata.get("legacy_message_type")
+        snapshot = metadata.get("legacy_message_snapshot")
+        if legacy_type not in {"tool_call", "silent"} or not isinstance(
+            snapshot, dict
+        ):
+            raise RuntimeError(
+                "0043 downgrade cannot restore migrated trace Message safely"
+            )
+        message_id = str(metadata.get("legacy_message_id") or "")
+        if not message_id or bind.execute(
+            sa.text("select 1 from messages where id = :id"),
+            {"id": message_id},
+        ).first():
+            raise RuntimeError(
+                "0043 downgrade cannot restore migrated trace Message identity"
+            )
+        bind.execute(
+            sa.text(
+                "insert into messages ("
+                "id, scope_id, session_id, platform, author, type, author_id, "
+                "author_name, source, native_message_id, parent_native_message_id, "
+                "content_text, content_json, metadata_json, created_at, updated_at, "
+                "delivered_at, read_at"
+                ") values ("
+                ":id, :scope_id, :session_id, :platform, :author, :type, :author_id, "
+                ":author_name, :source, :native_message_id, :parent_native_message_id, "
+                ":content_text, :content_json, :metadata_json, :created_at, :updated_at, "
+                ":delivered_at, :read_at)"
+            ),
+            {"id": message_id, **snapshot, "type": legacy_type},
+        )
+        session_id = str(snapshot.get("session_id") or "")
+        if session_id:
+            bind.execute(
+                sa.text(
+                    "insert into _0043_message_session_refs (message_id, session_id) "
+                    "values (:message_id, :session_id)"
+                ),
+                {"message_id": message_id, "session_id": session_id},
+            )
+
+
 def downgrade() -> None:
     bind = op.get_bind()
     unsafe = bind.execute(
@@ -838,6 +907,7 @@ def downgrade() -> None:
     )
     _restore_legacy_messages(bind)
     _restore_legacy_drafts(bind)
+    _restore_legacy_trace_messages(bind)
     op.drop_index("ix_messages_inbox_activity", table_name="messages")
     op.create_index(
         "ix_messages_inbox_activity",

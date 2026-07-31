@@ -604,6 +604,16 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _emitted_micros(row_id: Any, timestamp: datetime) -> int:
+    identity = str(row_id or "")
+    if len(identity) >= 19 and identity[3] == "_":
+        try:
+            return int(identity[4:19], 16)
+        except ValueError:
+            pass
+    return int(timestamp.timestamp() * 1_000_000)
+
+
 def _forked_session_title(source_title: str, lang: str = "en") -> str:
     return t("fork.title", lang, title=source_title) if source_title else t("fork.titleUntitled", lang)
 
@@ -634,8 +644,12 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(1)
     ).mappings().first()
-    legacy_terminal = conn.execute(
-        select(agent_events.c.created_at)
+    silent_terminal = conn.execute(
+        select(
+            agent_events.c.id,
+            agent_events.c.created_at,
+            agent_events.c.metadata_json,
+        )
         .where(
             agent_events.c.session_id == source_session_id,
             agent_events.c.event_type == "silent_terminal",
@@ -643,23 +657,33 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .order_by(agent_events.c.created_at.desc(), agent_events.c.id.desc())
         .limit(1)
     ).mappings().first()
-    terminal_candidates: list[tuple[datetime, str]] = []
+    terminal_candidates: list[tuple[int, str]] = []
     if latest_turn is not None and latest_turn["state"] == "terminal":
         terminal_at = _parse_utc_timestamp(latest_turn["terminal_at"])
         if terminal_at is not None:
             terminal_candidates.append(
-                (terminal_at, str(latest_turn["terminal_outcome"] or "completed"))
+                (
+                    int(terminal_at.timestamp() * 1_000_000),
+                    str(latest_turn["terminal_outcome"] or "completed"),
+                )
             )
-    if legacy_terminal is not None:
-        terminal_at = _parse_utc_timestamp(legacy_terminal["created_at"])
+    if silent_terminal is not None:
+        terminal_at = _parse_utc_timestamp(silent_terminal["created_at"])
         if terminal_at is not None:
-            terminal_candidates.append((terminal_at, "completed"))
+            metadata = _load_metadata(silent_terminal["metadata_json"])
+            event_id = metadata.get("legacy_message_id") or silent_terminal["id"]
+            terminal_candidates.append(
+                (
+                    _emitted_micros(event_id, terminal_at),
+                    str(metadata.get("terminal_outcome") or "completed"),
+                )
+            )
     message_at = _parse_utc_timestamp(row["created_at"])
     latest_terminal = max(terminal_candidates, default=None)
     if (
         message_at is not None
         and latest_terminal is not None
-        and latest_terminal[0] >= message_at
+        and latest_terminal[0] >= _emitted_micros(row["id"], message_at)
     ):
         return SourceMessageAnchor(
             message_id=str(row["id"]) if row["id"] else None,

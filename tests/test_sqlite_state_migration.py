@@ -371,6 +371,18 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
     assert [group["status"] for group in groups] == ["done"]
     assert groups[0]["steps"] == 1
 
+    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    with sqlite3.connect(db_path) as conn:
+        restored_trace = conn.execute(
+            "select id, type, content_text from messages "
+            "where id in (?, ?) order by id",
+            (tool_message_id, silent_message_id),
+        ).fetchall()
+    assert restored_trace == [
+        (silent_message_id, "silent", "silent trace"),
+        (tool_message_id, "tool_call", "tool trace"),
+    ]
+
 
 def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     tmp_path: Path,

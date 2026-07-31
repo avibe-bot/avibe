@@ -433,11 +433,12 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         """
         controller = self._terminal_lifecycle_controller()
 
-        dispatcher, context = await self._emit_silent_terminal(
-            controller,
-            completes_run=False,
-            output=stop_output_for(None),
-        )
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+                output=stop_output_for(None),
+            )
 
         controller.mark_turn_complete.assert_called_once_with(
             context,
@@ -447,6 +448,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(SETTLED_BY_STOPPED, SETTLEMENTS_WITHOUT_RESULT)
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")
         dispatcher._record_agent_run_terminal_result.assert_not_called()
+        persist.assert_not_called()
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
