@@ -349,13 +349,14 @@ with different content.
 
 ## Security and Data Disclosure
 
-- Memory Settings and browser content routes require a direct loopback peer and
-  host, a same-origin Origin/Referer, no forwarded metadata, and CSRF for
-  mutations. LAN, proxy, Docker bridge, and Avibe Cloud browser routes cannot
-  read whether Memory is enabled or access its content.
-- Authenticated remote Workbench messages may receive a stable per-user capture
-  and Agent capability, but the remote browser cannot open the local Settings
-  data surface.
+- Memory Settings and browser content routes require either a direct loopback
+  connection or an authenticated Avibe Cloud session. Every request requires a
+  same-origin Origin/Referer, and mutations also require CSRF. LAN, arbitrary
+  proxy, and Docker bridge routes remain unable to read Memory state or content.
+- Authenticated Avibe Cloud browser reads use the same stable per-user principal
+  as that account's remote Workbench messages. The install-wide settings,
+  diagnostics, runtime restart, and Clear all controls remain owner operations
+  protected by the signed Cloud session and same-origin/CSRF checks.
 - The controller socket and EverOS socket are owner-only Unix-domain sockets in
   mode `0600`; the sidecar has no TCP listener and is not exposed through remote
   access.

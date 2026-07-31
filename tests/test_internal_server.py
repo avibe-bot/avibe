@@ -734,6 +734,80 @@ def test_memory_ui_reads_use_the_default_agent_session_project(tmp_path: Path):
     assert expected_project.startswith("p-") and len(expected_project) == 34
 
 
+def test_memory_ui_proof_accepts_an_authenticated_remote_workbench_principal():
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    user_key = "avibe:remote:user-1"
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path="/internal/memory/profile",
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    runtime.principal_for_user_key.assert_called_once_with(user_key)
+    runtime.profile_payload.assert_awaited_once()
+
+
+def test_memory_ui_proof_rejects_non_browser_principal_namespaces():
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value="u-11111111111111111111111111111111"),
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    user_key = "slack:user-1"
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path="/internal/memory/profile",
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    runtime.principal_for_user_key.assert_not_called()
+
+
 def test_memory_internal_read_rejects_agent_session_with_forged_local_owner_header():
     from core.memory.http_headers import (
         CALLER_SESSION_HEADER,

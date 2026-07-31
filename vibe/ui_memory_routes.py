@@ -1,7 +1,8 @@
 """The ``/api/memory/*`` UI surface.
 
-Every route here is direct-loopback only and answers with the closed Memory
-result envelope (``{"status": "ok", ...}`` / ``{"status": "failed", "error":
+Every route here requires a trusted local or authenticated Avibe Cloud browser
+and answers with the closed Memory result envelope (``{"status": "ok", ...}`` /
+``{"status": "failed", "error":
 <closed code>}``) plus ``Cache-Control: no-store``. Keeping them in one module
 means the admission check, the envelope and the no-store header are stated once
 per route group instead of being scattered through ``vibe/ui_server.py``.
@@ -23,16 +24,16 @@ from config.v2_config import V2Config
 from vibe.ui_compat import Response, jsonify
 
 
-def _direct_loopback_memory_request() -> bool:
-    """Ask ``ui_server`` for the strict Memory admission verdict.
+def _memory_ui_user_key() -> str | None:
+    """Ask ``ui_server`` for the trusted browser's Memory identity.
 
-    Late-bound on purpose: the predicate belongs with the other request-locality
+    Late-bound on purpose: the policy belongs with the other request-locality
     helpers in ``ui_server``, and resolving it per call keeps it patchable there.
     """
 
     from vibe import ui_server
 
-    return ui_server.is_direct_loopback_memory_request()
+    return ui_server.memory_ui_user_key()
 
 
 def _memory_response(payload: dict, *, status_code: int = 200) -> Response:
@@ -238,7 +239,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/settings", include_in_schema=False)
     async def memory_settings_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             try:
                 return _memory_response(await asyncio.to_thread(_memory_settings_payload))
@@ -250,7 +251,7 @@ def register_memory_routes(app) -> None:
     @app.patch("/api/memory/settings", include_in_schema=False)
     async def memory_settings_patch(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             try:
                 patch_payload = await starlette_request.json()
@@ -263,7 +264,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/status", include_in_schema=False)
     async def memory_status_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -274,7 +275,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/failures", include_in_schema=False)
     async def memory_failures_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -285,12 +286,13 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/profile", include_in_schema=False)
     async def memory_profile_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
                 return _memory_forbidden_response()
             from vibe import internal_client
 
             return await _memory_internal_response(
-                lambda: internal_client.memory_profile(user_key="avibe:local")
+                lambda: internal_client.memory_profile(user_key=user_key)
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
@@ -298,7 +300,8 @@ def register_memory_routes(app) -> None:
     @app.post("/api/memory/search", include_in_schema=False)
     async def memory_search_post(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
                 return _memory_forbidden_response()
             try:
                 payload = await starlette_request.json()
@@ -313,7 +316,7 @@ def register_memory_routes(app) -> None:
             from vibe import internal_client
 
             return await _memory_internal_response(
-                lambda: internal_client.memory_search(query, limit, user_key="avibe:local")
+                lambda: internal_client.memory_search(query, limit, user_key=user_key)
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
@@ -330,7 +333,7 @@ def register_memory_routes(app) -> None:
         """
 
         async def handler():
-            if not _direct_loopback_memory_request():
+            if _memory_ui_user_key() is None:
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -341,7 +344,8 @@ def register_memory_routes(app) -> None:
     @app.post("/api/memory/clear", include_in_schema=False)
     async def memory_clear_post(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
                 return _memory_forbidden_response()
             try:
                 payload = await starlette_request.json()
@@ -351,6 +355,8 @@ def register_memory_routes(app) -> None:
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             from vibe import internal_client
 
-            return await _memory_internal_response(internal_client.memory_clear)
+            return await _memory_internal_response(
+                lambda: internal_client.memory_clear(user_key=user_key)
+            )
 
         return await app.dispatch_native_request(starlette_request, handler)
