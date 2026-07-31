@@ -3118,6 +3118,95 @@ class ScheduledTaskService:
             )
             return set()
 
+    def _teardown_held_session_locks(self) -> set[str]:
+        """Session LOCK KEYS whose runtime a teardown is currently dismantling (HFR-336).
+
+        The drain's half of the admission hold. ``SessionTurnManager`` owns the hold
+        and is read through the controller by the same defensive adapter shape as
+        :meth:`_teardown_exempt_run_ids` — ``core.scheduled_tasks`` never imports the
+        manager, and a controller without one (headless service, the test doubles) is
+        an empty answer rather than an exception on the dispatch path.
+
+        TRANSLATED INTO LOCK KEYS, because that is the only identifier both sides
+        share. The holds are keyed by ``agent_sessions`` row id — the same id
+        ``_session_lock_cache`` is keyed by — while a pending request may carry a
+        ``session_id``, a ``session_key``, or only a ``task_id``. Mapping the (few,
+        usually zero) held ids forward through the drain's OWN resolution answers all
+        three at once: an avibe/project session lands on ``sid:<id>`` and an IM
+        session on ``key:<session_key>``, which is exactly the key a ``session_key``-
+        only row computes for itself. Resolving each request backwards to a row id
+        instead is not available here — for IM rows that id does not exist until the
+        turn creates it.
+
+        The consequence of keying on the lock rather than the id is deliberate: a hold
+        on one IM session defers a queued run for anything sharing its lock key. Those
+        are precisely the rows the drain already refuses to run concurrently, so this
+        widens nothing that was ever independent.
+
+        ``create_per_run`` rows have no lock key at all (:meth:`_execution_lock_key`
+        returns ``None``) and so can never appear here — correctly, since they target
+        a session that does not exist yet and no teardown can be holding it.
+        """
+
+        session_turns = getattr(self.controller, "session_turns", None)
+        provider = getattr(session_turns, "teardown_held_session_ids", None)
+        if not callable(provider):
+            return set()
+        try:
+            held_ids = {str(session_id) for session_id in provider() if session_id}
+        except Exception:
+            logger.warning(
+                "Scheduler drain: teardown admission holds could not be read; "
+                "dispatching as if no session were being torn down",
+                exc_info=True,
+            )
+            return set()
+        locks: set[str] = set()
+        for session_id in held_ids:
+            lock_key = self._resolved_session_lock(session_id)
+            if lock_key is not None:
+                locks.add(lock_key)
+        return locks
+
+    def _teardown_holds_request(self, request: TaskExecutionRequest) -> bool:
+        """True when this request's session is being torn down right now (HFR-336).
+
+        The single-row form of :meth:`_teardown_held_session_locks`, for the trigger
+        path that dispatches one request without running a drain pass. The drain keeps
+        its own set-per-pass because it asks the question many times in a row.
+        """
+
+        lock_key = self._execution_lock_key(request)
+        if lock_key is None:
+            return False
+        return lock_key in self._teardown_held_session_locks()
+
+    def _resolved_session_lock(self, session_id: str) -> Optional[str]:
+        """This session's canonical lock key, or ``None`` — never an invented one.
+
+        :meth:`_canonical_session_lock` always returns a key: an id it cannot resolve
+        falls back to ``sid:<id>`` and is MEMOIZED, which is safe for the dispatch path
+        that owns the id but not for a read like this one. Called with no session key
+        to pass, that fallback would poison ``_session_lock_cache`` for a later request
+        carrying the same id AND a session key — which would have been normalized to
+        ``key:<...>`` — splitting one conversation's serialization in two. So an
+        unresolvable id is reported as "no lock key" instead of being cached as a
+        guess, the same refusal :meth:`cancel_session_executions` makes for the same
+        reason. A warm cache entry is authoritative and answers without a lookup.
+        """
+
+        cached = self._session_lock_cache.get(session_id)
+        if cached is not None:
+            return cached
+        try:
+            resolve_session_id_target(session_id)
+        except Exception:
+            logger.debug(
+                "Scheduler drain: session %s has no resolvable lock key", session_id, exc_info=True
+            )
+            return None
+        return self._canonical_session_lock(session_id, None)
+
     async def _release_manager_turn(self, session_id: str, *, settled_by: str) -> bool:
         """Cancel the session's live Workbench turn with ``settled_by`` recorded first.
 
@@ -4009,6 +4098,15 @@ class ScheduledTaskService:
         if not self._transport_ready_for_request(queued):
             self._drain_dirty = True
             return
+        # The trigger's own door into the same lane (HFR-336): a cron/at firing claims
+        # and spawns here without passing ``_drain_requests``' skip logic, so it needs
+        # the same refusal. Checked BEFORE the claim so the row simply stays queued —
+        # the capacity and session-busy branches below claim first and requeue, which
+        # is a status round-trip this case has no reason to spend. The drain picks it
+        # up once the hold clears, on the tick this re-arms.
+        if self._teardown_holds_request(queued):
+            self._drain_dirty = True
+            return
         request = self.request_store.claim(queued.id)
         if request is None:
             return
@@ -4033,6 +4131,10 @@ class ScheduledTaskService:
         # backend that never returns) blocked the loop forever and every
         # later request piled up in ``queued``. Dispatching concurrently keeps
         # delivery flowing: a stuck turn only holds up its own session.
+        # One snapshot for the whole pass: the loop below never awaits, so no hold can
+        # change under it, and a pass that re-read the manager per row could gate two
+        # rows of the same conversation against two different answers.
+        held_session_locks = self._teardown_held_session_locks()
         for pending in self.request_store.list_pending():
             if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
                 # At capacity — leave the rest queued and retry next tick.
@@ -4050,6 +4152,36 @@ class ScheduledTaskService:
                 )
                 continue
             lock_key = self._execution_lock_key(pending)
+            if lock_key is not None and lock_key in held_session_locks:
+                # THE THIRD DOOR (HFR-336). A teardown is dismantling this session's
+                # runtime, and the lock this drain gates on says nothing about that:
+                # ``_on_execution_done`` is a done callback, so cancelling the live
+                # execution frees the lock DURING ``cancel_session_executions``' await,
+                # long before the caller has dropped the client. Claiming here would
+                # dispatch onto exactly the dying runtime HFR-330 closed ``submit``
+                # against — and for an IM-targeted row it would go straight to
+                # ``handle_scheduled_message``, which never consults the manager at all.
+                #
+                # STAYS QUEUED, untouched: no claim, no requeue, and deliberately no
+                # skip reason. A recorded reason is a durable write, and this row is
+                # neither transport-blocked nor session-busy — it is waiting out a
+                # window measured in one teardown, after which it runs normally.
+                #
+                # RE-ARMED HERE, which is the other half of the refusal. ``_watch_store``
+                # drains only on a store reload or ``_drain_dirty``; the one dirty flag
+                # this race produces is set by ``_on_execution_done`` and is consumed by
+                # the very pass that skipped. Without this the row would wait for an
+                # unrelated enqueue or a restart — the HFR-332 failure in scheduler
+                # form. Setting it re-runs the drain on the next 2 s tick, and keeps
+                # re-running it until the hold clears; the pass is one indexed read
+                # while it no-ops.
+                self._drain_dirty = True
+                logger.debug(
+                    "Scheduler drain deferred request %s: session lock %s is held by a teardown",
+                    pending.id,
+                    lock_key,
+                )
+                continue
             if lock_key is not None and lock_key in self._inflight_sessions:
                 # A turn for this conversation is already running; keep this
                 # one queued so we never run two turns for one session at once.

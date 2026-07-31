@@ -806,6 +806,28 @@ class SessionTurnManager:
         resolved = str(session_id or "").strip()
         return bool(resolved) and self._teardown_admission.get(resolved, 0) > 0
 
+    def teardown_held_session_ids(self) -> set[str]:
+        """Every session whose admission a teardown currently holds shut (HFR-336).
+
+        The ENUMERATING half of :meth:`is_teardown_admission_closed`, and the reason
+        it exists rather than the predicate being called per candidate: the scheduler
+        drain has to answer this question for rows that carry no session id at all.
+        A scheduled/hook run targeting an IM conversation carries only a
+        ``session_key`` (``ScheduledTask.session_id`` is optional and stays ``None``
+        for every ``--session-key`` target), and the concrete ``agent_sessions`` row
+        id is not resolved until two layers below the dispatch it would have to gate —
+        by which point the turn has already started. The drain therefore maps the
+        holds FORWARD onto its own lock keys instead, which is the one direction that
+        needs no per-request lookup. Same reporting shape as
+        :meth:`owned_agent_run_ids` and :meth:`teardown_exempt_run_ids`.
+
+        A copy, not the live dict: callers read it across their own awaits, and a hold
+        released underneath a mutating view would be the same stale-snapshot bug this
+        file is otherwise about.
+        """
+
+        return {session_id for session_id, depth in self._teardown_admission.items() if depth > 0}
+
     @contextlib.contextmanager
     def teardown_admission(
         self,

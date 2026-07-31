@@ -3531,6 +3531,91 @@ scenarios:
     # test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage /
     # ::test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads.
     test: tests/test_session_teardown.py::test_composite_split_disambiguates_against_stored_anchors
+  - id: HFR-336
+    name: >-
+      the scheduler drain is the third door, and it defers a queued run while a
+      teardown holds the session
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 12. THE THIRD DOOR onto a session's runtime. HFR-330 closed the
+    # FIRST (SessionTurnManager.submit, which now folds is_teardown_admission_closed
+    # into its admission decision) and HFR-126/HFR-332 the SECOND (the send-now direct
+    # flush, plus the drain the hold owes when it reopens). Both live inside the turn
+    # manager. The scheduler reaches the same runtime without passing either.
+    # THE BUG: ScheduledTaskService._drain_requests gates only on _inflight_sessions --
+    # a set of LOCK KEYS that says nothing about teardown. _on_execution_done is a done
+    # CALLBACK, so cancelling the live execution frees that lock DURING
+    # cancel_session_executions' own `with suppress(CancelledError): await task`, long
+    # before the caller has dropped the runtime client. From that instant to the end of
+    # the teardown the session reads FREE to the drain, and any drain pass landing in
+    # the window (the tick is 2 s; a teardown that stops a transport is easily longer)
+    # claims the next queued run for that session and dispatches it onto the
+    # Claude/Codex runtime being disconnected. Worse for IM: an IM-targeted row does not
+    # go through the gate at all -- _execute_request falls through to
+    # MessageHandler.handle_scheduled_message, which never consults the manager.
+    # THE SEAM: the hold stays owned by SessionTurnManager; the new
+    # teardown_held_session_ids() is its ENUMERATING half, read through the controller
+    # by the same getattr-guarded adapter shape as _teardown_exempt_run_ids, so
+    # core/scheduled_tasks imports no manager internals and a controller without one
+    # degrades to "nothing held" rather than raising on a dispatch path.
+    # KEYING, and why the predicate could not simply be called per row: the holds are
+    # keyed by agent_sessions row id, but a scheduled/hook row targeting IM carries only
+    # a session_key -- ScheduledTask.session_id is optional and stays None for every
+    # --session-key target -- and the concrete row id is not resolved until inside
+    # _handle_turn / ensure_agent_session_id, i.e. AFTER the dispatch this must gate
+    # (and ensure_ has CREATE semantics, so resolving it here would mint rows as a side
+    # effect of an admission check). So the holds are mapped FORWARD onto the drain's
+    # own lock keys instead, via _resolved_session_lock -> _canonical_session_lock: an
+    # avibe/project session lands on sid:<id>, an IM one on key:<session_key>, which is
+    # exactly the key a session_key-only row computes for itself. _resolved_session_lock
+    # refuses to CACHE an unresolvable id (returning None instead of _canonical_session
+    # _lock's sid:<id> fallback) for the reason cancel_session_executions states: a
+    # guess memoized here would be handed to a later request carrying that id AND a
+    # session key, splitting one conversation's serialization. create_per_run rows have
+    # no lock key at all and so can never be held -- correct, they target a session that
+    # does not exist yet.
+    # SEMANTICS: a held row stays QUEUED. Not claimed, not requeued, and deliberately NO
+    # skip reason -- a reason is a durable write and this row is neither
+    # transport-blocked nor session-busy. The held check runs BEFORE the session-busy
+    # branch precisely so the usual case (held AND busy) writes nothing either.
+    # RE-PICKUP, the HFR-332 lesson in scheduler form: refusing is only half a contract.
+    # _watch_store drains only when a store reloaded or _drain_dirty is set, and the one
+    # dirty flag this race produces (_on_execution_done's) is SPENT by the very tick
+    # that skips -- the flag is cleared before _drain_requests runs. So the skip
+    # re-arms the drain itself; it then re-arms every 2 s until the hold clears, which
+    # costs one indexed read per no-op pass. This is pinned by driving two real ticks
+    # with both stores reporting no reload, and it was verified by neutering: removing
+    # the one assignment fails the second test at the re-arm assertion. An earlier draft
+    # that called _drain_requests directly passed while neutered, because a direct call
+    # never consumes the flag -- that draft proved nothing and was rewritten.
+    # FOURTH-DOOR AUDIT (every path that reaches a backend for an EXISTING session):
+    # (1) session_turn_gate.submit_scheduled -- INHERITS THE HOLD: internal_server's
+    # _submit_scheduled_turn ends at manager.submit(..., source=SOURCE_SCHEDULED), which
+    # is the HFR-330 fold. So avibe rows carrying a session_id were already safe; the
+    # exposure was exactly the non-gate fallbacks. (2) ScheduledTaskService._run_task --
+    # SAME LANE, SEPARATE DOOR: a cron/at firing claims and spawns without passing
+    # _drain_requests' skip logic. Fixed here too, checked BEFORE the claim so the row
+    # stays queued rather than taking the claim/requeue round trip its neighbours use.
+    # (3) watches -- NOT A DOOR: _hook_request only builds a request and enqueues it,
+    # re-entering the drain. (4) run/vault callbacks and the owed-failure-notice drain --
+    # NOT DOORS: the callbacks enqueue fresh rows through enqueue_session_callback, and
+    # the notice drain emits one notify with no turn settlement. (5) recovered activity
+    # outputs -- NOT A DOOR: _deliver_recovered_activity_output ends at
+    # emit_agent_message, delivery only. (6) `vibe agent run --sync` -- NOT A DOOR: the
+    # CLI enqueues and then POLLS the DB; dispatch happens in the controller process
+    # through this same drain. (7) handle_scheduled_message has exactly two non-test
+    # callers, _execute_request and dispatch_turn_with_outcome's scheduled branch, both
+    # reached only from this lane -- no third caller.
+    # RESIDUAL, out of scope and recorded rather than fixed: SessionTurnManager.
+    # flush_queue does not consult the hold itself, so its non-submit callers (send_now's
+    # idle branch, recover_persisted_agent_run_queue, _run's own finally for a turn that
+    # completes naturally mid-hold) remain reachable; and the IM human lane
+    # (handle_user_message, incl. the quick-reply callback) has no admission check at
+    # all, though it has no durable send-while-busy queue to divert into today either.
+    # Companion: ::test_a_held_sessions_run_dispatches_after_the_hold_clears.
+    test: tests/test_scheduled_tasks.py::test_scheduler_drain_defers_a_queued_run_while_teardown_holds_the_session
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

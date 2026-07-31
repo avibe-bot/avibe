@@ -8855,6 +8855,224 @@ def test_drain_serializes_task_only_scheduled_runs(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
+# HFR-336: the scheduler drain is the THIRD door onto a session's runtime
+# ---------------------------------------------------------------------
+
+
+def _teardown_hold_race(tmp_path: Path, monkeypatch):
+    """The HFR-336 race, built once for both tests below.
+
+    A live execution pinned to ``sesX`` plus a SECOND queued run for the same
+    conversation carried the IM way (``session_key`` only, no session id), and a real
+    :class:`SessionTurnManager` on the controller so a teardown can hold the session's
+    admission for real rather than through a double.
+    """
+
+    def fake_resolve(session_id, *, db_path=None):
+        return SimpleNamespace(
+            session_key=ParsedSessionKey(platform="slack", scope_type="channel", scope_id="C123")
+        )
+
+    monkeypatch.setattr("core.scheduled_tasks.resolve_session_id_target", fake_resolve)
+
+    store = TaskExecutionStore(tmp_path / "reqs")
+    live = store.enqueue_hook_send(session_key="", session_id="sesX", prompt="the live turn")
+    queued = store.enqueue_hook_send(session_key="slack::channel::C123", prompt="queued behind it")
+
+    manager = SessionTurnManager()
+    controller = SimpleNamespace(platform_settings_managers={}, session_turns=manager)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=store,
+    )
+
+    started: list[str] = []
+    gate = asyncio.Event()
+
+    async def fake_execute(request):
+        started.append(request.id)
+        await gate.wait()
+        service.request_store.complete(request, ok=True)
+
+    service._execute_claimed_request = fake_execute  # type: ignore[assignment]
+
+    return SimpleNamespace(
+        store=store,
+        service=service,
+        controller=controller,
+        manager=manager,
+        live=live,
+        queued=queued,
+        started=started,
+        gate=gate,
+        lock_key="key:slack::channel::C123",
+    )
+
+
+def test_scheduler_drain_defers_a_queued_run_while_teardown_holds_the_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-336: the drain must not dispatch into a runtime a teardown is dismantling.
+
+    THE THIRD DOOR. HFR-330 closed admission for ``SessionTurnManager.submit`` and
+    HFR-332/HFR-126 for the send-now direct flush, but the scheduler drain reaches a
+    session by a route neither guards: it gates on ``_inflight_sessions``, and
+    ``_on_execution_done`` — a done callback — frees that lock DURING
+    ``cancel_session_executions``' own await. So from the middle of the teardown
+    onward the session reads FREE to the drain while its runtime is still being torn
+    down, and any drain pass landing in that window claims the next queued run for the
+    session and dispatches it onto the dying Claude/Codex client (an IM-targeted run
+    goes straight to ``handle_scheduled_message`` and never consults the manager at
+    all).
+
+    The hold is entered exactly as production does it — ``hold_session_admission`` on
+    the caller's ``ExitStack``, spanning the whole teardown — and the drain pass runs
+    INSIDE that stack, after the cancel has already freed the lock.
+    """
+
+    from contextlib import ExitStack
+
+    from core.session_teardown import hold_session_admission
+
+    async def _exercise() -> None:
+        race = _teardown_hold_race(tmp_path, monkeypatch)
+        service, store = race.service, race.store
+
+        await asyncio.wait_for(service._drain_requests(), timeout=1.0)
+        await asyncio.sleep(0.05)
+        # The live run holds the conversation's lock; the second waits behind it.
+        assert race.started == [race.live.id]
+        assert race.lock_key in service._inflight_sessions
+
+        with ExitStack() as stack:
+            # ``drain_on_release=False`` is the End/shutdown shape: hold admission,
+            # decline the queue hand-back. The hold is what this test is about.
+            hold_session_admission(
+                race.controller, "sesX", admission_holds=stack, drain_on_release=False
+            )
+            assert race.manager.is_teardown_admission_closed("sesX") is True
+
+            await service.teardown_session_runs("sesX", settled_by=SETTLED_BY_EVICTED)
+
+            # THE WINDOW: the cancel freed the session lock while the hold — and the
+            # teardown — are still up.
+            assert race.lock_key not in service._inflight_sessions
+            assert race.manager.is_teardown_admission_closed("sesX") is True
+
+            await asyncio.wait_for(service._drain_requests(), timeout=1.0)
+            await asyncio.sleep(0.05)
+
+            # Nothing new dispatched onto the dying runtime...
+            assert race.started == [race.live.id]
+            # ...and the row is left QUEUED: not claimed, not requeued, no status write.
+            assert [item["id"] for item in store.list_runs(status="queued")] == [race.queued.id]
+            assert race.queued.id not in service._inflight_executions
+
+        race.gate.set()
+
+    asyncio.run(_exercise())
+
+
+def test_a_held_sessions_run_dispatches_after_the_hold_clears(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-336, second half: a deferred run must come back WITHOUT a new trigger.
+
+    The HFR-332 lesson in scheduler form. Refusing the dispatch is only half a
+    contract — the drain does not run on every tick, only when a store reloaded or
+    ``_drain_dirty`` is set (``_watch_store``), and the one dirty flag this race
+    produces (``_on_execution_done``) is consumed by the very pass that skipped. So
+    the skip RE-ARMS the drain itself: nothing else would revisit the row until an
+    unrelated enqueue or a restart.
+
+    Pinned through the REAL tick loop, twice, because that is the only place the flag
+    is consumed: ``_watch_store`` clears ``_drain_dirty`` before it drains, so the tick
+    that skips the held row spends the one flag ``_on_execution_done`` left behind. If
+    the skip does not re-arm, the second tick — with both stores reporting no reload
+    and nothing else changing — never drains at all and the row never runs. Calling
+    ``_drain_requests`` directly instead would prove nothing: it does not consume the
+    flag, so the row would come back on a flag the race had already produced.
+    """
+
+    from contextlib import ExitStack
+
+    from core.session_teardown import hold_session_admission
+
+    original_sleep = asyncio.sleep
+
+    async def _exercise() -> None:
+        race = _teardown_hold_race(tmp_path, monkeypatch)
+        service, store = race.service, race.store
+
+        await asyncio.wait_for(service._drain_requests(), timeout=1.0)
+        await asyncio.sleep(0.05)
+        assert race.started == [race.live.id]
+
+        # Neither store ever reports a change again: from here on, the ONLY thing that
+        # can make a tick drain is ``_drain_dirty``.
+        reloads: list[str] = []
+
+        def _no_task_reload() -> bool:
+            reloads.append("tasks")
+            return False
+
+        def _no_request_reload() -> bool:
+            reloads.append("requests")
+            return False
+
+        service.store.maybe_reload = _no_task_reload  # type: ignore[assignment]
+        service.request_store.maybe_reload = _no_request_reload  # type: ignore[assignment]
+        service.scheduler = _StubScheduler()
+
+        async def _stop_after_first_sleep(_seconds):
+            service._running = False
+            await original_sleep(0)
+
+        monkeypatch.setattr("core.scheduled_tasks.asyncio.sleep", _stop_after_first_sleep)
+
+        async def _one_tick() -> None:
+            service._running = True
+            await service._watch_store()
+            await original_sleep(0)
+
+        with ExitStack() as stack:
+            hold_session_admission(
+                race.controller, "sesX", admission_holds=stack, drain_on_release=False
+            )
+            await service.teardown_session_runs("sesX", settled_by=SETTLED_BY_EVICTED)
+            # The cancelled execution's ``_on_execution_done`` armed the drain; this
+            # tick SPENDS that flag and finds the session held.
+            assert service._drain_dirty is True
+            await _one_tick()
+            assert race.started == [race.live.id]
+            # THE RE-PICKUP MECHANISM: the skip re-armed the drain it just consumed.
+            assert service._drain_dirty is True
+
+        assert race.manager.is_teardown_admission_closed("sesX") is False
+
+        # A tick with NOTHING to notice: no store reload, no new row, no execution
+        # finishing, no unrelated trigger of any kind.
+        await _one_tick()
+
+        assert reloads == ["tasks", "requests", "tasks", "requests"]
+        assert race.started == [race.live.id, race.queued.id]
+        assert service._drain_dirty is False
+        assert [item["id"] for item in store.list_runs(status="queued")] == []
+
+        race.gate.set()
+        pending = service._inflight_executions.get(race.queued.id)
+        if pending is not None:
+            await pending
+        if service._notice_drain_task is not None:
+            service._notice_drain_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await service._notice_drain_task
+
+    asyncio.run(_exercise())
+
+
+# ---------------------------------------------------------------------
 # avibe scheduled runs route through the per-session turn gate
 # ---------------------------------------------------------------------
 
