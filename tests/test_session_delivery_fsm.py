@@ -2012,6 +2012,43 @@ def test_ownerless_recovery_resumes_oldest_combined_fifo_head(managers) -> None:
     assert queued["state"] == "queued"
 
 
+def test_restart_resumes_queued_delivery_after_terminal_owner_was_committed(
+    managers,
+) -> None:
+    manager, restored, engine, _engine_b, _starts = managers
+    dispatched: list[str] = []
+
+    async def run():
+        turn_id, _context_value = await _activate(manager)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="resume after terminal commit",
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        assert manager._terminalize_durable_turn(turn_id, "completed")["changed"]
+
+        async def capture_run(_session_id, _context_value, text, **_kwargs):
+            dispatched.append(text)
+
+        restored._run = capture_run
+        await restored.recover_durable_delivery_state("ses_fsm")
+        return queued
+
+    queued = asyncio.run(run())
+    assert dispatched == ["resume after terminal commit"]
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(queued.delivery_id))
+        active = delivery_store.active_turn(conn, "ses_fsm")
+    assert delivery is not None
+    assert delivery["state"] == "starting"
+    assert active is not None
+    assert active["id"] == delivery["target_turn_id"]
+
+
 def test_terminal_reconciliation_waits_for_release_and_contains_write_failure(
     managers,
     monkeypatch,
@@ -2161,6 +2198,67 @@ def test_stopping_agent_initiated_turn_preserves_durable_queue(managers) -> None
     assert delivery is not None
     assert delivery["state"] == "queued"
     assert active is None
+
+
+def test_agent_initiated_completion_resumes_oldest_combined_fifo_head(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    dispatched: list[str] = []
+
+    async def run():
+        manager.controller._get_session_key = lambda _context_value: "avibe::ses_fsm"
+        context = _context()
+        context.platform_specific.update(
+            {
+                "turn_token": "trn-agent-initiated-fifo",
+                "agent_runtime_turn_key": "agent-initiated-key",
+                "agent_runtime_turn_token": "agent-initiated-token",
+            }
+        )
+        assert manager.register_agent_initiated_turn(context)
+        await asyncio.sleep(0)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="older durable row",
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        with engine.begin() as conn:
+            legacy = messages_service.enqueue_queued(
+                conn,
+                scope_id=None,
+                session_id="ses_fsm",
+                text="newer legacy row",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == legacy["id"])
+                .values(created_at="9999-12-31T23:59:59Z")
+            )
+
+        async def capture_run(_session_id, _context_value, text, **_kwargs):
+            dispatched.append(text)
+
+        manager._run = capture_run
+        holder = manager.in_flight["ses_fsm"].task
+        sink = manager.get_turn_sink("avibe::ses_fsm")
+        assert sink is not None
+        sink["settled_by"] = "terminal_result"
+        sink["done_event"].set()
+        await holder
+        return queued, legacy
+
+    queued, legacy = asyncio.run(run())
+    assert dispatched == ["older durable row"]
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(queued.delivery_id))
+        legacy_row = messages_service.get_message(conn, str(legacy["id"]))
+    assert delivery is not None
+    assert delivery["state"] == "starting"
+    assert legacy_row is not None
+    assert legacy_row["type"] == messages_service.QUEUED_TYPE
 
 
 def test_backend_drain_defers_durable_successor_start_attempt(managers) -> None:

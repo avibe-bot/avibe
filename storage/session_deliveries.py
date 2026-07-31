@@ -565,6 +565,28 @@ def recovery_turns(conn: Connection, session_id: str | None = None) -> list[dict
     return [dict(row) for row in conn.execute(query).mappings()]
 
 
+def queued_session_ids_without_live_turns(
+    conn: Connection,
+    session_id: str | None = None,
+) -> list[str]:
+    live_turn = (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == session_deliveries.c.session_id)
+        .where(session_turns.c.state.in_(TURN_OWNER_STATES))
+        .exists()
+    )
+    query = (
+        select(session_deliveries.c.session_id)
+        .where(session_deliveries.c.state == "queued")
+        .where(~live_turn)
+        .distinct()
+    )
+    if session_id:
+        query = query.where(session_deliveries.c.session_id == session_id)
+    query = query.order_by(session_deliveries.c.session_id)
+    return [str(value) for value in conn.execute(query).scalars() if value]
+
+
 def unsettled_attempts(conn: Connection, session_id: str | None = None) -> list[dict[str, Any]]:
     query = select(session_deliveries).where(
         session_deliveries.c.state.in_(

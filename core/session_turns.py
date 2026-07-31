@@ -2415,6 +2415,7 @@ class SessionTurnManager:
         pending_interrupts: list[tuple[str, str]] = []
         recovered: list[str] = []
         retired_ownerless: set[str] = set()
+        queued_without_owner: set[str] = set()
         for turn in turns:
             turn_id = str(turn["id"])
             target_session = str(turn["session_id"])
@@ -2481,10 +2482,13 @@ class SessionTurnManager:
                         expected_states=(str(attempt["state"]),),
                         values={"state": "reconciling", "receipt_outcome": "unknown"},
                     )
+            queued_without_owner.update(
+                delivery_store.queued_session_ids_without_live_turns(conn, session_id)
+            )
 
         for target_session, turn_id in pending_interrupts:
             await self._run_pending_interrupt(target_session, turn_id)
-        for target_session in sorted(retired_ownerless):
+        for target_session in sorted(retired_ownerless | queued_without_owner):
             await self._resume_post_terminal(target_session)
         for turn_id in dispatchable:
             if await self._start_persisted_turn(turn_id):
@@ -3978,11 +3982,12 @@ class SessionTurnManager:
                 )
                 if should_flush:
                     try:
-                        await self.flush_queue(session_id)
+                        if durable_turn_registered:
+                            await self._resume_post_terminal(session_id)
+                        else:
+                            await self.flush_queue(session_id)
                     except Exception:
-                        logger.debug("agent-initiated turn: flush_queue failed", exc_info=True)
-                if durable_turn_registered and should_flush:
-                    await self._resume_durable_session(session_id)
+                        logger.debug("agent-initiated turn: queue resume failed", exc_info=True)
 
         try:
             task = asyncio.create_task(_holder(), name="agent-initiated-turn-holder")
