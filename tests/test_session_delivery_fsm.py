@@ -309,6 +309,41 @@ def test_adapter_error_persists_reconciliation_without_retry(managers) -> None:
     manager._steer.assert_awaited_once()
 
 
+def test_p1_steers_through_persisted_turn_backend(managers) -> None:
+    manager, _restarted, _engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    observed_backends: list[str] = []
+
+    def active_identity(backend, _session, logical):
+        observed_backends.append(backend)
+        return logical, "native-t1"
+
+    manager._active_identity = active_identity
+    manager._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+    drifted_context = _context()
+    drifted_context.platform_specific["agent_session_target"][
+        "agent_backend"
+    ] = "claude"
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="target the durable owner",
+            ),
+            context=drifted_context,
+        )
+    )
+
+    assert result.state == "attached"
+    assert result.turn_id == turn_id
+    assert observed_backends == ["codex"]
+    assert manager._steer.await_args.args[0] == "codex"
+
+
 def test_definitive_refusal_racing_idle_drain_starts_same_message_once(managers) -> None:
     """Scenario: MESSAGE-DELIVERY-012"""
     manager, drainer, engine, _engine_b, starts = managers

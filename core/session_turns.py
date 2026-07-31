@@ -1282,6 +1282,7 @@ class SessionTurnManager:
         steer_attempt_id: str | None = None
         expected_native_id: str | None = None
         turn_id: str | None = None
+        steer_backend = backend
         state: str
         priority = "p1"
         with self._sqlite_engine().begin() as conn:
@@ -1300,6 +1301,7 @@ class SessionTurnManager:
                 steer_attempt_id = delivery_store.new_attempt_id()
                 expected_native_id = str(identity[1])
                 turn_id = observed_id
+                steer_backend = str(current["backend"])
                 delivery_store.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -1374,7 +1376,7 @@ class SessionTurnManager:
             await self._start_persisted_turn(turn_id, context=context)
         elif state == "steering" and turn_id and steer_attempt_id and expected_native_id:
             receipt = await self._attempt_steer(
-                backend,
+                steer_backend,
                 SteerRequest(
                     target_session_id=request.session_id,
                     expected_logical_turn_id=turn_id,
@@ -1401,6 +1403,7 @@ class SessionTurnManager:
         turn_id: str | None = None
         attempt_id: str | None = None
         native_id: str | None = None
+        steer_backend = backend
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             current_head = delivery_store.fifo_head(conn, session_id)
@@ -1446,6 +1449,7 @@ class SessionTurnManager:
                 turn_id = observed_turn_id
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
+                steer_backend = str(current_turn["backend"])
                 claimed = delivery_store.cas_delivery(
                     conn,
                     delivery_id,
@@ -1478,7 +1482,7 @@ class SessionTurnManager:
             with self._sqlite_engine().connect() as conn:
                 row = messages_service.get_message(conn, message, session_id=session_id)
             receipt = await self._attempt_steer(
-                backend,
+                steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
