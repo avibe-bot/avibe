@@ -957,6 +957,74 @@ def test_empty_p0_unknown_receipt_completes_only_on_exact_terminal_proof(manager
     assert starts == [turn_id]
 
 
+def test_empty_p0_natural_terminal_race_preserves_fifo_queue(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    release_terminal = asyncio.Event()
+    interrupt_persisted = asyncio.Event()
+    release_interrupt = asyncio.Event()
+
+    async def terminal_after_p0(*_args, **_kwargs):
+        await release_terminal.wait()
+        return SimpleNamespace(settled_by="terminal_result")
+
+    async def delayed_interrupt(_session_id, _turn_id, delivery_id):
+        interrupt_persisted.set()
+        await release_interrupt.wait()
+        with engine.connect() as conn:
+            delivery = delivery_store.get_delivery(conn, delivery_id)
+        return {"state": str((delivery or {}).get("state") or "reconciling")}
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        terminal_after_p0,
+    )
+    manager._interrupt_durable_turn = delayed_interrupt
+
+    async def run():
+        active = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="active",
+            ),
+            context=_context(),
+        )
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="must remain queued",
+            ),
+            context=_context(),
+        )
+        p0 = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p0"),
+                context=_context(),
+            )
+        )
+        await interrupt_persisted.wait()
+        holder = manager.in_flight["ses_fsm"].task
+        release_terminal.set()
+        await holder
+        release_interrupt.set()
+        await p0
+        await asyncio.sleep(0)
+        return active, queued
+
+    _active, queued = asyncio.run(run())
+    with engine.connect() as conn:
+        queued_row = delivery_store.get_delivery(conn, str(queued.delivery_id))
+        owner = delivery_store.active_turn(conn, "ses_fsm")
+    assert queued_row is not None
+    assert queued_row["state"] == "queued"
+    assert owner is None
+
+
 def test_legacy_queue_drain_excludes_durable_owned_messages(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     turn_id, _ = asyncio.run(_activate(manager))

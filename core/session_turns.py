@@ -2495,7 +2495,11 @@ class SessionTurnManager:
                     # so they retire with it — no parallel set to discard. Don't flush
                     # after a plain Stop (keep the queue) or a terminal failure; send-now
                     # still forces a flush via flush_on_cancel.
-                    should_flush = (
+                    preserve_durable_queue = bool(
+                        durable_turn_registered
+                        and durable_terminal_result.get("preserve_queue")
+                    )
+                    should_flush = not preserve_durable_queue and (
                         (
                             not cancelled
                             and not failed
