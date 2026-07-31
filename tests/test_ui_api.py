@@ -2697,7 +2697,9 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
     # Scenario: TELEGRAM-TOPIC-001
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     SettingsStore.reset_instance()
+    agent_store = VibeAgentStore()
     try:
+        agent_store.create(name="reviewer", backend="codex")
         store = SettingsStore.get_instance()
         store.update_channel("-1001", ChannelSettings(enabled=True, require_mention=True), platform="telegram")
         chat_discovery.remember_chat(
@@ -2736,6 +2738,7 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
         assert api.get_settings("telegram")["threads"] == {}
     finally:
         SettingsStore.reset_instance()
+        agent_store.close()
 
 
 def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path, monkeypatch):
