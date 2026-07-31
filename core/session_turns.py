@@ -1140,7 +1140,7 @@ class SessionTurnManager:
     ) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
         with self._sqlite_engine().connect() as conn:
             turn = delivery_store.active_turn(conn, session_id)
-        if turn is None or turn["state"] != "active":
+        if turn is None:
             return turn, None
         identity = self._active_identity(
             str(turn["backend"]),
@@ -1148,8 +1148,25 @@ class SessionTurnManager:
             str(turn["id"]),
         )
         persisted_native_id = str(turn.get("native_turn_id") or "").strip()
-        if identity is None and persisted_native_id:
+        if identity is None and turn["state"] == "active" and persisted_native_id:
             identity = (str(turn["id"]), persisted_native_id)
+        if identity is not None and turn["state"] != "active":
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_turn(conn, str(turn["id"]))
+                if latest is None or latest["state"] not in delivery_store.TURN_OWNER_STATES:
+                    return latest, None
+                bound = delivery_store.bind_native_start(
+                    conn,
+                    str(turn["id"]),
+                    expected_version=int(latest["version"]),
+                    runtime_key=str(latest.get("runtime_key") or "recovered"),
+                    runtime_turn_id=str(latest.get("runtime_turn_id") or "recovered"),
+                    native_turn_id=identity[1],
+                )
+                if bound is None:
+                    return latest, None
+                turn = bound
         return turn, identity
 
     async def deliver(

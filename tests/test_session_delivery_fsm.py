@@ -538,6 +538,36 @@ def test_missing_runtime_owner_persists_p0_reconciliation(managers) -> None:
     manager.controller.command_handler.handle_stop.assert_not_awaited()
 
 
+def test_late_positive_native_evidence_rebinds_quarantined_turn(managers) -> None:
+    manager, restarted, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    asyncio.run(restarted.recover_durable_delivery_state())
+    with engine.connect() as conn:
+        quarantined = delivery_store.get_turn(conn, turn_id)
+    assert quarantined is not None
+    assert quarantined["state"] == "quarantined"
+
+    restarted._active_identity = lambda _backend, _session, logical: (
+        logical,
+        "native-t1",
+    )
+    restarted._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    result = asyncio.run(
+        restarted.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="after restore"),
+            context=_context(),
+        )
+    )
+
+    assert result.state == "attached"
+    with engine.connect() as conn:
+        rebound = delivery_store.get_turn(conn, turn_id)
+    assert rebound is not None
+    assert rebound["state"] == "active"
+    assert rebound["native_turn_id"] == "native-t1"
+    restarted._steer.assert_awaited_once()
+
+
 def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     admitted = asyncio.run(
