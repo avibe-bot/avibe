@@ -1530,6 +1530,26 @@ def cancel_not_requested() -> Any:
     return cast(func.coalesce(agent_runs.c.cancel_requested, 0), Integer) == 0
 
 
+def _cancel_aware_terminal_status(
+    row: Any,
+    requested_status: Any,
+) -> tuple[str, list[Any]]:
+    """Decide one terminal status and return the CAS guards for that snapshot."""
+
+    status = normalize_run_status(requested_status)
+    cancel_requested = bool(row["cancel_requested"])
+    if cancel_requested and status == "failed":
+        status = "canceled"
+    guards = [
+        agent_runs.c.status.in_(
+            _status_query_values("queued") + _status_query_values("running")
+        )
+    ]
+    if not cancel_requested:
+        guards.append(cancel_not_requested())
+    return status, guards
+
+
 def _coalesced_terminal_write(
     row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
 ) -> Optional[tuple[dict[str, Any], list[Any]]]:
@@ -3251,35 +3271,54 @@ class SQLiteBackgroundTaskStore:
                     if deferred_result_text is not None
                     else visible_text
                 )
-                terminal_values: dict[str, Any] = {
-                    "status": normalize_run_status(effective_terminal_status),
+                base_terminal_values: dict[str, Any] = {
                     # Structured outputs remain available in result_payload, but
                     # result_text is the one terminal result used by callbacks.
                     "result_text": terminal_result_text,
-                    "completed_at": now,
-                    "updated_at": now,
                 }
                 if effective_terminal_error is not None:
-                    terminal_values["error"] = str(effective_terminal_error)
-                _merge_owed_failure_notice(
-                    terminal_values,
-                    run_id=run_id,
-                    status=effective_terminal_status,
-                    row_metadata_json=row["metadata_json"],
-                    now=now,
-                )
-                transition = conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == run_id)
-                    .where(
-                        agent_runs.c.status.in_(
-                            _status_query_values("queued")
-                            + _status_query_values("running")
-                        )
+                    base_terminal_values["error"] = str(effective_terminal_error)
+
+                # One bounded re-read mirrors ``settle_run_terminal``. A Stop on a
+                # running row changes only ``cancel_requested``; the first CAS loses,
+                # then the second decision sees the flag and settles canceled.
+                terminal_row = row
+                for final_attempt in (False, True):
+                    if normalize_run_status(terminal_row["status"]) in TERMINAL_RUN_STATUSES:
+                        break
+                    status, guards = _cancel_aware_terminal_status(
+                        terminal_row, effective_terminal_status
                     )
-                    .values(**terminal_values)
-                )
-                terminal_transition = bool(transition.rowcount)
+                    terminal_values = {
+                        **base_terminal_values,
+                        "status": status,
+                        "completed_at": now,
+                        "updated_at": now,
+                    }
+                    _merge_owed_failure_notice(
+                        terminal_values,
+                        run_id=run_id,
+                        status=status,
+                        row_metadata_json=terminal_row["metadata_json"],
+                        now=now,
+                    )
+                    transition = conn.execute(
+                        update(agent_runs)
+                        .where(agent_runs.c.id == run_id)
+                        .where(*guards)
+                        .values(**terminal_values)
+                    )
+                    if transition.rowcount:
+                        terminal_transition = True
+                        break
+                    if final_attempt:
+                        break
+                    terminal_row = (
+                        conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                        .mappings()
+                        .one()
+                    )
+                row = terminal_row
                 if not terminal_transition:
                     # The row was already terminal, so the guarded UPDATE above
                     # matched nothing and ``result_text`` -- the one terminal
@@ -3428,10 +3467,7 @@ class SQLiteBackgroundTaskStore:
                 if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
                     # The Activity lifecycle already owns this row's terminal state.
                     return None
-                status = normalize_run_status(terminal_status)
-                cancel_requested = bool(row["cancel_requested"])
-                if cancel_requested and status == "failed":
-                    status = "canceled"
+                status, guards = _cancel_aware_terminal_status(row, terminal_status)
                 values: dict[str, Any] = {
                     "status": status,
                     "completed_at": now,
@@ -3449,21 +3485,9 @@ class SQLiteBackgroundTaskStore:
                     extra_metadata=metadata or None,
                     now=now,
                 )
-                guards = [
-                    agent_runs.c.status.in_(
-                        _status_query_values("queued") + _status_query_values("running")
-                    )
-                ]
-                if not cancel_requested:
-                    # RE-ASSERT what the branch above decided from. The status predicate
-                    # alone catches a cancel of a QUEUED row (``cancel_run`` flips that
-                    # one to ``canceled``) but NOT of a RUNNING one, where it sets only
-                    # the flag — and that is the case that matters, because a running
-                    # turn is what a user actually presses Stop on. Without this the
-                    # write lands ``failed`` over the Stop AND stamps an owed failure
-                    # notice, telling the user their task broke because they cancelled
-                    # it.
-                    guards.append(cancel_not_requested())
+                # ``_cancel_aware_terminal_status`` re-asserts the cancellation fact
+                # this branch read. A running cancel changes only the flag, so a status
+                # predicate alone cannot stop a stale failure from overwriting Stop.
                 transition = conn.execute(
                     update(agent_runs).where(agent_runs.c.id == run_id).where(*guards).values(**values)
                 )
@@ -3564,56 +3588,72 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if not row:
                 return False
-            result_payload = _json_loads(row["result_payload_json"], {})
-            if not isinstance(result_payload, dict):
-                return False
-            deferred_status = str(result_payload.get("deferred_terminal_status") or "").strip()
-            if not deferred_status:
-                return False
-            result_payload.pop("deferred_terminal_status", None)
-            deferred_error = result_payload.pop("deferred_terminal_error", None)
-            deferred_result_text = result_payload.pop("deferred_terminal_result_text", None)
-            status = (
-                _stronger_terminal_status(deferred_status, terminal_status)
-                if terminal_status
-                else normalize_run_status(deferred_status)
-            )
-            values: dict[str, Any] = {
-                "status": status,
-                "completed_at": now,
-                "updated_at": now,
-                "result_payload_json": _json_dumps(result_payload),
-            }
-            effective_error = deferred_error if deferred_error is not None else error
-            if effective_error is not None:
-                values["error"] = str(effective_error)
-            if deferred_result_text is not None:
-                values["result_text"] = str(deferred_result_text)
-            _merge_owed_failure_notice(
-                values,
-                run_id=run_id,
-                status=status,
-                row_metadata_json=row["metadata_json"],
-                now=now,
-            )
-            transition = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(
-                    agent_runs.c.status.in_(
-                        _status_query_values("queued")
-                        + _status_query_values("running")
+            # A deferred failure is still subordinate to Stop. Re-decide once when
+            # the cancellation CAS loses so a running row becomes canceled instead
+            # of remaining a zombie or receiving a false failure notice.
+            for final_attempt in (False, True):
+                if normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                    break
+                result_payload = _json_loads(row["result_payload_json"], {})
+                if not isinstance(result_payload, dict):
+                    break
+                deferred_status = str(
+                    result_payload.get("deferred_terminal_status") or ""
+                ).strip()
+                if not deferred_status:
+                    break
+                result_payload.pop("deferred_terminal_status", None)
+                deferred_error = result_payload.pop("deferred_terminal_error", None)
+                deferred_result_text = result_payload.pop(
+                    "deferred_terminal_result_text", None
+                )
+                requested_status = (
+                    _stronger_terminal_status(deferred_status, terminal_status)
+                    if terminal_status
+                    else normalize_run_status(deferred_status)
+                )
+                status, guards = _cancel_aware_terminal_status(row, requested_status)
+                values: dict[str, Any] = {
+                    "status": status,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "result_payload_json": _json_dumps(result_payload),
+                }
+                effective_error = deferred_error if deferred_error is not None else error
+                if effective_error is not None:
+                    values["error"] = str(effective_error)
+                if deferred_result_text is not None:
+                    values["result_text"] = str(deferred_result_text)
+                _merge_owed_failure_notice(
+                    values,
+                    run_id=run_id,
+                    status=status,
+                    row_metadata_json=row["metadata_json"],
+                    now=now,
+                )
+                transition = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(*guards)
+                    .values(**values)
+                )
+                if transition.rowcount:
+                    transitioned = True
+                    row_to_publish = dict(
+                        conn.execute(
+                            select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                        ).mappings().one()
                     )
+                    break
+                if final_attempt:
+                    break
+                row = (
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1))
+                    .mappings()
+                    .first()
                 )
-                .values(**values)
-            )
-            transitioned = bool(transition.rowcount)
-            if transitioned:
-                row_to_publish = dict(
-                    conn.execute(
-                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
-                    ).mappings().one()
-                )
+                if row is None:
+                    break
         _publish_run_rows_updated([row_to_publish])
         return transitioned
 

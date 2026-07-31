@@ -270,6 +270,73 @@ def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     )
 
 
+def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    """The backend output writer must re-decide a failed turn after Stop wins."""
+
+    sqlite, requests = _store(tmp_path)
+    request = requests.enqueue_agent_run(
+        session_key="slack::channel::C6",
+        message="hi",
+        agent_name=None,
+    )
+    assert requests.claim(request.id) is not None
+
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    event.listen(sqlite.engine, "before_cursor_execute", listener)
+    try:
+        result = sqlite.record_run_output(
+            request.id,
+            output_id="failed-output",
+            text="backend failed",
+            terminal_status="failed",
+            error="backend failed",
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", listener)
+
+    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    saved = sqlite.get_run(request.id)
+    assert result["terminal_transition"] is True
+    assert saved["status"] == "canceled"
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+
+
+def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    """An Activity's deferred failure remains subordinate to a concurrent Stop."""
+
+    sqlite, requests = _store(tmp_path)
+    request = requests.enqueue_agent_run(
+        session_key="slack::channel::C7",
+        message="hi",
+        agent_name=None,
+    )
+    assert requests.claim(request.id) is not None
+    assert sqlite.defer_run_terminal(
+        request.id,
+        terminal_status="failed",
+        error="deferred failure",
+        result_text="backend failed",
+    )
+
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    event.listen(sqlite.engine, "before_cursor_execute", listener)
+    try:
+        transitioned = sqlite.settle_deferred_run(request.id)
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", listener)
+
+    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    saved = sqlite.get_run(request.id)
+    assert transitioned is True
+    assert saved["status"] == "canceled"
+    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+    assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 
