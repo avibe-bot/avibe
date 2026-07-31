@@ -1822,3 +1822,109 @@ def test_backend_drain_defers_durable_successor_start_attempt(managers) -> None:
     assert successor["start_attempt_id"] is not None
     assert len(starts) == 2
     assert starts[1] == successor_id
+
+
+def test_legacy_submit_queues_behind_restored_durable_owner(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+
+    async def run():
+        turn_id, _context_value = await _activate(manager)
+
+        def enqueue() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn,
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    text="wait for restored native work",
+                )
+            return True
+
+        result = await manager.submit(
+            "ses_fsm",
+            _context(),
+            "wait for restored native work",
+            enqueue=enqueue,
+        )
+        return turn_id, result
+
+    turn_id, result = asyncio.run(run())
+    assert result.route == "enqueued"
+    assert result.queue_persisted is True
+    assert result.target_was_busy is True
+    assert starts == [turn_id]
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert [row["text"] for row in queued] == ["wait for restored native work"]
+
+
+def test_idle_p3_preserves_older_legacy_fifo_head(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="older legacy row",
+        )
+    dispatched: list[str] = []
+
+    async def capture_run(_session_id, _context_value, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._run = capture_run
+    delivery = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="new durable row",
+            ),
+            context=_context(),
+        )
+    )
+    assert delivery.state == "queued"
+    assert dispatched == ["older legacy row"]
+    with engine.connect() as conn:
+        owner = delivery_store.get_delivery(conn, str(delivery.delivery_id))
+        queued = messages_service.list_queued(conn, "ses_fsm")
+    assert owner is not None
+    assert owner["state"] == "queued"
+    assert [row["id"] for row in queued] == [delivery.message_id]
+
+
+def test_remove_queued_retires_durable_delivery_before_message(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        await _activate(manager)
+        return await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="remove me",
+            ),
+            context=_context(),
+        )
+
+    queued = asyncio.run(run())
+    assert queued.state == "queued"
+    assert queued.message_id
+    with engine.begin() as conn:
+        assert messages_service.remove_queued(
+            conn,
+            "ses_fsm",
+            str(queued.message_id),
+        )
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(queued.delivery_id))
+        message = messages_service.get_message(
+            conn,
+            str(queued.message_id),
+            session_id="ses_fsm",
+        )
+    assert delivery is not None
+    assert delivery["state"] == "completed"
+    assert delivery["message_id"] is None
+    assert delivery["receipt_outcome"] == "removed"
+    assert message is None

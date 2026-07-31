@@ -1221,13 +1221,24 @@ class SessionTurnManager:
     ) -> DeliveryResult:
         delivery_id = delivery_store.new_delivery_id()
         turn_id: str | None = None
-        drain_existing = False
+        drain_durable = False
+        drain_legacy = False
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             active = delivery_store.active_turn(conn, request.session_id)
             head = delivery_store.fifo_head(conn, request.session_id)
+            durable_message_ids = delivery_store.queued_message_ids(
+                conn,
+                request.session_id,
+            )
+            legacy_rows = [
+                row
+                for row in messages_service.list_queued(conn, request.session_id)
+                if str(row.get("id") or "") not in durable_message_ids
+            ]
+            legacy_head = legacy_rows[0] if legacy_rows else None
             message_id = self._delivery_message(conn, request)
-            if active is not None or head is not None:
+            if active is not None or head is not None or legacy_head is not None:
                 delivery_store.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -1242,7 +1253,19 @@ class SessionTurnManager:
                 ):
                     raise RuntimeError("P3 Message projection lost ownership")
                 state = "queued"
-                drain_existing = active is None
+                if active is None:
+                    legacy_key = (
+                        str((legacy_head or {}).get("created_at") or ""),
+                        str((legacy_head or {}).get("id") or ""),
+                    )
+                    durable_key = (
+                        str((head or {}).get("created_at") or ""),
+                        str((head or {}).get("id") or ""),
+                    )
+                    drain_legacy = legacy_head is not None and (
+                        head is None or legacy_key <= durable_key
+                    )
+                    drain_durable = not drain_legacy
             else:
                 turn_id = delivery_store.new_turn_id()
                 delivery_store.insert_turn(
@@ -1269,7 +1292,9 @@ class SessionTurnManager:
                 state = "starting"
         if turn_id:
             await self._start_persisted_turn(turn_id, context=context)
-        elif drain_existing:
+        elif drain_legacy:
+            await self.flush_queue(request.session_id)
+        elif drain_durable:
             await self.drain_delivery_queue(request.session_id)
         return DeliveryResult(delivery_id, message_id, state, turn_id)
 
@@ -2371,6 +2396,9 @@ class SessionTurnManager:
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
+        if not busy and self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                busy = delivery_store.active_turn(conn, session_id) is not None
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
         if delivery_intent == "send_now":

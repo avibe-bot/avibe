@@ -1066,6 +1066,9 @@ def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
     explicitly held by Workbench; its cancellation and the row deletion commit
     together in the caller's transaction.
     """
+    from storage.agent_session_rows import reserve_write_lock
+
+    reserve_write_lock(conn)
     row = conn.execute(
         select(messages.c.native_message_id, messages.c.metadata_json)
         .where(messages.c.id == message_id)
@@ -1087,6 +1090,9 @@ def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
             session_id=session_id,
         ):
             return False
+    from storage.session_deliveries import retire_queued_delivery_for_message
+
+    retire_queued_delivery_for_message(conn, session_id, message_id)
     result = conn.execute(
         delete(messages)
         .where(messages.c.id == message_id)

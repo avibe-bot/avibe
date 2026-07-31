@@ -89,6 +89,43 @@ def queued_message_ids(conn: Connection, session_id: str) -> set[str]:
     }
 
 
+def retire_queued_delivery_for_message(
+    conn: Connection,
+    session_id: str,
+    message_id: str,
+) -> bool:
+    """Release one queued delivery before its Message projection is deleted."""
+
+    delivery = _one(
+        conn,
+        select(session_deliveries)
+        .where(session_deliveries.c.session_id == session_id)
+        .where(session_deliveries.c.message_id == message_id)
+        .where(session_deliveries.c.state == "queued")
+        .limit(1),
+    )
+    if delivery is None:
+        return False
+    values: dict[str, Any] = {
+        "state": "completed",
+        "message_id": None,
+        "target_turn_id": None,
+        "successor_turn_id": None,
+    }
+    if delivery.get("receipt_outcome") is None:
+        values["receipt_outcome"] = "removed"
+    retired = cas_delivery(
+        conn,
+        str(delivery["id"]),
+        expected_version=int(delivery["version"]),
+        expected_states=("queued",),
+        values=values,
+    )
+    if retired is None:
+        raise RuntimeError("queued delivery removal lost ownership")
+    return True
+
+
 def insert_turn(
     conn: Connection,
     *,
