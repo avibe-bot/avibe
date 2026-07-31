@@ -2316,6 +2316,347 @@ scenarios:
     # property every round of this review has verified as unchanged, so it is a scoped
     # follow-up for the plan owner and not a close-out edit.
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
+  # --- PR2: P3, reconcile on teardown (block HFR-100...129; 126...129 unused) ---
+  # One rule underneath all of them, stated once here rather than in each entry: the
+  # CAUSE is recorded at the cancel site and never inferred from the path, and the
+  # STATUS and COPY are decided only by core/run_settlement.py's tables. Eviction,
+  # restart and a user Stop all reach the handler as the same bare CancelledError, so
+  # a settlement that reads the path instead of the record can only guess -- and the
+  # three guesses are wrong in different, user-visible directions.
+  - id: HFR-100
+    name: a cancelled in-flight execution terminalizes its Run and frees the session lock
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # The defect PR2 removes, on the SQLite backend. Cancellation was answered with
+    # request_store.requeue(), which puts the CLAIM back while the agent_runs row it
+    # belongs to stays running forever and the session lock stays held -- so the next
+    # drain cannot dispatch into that session either. Nobody recorded a cause here, so
+    # the generic default applies: interrupted (an infrastructure fault, hence failed),
+    # never the more specific evicted.
+    test: tests/test_scheduled_tasks.py::test_cancelling_an_inflight_execution_terminalizes_and_frees_the_session_lock
+  - id: HFR-101
+    name: service stop terminalizes a scheduled Run instead of requeueing it
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # The duplicate-prompt regression. stop() cancels every in-flight execution, and
+    # the old requeue meant the next start re-sent a prompt whose first attempt may
+    # already have had effects, with the first attempt's row still reading as unfinished
+    # work. The service restarting around a run is a named cause: restarted.
+    test: tests/test_scheduled_tasks.py::test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing
+  - id: HFR-102
+    name: an evicted scheduled Run with no callback target still reaches its user
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # PR2's EXIT CRITERION, end to end over one real store. P3's user-visible harm is a
+    # run that dies with its session and tells nobody, and the obvious answer -- fire
+    # the callback -- covers only the runs that HAVE one. A scheduled fire has no
+    # callback_session_id at all, which is exactly the class of run nobody is watching.
+    # So the teardown settlement stamps an owed notice and PR6's drain (untouched by
+    # PR2) delivers it. Three seams in the order the failure travels, because each has
+    # a green reading that hides the next: the row settles failed/evicted; the stamp
+    # lands on the interruption identity interrupt:{run}:evicted rather than the bare
+    # run id (a shared identity would let PR6's dedup swallow the D1 notice behind an
+    # ordinary failure notice for the same execution); and the drain acks it.
+    # list_pending_callbacks is asserted EMPTY throughout, so the delivery can only
+    # have come from the notice.
+    test: tests/test_harness_failure_visibility.py::test_evicted_scheduled_run_without_a_callback_target_still_notifies
+  - id: HFR-103
+    name: session teardown reaches a pinned-session execution through the lock owners
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # A session id is not a run id and a run id is not a lock key, so
+    # session_id -> _session_lock_cache -> lock key -> _session_lock_owners -> run id
+    # -> _inflight_executions is the ONLY path from what a teardown knows to the task
+    # it must interrupt. Drop the middle hop and the scan silently misses every
+    # ordinary pinned session.
+    test: tests/test_scheduled_tasks.py::test_cancel_session_executions_finds_a_pinned_session_execution_via_lock_owners
+  - id: HFR-104
+    name: session teardown reaches a create_per_run execution with no lock key
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # _execution_lock_key returns None for create_per_run by design, so HFR-103's join
+    # cannot see this execution at all. Its session is minted mid-flight, so the
+    # reservation-time association is a second, independent lookup path; neither
+    # subsumes the other.
+    test: tests/test_scheduled_tasks.py::test_cancel_session_executions_finds_a_create_per_run_execution
+  - id: HFR-105
+    name: the recorded cause distinguishes eviction from service shutdown
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # Both settle failed, so the STATUS is not the discriminator and asserting it alone
+    # would prove nothing. Driven on one service in one pass with both executions live,
+    # because the interesting failure is not whether either value is ever written but
+    # whether the cause map keeps them apart: a single shared field, or a cause read
+    # after the fact, gives both runs whichever teardown ran last.
+    test: tests/test_scheduled_tasks.py::test_cancellation_cause_distinguishes_eviction_from_shutdown
+  - id: HFR-106
+    name: evicting a session cancels its Workbench turn and fails the Run as evicted
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # The turn lane, which the scheduler maps never see: _execute_request hands an
+    # avibe-targeted run to the gate and returns, so an evicted session's live turn is
+    # only reachable through SessionTurnManager. Asserts the reason alongside the
+    # status -- a terminality-only assertion passes against a plain user Stop.
+    test: tests/test_internal_server.py::test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted
+  - id: HFR-107
+    name: Running-tab End settles its Run canceled with no interruption notice
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # The carve-out from every other row in this block. End is a user's decision, so it
+    # keeps the canonical stop path: canceled, no interrupt_reason, no owed notice.
+    # Telling a user their run failed because they ended it is the HFR-012/HFR-037
+    # inversion arriving from the teardown side.
+    test: tests/test_running_agents_service.py::test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_notice
+  - id: HFR-108
+    name: Running-tab End on an idle row is silent and settles nothing
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # The safety half of HFR-107. End cancels the scheduler lane UNCONDITIONALLY,
+    # whatever the state read returned, to close the race where an execution acquires
+    # the session after the read -- so the unconditional call has to be harmless when
+    # there was nothing to stop. The silence comes from the canonical stop context's
+    # suppress_stop_no_active_notice, not from any new helper.
+    test: tests/test_running_agents_service.py::test_ending_an_idle_row_is_silent_and_settles_nothing
+  - id: HFR-109
+    name: an unrecorded external cancellation settles interrupted, never evicted
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # The explicit contrast to HFR-105. A cancellation this service did not originate
+    # records no cause, and two defaults are wrong in opposite ways: stopped claims the
+    # user did it, evicted claims a session teardown that never happened. Run beside a
+    # run that IS being evicted in the same pass, because the failure pinned here is
+    # CONTAMINATION rather than a bare default -- a cause map keyed too loosely hands
+    # the raw-cancelled run its neighbour's reason, and a single-run test cannot see it.
+    test: tests/test_scheduled_tasks.py::test_external_cancellation_without_recorded_cause_settles_interrupted_not_evicted
+  - id: HFR-110
+    name: the interrupt reason survives a crash between defer and settle
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # A defer and its settlement are two statements, and the gap between them is a gap
+    # a crash can land in. A cause held in memory across it is lost; a cause written by
+    # a THIRD statement after the settlement arrives too late for
+    # _owed_failure_notice_for_transition, which reads the merged metadata at
+    # transition time and never re-stamps. Too late is the same as never. So the intent
+    # is parked WITH its metadata in result_payload_json, and the proof is a genuinely
+    # fresh SQLiteBackgroundTaskStore over the same file after the first is closed --
+    # no shared cache, connection or Python object with the process that deferred.
+    test: tests/test_harness_failure_visibility.py::test_interrupt_reason_survives_a_crash_between_defer_and_settle
+  - id: HFR-111
+    name: cancellation settles the coalesced siblings, not just the claim
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # A coalesced Workbench turn holds a SINGLE claim on behalf of several agent_runs
+    # rows. Settling request.id alone strands the rest with nothing alive that will
+    # ever settle them -- the same zombie multiplied by the fan-out, and invisible
+    # because the primary's row looks correctly terminal. Nothing re-dispatches them
+    # either: a held sibling is excluded from list_pending precisely because the
+    # primary owns it, so "requeued" is not even an available outcome.
+    test: tests/test_scheduled_tasks.py::test_cancellation_settles_coalesced_sibling_runs
+  - id: HFR-112
+    name: legacy file-store cancellation terminalizes via complete with its cause
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # defer_run_terminal / settle_deferred_run both answer False on the file backend.
+    # Read as "already settled" that is the old bug wearing new clothes, so the
+    # fallback is complete(ok=False) -- and it must carry the SAME cause the SQLite
+    # path would have recorded. HFR-003 pins the same backend under the generic
+    # default; this is the RECORDED-cause half, which a fallback that terminalizes but
+    # drops settled_by would pass while telling every evicted run's user nothing.
+    test: tests/test_scheduled_tasks.py::test_file_store_cancellation_terminalizes_via_complete
+  - id: HFR-113
+    name: the session-scoped reconciler settles a row both in-memory joins lost
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # The backstop's whole reason to exist: a create_per_run execution -- the one
+    # policy with no session lock key -- whose dedicated run-id -> session-id entry has
+    # gone missing, so both scheduler-lane lookups come up empty. What survives is the
+    # pair the reconciler intersects: the row's session_id, stamped at reservation
+    # precisely for this (HFR-122), and the pre-cancel ownership snapshot, which is
+    # process-scoped rather than session-filtered for precisely this -- a
+    # session-filtered snapshot would have excluded the very row it exists to find.
+    test: tests/test_scheduled_tasks.py::test_session_scoped_reconciler_settles_a_map_missed_row
+  - id: HFR-114
+    name: a queued not-started Run survives teardown reconciliation
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Nothing has happened to it -- no prompt sent, no side effect, no partial turn --
+    # so there is no duplicate to prevent and nothing to report. Failing it destroys a
+    # dispatch that is still valid once the session is recreated. This is why the
+    # reconciler's predicate is NARROWER than settle_run_terminal's queued|running
+    # guard: the writer would happily take this row, so the narrowing has to live in
+    # the selection.
+    test: tests/test_scheduled_tasks.py::test_queued_not_started_run_survives_teardown_reconciliation
+  - id: HFR-115
+    name: teardown reconcile terminalizes a running row as failed with completed_at
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # failed, not canceled -- the §3.3 correction and the HFR-012/HFR-037 guardrails.
+    # completed_at is asserted separately because it is not decoration: every reader
+    # that decides whether a run is finished, the callback drain's eligibility query
+    # included, filters on it, so a row marked terminal without one is still an open
+    # run everywhere it matters.
+    test: tests/test_inbox_events.py::test_teardown_reconcile_terminalizes_a_running_row
+  - id: HFR-116
+    name: the reconciled Run's callback stays pending and the drain can find it
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # The reconcile writes a terminal row from OUTSIDE the run's own execution, so the
+    # follow-through that rides on complete() does not happen here. Easy to get wrong
+    # in both directions: delivering inline would put a network call inside a teardown,
+    # clearing the field would silently retire the request. Asserted through
+    # list_pending_callbacks rather than on the column, because a pending column proves
+    # nothing if the row fails the drain's other predicates.
+    test: tests/test_inbox_events.py::test_teardown_reconcile_leaves_the_callback_pending_for_the_drain
+  - id: HFR-117
+    name: a second teardown reconcile pass writes nothing
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Teardowns retry and overlap -- an eviction pass, a shutdown behind it, an End on
+    # the same session -- so the reconciler runs more than once over the same rows as a
+    # matter of course. A second write moves completed_at and updated_at forward, which
+    # re-orders the callback drain's queue, and it is the shape of write that resets an
+    # owed notice's attempt counter and resurrects a dead letter. Evidence is the WHOLE
+    # row before and after, not the count: a pass returning 0 while still touching
+    # updated_at satisfies a count-only assertion and has still done the damage.
+    test: tests/test_inbox_events.py::test_teardown_reconcile_is_idempotent
+  - id: HFR-118
+    name: a terminal status landing first outranks the teardown reconcile
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The reconciler decides what to write from a row it read a moment earlier, and
+    # pysqlite opens no transaction for a SELECT, so its snapshot really is older than
+    # its own UPDATE. In that gap the turn can finish for real -- the eviction
+    # interrupted the SESSION, not necessarily the work -- and an unguarded write would
+    # replace a genuine succeeded with a fabricated failure, hand its user an
+    # interruption notice for a run that completed, and lose the result text. The
+    # competing write comes from a SECOND store over the same file through the
+    # production writer, fired between the read and the UPDATE.
+    test: tests/test_inbox_events.py::test_teardown_reconcile_loses_to_a_terminal_status_that_lands_first
+  - id: HFR-119
+    name: teardown reconcile preserves a sent or skipped callback status
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # sent and skipped are both FINAL, for opposite reasons -- one delivered, one
+    # deliberately declined -- and the reconciler knows nothing that could revise
+    # either. Resetting to pending puts the row back in list_pending_callbacks and
+    # sends the same callback twice: the duplicate PR6's whole receipt protocol exists
+    # to prevent, reintroduced from the settlement side. Both values are exercised,
+    # because special-casing the one it was tested against is how this regresses.
+    test: tests/test_inbox_events.py::test_teardown_reconcile_preserves_a_finished_callback
+  - id: HFR-120
+    name: both evict_idle_sessions branches settle their Runs before teardown
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: claude
+    # Settle first, tear down second: a torn-down backend can no longer settle its own
+    # turn, so a settlement deferred past teardown is a settlement that never happens.
+    # BOTH branches, because the stuck-active backstop is the one that fires when
+    # something has already gone wrong -- exactly when the runs most need settling.
+    # A second test carries this same id:
+    # tests/test_claude_cli_path.py::test_evict_idle_sessions_settles_runs_before_the_stuck_active_backstop
+    test: tests/test_claude_cli_path.py::test_evict_idle_sessions_settles_runs_before_the_ordinary_idle_teardown
+  - id: HFR-121
+    name: release_for_teardown records the cause before cancelling and awaits settlement
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # NOT SessionTurnManager.cancel, which is the user-Stop API and settles canceled --
+    # the HFR-029 inversion arriving from a new direction. Order is the contract, and
+    # it is release_for_backend_refresh's order: record cancel_settled_by, THEN
+    # task.cancel(), then await, because cancelling first leaves a window in which the
+    # handler runs against an unrecorded cause.
+    test: tests/test_internal_server.py::test_release_for_teardown_records_the_cause_before_cancelling_and_awaits_settlement
+  - id: HFR-122
+    name: reservation stamps the session id onto the create_per_run Run row
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # What makes HFR-113 possible at all. agent_runs.session_id used to be first
+    # written by the completion path's identity UPDATE, so for the whole life of a
+    # create_per_run turn the row named no session -- and that is the one policy with
+    # no lock key either. Read while the run is STILL in flight; asserting after
+    # completion would pass against the old completion-time write.
+    test: tests/test_scheduled_tasks.py::test_reservation_stamps_the_session_id_onto_the_create_per_run_run_row
+  - id: HFR-123
+    name: a gate-parked follower survives teardown reconciliation
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # D1's §7 carve-out. running on a follower holding a workbench queue slot means
+    # "accepted, not yet started", so terminalizing it destroys work that was always
+    # going to run and prevents no duplicate prompt. The row's status alone cannot tell
+    # the two apart -- only workbench_queue_holds_run can -- which is why the exemption
+    # is read off the metadata rather than derived from the status.
+    test: tests/test_scheduled_tasks.py::test_gate_parked_follower_survives_teardown_reconciliation
+  - id: HFR-124
+    name: the interruption i18n lane covers the generic interrupted default
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # The parity pin PR6 built, extended for PR2's new causes. Membership in
+    # RUN_INTERRUPTION_REASONS is what routes a reason down the unsuppressed
+    # interruption lane and gives it the interrupt:{run}:{reason} identity, so a cause
+    # added to the settlement tables but not to the notice map ships a notice with no
+    # label -- inert on exactly the axis nobody checks.
+    test: tests/test_i18n_backend_keys.py::test_notice_reason_i18n_map_covers_exactly_the_interruption_lane
+  - id: HFR-125
+    name: the reconciler does not settle an unrelated running row on the same session
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A session id SELECTS rows; it does not prove ownership. Another process -- or a
+    # later execution that acquired the session after the snapshot -- can hold a
+    # perfectly live claim on the same session, and settling it kills a healthy run and
+    # hands its user a failure notice for something that never failed. The pre-cancel
+    # snapshot is the only surviving proof of which claims were ours, so it is a
+    # required leg of the intersection rather than an optimisation.
+    test: tests/test_scheduled_tasks.py::test_reconciler_does_not_settle_an_unrelated_running_row_on_the_same_session
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -1,14 +1,15 @@
 # Harness Run Reliability: Settlement, Reconcile, Delivery, and Visibility
 
-Status (2026-07-29): **PR1 and PR5 merged. PR6 in review. PR2/PR3/PR4 not
-started. PR7 BLOCKED on D7.** Defects P3, P4a, P4b still reproduce on `master`.
+Status (2026-07-31): **PR1, PR5 and PR6 merged. PR2 in review. PR3/PR4 not
+started. PR7 BLOCKED on D7.** Defects P3, P4a, P4b still reproduce on `master`
+(P3's fix is in review, not merged).
 
 | PR | Problem | Status |
 |---|---|---|
 | PR1 | P2 delivered runs record no `result_text` | **#1063 — merged 2026-07-28** |
 | PR5 | P5 pinned bindings break | **#1064 — merged 2026-07-29** |
-| PR6 | P6 failures invisible | **#1072 — in review**, CI green |
-| PR2 | P3 teardown never reconciles | not started (needs PR6) |
+| PR6 | P6 failures invisible | **#1072 — merged 2026-07-31** |
+| PR2 | P3 teardown never reconciles | **in review** — branch `fix/harness-teardown-reconcile` |
 | PR3 | P4a eviction blind to queued work | not started (needs PR2) |
 | PR4 | P4b drain loop unbounded | not started (needs PR3) |
 | PR7 | P1 settle at the real terminal result | **BLOCKED on D7** |
@@ -74,10 +75,10 @@ Two consequences worth stating up front:
 
 | Problem | PR | Load-bearing evidence (verified against `35a5e13a`) |
 |---|---|---|
-| P3 teardown never reconciles | PR2 | `grep -E "agent_runs\|request_store\|run_id" core/handlers/session_handler.py` → 0 matches. `cancel_session_executions` does not exist. |
+| P3 teardown never reconciles | PR2 | `grep -E "agent_runs\|request_store\|run_id" core/handlers/session_handler.py` → 0 matches. `cancel_session_executions` does not exist. **Fix in review** on `fix/harness-teardown-reconcile`: cause-aware teardown cancellation (terminalize, never requeue) plus a session-scoped reconciler behind it, wired into every run-blind teardown entry. |
 | P4a eviction blind to queued work | PR3 | `evict_idle_sessions` still reads only the clock and in-memory maps, in both passes. |
 | P4b drain loop unbounded | PR4 | `_drain_recovered_activity_outputs` is still the first inline `await` of every `_watch_store` tick; zero `wait_for` / `heartbeat` / `watchdog` in the file. |
-| P6 failures invisible | PR6 | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. **Fix in review: #1072.** |
+| P6 failures invisible | PR6 | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. **Fixed: #1072, merged 2026-07-31.** |
 | P1 settle at dispatch | PR7 | `TaskExecutionResult` still has no `complete_on_return`; only its sibling `AgentRunExecutionResult` does. |
 
 One partial credit: `9b1af0a5` added a row-level alert channel to the Harness list,
@@ -168,6 +169,12 @@ Fixed by widening the gates plus a guarded, status-preserving text backfill;
 §10.1–10.3 record what the implementation corrected.
 
 ### P3 — Session teardown never reconciles in-flight runs
+
+**Status (2026-07-31): fix IN REVIEW on `fix/harness-teardown-reconcile`** —
+cause-aware cancellation of in-flight executions at every run-blind teardown
+(terminalize, never requeue, on both backends and across coalesced siblings)
+plus the session-scoped reconciler behind it. Everything below still describes
+`master`.
 
 Verified constants: `config/v2_config.py:30` `DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
 = 600`; `:73-74` multiplier 3 / floor 1800 → stuck-active threshold
@@ -410,7 +417,7 @@ other PRs still consume:
 Scenario IDs: HFR-041 … HFR-048 (used).
 
 
-### PR2 — P3: reconcile on teardown
+### PR2 — P3: reconcile on teardown — IN REVIEW (`fix/harness-teardown-reconcile`)
 
 1. `ScheduledTaskService.cancel_session_executions(session_id) -> int` — scans
    from a session id to the tasks to `task.cancel()`. **The lookup is a
@@ -1105,7 +1112,7 @@ Scenario IDs: HFR-049 … HFR-059 and overflow HFR-240 … HFR-279 (all used —
 see §10.7 for the range reallocation this forced).
 
 
-### PR6 — P6: make failure visible — IN REVIEW (#1072)
+### PR6 — P6: make failure visible — MERGED (#1072, 2026-07-31)
 
 1. **Notify once per failure transition**, at a single choke point — but **not
    `_execute_task`** (corrected 2026-07-27). An earlier revision named
@@ -2719,12 +2726,12 @@ deferred.
 ```
 PR1 (P2 capture)          — MERGED (#1063)
 PR5 (P5 bindings)         — MERGED (#1064); shares the notify hook with PR6
-  └─ PR6 (P6 visibility)  — IN REVIEW (#1072); same choke point as PR5's pause; OWNS THE WHOLE
+  └─ PR6 (P6 visibility)  — MERGED (#1072, 2026-07-31); same choke point as PR5's pause; OWNS THE WHOLE
        │                    owed-notice drain: renders it AND implements the
        │                    receipt/ack/backoff/dead-letter protocol plus the
        │                    (delivered_id, persisted_row, error) result and the
        │                    persist_agent_message error channel it needs
-       └─ PR2 (P3 reconcile) — stamps metadata.owed_failure_notice
+       └─ PR2 (P3 reconcile) — IN REVIEW; stamps metadata.owed_failure_notice
             │                  (correction 2: a terminalized run with no
             │                  callback_session_id is otherwise silent,
             │                  violating D1); provides the session→runs resolver
@@ -2996,7 +3003,7 @@ extended:**
 
 | ID | Current assertion | Effect |
 | --- | --- | --- |
-| **HFR-003** | "canceled scheduler execution **requeues** its claimed Run" (`kind: cancellation`, `test_drain_requests_requeues_cancelled_task_run`) | **PR2.** The name itself asserts the requeue. Entry and test both replaced. |
+| **HFR-003** | "canceled scheduler execution **requeues** its claimed Run" (`kind: cancellation`, `test_drain_requests_requeues_cancelled_task_run`) | **PR2 — done.** The name itself asserted the requeue. Entry and test both replaced by `test_drain_requests_terminalizes_cancelled_task_run`. |
 
 **Guardrails — must NOT move; they are the contracts that make the corrections
 above correct, and a PR that changes them has misunderstood the plan:**
@@ -3423,8 +3430,8 @@ it; reassign from above the highest landed ID, never reuse or straddle.**
 |---|---|---|
 | PR1 (#1063, merged) | HFR-041 … 048 (used) | — |
 | PR5 (#1064, merged) | HFR-049 … 059 (used) | HFR-240 … 279 (used) |
-| PR6 (#1072) | HFR-060 … 099 (full) | HFR-280 … 319 |
-| PR2 | HFR-100 … 129 | HFR-320 … 349 |
+| PR6 (#1072, merged) | HFR-060 … 099 (used) | HFR-280 … 319 |
+| PR2 (in review) | HFR-100 … 125 (used; 126 … 129 reserved) | HFR-320 … 349 |
 | PR3 | HFR-130 … 154 | HFR-350 … 369 |
 | PR4 | HFR-155 … 179 | HFR-370 … 389 |
 | PR7 | HFR-180 … 219 | HFR-390 … 429 |
