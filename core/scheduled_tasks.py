@@ -1608,6 +1608,58 @@ def _agent_backend_for_name(
         return ""
 
 
+#: Values ``agent_sessions.agent_backend`` uses to mean "no owned backend". They are
+#: real column values rather than NULLs (``reserve_agent_session`` writes ``unknown``
+#: for a name outside the known set, and ``default`` is the routing sentinel), so a
+#: reader that only tested for blank would treat them as identities.
+_UNOWNED_SESSION_BACKENDS = {"", "default", "unknown"}
+
+
+def _agent_backend_for_session(session_id: Optional[str]) -> str:
+    """The backend a run's OWN session row names, or ``""`` when it names none.
+
+    The last rung of the ownership ladder (HFR-337), reached only for a run that
+    states no backend of its own and pins no Agent name — the default-routed shape,
+    which is most of them, since a definition that follows the session/scope/global
+    default carries neither fact.
+
+    WHY THE SESSION ROW IS DECISIVE HERE, against the general objection
+    :meth:`session_lane_ownership` raises to it. That objection is about asking a
+    SESSION who owns its lane: ``agent_sessions.agent_backend`` is write-once after
+    the first native bind, so a session that has since switched still names its old
+    backend. This is a different question — it is asked of the row a specific RUN's
+    ``session_id`` points at, and a genuine switch supersedes the anchor and creates a
+    NEW row (``_claim_anchor_row``), so the row this run is bound to is the one it is
+    executing inside. It is also literally what the dispatch reads: ``_execute_request``
+    resolves the same column and hands it to the turn as
+    ``agent_session_target.agent_backend``.
+
+    Read-only and total: a missing row, an unowned sentinel value or any failure at
+    all returns ``""``, which leaves the lane unidentifiable and the fail-closed
+    backstop in charge. A guessed identity would be worse than an absent one.
+    """
+
+    resolved = str(session_id or "").strip()
+    if not resolved:
+        return ""
+    try:
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            row = service.get_agent_session_by_id(resolved)
+        finally:
+            service.close()
+    except Exception:
+        logger.debug("Could not read session %s for lane backend identity", resolved, exc_info=True)
+        return ""
+    if not row:
+        return ""
+    backend = str(row.get("agent_backend") or "").strip()
+    return "" if backend in _UNOWNED_SESSION_BACKENDS else backend
+
+
 class TaskExecutionStore:
     def __init__(self, root: Optional[Path] = None):
         self.root = root or (paths.get_state_dir() / "task_requests")
@@ -2098,8 +2150,14 @@ class TaskExecutionStore:
             return False
         return self._sqlite.record_run_skip_reason(run_id, reason=reason)
 
-    def stamp_run_session_id(self, run_id: str, *, session_id: str) -> bool:
+    def stamp_run_session_id(
+        self, run_id: str, *, session_id: str, agent_backend: Optional[str] = None
+    ) -> bool:
         """Record which session an in-flight run is executing in (SQLite only).
+
+        ``agent_backend`` fills the run's blank ownership stamp with the backend the
+        dispatch actually resolved (HFR-337); it never overwrites one the enqueue or
+        the caller already set.
 
         ``False`` on the legacy file store, which has no row a session-keyed teardown
         could query anyway — the in-memory association is the whole story there.
@@ -2107,7 +2165,9 @@ class TaskExecutionStore:
 
         if self._sqlite is None:
             return False
-        return self._sqlite.stamp_run_session_id(run_id, session_id=session_id)
+        return self._sqlite.stamp_run_session_id(
+            run_id, session_id=session_id, agent_backend=agent_backend
+        )
 
     def sweep_stale_runs(
         self,
@@ -3251,14 +3311,25 @@ class ScheduledTaskService:
         stamped at enqueue from the resolved dispatch target, which is exactly "the
         backend this in-flight run actually went to".
 
-        A BLANK COLUMN IS RESOLVED, NOT SURRENDERED TO (HFR-328). The stamp is only
-        as old as HFR-328, so legacy rows — and any run whose enqueue path could not
-        resolve a backend — still carry NULL. For those the run's ``agent_name`` is
-        asked the same question the stamp asks, through the same resolver, so a lane
-        held by a nameable Agent stays provable instead of degrading into the
-        unprovable case. Only a SUCCESSFUL resolution counts: a name no Agents row
-        claims contributes nothing, because a guessed identity would be worse than an
-        absent one.
+        A BLANK COLUMN IS RESOLVED, NOT SURRENDERED TO (HFR-328/HFR-337). The stamp
+        is only as old as HFR-328, so legacy rows — and any run whose enqueue path
+        could not resolve a backend — still carry NULL. Three rungs, most specific
+        first, and the fail-closed backstop only after all three:
+
+        1. the ``agent_backend`` column — the run's own statement, from its enqueue or
+           from the dispatch that reserved its session;
+        2. the run's ``agent_name``, asked the same question the stamp asks through
+           the same resolver (HFR-328), which covers a legacy row that pinned an Agent;
+        3. the run's own SESSION row (HFR-337), which is the only identity a
+           DEFAULT-ROUTED run has: a definition that follows the session/scope/global
+           default carries neither a backend nor a name, and that is the common shape
+           rather than an edge case. See :func:`_agent_backend_for_session` for why the
+           session row is decisive for a specific run even though it is a poor proxy
+           for "who owns this session's lane" in general.
+
+        Only a SUCCESSFUL resolution counts at every rung: a name no Agents row
+        claims, or a session row naming no owned backend, contributes nothing, because
+        a guessed identity would be worse than an absent one.
 
         The returned ``run_ids`` are what separates "the lane is empty" from "the lane
         is held by something unidentifiable" — see :class:`SessionLaneOwnership`. The
@@ -3298,6 +3369,11 @@ class ScheduledTaskService:
                 backend = _agent_backend_for_name(
                     self.request_store.sqlite_backend, run.get("agent_name")
                 )
+            if not backend:
+                # DEFAULT-ROUTED (HFR-337): the run pinned no Agent, so there was no
+                # name for either stamp to resolve. It is still session-bound, and a
+                # session-bound run executes on its session's backend.
+                backend = _agent_backend_for_session(run.get("session_id"))
             if backend:
                 backends.add(backend)
         return SessionLaneOwnership(frozenset(run_ids), frozenset(backends))
@@ -7258,10 +7334,16 @@ class ScheduledTaskService:
         if not session_id:
             raise ValueError("failed to reserve runtime session")
         if execution_id:
-            self._record_execution_session(execution_id, session_id)
+            # ``agent_backend`` is the ladder's answer for THIS run, resolved a few
+            # lines up and otherwise thrown away (HFR-337). A run that pinned no Agent
+            # reaches here with a blank ownership stamp, and this is the first and
+            # only moment anything knows what to fill it with.
+            self._record_execution_session(execution_id, session_id, agent_backend=agent_backend)
         return session_id
 
-    def _record_execution_session(self, execution_id: str, session_id: str) -> None:
+    def _record_execution_session(
+        self, execution_id: str, session_id: str, *, agent_backend: Optional[str] = None
+    ) -> None:
         """Associate a run with the session its reservation just minted.
 
         TWO RECORDS, ORDERED, DELIBERATELY NOT ATOMIC. The in-memory map goes first
@@ -7273,6 +7355,14 @@ class ScheduledTaskService:
         live process to use it, and a map entry missed entirely still leaves the row
         findable by ``agent_runs.session_id``.
 
+        THE BACKEND RIDES THE SAME WRITE (HFR-337), and the ordering above is exactly
+        why it belongs here rather than in a stamp of its own. The in-memory entry
+        written on the line below is what makes this run visible as a lane owner to
+        every teardown; a backend stamped by a later, separate call would leave a
+        window in which the lane is held and unidentifiable, which is precisely the
+        state End's fail-closed gate refuses to cancel. Written together, the lane
+        never exists without its identity.
+
         The stamp never fails the run. A reservation that succeeded has produced a
         usable session and the turn must go ahead; losing the association degrades
         teardown to the existing staleness sweep rather than costing the user a run.
@@ -7280,7 +7370,9 @@ class ScheduledTaskService:
 
         self._execution_session_ids[execution_id] = session_id
         try:
-            self.request_store.stamp_run_session_id(execution_id, session_id=session_id)
+            self.request_store.stamp_run_session_id(
+                execution_id, session_id=session_id, agent_backend=agent_backend
+            )
         except Exception:
             logger.warning(
                 "Could not stamp reserved session %s onto run %s; "

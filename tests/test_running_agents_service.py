@@ -1751,8 +1751,46 @@ def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(
     assert request_store.settle_without_result(run_id, terminal_status="succeeded") == "succeeded"
 
 
+def _seed_agent_session_row(session_id: str, *, agent_backend: str) -> None:
+    """An ``agent_sessions`` row for ``session_id`` naming ``agent_backend``.
+
+    The durable statement of WHICH backend a session-bound run executes on. Written
+    by ``_reserve_runtime_session`` / the anchor claim in production; inserted
+    directly here because these tests drive the lane maps rather than a real
+    dispatch.
+    """
+
+    from sqlalchemy import insert
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(agent_sessions).values(
+                id=session_id,
+                scope_id=None,
+                agent_backend=agent_backend,
+                agent_variant=agent_backend,
+                session_anchor=session_id,
+                native_session_id="",
+                status="active",
+                visibility="foreground",
+                metadata_json="{}",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+        )
+
+
 def _end_with_scheduler_lane_owner(
-    tmp_path, *, lane_backend, clicked_backend, lane_agent_name="codex"
+    tmp_path,
+    *,
+    lane_backend,
+    clicked_backend,
+    lane_agent_name="codex",
+    lane_session_backend=None,
 ):
     """End a codex row on a session whose scheduler lane is held by ``lane_backend``.
 
@@ -1760,6 +1798,11 @@ def _end_with_scheduler_lane_owner(
     REAL running row plus the two service maps ``cancel_session_executions`` Path 1
     reads (``_session_lock_cache`` -> lock key, ``_session_lock_owners`` -> run id)
     and the ``_inflight_executions`` task it would actually cancel.
+
+    ``lane_session_backend`` seeds the SESSION row the lane owner is bound to
+    (HFR-337). A default-routed run carries neither a stamped backend nor an
+    ``agent_name``, so the session it executes in is the only thing left that names
+    its backend.
     """
 
     service, request_store = _settlement_service(tmp_path)
@@ -1770,6 +1813,8 @@ def _end_with_scheduler_lane_owner(
         agent_backend=lane_backend,
         agent_name=lane_agent_name,
     )
+    if lane_session_backend:
+        _seed_agent_session_row("chat-1", agent_backend=lane_session_backend)
 
     cleared = {}
     mgr = types.SimpleNamespace(
@@ -1924,6 +1969,72 @@ def test_end_refuses_to_cancel_an_unprovable_scheduler_lane(tmp_path, monkeypatc
     assert cancelled is False
     assert status == "running"
     # ...and End still completed and tore down the clicked row's own runtime.
+    assert cleared.get("clr") == "codex-base"
+    assert cleared.get("treg") == "codex-base"
+
+
+def test_default_routed_definition_lane_is_identifiable_to_end(tmp_path, monkeypatch):
+    """HFR-337: HFR-328's residual — the run that pins no Agent at all.
+
+    HFR-328 stamps ``agent_runs.agent_backend`` at enqueue by resolving the request's
+    ``agent_name``. That closes the lane for a definition that PINS an Agent. It does
+    nothing for the far more common shape: a definition that names no Agent and
+    follows the routing ladder (session Agent -> per-channel scope override -> the
+    global default in ``state_meta.default_agent_name``). Those enqueue with a blank
+    name, so the resolver has nothing to resolve, the column stays NULL, and the lane
+    reads as unidentifiable — which sends End down HFR-328's fail-closed branch. The
+    cancel is SKIPPED and End proceeds to tear the runtime down anyway, leaving the
+    execution and its ``running`` row live until the staleness sweep finds them.
+
+    Fail-closed is the right backstop for a lane nothing can name; it is the wrong
+    answer for a lane that is perfectly nameable through a fact nobody was reading.
+    A session-bound run executes on its SESSION's backend — that is what
+    ``_execute_request`` hands the dispatch (``agent_session_target.agent_backend``)
+    and what ``_reserve_runtime_session`` writes when it mints the session. So the
+    ownership is PROVABLE, and both directions must follow from the proof rather than
+    from the absence of one: a matching backend cancels, a mismatched one skips.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    res, cancelled, status, cleared = _end_with_scheduler_lane_owner(
+        tmp_path,
+        # Default routing: no pinned Agent name, so nothing for the enqueue stamp to
+        # resolve and a genuinely blank ``agent_runs.agent_backend``.
+        lane_backend=None,
+        lane_agent_name="",
+        lane_session_backend="codex",
+        clicked_backend="codex",
+    )
+
+    assert res["ok"] is True
+    # Provably OURS: the same-backend cancel is unconditional again, instead of being
+    # refused by a guard that could not tell whose lane it was.
+    assert cancelled is True
+    assert cleared.get("clr") == "codex-base"
+
+
+def test_default_routed_lane_of_another_backend_is_still_spared_by_end(tmp_path, monkeypatch):
+    """HFR-337 companion: proving ownership must not turn into cancelling everything.
+
+    The mismatch direction of the same proof. A default-routed lane whose session
+    runs on Claude is now identifiable, so End of a stale Codex row skips it for the
+    HFR-327 reason — the mismatch — rather than for the HFR-328 reason (nobody could
+    say). Both tests are needed: a fix that resolved the backend but ignored it would
+    pass the matching case alone.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    res, cancelled, status, cleared = _end_with_scheduler_lane_owner(
+        tmp_path,
+        lane_backend=None,
+        lane_agent_name="",
+        lane_session_backend="claude",
+        clicked_backend="codex",
+    )
+
+    assert res["ok"] is True
+    assert cancelled is False
+    assert status == "running"
     assert cleared.get("clr") == "codex-base"
     assert cleared.get("treg") == "codex-base"
 

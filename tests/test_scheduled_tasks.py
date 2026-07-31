@@ -1197,6 +1197,148 @@ def test_definition_run_enqueue_stamps_the_agent_backend(tmp_path: Path, monkeyp
     assert (store.get_run(pinned.id) or {})["agent_backend"] == "claude"
 
 
+def test_dispatch_stamps_the_effective_backend_for_a_default_routed_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-337: the run that pins no Agent must still name the backend it went to.
+
+    HFR-328 resolves the stamp from the request's ``agent_name``, which is exactly as
+    far as an ENQUEUE can see. A definition that names no Agent — the common shape,
+    since most users never pin one — follows the routing ladder instead, and the
+    ladder is only walked at dispatch. So the column stayed NULL for those runs and
+    ``session_lane_ownership`` could prove nothing about the lane they hold.
+
+    STAMPED AT DISPATCH, NOT AT ENQUEUE, deliberately. The stamp exists to say who
+    owns a lane DURING execution; the effective default can be changed between the
+    enqueue and the fire, so an enqueue-time guess at the ladder's answer would be a
+    stale claim about a live run. ``_reserve_runtime_session`` is where the ladder is
+    actually walked (scope Agent, else default Agent) and where the reserved session's
+    own ``agent_backend`` is decided, so the run's stamp is taken from the same
+    resolution rather than re-derived beside it.
+
+    AND IT RIDES ``_record_execution_session``, which is what makes the timing safe:
+    the in-memory lane entry and the durable stamp are written by ONE call, so the
+    instant the lane becomes visible to a teardown it is already identifiable. There
+    is no window in which the run holds the session and cannot be named.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.ensure_builtin_default_agents(["codex"])
+    finally:
+        agent_store.close()
+
+    store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=store,
+    )
+
+    run = store.enqueue_hook_send(
+        session_key="",
+        prompt="a watch that follows the default Agent",
+        session_policy="create_per_run",
+    )
+    # The enqueue stamp had nothing to work with: no name, no backend.
+    assert not ((store.get_run(run.id) or {}).get("agent_backend") or "")
+
+    session_id = service._reserve_runtime_session(
+        agent_name=None,
+        deliver_key=None,
+        metadata=None,
+        execution_id=run.id,
+    )
+
+    # The lane entry and the stamp landed together.
+    assert service._execution_session_ids[run.id] == session_id
+    assert (store.get_run(run.id) or {})["agent_backend"] == "codex"
+    assert service.session_lane_ownership(session_id).backends == frozenset({"codex"})
+
+
+def test_session_bound_default_routed_lane_resolves_through_its_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-337, the other half: a run that reserves nothing still names its lane.
+
+    A default-routed definition pinned to an EXISTING session never calls
+    ``_reserve_runtime_session`` — it dispatches into a session that already exists,
+    and its lock is taken by ``_spawn_execution`` before the execution coroutine even
+    starts. No dispatch-time stamp can beat that, so the identity has to come from a
+    fact that was already durable when the run was enqueued: ``agent_runs.session_id``.
+
+    For such a run the SESSION row is decisive rather than a proxy. The general
+    objection to ``agent_sessions.agent_backend`` (it is write-once after the first
+    native bind, so it cannot describe a session that has since switched) does not
+    apply here: a switch supersedes the anchor and creates a NEW row, so the row this
+    run's ``session_id`` points at is the one it is executing inside. It is also
+    exactly what the dispatch reads — ``_execute_request`` passes that column through
+    as ``agent_session_target.agent_backend``.
+
+    Ordered LAST, after the column and after the name, so a run that states its own
+    backend is never overridden by an inference about its session.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from sqlalchemy import insert
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=store,
+    )
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(agent_sessions).values(
+                id="ses-pinned",
+                scope_id=None,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="ses-pinned",
+                native_session_id="",
+                status="active",
+                visibility="foreground",
+                metadata_json="{}",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:00Z",
+            )
+        )
+
+    run = store.enqueue_definition_run(
+        definition_id="task-337",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="slack::channel::C123",
+        session_id="ses-pinned",
+        post_to=None,
+        deliver_key=None,
+        prompt="run the nightly report on whatever Agent is default",
+        agent_name=None,
+        session_policy=None,
+    )
+    assert not ((store.get_run(run.id) or {}).get("agent_backend") or "")
+
+    # The lane exactly as ``_spawn_execution`` leaves it: lock key cached, owner
+    # recorded, and the execution coroutine not yet anywhere near a stamp.
+    service._session_lock_cache["ses-pinned"] = "sid:ses-pinned"
+    service._session_lock_owners["sid:ses-pinned"] = run.id
+
+    ownership = service.session_lane_ownership("ses-pinned")
+    assert ownership.run_ids == frozenset({run.id})
+    assert ownership.backends == frozenset({"claude"})
+
+
 def test_request_store_file_backend_reload_detects_queue_changes(tmp_path: Path) -> None:
     root = tmp_path / "task_requests"
     reader = TaskExecutionStore(root)

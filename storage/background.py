@@ -4061,6 +4061,7 @@ class SQLiteBackgroundTaskStore:
         run_id: str,
         *,
         session_id: str,
+        agent_backend: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
         """Associate a still-open run with the session it is actually executing in.
@@ -4074,9 +4075,26 @@ class SQLiteBackgroundTaskStore:
         reconciler most needs to find, because the same policy has no session lock key
         either and so is invisible to every in-memory join as well.
 
-        NARROW ON PURPOSE. It writes ``session_id`` and ``updated_at`` and nothing
-        else: this is an association, not a state change, and a reservation must never
-        be able to move a run's status, error or result. The ``WHERE`` is guarded to
+        ``agent_backend`` IS THE SECOND HALF OF THE SAME FACT (HFR-337). The caller
+        that knows which session a run is executing in is the caller that just walked
+        the routing ladder to decide which Agent it goes to, so both facts are known
+        at the same instant and are written by one UPDATE. HFR-328 could only stamp
+        the backend at ENQUEUE, from the request's ``agent_name`` — which resolves
+        nothing for a run that pins no Agent and follows the session/scope/global
+        default. Those runs held a lane nothing could identify, and End's fail-closed
+        ownership gate consequently skipped the cancel and tore the runtime down
+        around a live execution.
+
+        FILLED, NEVER OVERWRITTEN, matching the enqueue stamp's rule: a run that
+        already names a backend was pinned by a caller who resolved its own dispatch
+        target, and a reservation must not be able to re-label somebody else's
+        identity. ``COALESCE(NULLIF(...))`` does that inside the single statement, so
+        no read-then-write window exists.
+
+        NARROW ON PURPOSE. It writes ``session_id``, optionally fills
+        ``agent_backend``, bumps ``updated_at`` and touches nothing else: these are
+        associations, not state changes, and a reservation must never be able to move
+        a run's status, error or result. The ``WHERE`` is guarded to
         ``NON_TERMINAL_RUN_STATUSES`` for the same reason every other writer in this
         file is guarded — a late reservation racing a terminal write must lose, not
         re-stamp identity onto settled history.
@@ -4089,14 +4107,20 @@ class SQLiteBackgroundTaskStore:
         resolved_session_id = str(session_id or "").strip()
         if not resolved_run_id or not resolved_session_id:
             return False
+        resolved_backend = str(agent_backend or "").strip()
         now = updated_at or _utc_now_iso()
+        values: dict[str, Any] = {"session_id": resolved_session_id, "updated_at": now}
+        if resolved_backend:
+            values["agent_backend"] = func.coalesce(
+                func.nullif(agent_runs.c.agent_backend, ""), literal(resolved_backend)
+            )
         row_to_publish = None
         with self.engine.begin() as conn:
             result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == resolved_run_id)
                 .where(agent_runs.c.status.in_(NON_TERMINAL_RUN_STATUSES))
-                .values(session_id=resolved_session_id, updated_at=now)
+                .values(**values)
             )
             if not result.rowcount:
                 return False

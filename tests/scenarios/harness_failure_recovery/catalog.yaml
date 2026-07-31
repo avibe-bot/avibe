@@ -3616,6 +3616,66 @@ scenarios:
     # all, though it has no durable send-while-busy queue to divert into today either.
     # Companion: ::test_a_held_sessions_run_dispatches_after_the_hold_clears.
     test: tests/test_scheduled_tasks.py::test_scheduler_drain_defers_a_queued_run_while_teardown_holds_the_session
+  - id: HFR-337
+    name: >-
+      a default-routed run names the backend it executes on, so End can prove whose
+      scheduler lane it is about to cancel
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 13. HFR-328's RESIDUAL, and the shape it left uncovered is the
+    # common one rather than an edge case.
+    # THE BUG: HFR-328 stamps agent_runs.agent_backend at enqueue by resolving the
+    # request's agent_name, and HFR-328's lookup fallback resolves a blank column from
+    # that same name. Both are answers to "which backend does this NAME mean". Neither
+    # helps a definition that names no Agent at all and follows the routing ladder
+    # instead -- the session's Agent, then the per-channel scope override, then the
+    # global default in state_meta.default_agent_name. Most users never pin an Agent,
+    # so most scheduled/definition/hook runs enqueue with a blank name, keep a NULL
+    # column, and reach session_lane_ownership as run_ids-non-empty/backends-empty.
+    # That is exactly the unidentifiable case HFR-328 made FAIL-CLOSED: End skips the
+    # scheduler-lane cancel and then proceeds to tear the runtime down anyway, leaving
+    # the execution and its running row live until the staleness sweep. HFR-328 traded
+    # HFR-327's wrong cancel for a wrong refusal on the majority of the lane.
+    # WHERE THE STAMP GOES, and why not at enqueue. The effective default can change
+    # between an enqueue and a fire, and the stamp's whole purpose is ownership DURING
+    # execution -- so an enqueue-time walk of the ladder would park a stale claim about
+    # a live run. It is stamped at DISPATCH, in _reserve_runtime_session, which is
+    # where the ladder is actually walked (scope Agent, else default Agent) and where
+    # the reserved session's own agent_backend is decided; the run's stamp is taken
+    # from that same resolution rather than re-derived beside it. HFR-328's enqueue
+    # stamp is untouched and still runs first for an explicitly pinned name, where it
+    # is correct and earlier is better.
+    # TIMING, which is the part that makes it safe: the stamp rides
+    # _record_execution_session, the ONE call that also publishes
+    # _execution_session_ids -- the map that makes the run visible as a lane owner. A
+    # separate later write would leave a window in which the lane is held and
+    # unidentifiable, i.e. precisely the state the fail-closed gate refuses to cancel.
+    # It is a guarded write: stamp_run_session_id's existing UPDATE (HFR-122 shape,
+    # NON_TERMINAL_RUN_STATUSES) gains one COALESCE(NULLIF(...)) value, so it FILLS a
+    # blank and can never overwrite an identity a caller already stated, and no
+    # read-then-write window exists. update_run_status is not involved.
+    # THE OTHER HALF: a default-routed run pinned to an EXISTING session never reserves
+    # anything, and _spawn_execution takes its session lock before the execution
+    # coroutine starts -- no dispatch-time stamp can beat that. So the lookup ladder in
+    # session_lane_ownership gains a third rung after the column and the name: the run's
+    # OWN session row. The general objection to agent_sessions.agent_backend (write-once
+    # after the first native bind, so it cannot say who owns a SESSION's lane now) does
+    # not apply to this question -- a genuine switch supersedes the anchor and creates a
+    # NEW row, so the row a specific run's session_id points at is the one it is
+    # executing inside, and it is literally what _execute_request hands the dispatch as
+    # agent_session_target.agent_backend. Sentinels ('', default, unknown) resolve to
+    # nothing: fail-closed stays the backstop for a lane genuinely nobody can name, and
+    # a guessed identity would be worse than an absent one.
+    # BOTH DIRECTIONS ARE PINNED, because a fix that resolved the backend and then
+    # ignored it would pass the matching case alone. Companions:
+    # ::test_default_routed_lane_of_another_backend_is_still_spared_by_end (mismatch now
+    # skips for the HFR-327 reason, not for want of an answer),
+    # tests/test_scheduled_tasks.py::test_dispatch_stamps_the_effective_backend_for_a_default_routed_run
+    # (the stamp and the lane entry land together) and
+    # ::test_session_bound_default_routed_lane_resolves_through_its_session.
+    test: tests/test_running_agents_service.py::test_default_routed_definition_lane_is_identifiable_to_end
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
