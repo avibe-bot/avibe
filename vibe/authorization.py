@@ -317,6 +317,12 @@ def required_instance_role(method: str, path: str) -> str | None:
     """
 
     normalized_method = method.upper()
+    # Organization management establishes and evaluates a separate Cloud user
+    # identity. Any authenticated Instance viewer may enter that identity gate;
+    # the Cloud service then re-evaluates Organization role and object ownership
+    # for every read and mutation.
+    if path.startswith("/api/cloud-management/"):
+        return "viewer"
     if path.startswith("/show/"):
         return "viewer" if normalized_method in {"GET", "HEAD", "OPTIONS"} else "editor"
     if not path.startswith("/api/"):

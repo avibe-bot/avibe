@@ -317,7 +317,7 @@ def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
     assert state_payload["next"] == "/setup"
 
 
-def test_remote_config_get_without_session_returns_login_required(monkeypatch, tmp_path):
+def test_remote_api_get_without_session_returns_login_required(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
@@ -328,8 +328,9 @@ def test_remote_config_get_without_session_returns_login_required(monkeypatch, t
         follow_redirects=False,
     )
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
+    assert response.headers.get("Location") is None
 
 
 def test_api_config_blocked_host_returns_machine_readable_error(monkeypatch, tmp_path):
@@ -955,6 +956,29 @@ def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@exa
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = remote_access._session_signature(cloud.session_secret, payload_text)
     return f"{payload_text}.{signature}"
+
+
+def test_remote_api_get_with_expired_session_returns_login_required(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _forged_session_cookie(config, int(_time.time()) - 60),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/api/config",
+        base_url="https://alex.avibe.bot",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
+    assert response.headers.get("Location") is None
 
 
 def test_remote_session_probe_reports_unauthenticated_when_authorization_refresh_required(monkeypatch, tmp_path):

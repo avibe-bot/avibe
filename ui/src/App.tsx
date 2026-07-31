@@ -90,6 +90,18 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { OrganizationOverviewPage } from './features/organization/pages/OrganizationOverviewPage';
+import { OrganizationMembersPage } from './features/organization/pages/OrganizationMembersPage';
+import {
+  OrganizationGroupDetailPage,
+  OrganizationGroupsPage,
+} from './features/organization/pages/OrganizationGroupsPages';
+import { OrganizationInstancesPage } from './features/organization/pages/OrganizationInstancesPage';
+import {
+  InstanceAccessPage,
+  InstanceProjectsPage,
+} from './features/organization/pages/OrganizationInstancePages';
+import { OrganizationResourcesPage } from './features/organization/pages/OrganizationResourcesPage';
 
 // Paths that bypass the setup guard so the wizard and diagnostics can show
 // logs / doctor output even before configuration is complete.
@@ -588,6 +600,15 @@ const router = createBrowserRouter(
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route path="/admin/organization" element={<Navigate to="/admin/organization/overview" replace />} />
+        <Route path="/admin/organization/overview" element={<OrganizationOverviewPage />} />
+        <Route path="/admin/organization/members" element={<OrganizationMembersPage />} />
+        <Route path="/admin/organization/groups" element={<OrganizationGroupsPage />} />
+        <Route path="/admin/organization/groups/:groupId" element={<OrganizationGroupDetailPage />} />
+        <Route path="/admin/organization/instances" element={<OrganizationInstancesPage />} />
+        <Route path="/admin/organization/instances/:instanceId/access" element={<InstanceAccessPage />} />
+        <Route path="/admin/organization/instances/:instanceId/projects" element={<InstanceProjectsPage />} />
+        <Route path="/admin/organization/resources" element={<OrganizationResourcesPage />} />
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />

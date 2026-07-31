@@ -421,6 +421,8 @@ class CompatApp(FastAPI):
         self,
         starlette_request: FastAPIRequest,
         func: Callable[..., Any],
+        *,
+        parse_json: bool = True,
     ) -> Response:
         """Run a native FastAPI endpoint through the shared UI request hooks.
 
@@ -443,7 +445,8 @@ class CompatApp(FastAPI):
                         response = normalize_response(result)
                         break
                 if response is None:
-                    compat_request._json_payload = await _read_json_payload(starlette_request)
+                    if parse_json:
+                        compat_request._json_payload = await _read_json_payload(starlette_request)
                     response = normalize_response(await run_maybe_async(func))
             except Exception as exc:
                 response = await self._handle_compat_exception(exc)
