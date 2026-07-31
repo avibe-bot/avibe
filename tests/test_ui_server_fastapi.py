@@ -317,7 +317,10 @@ def _machine_coded_error_builders():
     below fails for any coded body that skips the shared builder entirely, so a route
     cannot quietly opt out of this list.
     """
-    from core.services.session_fork import SessionForkError
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SessionForkError,
+    )
     from storage.workbench_sessions_service import SessionBackendLockedError
 
     class _Coded(Exception):
@@ -382,6 +385,18 @@ def _machine_coded_error_builders():
             409,
         ),
         (
+            "fork_agent_unavailable",
+            lambda: ui_server._session_fork_error_response(
+                SessionForkError(
+                    "source session Agent is unavailable",
+                    code=SESSION_AGENT_UNAVAILABLE_CODE,
+                    details={"source_session_id": "ses_1"},
+                )
+            ),
+            SESSION_AGENT_UNAVAILABLE_CODE,
+            409,
+        ),
+        (
             "fork_failed",
             lambda: ui_server._session_fork_error_response(SessionForkError("something else broke")),
             "session_fork_failed",
@@ -442,6 +457,39 @@ def test_machine_coded_error_bodies_survive_the_ui_error_parse(
     assert body["code"] == expected_code, label
     assert isinstance(body["message"], str) and body["message"], label
     assert body["error"]["message"] == body["message"], label
+
+
+def test_session_fork_agent_unavailable_message_follows_configured_language(monkeypatch, tmp_path):
+    from config import paths
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+    )
+    from core.services.settings import default_config
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+    error = SessionForkError(
+        "source session Agent is unavailable; choose an enabled Agent override",
+        code=SESSION_AGENT_UNAVAILABLE_CODE,
+        details={"source_session_id": "ses_1"},
+    )
+
+    response, status = ui_server._session_fork_error_response(error)
+    body = json.loads(response.body)
+    expected_message = i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.message", "zh")
+    expected_hint = i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.hint", "zh")
+
+    assert status == 409
+    assert body["code"] == SESSION_AGENT_UNAVAILABLE_CODE
+    assert body["message"] == expected_message
+    assert body["message"] != str(error)
+    assert body["hint"] == expected_hint
+    assert body["source_session_id"] == "ses_1"
 
 
 # Coded bodies that deliberately keep the flat shape, each with the reason it cannot

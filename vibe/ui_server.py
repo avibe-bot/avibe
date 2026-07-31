@@ -6384,7 +6384,23 @@ def _session_fork_error_response(err: Exception):
     permanent refusal. See ``_coded_error_response`` — every code here needs the same
     treatment, so the whole mapping goes through it rather than one patched branch.
     """
+    from core.services import settings as settings_service
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+    )
+
     message = str(err)
+    if getattr(err, "code", None) == SESSION_AGENT_UNAVAILABLE_CODE:
+        lang = settings_service.load_config_or_default().language
+        key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
+        return _coded_error_response(
+            SESSION_AGENT_UNAVAILABLE_CODE,
+            t(f"{key}.message", lang),
+            409,
+            hint=t(f"{key}.hint", lang),
+            **getattr(err, "details", {}),
+        )
     if "id not found" in message:
         return _coded_error_response("session_not_found", message, 404)
     if "is archived" in message:

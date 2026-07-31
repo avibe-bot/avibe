@@ -161,6 +161,12 @@
     }
   },
   "error": {
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "The source session's Agent is no longer available for a new fork.",
+        "hint": "Choose an enabled Agent override that uses the same backend."
+      }
+    },
     "sessionArchived": "This session is archived and can no longer be changed.",
     "agentArchive": {
       "agent_builtin": {

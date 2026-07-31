@@ -49,9 +49,23 @@ _FORK_ANCHOR_TYPES = tuple(
     )
 )
 
+SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
+SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
+
 
 class SessionForkError(ValueError):
     """Raised when a Session cannot be forked."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session_fork_failed",
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -224,7 +238,9 @@ def reserve_forked_session(
                     )
                 except LookupError as exc:
                     raise SessionForkError(
-                        "source session Agent is unavailable; choose an enabled Agent override"
+                        "source session Agent is unavailable; choose an enabled Agent override",
+                        code=SESSION_AGENT_UNAVAILABLE_CODE,
+                        details={"source_session_id": source_session_id},
                     ) from exc
                 if inherited_agent["backend"] != source_backend:
                     raise SessionForkError(

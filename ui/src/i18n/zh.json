@@ -1181,6 +1181,7 @@
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
     "missing_share_id": "请先输入自定义链接。",
     "not_public": "请先把展示页面设为公开，再修改链接。",
+    "session_agent_unavailable": "源会话的 Agent 已不可用。请选择一个已启用的 Agent 来复刻此会话。",
     "session_archived": "该会话已归档，无法修改它的展示页面。",
     "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
     "invalid_icon_type": "图标必须是 SVG、PNG、ICO、JPEG 或 WebP 图片。",

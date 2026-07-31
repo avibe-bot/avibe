@@ -79,6 +79,7 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
@@ -188,6 +189,7 @@ export const HarnessPage: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<HarnessRun | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
   // Per-id pending state so the row's toggle / delete buttons can show a
   // spinner without disabling siblings.
   const [pendingMutation, setPendingMutation] = useState<Record<string, boolean>>({});
@@ -209,6 +211,7 @@ export const HarnessPage: React.FC = () => {
   const [runTypeFilter, setRunTypeFilter] = useState<RunTypeFilter>('default');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
+  const agentRefreshSeq = useRef(0);
   // URL scope from the background-work banner (spec req 4): ?tab / ?session /
   // ?run deep-link into a session-scoped tab (removable "只看本会话" chip) or a
   // specific run. One-way URL -> state, keyed per-param so a user's tab click
@@ -385,32 +388,32 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  const refreshAgents = useCallback(async () => {
+    const seq = agentRefreshSeq.current + 1;
+    agentRefreshSeq.current = seq;
+    try {
+      const agents = await loadHarnessAgentCatalog(api);
+      if (agentRefreshSeq.current === seq) setAgentsByName(agents);
+    } catch {
+      // Harness data remains usable when the optional Agent metadata lookup fails.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshAgents();
+    return () => {
+      agentRefreshSeq.current += 1;
+    };
+  }, [refreshAgents]);
+
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onRunsUpdated: () => {
         void refresh();
+        void refreshAgents();
       },
     });
-  }, [api, refresh]);
-
-  // Resolve agent_name → backend/model/effort for the detail panels: the
-  // task/watch payload stores only the name. Fetched once on mount.
-  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: true, includeArchived: true })
-      .then((res) => {
-        if (cancelled) return;
-        const map: Record<string, VibeAgentBrief> = {};
-        for (const a of res.agents) map[a.name] = a;
-        setAgentsByName(map);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+  }, [api, refresh, refreshAgents]);
 
   const markPending = useCallback((id: string, value: boolean) => {
     setPendingMutation((prev) => {

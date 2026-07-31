@@ -628,7 +628,12 @@ export type ApiContextType = {
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
-  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean; includeArchived?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  listVibeAgents: (params?: {
+    backend?: string;
+    includeDisabled?: boolean;
+    includeArchived?: boolean;
+    cache?: boolean;
+  }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -2910,7 +2915,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.includeDisabled) search.set('include_disabled', '1');
       if (params?.includeArchived) search.set('include_archived', '1');
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
+      const path = qs ? `/api/agents?${qs}` : '/api/agents';
+      return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),

@@ -161,6 +161,12 @@
     }
   },
   "error": {
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
+        "hint": "请选择使用相同 backend 的已启用 Agent 作为覆盖项。"
+      }
+    },
     "sessionArchived": "该会话已归档，无法再修改。",
     "agentArchive": {
       "agent_builtin": {

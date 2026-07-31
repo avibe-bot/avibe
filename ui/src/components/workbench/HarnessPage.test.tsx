@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type {
+  ApiContextType,
   HarnessRun,
   HarnessSessionSummary,
   HarnessWatch,
@@ -22,6 +23,7 @@ import {
   harnessEmptyStateKey,
   harnessTabFromParam,
 } from './HarnessPage';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -132,6 +134,36 @@ describe('harnessEmptyStateKey', () => {
   ] as const)('distinguishes an empty store from an empty %s view', (kind, emptyKey, filteredKey) => {
     expect(harnessEmptyStateKey(kind, false)).toBe(emptyKey);
     expect(harnessEmptyStateKey(kind, true)).toBe(filteredKey);
+  });
+});
+
+describe('loadHarnessAgentCatalog', () => {
+  it('bypasses the read cache and indexes a newly archived Agent by its internal name', async () => {
+    const archived = {
+      id: 'agent-pm',
+      name: '_pm-a1b2',
+      display_name: 'pm',
+      description: null,
+      backend: 'codex',
+      model: null,
+      reasoning_effort: null,
+      enabled: false,
+      archived: true,
+      archived_at: '2026-07-31T21:00:00Z',
+      source: 'custom',
+      updated_at: '2026-07-31T21:00:00Z',
+    } satisfies VibeAgentBrief;
+    let params: Parameters<ApiContextType['listVibeAgents']>[0] = undefined;
+
+    const catalog = await loadHarnessAgentCatalog({
+      listVibeAgents: async (nextParams) => {
+        params = nextParams;
+        return { ok: true, agents: [archived], default_agent_name: 'codex' };
+      },
+    });
+
+    expect(params).toEqual({ includeDisabled: true, includeArchived: true, cache: false });
+    expect(catalog).toEqual({ '_pm-a1b2': archived });
   });
 });
 

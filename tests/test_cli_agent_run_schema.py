@@ -1533,6 +1533,42 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     assert payload["code"] == "session_fork_failed"
 
 
+def test_agent_run_fork_localizes_unavailable_source_agent(monkeypatch) -> None:
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+    )
+    from vibe.i18n import t as i18n_t
+
+    error = SessionForkError(
+        "source session Agent is unavailable; choose an enabled Agent override",
+        code=SESSION_AGENT_UNAVAILABLE_CODE,
+        details={"source_session_id": "ses-source"},
+    )
+    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(
+        "core.services.session_fork.reserve_forked_session",
+        lambda **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._reserve_forked_cli_session(
+            source_session_id="ses-source",
+            agent_name=None,
+            model=None,
+            reasoning_effort=None,
+            scope_key=None,
+            visibility="foreground",
+        )
+
+    exc = exc_info.value
+    assert exc.code == SESSION_AGENT_UNAVAILABLE_CODE
+    assert str(exc) == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.message", "zh")
+    assert exc.hint == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.hint", "zh")
+    assert exc.details == {"source_session_id": "ses-source"}
+
+
 def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path, capsys, monkeypatch) -> None:
     """A caller-less run reserves a standalone Session in its Show workspace."""
     from storage.importer import ensure_sqlite_state

@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from core.services.session_fork import (
+    SESSION_AGENT_UNAVAILABLE_CODE,
     SessionForkError,
     SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
@@ -912,8 +913,10 @@ def test_reserve_forked_session_rejects_archived_inherited_agent(tmp_path: Path)
     finally:
         engine.dispose()
 
-    with pytest.raises(SessionForkError, match="source session Agent is unavailable"):
+    with pytest.raises(SessionForkError, match="source session Agent is unavailable") as exc_info:
         reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert exc_info.value.code == SESSION_AGENT_UNAVAILABLE_CODE
+    assert exc_info.value.details == {"source_session_id": source_id}
 
     engine = create_sqlite_engine(db_path)
     try:

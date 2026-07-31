@@ -4615,7 +4615,12 @@ def _reserve_forked_cli_session(
     scope_key: Optional[str],
     visibility: str,
 ):
-    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+        reserve_forked_session,
+    )
 
     try:
         return reserve_forked_session(
@@ -4628,6 +4633,19 @@ def _reserve_forked_cli_session(
             db_path=paths.get_sqlite_state_path(),
         )
     except SessionForkError as exc:
+        if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
+            key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
+            raise TaskCliError(
+                i18n_t(f"{key}.message", lang),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang),
+                help_command="vibe agent run --help",
+                details={"source_session_id": source_session_id, **exc.details},
+            ) from exc
         raise TaskCliError(
             str(exc),
             code="session_fork_failed",
