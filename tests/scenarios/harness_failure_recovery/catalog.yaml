@@ -2859,6 +2859,38 @@ scenarios:
     # that reclaims the session it is executing in):
     # tests/test_scheduled_tasks.py::test_self_evicting_execution_is_not_reconciled_mid_flight
     test: tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_in_dispatch_recreation_does_not_reconcile_the_callers_own_run
+  - id: HFR-322
+    name: a buffered terminal result outranks the receiver-failure interruption label
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: claude
+    # PR2 review round 4, and a consequence of routing cleanup_session through the
+    # settlement preamble. ClaudeAgent._receive_messages reaches
+    # settling_ambiguous_primary when the receive stream EOFs or throws AND a genuine
+    # Claude ResultMessage is waiting in _ambiguous_primary_results (buffered by an
+    # ambiguous steering write). That branch calls _cleanup_runtime_session_state with
+    # SETTLED_BY_INTERRUPTED BEFORE the buffered message is processed a few lines
+    # below. Pre-PR2 that call was runtime-state-only; on this branch it runs
+    # cleanup_session, whose preamble cancels and reconciles the session's runs, so
+    # the live Workbench turn (or scheduler execution) was settled
+    # failed/interrupted moments before its real, usually successful, outcome
+    # arrived -- and settle_run_terminal is scoped to queued|running, so the genuine
+    # result could never overwrite the label. Master plan 10.3: a genuine outcome is
+    # never pre-empted by an interruption story.
+    # FIX: settle_runs: bool = True threaded through
+    # ClaudeAgent._cleanup_runtime_session / _cleanup_runtime_session_state ->
+    # SessionHandler.cleanup_session; False skips the teardown_composite_session_runs
+    # preamble (both lanes and the reconcile) and changes nothing else -- receiver,
+    # client and runtime state are still dropped, which the regression asserts so the
+    # opt-out cannot degrade into "skip the cleanup". Only the
+    # settling_ambiguous_primary site passes False; every other broken-receiver path
+    # still reconciles, because on those no result exists to settle with. settled_by
+    # stays required (signature stability; unused on the opt-out path).
+    # RESIDUAL: if processing the buffered result then fails, the run stays running
+    # for the staleness sweep / PR7 recovery -- deliberate, because a recoverable
+    # unsettled run beats a permanently wrong terminal status.
+    test: tests/test_claude_receiver_result_settle.py::ResultSettlesTurnOnEmitFailureTests::test_buffered_primary_result_survives_receiver_failure_cleanup
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

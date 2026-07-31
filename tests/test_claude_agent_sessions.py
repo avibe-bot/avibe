@@ -66,7 +66,12 @@ class _StubController:
         self.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
 
         async def _cleanup_session(
-            composite_key, *, settled_by="", current_receiver_task=None, include_manager_lane=True
+            composite_key,
+            *,
+            settled_by="",
+            current_receiver_task=None,
+            include_manager_lane=True,
+            settle_runs=True,
         ):
             receiver_task = self.receiver_tasks.pop(composite_key, None)
             client = self.claude_sessions.pop(composite_key, None)
@@ -440,6 +445,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             # HFR-126: the stop owns the manager turn; cleanup takes the scheduler
             # lane only.
             include_manager_lane=False,
+            # HFR-322 opts a single receiver path out of settlement; a Stop is not it.
+            settle_runs=True,
         )
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
@@ -489,14 +496,20 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         # The real cleanup ordering: settle the session's runs FIRST, then drop the
         # runtime client. ``include_manager_lane`` is what the adapter forwards.
         async def _cleanup_session(
-            composite_key, *, settled_by="", current_receiver_task=None, include_manager_lane=True
+            composite_key,
+            *,
+            settled_by="",
+            current_receiver_task=None,
+            include_manager_lane=True,
+            settle_runs=True,
         ):
-            await teardown_composite_session_runs(
-                controller,
-                composite_key,
-                settled_by=settled_by,
-                include_manager_lane=include_manager_lane,
-            )
+            if settle_runs:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=settled_by,
+                    include_manager_lane=include_manager_lane,
+                )
             controller.claude_sessions.pop(composite_key, None)
 
         controller.session_handler.cleanup_session = AsyncMock(side_effect=_cleanup_session)
@@ -570,6 +583,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 settled_by=SETTLED_BY_STOPPED,
                 current_receiver_task=None,
                 include_manager_lane=False,
+                settle_runs=True,
             )
         finally:
             turn_task.cancel()
@@ -1032,6 +1046,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             # HFR-126: the stop owns the manager turn; cleanup takes the scheduler
             # lane only.
             include_manager_lane=False,
+            # HFR-322 opts a single receiver path out of settlement; a Stop is not it.
+            settle_runs=True,
         )
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
@@ -1707,6 +1723,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             settled_by="interrupted",
             current_receiver_task=receiver_task,
             include_manager_lane=True,
+            settle_runs=True,
         )
         self.assertNotIn(session_key, agent._last_assistant_text)
         self.assertNotIn(session_key, agent._pending_assistant_message)
@@ -1933,6 +1950,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
             include_manager_lane=True,
+            settle_runs=True,
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -2419,6 +2437,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             settled_by="evicted",
             current_receiver_task=None,
             include_manager_lane=True,
+            settle_runs=True,
         )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         controller.emit_agent_message.assert_awaited_once_with(
@@ -2555,6 +2574,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
             include_manager_lane=True,
+            settle_runs=True,
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)
         self.assertEqual(agent._remove_ack_reaction.await_args_list[0].args, (pending_request_1,))

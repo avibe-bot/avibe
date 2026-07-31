@@ -453,6 +453,7 @@ class ClaudeAgent(BaseAgent):
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
         include_manager_lane: bool = True,
+        settle_runs: bool = True,
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task.
 
@@ -464,6 +465,9 @@ class ClaudeAgent(BaseAgent):
 
         ``include_manager_lane=False`` is for a call site that is itself the manager
         lane's stop owner; see ``SessionHandler.cleanup_session``.
+
+        ``settle_runs=False`` is for a call site holding a REAL terminal result it is
+        about to process; see ``SessionHandler.cleanup_session`` and HFR-322.
         """
 
         await self._prepare_steering_cleanup(composite_key)
@@ -474,6 +478,7 @@ class ClaudeAgent(BaseAgent):
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
                 include_manager_lane=include_manager_lane,
+                settle_runs=settle_runs,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -486,6 +491,7 @@ class ClaudeAgent(BaseAgent):
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
         include_manager_lane: bool = True,
+        settle_runs: bool = True,
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -508,6 +514,7 @@ class ClaudeAgent(BaseAgent):
                 settled_by=settled_by,
                 current_receiver_task=current_receiver_task,
                 include_manager_lane=include_manager_lane,
+                settle_runs=settle_runs,
             )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -1086,11 +1093,25 @@ class ClaudeAgent(BaseAgent):
                         exc_info=True,
                     )
                 if settling_ambiguous_primary:
+                    # RUNTIME-ONLY cleanup (HFR-322). The stream broke, so the client
+                    # and receiver must go — but a REAL terminal result is in hand and
+                    # is processed a few lines below, and it is that outcome (usually a
+                    # success) the run must settle with. Letting the teardown preamble
+                    # run here would cancel and reconcile the live Workbench turn or
+                    # scheduler execution as ``interrupted`` first, and the terminal
+                    # writer is scoped to ``queued|running``, so the genuine result
+                    # could never overwrite the interruption label. A genuine outcome
+                    # is never pre-empted by an interruption story.
+                    # Residual: if the processing below then fails, the run stays
+                    # ``running`` for the staleness sweep / PR7 recovery to settle —
+                    # deliberately, because a recoverable unsettled run beats a
+                    # permanently wrong terminal status.
                     await self._cleanup_runtime_session_state(
                         composite_key,
                         settled_by=SETTLED_BY_INTERRUPTED,
                         current_receiver_task=asyncio.current_task(),
                         preserve_pending_request_state=True,
+                        settle_runs=False,
                     )
                 try:
                     touch_session_activity = getattr(self.session_handler, "touch_session_activity", None)

@@ -1545,6 +1545,7 @@ class SessionHandler(BaseHandler):
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
         include_manager_lane: bool = True,
+        settle_runs: bool = True,
     ):
         """Clean up a specific session by composite key.
 
@@ -1570,18 +1571,33 @@ class SessionHandler(BaseHandler):
         returns. Releasing that turn from here would run its ``finally`` — including
         Send Now's ``flush_on_cancel``-forced flush — while the old runtime client is
         still registered, dispatching the replacement turn into a dying runtime.
+
+        ``settle_runs=False`` drops the settlement preamble entirely — both cancel
+        lanes and the reconcile — and keeps every other piece of the teardown. It is
+        for the ONE caller whose run is about to be settled by a REAL terminal
+        outcome that is already in hand: the receiver popping a buffered Claude
+        ``ResultMessage`` out of ``_ambiguous_primary_results`` after its stream
+        broke, which drops the runtime and then processes that result (HFR-322).
+        Settling there would label a run ``interrupted`` moments before its genuine
+        (usually successful) outcome arrived, and the terminal writer is scoped to
+        ``queued|running``, so the real result could never overwrite the label.
+        ``settled_by`` stays required — the signature must not grow a way to omit the
+        cause — and is simply unused on that path, because nothing is being settled
+        by this call.
         """
 
-        await teardown_composite_session_runs(
-            self.controller,
-            composite_key,
-            settled_by=settled_by,
-            # This handler owns Claude runtimes and nothing else, so a candidate row
-            # on another backend is another runtime's session that happens to share
-            # the anchor — and the teardown CANCELS what it resolves (HFR-128).
-            agent_backend="claude",
-            include_manager_lane=include_manager_lane,
-        )
+        if settle_runs:
+            await teardown_composite_session_runs(
+                self.controller,
+                composite_key,
+                settled_by=settled_by,
+                # This handler owns Claude runtimes and nothing else, so a candidate
+                # row on another backend is another runtime's session that happens to
+                # share the anchor — and the teardown CANCELS what it resolves
+                # (HFR-128).
+                agent_backend="claude",
+                include_manager_lane=include_manager_lane,
+            )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
         if client is not None and retire_model_hub_scope:

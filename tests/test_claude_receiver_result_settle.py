@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import unittest
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -1421,6 +1422,146 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, [("cleanup", True), ("release", True), ("emit", False)])
         agent.controller.emit_agent_message.assert_awaited_once()
+
+    async def test_buffered_primary_result_survives_receiver_failure_cleanup(self):
+        """HFR-322: a real terminal result outranks the interruption label.
+
+        The ``settling_ambiguous_primary`` branch is reached when the receive stream
+        ends or throws AND a genuine Claude ``ResultMessage`` is sitting in
+        ``_ambiguous_primary_results`` — buffered by an ambiguous steering write. The
+        transport is gone, so the runtime must be dropped, but the turn's real
+        outcome is IN HAND and is processed a few lines later.
+
+        The cleanup that path calls used to be runtime-state-only. Now it runs
+        ``SessionHandler.cleanup_session``, whose preamble cancels and reconciles the
+        session's runs as ``interrupted`` — so the live Workbench turn's run was
+        terminalized ``failed``/``interrupted`` moments before its successful result
+        arrived, and ``settle_run_terminal``'s ``queued|running`` guard then refused
+        the genuine outcome. The user is told their finished turn was interrupted, and
+        the result they actually got can never be recorded (master plan §10.3: a
+        genuine outcome must never be pre-empted by an interruption label).
+
+        The fix keeps this ONE path runtime-only (``settle_runs=False``); every other
+        broken-receiver path still reconciles, because on those no result exists.
+        """
+
+        from sqlalchemy import update
+
+        from core.handlers.session_handler import SessionHandler
+        from core.scheduled_tasks import ScheduledTaskService
+        from core.session_turns import SessionTurnManager, Turn
+        from modules.im import MessageContext
+        from storage.db import create_sqlite_engine
+        from storage.models import agent_runs
+
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        controller = agent.controller
+        composite_key = "slack_C1:/tmp/work"
+        session_id = "ses_buffered_322"
+
+        # A real teardown path behind the cleanup: resolver, settlement service and a
+        # live Workbench turn, so the preamble has something to cancel and reconcile.
+        controller.stored_session_mappings = {}
+        controller.sessions = SimpleNamespace(
+            find_session_ids_for_anchor=lambda anchor, workdir=None, **_kw: [session_id]
+        )
+        # Stores default to the per-test isolated ``AVIBE_HOME`` (tests/conftest.py).
+        service = ScheduledTaskService(controller=controller)
+        controller.scheduled_task_service = service
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        handler = SessionHandler(controller)
+        controller.session_handler = handler
+        agent.session_handler = handler
+
+        run = service.request_store.enqueue_agent_run(
+            session_key="session-key",
+            message="the turn whose result was buffered",
+            agent_name="claude",
+        )
+        engine = create_sqlite_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .values(session_id=session_id, status="running")
+            )
+
+        turn_ctx = MessageContext(user_id="U1", channel_id=session_id, platform="avibe")
+        turn_ctx.platform_specific = {
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+        }
+
+        async def _turn_body():
+            await asyncio.sleep(60)
+
+        turn_task = asyncio.create_task(_turn_body())
+        manager.in_flight[session_id] = Turn(task=turn_task, context=turn_ctx)
+
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        agent.emit_result_message = AsyncMock(return_value=None)
+
+        buffered = _ResultMessage()
+        buffered.result = "the answer the user actually got"
+        agent._ambiguous_primary_results[composite_key] = buffered
+
+        class _BrokenStreamClient:
+            def receive_messages(self):
+                async def _iterate():
+                    raise RuntimeError("transport died mid-turn")
+                    yield  # pragma: no cover - generator marker
+
+                return _iterate()
+
+        client = _BrokenStreamClient()
+        client.disconnect = AsyncMock()
+        controller.claude_sessions[composite_key] = client
+
+        await agent._receive_messages(
+            client,
+            "slack_C1",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        # The buffered result was delivered, and the runtime really was torn down —
+        # the opt-out drops the settlement preamble, not the cleanup.
+        agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(
+            agent.emit_result_message.await_args.args[1], "the answer the user actually got"
+        )
+        self.assertNotIn(composite_key, controller.claude_sessions)
+        client.disconnect.assert_awaited_once()
+
+        row = service.request_store.get_run(run.id)
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            row["status"],
+            "running",
+            "the run was labelled interrupted before its real result was processed",
+        )
+        self.assertNotIn("interrupt_reason", row["metadata"] or {})
+
+        # The genuine outcome can therefore still be written: the guarded terminal
+        # writer only accepts ``queued|running``, so a row the teardown had already
+        # settled would refuse it forever.
+        written = service.request_store.sqlite_backend.settle_run_terminal(
+            run.id,
+            terminal_status="succeeded",
+            result_text="the answer the user actually got",
+        )
+        self.assertEqual(written, "succeeded")
+        settled = service.request_store.get_run(run.id)
+        self.assertEqual(settled["status"], "succeeded")
+
+        turn_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await turn_task
 
 
 if __name__ == "__main__":  # pragma: no cover
