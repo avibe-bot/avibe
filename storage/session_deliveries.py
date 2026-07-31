@@ -235,8 +235,8 @@ def bind_native_start(
     turn_id: str,
     *,
     expected_version: int,
-    runtime_key: str,
-    runtime_turn_id: str,
+    runtime_key: str | None,
+    runtime_turn_id: str | None,
     native_turn_id: str | None,
 ) -> dict[str, Any] | None:
     now = utc_now_iso()

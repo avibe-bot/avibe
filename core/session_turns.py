@@ -1161,8 +1161,8 @@ class SessionTurnManager:
                     conn,
                     str(turn["id"]),
                     expected_version=int(latest["version"]),
-                    runtime_key=str(latest.get("runtime_key") or "recovered"),
-                    runtime_turn_id=str(latest.get("runtime_turn_id") or "recovered"),
+                    runtime_key=latest.get("runtime_key"),
+                    runtime_turn_id=latest.get("runtime_turn_id"),
                     native_turn_id=identity[1],
                 )
                 if bound is None:
@@ -2049,8 +2049,8 @@ class SessionTurnManager:
                         conn,
                         turn_id,
                         expected_version=int(latest["version"]),
-                        runtime_key=str(latest.get("runtime_key") or "recovered"),
-                        runtime_turn_id=str(latest.get("runtime_turn_id") or "recovered"),
+                        runtime_key=latest.get("runtime_key"),
+                        runtime_turn_id=latest.get("runtime_turn_id"),
                         native_turn_id=identity[1],
                     )
                     if bound is not None:

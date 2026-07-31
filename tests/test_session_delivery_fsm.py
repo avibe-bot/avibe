@@ -490,6 +490,49 @@ def test_native_start_ambiguity_is_quarantined_without_duplicate_dispatch(manage
     assert turn["state"] == "quarantined"
     assert turn["start_attempt_id"]
 
+    restarted._active_identity = lambda _backend, _session, logical: (
+        logical,
+        "native-restored",
+    )
+    restarted._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+    attached = asyncio.run(
+        restarted.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="attach after native evidence",
+            ),
+            context=_context(),
+        )
+    )
+    assert attached.state == "attached"
+    with engine.connect() as conn:
+        rebound = delivery_store.get_turn(conn, str(outcome.turn_id))
+    assert rebound is not None
+    assert rebound["runtime_turn_id"] is None
+
+    async def terminalize_restored_native() -> None:
+        terminal_context = _context()
+        terminal_context.platform_specific["turn_token"] = str(outcome.turn_id)
+        terminal_context.platform_specific["agent_runtime_turn_token"] = (
+            "actual-restored-runtime"
+        )
+        task = restarted.on_native_terminal(
+            terminal_context,
+            outcome="terminal",
+        )
+        if task is not None:
+            await task
+
+    asyncio.run(terminalize_restored_native())
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, str(outcome.turn_id))
+    assert terminal is not None
+    assert terminal["state"] == "terminal"
+    assert dispatch_calls == 1
+
 
 def test_async_dispatch_failure_keeps_starting_delivery_quarantined(
     managers,
@@ -657,7 +700,25 @@ def test_late_positive_native_evidence_rebinds_quarantined_turn(managers) -> Non
     assert rebound is not None
     assert rebound["state"] == "active"
     assert rebound["native_turn_id"] == "native-t1"
+    assert rebound["runtime_turn_id"] == "runtime-token"
     restarted._steer.assert_awaited_once()
+
+    async def terminalize_restored_native() -> None:
+        terminal_context = _context()
+        terminal_context.platform_specific["turn_token"] = turn_id
+        terminal_context.platform_specific["agent_runtime_turn_token"] = "runtime-token"
+        task = restarted.on_native_terminal(
+            terminal_context,
+            outcome="terminal",
+        )
+        if task is not None:
+            await task
+
+    asyncio.run(terminalize_restored_native())
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, turn_id)
+    assert terminal is not None
+    assert terminal["state"] == "terminal"
 
 
 def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) -> None:
