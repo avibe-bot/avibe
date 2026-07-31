@@ -1,6 +1,7 @@
 """The ``/api/memory/*`` UI surface.
 
-Every route here is direct-loopback only and answers with the closed Memory
+Every route here requires direct loopback or an authenticated remote-access
+session, and answers with the closed Memory
 result envelope (``{"status": "ok", ...}`` / ``{"status": "failed", "error":
 <closed code>}``) plus ``Cache-Control: no-store``. Keeping them in one module
 means the admission check, the envelope and the no-store header are stated once
@@ -23,8 +24,8 @@ from config.v2_config import V2Config
 from vibe.ui_compat import Response, jsonify
 
 
-def _direct_loopback_memory_request() -> bool:
-    """Ask ``ui_server`` for the strict Memory admission verdict.
+def _memory_request_admitted() -> bool:
+    """Ask ``ui_server`` for the Memory admission verdict.
 
     Late-bound on purpose: the predicate belongs with the other request-locality
     helpers in ``ui_server``, and resolving it per call keeps it patchable there.
@@ -32,7 +33,7 @@ def _direct_loopback_memory_request() -> bool:
 
     from vibe import ui_server
 
-    return ui_server.is_direct_loopback_memory_request()
+    return ui_server.is_memory_request_admitted()
 
 
 def _memory_response(payload: dict, *, status_code: int = 200) -> Response:
@@ -238,7 +239,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/settings", include_in_schema=False)
     async def memory_settings_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             try:
                 return _memory_response(await asyncio.to_thread(_memory_settings_payload))
@@ -250,7 +251,7 @@ def register_memory_routes(app) -> None:
     @app.patch("/api/memory/settings", include_in_schema=False)
     async def memory_settings_patch(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             try:
                 patch_payload = await starlette_request.json()
@@ -263,7 +264,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/status", include_in_schema=False)
     async def memory_status_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -274,7 +275,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/failures", include_in_schema=False)
     async def memory_failures_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -285,7 +286,7 @@ def register_memory_routes(app) -> None:
     @app.get("/api/memory/profile", include_in_schema=False)
     async def memory_profile_get(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -298,7 +299,7 @@ def register_memory_routes(app) -> None:
     @app.post("/api/memory/search", include_in_schema=False)
     async def memory_search_post(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             try:
                 payload = await starlette_request.json()
@@ -330,7 +331,7 @@ def register_memory_routes(app) -> None:
         """
 
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             from vibe import internal_client
 
@@ -341,7 +342,7 @@ def register_memory_routes(app) -> None:
     @app.post("/api/memory/clear", include_in_schema=False)
     async def memory_clear_post(starlette_request: FastAPIRequest):
         async def handler():
-            if not _direct_loopback_memory_request():
+            if not _memory_request_admitted():
                 return _memory_forbidden_response()
             try:
                 payload = await starlette_request.json()

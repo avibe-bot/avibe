@@ -3471,8 +3471,8 @@
       "settings": "Settings"
     },
     "remoteUnavailable": {
-      "title": "Available on this device only",
-      "description": "Memory settings and data are visible only from a direct connection to this Avibe install — not through Avibe Cloud or another remote route."
+      "title": "Sign-in required",
+      "description": "Memory settings and data require a direct connection to this Avibe install or a signed-in Avibe Cloud session."
     },
     "status": {
       "title": "Status",
