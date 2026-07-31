@@ -1062,6 +1062,34 @@ def retire_queued_agent_run(
     return removed
 
 
+def retire_reserved(
+    conn: Connection,
+    session_id: str,
+    delivery_id: str,
+    *,
+    reason: str,
+) -> bool:
+    """Retire only a producer reservation that no executor has claimed."""
+
+    delivery = get_delivery(conn, delivery_id)
+    if (
+        delivery is None
+        or delivery["session_id"] != session_id
+        or delivery["state"] != "reserved"
+        or delivery.get("current_attempt_id")
+    ):
+        return False
+    updated = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("reserved",),
+        values={"state": "retired", "retired_at": utc_now_iso()},
+        history_event={"kind": "retire", "reason": reason},
+    )
+    return updated is not None
+
+
 def retire_not_written(conn: Connection, session_id: str, delivery_id: str, *, reason: str) -> bool:
     delivery = get_delivery(conn, delivery_id)
     if (

@@ -134,6 +134,21 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             """,
             (now, now),
         )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, author_id,
+                author_name, source, native_message_id, parent_native_message_id,
+                content_text, content_json, metadata_json, created_at, updated_at,
+                delivered_at, read_at
+            ) values (
+                'msg_fsm_draft', null, 'ses_fsm', 'avibe', 'user', 'draft', null,
+                null, 'user', null, null, 'unfinished thought',
+                '{"text":"unfinished thought"}', '{}', ?, ?, null, null
+            )
+            """,
+            (now, now),
+        )
         conn.commit()
 
     run_migrations(db_path)
@@ -156,6 +171,10 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         ).fetchone()
         hold_state = conn.execute(
             "select queue_hold_state from agent_sessions where id = 'ses_fsm'"
+        ).fetchone()
+        draft_state = conn.execute(
+            "select composer_draft_text, composer_draft_updated_at "
+            "from agent_sessions where id = 'ses_fsm'"
         ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert {"session_turns", "message_deliveries"}.issubset(tables)
@@ -181,6 +200,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert delivery[0:2] == ("queued", "hello")
     assert json.loads(delivery[2])["content_text"] == "hello"
     assert hold_state == ("held",)
+    assert draft_state == ("unfinished thought", now)
     assert version == (HEAD_REVISION,)
 
     from storage import message_deliveries
@@ -203,12 +223,17 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             for row in conn.execute("select name from sqlite_master where type = 'table'")
         }
         existing = conn.execute(
-            "select content_text, type from messages where id = 'msg_fsm'"
+            "select content_text, type, session_id from messages where id = 'msg_fsm'"
+        ).fetchone()
+        restored_draft = conn.execute(
+            "select content_text, type from messages "
+            "where session_id = 'ses_fsm' and type = 'draft'"
         ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert "session_turns" not in tables
     assert "message_deliveries" not in tables
-    assert existing == ("hello", "queued")
+    assert existing == ("hello", "queued", "ses_fsm")
+    assert restored_draft == ("unfinished thought", "draft")
     assert version == ("20260729_0042",)
 
 

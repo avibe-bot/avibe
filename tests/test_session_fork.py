@@ -24,7 +24,7 @@ from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage import message_deliveries, messages_service
-from storage.models import agent_runs, agent_sessions, scope_settings
+from storage.models import agent_events, agent_runs, agent_sessions, messages, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -1501,6 +1501,70 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
 
     result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
     # A terminal exists after the input anchor → not a running turn → no trim.
+    assert result.fork.trim_latest_running_turn is False
+
+
+def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
+    tmp_path: Path,
+) -> None:
+    """A migrated legacy silent event remains a terminal fork boundary."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            message = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="latest completed input",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == message["id"])
+                .values(
+                    created_at="2026-08-01T00:00:00Z",
+                    updated_at="2026-08-01T00:00:00Z",
+                )
+            )
+            conn.execute(
+                agent_events.insert().values(
+                    id="evt_legacy_silent_fork_boundary",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    turn_id=None,
+                    run_id=None,
+                    platform="avibe",
+                    agent_name="worker",
+                    backend="codex",
+                    event_type="legacy_silent_terminal",
+                    visibility="trace",
+                    sequence=None,
+                    content_text=None,
+                    content_json="{}",
+                    metadata_json=json.dumps(
+                        {
+                            "legacy_message_id": "msg_legacy_silent",
+                            "migration_revision": "20260731_0043",
+                        }
+                    ),
+                    source="agent",
+                    created_at="2026-08-01T00:00:01Z",
+                    updated_at="2026-08-01T00:00:01Z",
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
     assert result.fork.trim_latest_running_turn is False
 
 

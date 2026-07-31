@@ -8076,7 +8076,7 @@ async def sessions_messages_create(session_id: str):
         from storage import message_deliveries
 
         with engine.begin() as conn:
-            message_deliveries.retire_not_written(
+            message_deliveries.retire_reserved(
                 conn,
                 session_id,
                 str(message["id"]),
@@ -8114,20 +8114,40 @@ async def sessions_messages_create(session_id: str):
             payload["queued"] = True
         return payload
 
+    def _retire_unclaimed_delivery(reason: str) -> dict:
+        from storage import message_deliveries
+        from storage.agent_session_rows import reserve_write_lock
+
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            message_deliveries.retire_reserved(
+                conn,
+                session_id,
+                str(message["id"]),
+                reason=reason,
+            )
+        return _current_delivery_response()
+
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerTimeout as exc:
+        current = _retire_unclaimed_delivery("internal_dispatch_timeout")
         return jsonify(
             {
-                **_current_delivery_response(),
-                "dispatch_error": "dispatch_pending",
+                **current,
+                "dispatch_error": (
+                    "dispatch_failed"
+                    if current.get("state") == "retired"
+                    else "dispatch_pending"
+                ),
                 "detail": str(exc),
             }
         ), 504
     except internal_client.InternalServerUnavailable as exc:
+        current = _retire_unclaimed_delivery("internal_dispatch_unavailable")
         return jsonify(
             {
-                **message,
+                **current,
                 "dispatch_error": "internal_unavailable",
                 "detail": str(exc),
             }
@@ -8139,10 +8159,15 @@ async def sessions_messages_create(session_id: str):
             exc,
             exc_info=True,
         )
+        current = _retire_unclaimed_delivery("internal_dispatch_error")
         return jsonify(
             {
-                **_current_delivery_response(),
-                "dispatch_error": "dispatch_pending",
+                **current,
+                "dispatch_error": (
+                    "dispatch_failed"
+                    if current.get("state") == "retired"
+                    else "dispatch_pending"
+                ),
                 "detail": str(exc),
             }
         ), 502

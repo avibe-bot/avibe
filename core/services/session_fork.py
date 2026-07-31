@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -594,6 +594,16 @@ def _clean_optional(value: Any) -> Optional[str]:
     return text or None
 
 
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _forked_session_title(source_title: str, lang: str = "en") -> str:
     return t("fork.title", lang, title=source_title) if source_title else t("fork.titleUntitled", lang)
 
@@ -601,7 +611,7 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import select
 
-    from storage.models import messages, session_turns
+    from storage.models import agent_events, messages, session_turns
 
     row = conn.execute(
         select(messages.c.id, messages.c.author, messages.c.type, messages.c.created_at)
@@ -624,22 +634,38 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(1)
     ).mappings().first()
-    terminal_after_message = False
+    legacy_terminal = conn.execute(
+        select(agent_events.c.created_at)
+        .where(
+            agent_events.c.session_id == source_session_id,
+            agent_events.c.event_type == "legacy_silent_terminal",
+        )
+        .order_by(agent_events.c.created_at.desc(), agent_events.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    terminal_candidates: list[tuple[datetime, str]] = []
     if latest_turn is not None and latest_turn["state"] == "terminal":
-        try:
-            message_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
-            terminal_at = datetime.fromisoformat(
-                str(latest_turn["terminal_at"]).replace("Z", "+00:00")
+        terminal_at = _parse_utc_timestamp(latest_turn["terminal_at"])
+        if terminal_at is not None:
+            terminal_candidates.append(
+                (terminal_at, str(latest_turn["terminal_outcome"] or "completed"))
             )
-            terminal_after_message = terminal_at >= message_at
-        except (TypeError, ValueError):
-            terminal_after_message = False
-    if terminal_after_message:
+    if legacy_terminal is not None:
+        terminal_at = _parse_utc_timestamp(legacy_terminal["created_at"])
+        if terminal_at is not None:
+            terminal_candidates.append((terminal_at, "completed"))
+    message_at = _parse_utc_timestamp(row["created_at"])
+    latest_terminal = max(terminal_candidates, default=None)
+    if (
+        message_at is not None
+        and latest_terminal is not None
+        and latest_terminal[0] >= message_at
+    ):
         return SourceMessageAnchor(
             message_id=str(row["id"]) if row["id"] else None,
             author="agent",
             message_type=(
-                "error" if latest_turn["terminal_outcome"] == "failed" else "result"
+                "error" if latest_terminal[1] == "failed" else "result"
             ),
         )
     return SourceMessageAnchor(

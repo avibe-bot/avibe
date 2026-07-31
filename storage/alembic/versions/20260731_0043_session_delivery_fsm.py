@@ -724,6 +724,66 @@ def _restore_legacy_messages(bind) -> None:
             ),
             {"id": row["id"]},
         )
+        bind.execute(
+            sa.text(
+                "insert into _0043_message_session_refs (message_id, session_id) "
+                "values (:message_id, :session_id)"
+            ),
+            {"message_id": row["id"], "session_id": row["session_id"]},
+        )
+
+
+def _restore_legacy_drafts(bind) -> None:
+    rows = bind.execute(
+        sa.text(
+            "select id, scope_id, composer_draft_text, composer_draft_updated_at, "
+            "updated_at from agent_sessions where composer_draft_text is not null"
+        )
+    ).mappings()
+    for row in rows:
+        session_id = str(row["id"])
+        base_id = (
+            "msg_legacy_draft_"
+            + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+        )
+        message_id = base_id
+        suffix = 0
+        while bind.execute(
+            sa.text("select 1 from messages where id = :id"),
+            {"id": message_id},
+        ).first():
+            suffix += 1
+            message_id = f"{base_id}_{suffix}"
+        text = str(row["composer_draft_text"])
+        timestamp = row["composer_draft_updated_at"] or row["updated_at"]
+        bind.execute(
+            sa.text(
+                "insert into messages ("
+                "id, scope_id, session_id, platform, author, type, author_id, author_name, "
+                "source, native_message_id, parent_native_message_id, content_text, "
+                "content_json, metadata_json, created_at, updated_at, delivered_at, read_at"
+                ") values ("
+                ":id, :scope_id, :session_id, 'avibe', 'user', 'draft', null, null, "
+                "'user', null, null, :content_text, :content_json, '{}', :created_at, "
+                ":updated_at, null, null)"
+            ),
+            {
+                "id": message_id,
+                "scope_id": row["scope_id"],
+                "session_id": session_id,
+                "content_text": text,
+                "content_json": _json({"text": text}),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+        )
+        bind.execute(
+            sa.text(
+                "insert into _0043_message_session_refs (message_id, session_id) "
+                "values (:message_id, :session_id)"
+            ),
+            {"message_id": message_id, "session_id": session_id},
+        )
 
 
 def downgrade() -> None:
@@ -766,7 +826,14 @@ def downgrade() -> None:
         )
     with op.batch_alter_table("messages") as batch:
         batch.drop_constraint("ck_messages_communication_type", type_="check")
+    bind.execute(
+        sa.text(
+            "create temporary table _0043_message_session_refs ("
+            "message_id text primary key, session_id text not null)"
+        )
+    )
     _restore_legacy_messages(bind)
+    _restore_legacy_drafts(bind)
     op.drop_index("ix_messages_inbox_activity", table_name="messages")
     op.create_index(
         "ix_messages_inbox_activity",
@@ -795,3 +862,12 @@ def downgrade() -> None:
         batch.drop_column("queue_held_at")
         batch.drop_column("queue_hold_version")
         batch.drop_column("queue_hold_state")
+    bind.execute(
+        sa.text(
+            "update messages set session_id = ("
+            "select session_id from _0043_message_session_refs refs "
+            "where refs.message_id = messages.id) "
+            "where id in (select message_id from _0043_message_session_refs)"
+        )
+    )
+    bind.execute(sa.text("drop table _0043_message_session_refs"))

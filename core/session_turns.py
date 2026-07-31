@@ -806,6 +806,8 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         turn_id: str | None = None
+        delivery_turn_id: str | None = None
+        start_context: MessageContext | None = None
         delivery: dict[str, Any]
         backend_draining = backend in self._draining_backends
         with self._sqlite_engine().begin() as conn:
@@ -861,37 +863,74 @@ class SessionTurnManager:
                 if claimed is None:
                     raise RuntimeError("P3 queue claim lost after writer reservation")
                 delivery = claimed
-            if active is None and not backend_draining:
+            start_owner = delivery
+            if (
+                active is None
+                and not backend_draining
+                and not delivery_store.queue_is_held(conn, request.session_id)
+            ):
+                ordering_head = delivery_store.ordering_head(conn, request.session_id)
+                if (
+                    ordering_head is not None
+                    and str(ordering_head["id"]) != str(delivery["id"])
+                ):
+                    if delivery["state"] == "reserved":
+                        queued = delivery_store.cas_delivery(
+                            conn,
+                            str(delivery["id"]),
+                            expected_version=int(delivery["version"]),
+                            expected_states=("reserved",),
+                            values={"state": "queued"},
+                            history_event={
+                                "kind": "queue",
+                                "reason": "fifo_backlog",
+                                "head_delivery_id": str(ordering_head["id"]),
+                            },
+                        )
+                        if queued is None:
+                            raise RuntimeError(
+                                "P3 FIFO queue claim lost after writer reservation"
+                            )
+                        delivery = queued
+                    start_owner = (
+                        ordering_head
+                        if ordering_head["state"] == "queued"
+                        else None
+                    )
+            if active is None and not backend_draining and start_owner is not None:
                 turn_id = delivery_store.new_turn_id()
                 delivery_store.insert_turn(
                     conn,
                     turn_id=turn_id,
                     session_id=request.session_id,
-                    initial_delivery_id=str(delivery["id"]),
+                    initial_delivery_id=str(start_owner["id"]),
                     state="starting",
                     backend=backend,
                 )
                 claimed = delivery_store.open_start_attempt(
                     conn,
-                    str(delivery["id"]),
-                    expected_version=int(delivery["version"]),
+                    str(start_owner["id"]),
+                    expected_version=int(start_owner["version"]),
                     turn_id=turn_id,
                     attempt_id=delivery_store.new_attempt_id(),
                 )
                 if claimed is None:
                     raise RuntimeError("P3 start claim lost after writer reservation")
-                delivery = claimed
+                if str(start_owner["id"]) == str(delivery["id"]):
+                    delivery = claimed
+                    delivery_turn_id = turn_id
+                    start_context = context
         if backend_draining:
             self._deferred_restart_sessions.setdefault(backend, set()).add(
                 request.session_id
             )
         if turn_id:
-            await self._start_persisted_turn(turn_id, context=context)
+            await self._start_persisted_turn(turn_id, context=start_context)
         return DeliveryResult(
             str(delivery["id"]),
             str(delivery.get("message_id") or "") or None,
             str(delivery["state"]),
-            turn_id,
+            delivery_turn_id,
         )
 
     async def _admit_p1(

@@ -133,10 +133,11 @@ async def _activate(
     manager: SessionTurnManager,
     *,
     text: str = "primary",
+    priority: str = "p3",
 ) -> tuple[str, MessageContext]:
     context = _context()
     admitted = await manager.deliver(
-        DeliveryRequest(session_id="ses_fsm", priority="p3", content=text),
+        DeliveryRequest(session_id="ses_fsm", priority=priority, content=text),
         context=context,
     )
     assert admitted.turn_id
@@ -346,7 +347,13 @@ def test_empty_p1_refuses_when_exact_turn_changes_before_head_claim(managers) ->
         )
         assert observed.wait(5)
         assert asyncio.run(replacement_manager.terminalize_turn(old_turn_id))
-        asyncio.run(_activate(replacement_manager, text="replacement-owner"))
+        asyncio.run(
+            _activate(
+                replacement_manager,
+                text="replacement-owner",
+                priority="p1",
+            )
+        )
         release.set()
         outcome = future.result(timeout=5)
 
@@ -954,6 +961,48 @@ def test_held_old_backlog_does_not_block_new_idle_p3(managers) -> None:
         assert delivery_store.queue_is_held(conn, "ses_fsm") is True
 
 
+def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:
+    """An open FIFO backlog wins the backend-drain handoff race."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    started_contexts: list[dict[str, object]] = []
+
+    async def capture_start(_session_id, context, text, **kwargs):
+        starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        started_contexts.append(dict(context.platform_specific or {}))
+
+    manager._run = capture_start
+    with engine.begin() as conn:
+        older = delivery_store.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="older-drain-head",
+            now="2026-07-31T23:59:00+00:00",
+        )
+
+    new_context = _context()
+    new_context.platform_specific["new_submission_only"] = True
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="new-after-drain",
+            ),
+            context=new_context,
+        )
+    )
+
+    assert admitted.state == "queued"
+    assert [text for _, text in starts] == ["older-drain-head"]
+    assert "new_submission_only" not in started_contexts[0]
+    older_after = _row(engine, older["id"])
+    new_after = _row(engine, str(admitted.delivery_id))
+    assert older_after["state"] == "start_attempting"
+    assert new_after["state"] == "queued"
+
+
 def test_accepted_steer_after_target_terminal_attaches_exact_terminal_turn(managers) -> None:
     manager, terminal_manager, engine, _engine_b, _starts = managers
 
@@ -1004,7 +1053,9 @@ def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) ->
     )
     assert _row(engine, str(first_attempt.delivery_id))["state"] == "queued"
     assert asyncio.run(other.terminalize_turn(t1))
-    t2, context2 = asyncio.run(_activate(other, text="new priority work"))
+    t2, context2 = asyncio.run(
+        _activate(other, text="new priority work", priority="p1")
+    )
     other._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
     promoted = asyncio.run(
         other.deliver(

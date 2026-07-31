@@ -233,15 +233,20 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("error_kind", "expected_status"),
-    (("timeout", 504), ("ambiguous", 502)),
+    ("error_kind", "expected_status", "expected_error"),
+    (
+        ("timeout", 504, "dispatch_failed"),
+        ("ambiguous", 502, "dispatch_failed"),
+        ("unavailable", 502, "internal_unavailable"),
+    ),
 )
-def test_route_ambiguous_failure_keeps_unaccepted_delivery_out_of_transcript(
+def test_route_dispatch_failure_retires_unclaimed_delivery_outside_transcript(
     isolated_state,
     tmp_path,
     monkeypatch,
     error_kind,
     expected_status,
+    expected_error,
 ):
     from vibe import internal_client
     from vibe.ui_server import app
@@ -252,6 +257,8 @@ def test_route_ambiguous_failure_keeps_unaccepted_delivery_out_of_transcript(
     async def fail_after_connect(_payload):
         if error_kind == "timeout":
             raise internal_client.InternalServerTimeout("acceptance unknown")
+        if error_kind == "unavailable":
+            raise internal_client.InternalServerUnavailable("socket missing")
         raise RuntimeError("ambiguous response")
 
     monkeypatch.setattr(
@@ -269,7 +276,7 @@ def test_route_ambiguous_failure_keeps_unaccepted_delivery_out_of_transcript(
 
     assert response.status_code == expected_status
     body = response.get_json()
-    assert body["dispatch_error"] == "dispatch_pending"
+    assert body["dispatch_error"] == expected_error
     assert body["type"] == "user"
     dispatch_mock.assert_awaited_once()
 
@@ -285,7 +292,7 @@ def test_route_ambiguous_failure_keeps_unaccepted_delivery_out_of_transcript(
         delivery = message_deliveries.get_delivery(conn, body["id"])
     assert queued == []
     assert visible["messages"] == []
-    assert delivery is not None and delivery["state"] == "reserved"
+    assert delivery is not None and delivery["state"] == "retired"
     assert "message.new" not in [event_type for event_type, _data in published]
 
 
