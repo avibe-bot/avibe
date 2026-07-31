@@ -3005,11 +3005,12 @@ class SQLiteBackgroundTaskStore:
         notice decision keyed on the stale copy would defer a row whose blocker is
         already resolved, or worse, deliver beside a callback that just landed.
         A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
-        callback child. The user has the callback only after that child succeeds, so
-        this read joins the child by ``callback_run_id`` and projects the state the
-        notice lane actually needs: queued/running is pending, succeeded is sent, and
-        failed/canceled (or a missing referenced child) releases the notice as failed.
-        The parent and child lookups are both primary-key probes in one statement.
+        callback child. The user has the callback only after that child succeeds AND
+        records delivery evidence, so this read joins the child by ``callback_run_id``
+        and projects the state the notice lane actually needs: queued/running is
+        pending, succeeded with a recorded message id is sent, and every terminal
+        outcome without that receipt releases the notice as failed. The parent and
+        child lookups are both primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
         is different from a callback whose status column is empty — a target with
@@ -3026,6 +3027,7 @@ class SQLiteBackgroundTaskStore:
                     parent.c.callback_status,
                     parent.c.callback_run_id,
                     child.c.status,
+                    child.c.message_ids_json,
                 )
                 .select_from(parent.outerjoin(child, child.c.id == parent.c.callback_run_id))
                 .where(parent.c.id == str(run_id))
@@ -3040,7 +3042,11 @@ class SQLiteBackgroundTaskStore:
         child_status = normalize_run_status(row[3]) if row[3] is not None else ""
         if child_status in {"queued", "running"}:
             return "pending"
-        if child_status == "succeeded":
+        message_ids = _json_loads(row[4], [])
+        has_delivery_receipt = isinstance(message_ids, list) and any(
+            str(message_id or "").strip() for message_id in message_ids
+        )
+        if child_status == "succeeded" and has_delivery_receipt:
             return "sent"
         return "failed"
 
@@ -4152,10 +4158,11 @@ class SQLiteBackgroundTaskStore:
           was replaced, which is the entire bug F6 exists to close.
 
         So the read is re-asserted in the WHERE clause — the status the SELECT saw,
-        verbatim, plus ``owed_notice_absent()`` — and the loss is read off
-        ``rowcount``, the ``DefinitionWriteExpectation`` idiom ``update_owed_failure_notice``
-        already follows. ``json_set`` rather than a composed blob for the same
-        atomicity reason one level down: the run is LIVE here, so sibling metadata
+        verbatim, no cancellation request, plus ``owed_notice_absent()`` — and the
+        loss is read off ``rowcount``, the ``DefinitionWriteExpectation`` idiom
+        ``update_owed_failure_notice`` already follows. ``json_set`` rather than a
+        composed blob for the same atomicity reason one level down: the run is LIVE
+        here, so sibling metadata
         keys are being written concurrently (the sweep's ``interrupt_reason``, the
         settler's ``ok`` marker), and a status+notice CAS over a whole-blob write
         would still clobber whichever of those landed in the gap. Only the one key
@@ -4214,6 +4221,8 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if not row:
                 return None
+            if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
+                return None
             metadata = _json_loads(row["metadata_json"], {})
             if not isinstance(metadata, dict):
                 return None
@@ -4253,7 +4262,7 @@ class SQLiteBackgroundTaskStore:
             metadata_source = func.coalesce(agent_runs.c.metadata_json, "{}")
 
             def _stamp_against(observed_status: Any) -> int:
-                """The guarded write, conditioned on one observed status value."""
+                """The guarded write, conditioned on status and no explicit Stop."""
 
                 return conn.execute(
                     update(agent_runs)
@@ -4263,6 +4272,10 @@ class SQLiteBackgroundTaskStore:
                     # and widening it through ``_status_query_values`` would let an
                     # alias transition slip past the guard.
                     .where(agent_runs.c.status == observed_status)
+                    # An explicit Stop outranks binding-recovery news. This closes
+                    # both shapes: queued Stop already changed the status to canceled;
+                    # running Stop changed only cancel_requested.
+                    .where(cancel_not_requested())
                     .where(*owed_notice_absent())
                     .where(func.json_valid(metadata_source) == 1)
                     .values(

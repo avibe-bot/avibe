@@ -5861,7 +5861,14 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
         # message the user has, and it must settle terminally.
         claimed_callback = requests.claim(callback.id)
         assert claimed_callback is not None
-        requests.complete(claimed_callback, ok=True)
+        delivered_callback = sqlite.record_run_output(
+            callback.id,
+            output_id="terminal",
+            text="callback delivered",
+            message_id="callback-message-1",
+            terminal_status="succeeded",
+        )
+        assert delivered_callback["terminal_transition"]
         sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
         asyncio.run(service._drain_failure_notices())
         notice = sqlite.owed_failure_notice("run-cb")
@@ -5932,6 +5939,46 @@ def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -
     )
     assert sqlite.owed_failure_notice("run-cb-dead")["state"] == "sent"
     assert sqlite.owed_failure_notice("run-cb-binding")["state"] == "sent"
+
+
+def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
+    tmp_path: Path,
+) -> None:
+    """A child outcome is not proof that the callback reached its user.
+
+    Ordinary result settlement is intentionally allowed after every IM send failed,
+    so ``status='succeeded'`` alone cannot suppress the durable fallback. Only the
+    message-id receipt written by the result recorder proves callback delivery.
+    """
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-no-receipt", deliver_key="slack::channel::C1")
+    _callback_run(sqlite, "run-cb-no-receipt", "task-cb-no-receipt", status="pending")
+    callback = requests.enqueue_agent_run(
+        message="try the callback",
+        source_kind="callback",
+        parent_run_id="run-cb-no-receipt",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        "run-cb-no-receipt", status="sent", callback_run_id=callback.id
+    )
+    claimed = requests.claim(callback.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=True)
+    assert sqlite.get_run(callback.id)["message_ids"] == []
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == ["run-cb-no-receipt"]
+    assert sqlite.owed_failure_notice("run-cb-no-receipt")["state"] == "sent"
 
 
 def test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off(
@@ -8527,10 +8574,6 @@ def test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap(tmp_path: 
     run = requests.enqueue_task_run("task-binding-cancel")
     claimed = requests.claim(run.id)
     assert claimed is not None
-    # The user pressed Stop while the fire was running; the settlement below maps the
-    # ``cancel_requested`` row to ``canceled`` rather than ``failed``.
-    assert sqlite.cancel_run(run.id)
-
     interleaved: list[str] = []
 
     def _cancel_inside_the_gap(
@@ -8539,6 +8582,10 @@ def test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap(tmp_path: 
         if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
             return
         interleaved.append(statement)
+        # Stop lands after the stamp's snapshot. It first sets cancel_requested, then
+        # the terminal owner maps the failed result to canceled before the stale stamp
+        # reaches its UPDATE.
+        assert sqlite.cancel_run(run.id)
         requests.complete(claimed, ok=False, error="stopped", task_id="task-binding-cancel")
 
     event.listen(sqlite.engine, "before_cursor_execute", _cancel_inside_the_gap)
@@ -8557,6 +8604,33 @@ def test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap(tmp_path: 
         "one written here is durable and undeliverable forever"
     )
     assert sqlite.list_owed_failure_notices() == []
+
+
+def test_a_binding_stamp_refuses_a_stop_already_visible_in_its_snapshot(tmp_path: Path) -> None:
+    """Both Stop shapes outrank binding news before the first CAS.
+
+    A queued Stop writes ``status='canceled'`` immediately; a running Stop leaves the
+    status running and writes ``cancel_requested`` for the terminal owner. Either row
+    would make a binding notice permanently unreachable after cancellation settles.
+    """
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-stopped")
+
+    queued = requests.enqueue_task_run("task-binding-stopped")
+    assert sqlite.cancel_run(queued.id)
+    assert sqlite.get_run(queued.id)["status"] == "canceled"
+
+    running = requests.enqueue_task_run("task-binding-stopped")
+    assert requests.claim(running.id) is not None
+    assert sqlite.cancel_run(running.id)
+    running_row = sqlite.get_run(running.id)
+    assert running_row["status"] == "running"
+    assert running_row["cancel_requested"] is True
+
+    for run in (queued, running):
+        assert _binding_stamp(sqlite, run.id, task_id="task-binding-stopped") is None
+        assert sqlite.owed_failure_notice(run.id) is None
 
 
 def test_a_binding_stamp_on_a_malformed_metadata_row_is_refused_not_raised(

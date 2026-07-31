@@ -339,6 +339,32 @@ def test_a_discord_dm_captures_no_workspace_id() -> None:
     assert in_dm.workspace_id is None
 
 
+def test_a_discord_interaction_captures_its_guild_as_the_workspace() -> None:
+    """Button and quick-reply turns store ``interaction``, not ``message``."""
+
+    from types import SimpleNamespace
+
+    from modules.im import MessageContext
+
+    captured = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "interaction": SimpleNamespace(guild=SimpleNamespace(id=777)),
+                "is_dm": False,
+            }
+        ),
+        message=MessageContext(
+            user_id="U1",
+            channel_id="555",
+            platform="discord",
+            message_id="888",
+        ),
+    )
+
+    assert captured is not None
+    assert captured.workspace_id == "777"
+
+
 def test_a_caller_with_no_message_context_captures_no_origin() -> None:
     """The CLI-only caller, unchanged.
 

@@ -232,9 +232,10 @@ def _origin_workspace_id(platform: str, payload: Mapping[str, object] | None) ->
 
     Defensive by design, and deliberately read-only: no ``modules/im`` adapter is
     changed to feed this. Slack event payloads carry ``team_id``; a Discord payload
-    carries the raw ``discord.Message``, whose ``guild`` is ``None`` in a DM. Every
-    other platform has no tenant id here, which is a MISSING id, not an empty one —
-    the deep-link builder must refuse rather than invent one.
+    carries either the raw ``discord.Message`` or ``discord.Interaction``; both expose
+    ``guild``, which is ``None`` in a DM. Every other platform has no tenant id here,
+    which is a MISSING id, not an empty one — the deep-link builder must refuse rather
+    than invent one.
     """
 
     if not payload:
@@ -242,7 +243,10 @@ def _origin_workspace_id(platform: str, payload: Mapping[str, object] | None) ->
     if platform == "slack":
         return _clean(payload.get("team_id")) or None
     if platform == "discord":
-        guild = getattr(payload.get("message"), "guild", None)
+        origin = payload.get("message")
+        if origin is None:
+            origin = payload.get("interaction")
+        guild = getattr(origin, "guild", None)
         return _clean(getattr(guild, "id", None)) or None
     return None
 
