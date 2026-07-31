@@ -106,7 +106,7 @@ def _legacy_event_id(bind, message_id: str, event_type: str) -> str:
 
 
 def _migrate_legacy_trace(bind, row: sa.RowMapping) -> None:
-    event_type = "tool_call" if row["type"] == "tool_call" else "legacy_silent_terminal"
+    event_type = "tool_call" if row["type"] == "tool_call" else "silent_terminal"
     existing = bind.execute(
         sa.text(
             "select id from agent_events "
@@ -293,7 +293,11 @@ def _migrate_pseudo_messages(bind) -> None:
                 "dispatch_text": dispatch_text,
                 "dispatch_sha256": _hash(dispatch_text),
                 "dedupe_key": (
-                    f"legacy:{row['platform']}:{row['native_message_id']}"
+                    (
+                        f"{row['platform']}:{row['native_message_id']}"
+                        if kind == "harness_dedupe"
+                        else f"legacy:{row['platform']}:{row['native_message_id']}"
+                    )
                     if row["native_message_id"]
                     else None
                 ),

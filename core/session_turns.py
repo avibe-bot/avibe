@@ -2633,6 +2633,39 @@ class SessionTurnManager:
         for turn in turns:
             turn_id = str(turn["id"])
             target_session = str(turn["session_id"])
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_turn(conn, turn_id)
+                terminal_stop_receipt = bool(
+                    latest is not None
+                    and latest["state"] in delivery_store.TURN_OWNER_STATES
+                    and latest.get("control_receipt_outcome") == "not_active"
+                )
+            if terminal_stop_receipt:
+                terminal = self._terminalize_durable_turn(
+                    turn_id,
+                    "canceled",
+                    settled_by="adapter_not_active",
+                    evidence_kind="stop_not_active",
+                    evidence={"reason": "not_active", "source": "recovery"},
+                    hold_queue=True,
+                )
+                recovered.append(target_session)
+                projected = self.in_flight.get(target_session)
+                if (
+                    projected is not None
+                    and projected.logical_turn_id == turn_id
+                    and not projected.task.done()
+                ):
+                    projected.cancel_settled_by = "adapter_not_active"
+                    projected.task.cancel()
+                    await asyncio.gather(projected.task, return_exceptions=True)
+                    if self.in_flight.get(target_session) is projected:
+                        self.in_flight.pop(target_session, None)
+                successor_turn_id = str(terminal.get("successor_turn_id") or "")
+                if successor_turn_id:
+                    await self._start_persisted_turn(successor_turn_id)
+                continue
             identity = self._active_identity(
                 str(turn["backend"]),
                 target_session,

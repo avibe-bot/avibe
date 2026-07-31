@@ -139,7 +139,7 @@ def create_app(controller: "Controller") -> FastAPI:
             TurnSubmissionResult,
             capture_scheduled_provenance,
         )
-        from storage import message_deliveries
+        from storage import message_deliveries, messages_service
         from storage.background import (
             agent_run_cancellation_won_in_connection,
             hold_running_agent_run_for_workbench_in_connection,
@@ -166,7 +166,15 @@ def create_app(controller: "Controller") -> FastAPI:
                 if dedupe_key
                 else None
             )
-            if existing is not None:
+            legacy_accepted = bool(
+                native_message_id
+                and messages_service.native_message_exists(
+                    conn,
+                    platform="avibe",
+                    native_message_id=native_message_id,
+                )
+            )
+            if existing is not None or legacy_accepted:
                 return "duplicate"
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)

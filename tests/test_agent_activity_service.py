@@ -81,18 +81,28 @@ def _msg(conn, scope_id, session_id, *, mid, mtype, author, created_at, text="",
     )
 
 
-def _evt(conn, scope_id, session_id, *, eid, created_at, text):
+def _evt(
+    conn,
+    scope_id,
+    session_id,
+    *,
+    eid,
+    created_at,
+    text,
+    event_type="tool_call",
+    metadata=None,
+):
     conn.execute(
         agent_events.insert().values(
             id=eid,
             scope_id=scope_id,
             session_id=session_id,
             platform="avibe",
-            event_type="tool_call",
+            event_type=event_type,
             visibility="trace",
             content_text=text,
             content_json=json.dumps({"kind": "tool_call", "text": text}),
-            metadata_json="{}",
+            metadata_json=json.dumps(metadata or {}),
             source="agent",
             created_at=created_at,
             updated_at=created_at,
@@ -300,6 +310,67 @@ def test_same_second_pre_window_event_dropped_by_id(isolated_state):
         summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
     # The pre-window event is dropped → the user+result turn has no activity.
     assert summary["groups"] == []
+
+
+def test_migrated_terminal_uses_original_message_clock_for_same_second_order(
+    isolated_state,
+):
+    engine = create_sqlite_engine()
+    sid = "ses_legacy_terminal_order"
+    base = int(
+        datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        * 1_000_000
+    )
+    timestamp = "2026-06-01T10:00:00Z"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid=_clock_id("msg", base + 1_000),
+            mtype="user",
+            author="user",
+            created_at=timestamp,
+            text="q1",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid=_clock_id("evt", base + 2_000),
+            created_at=timestamp,
+            text="tool",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="evt_legacy_without_clock",
+            created_at=timestamp,
+            text="",
+            event_type="silent_terminal",
+            metadata={"legacy_message_id": _clock_id("msg", base + 3_000)},
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid=_clock_id("msg", base + 4_000),
+            mtype="user",
+            author="user",
+            created_at=timestamp,
+            text="q2",
+            source="user",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+    assert groups[0]["status"] == "done"
+    assert groups[0]["anchor_message_id"] == _clock_id("msg", base + 1_000)
 
 
 def test_duration_measured_from_turn_opener(isolated_state):

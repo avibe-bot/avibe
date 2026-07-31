@@ -603,6 +603,66 @@ def test_p0_terminal_restart_claims_successor_once_after_old_terminal(managers) 
         assert delivery_store.queue_is_held(conn, "ses_fsm") is True
 
 
+def test_recovery_consumes_persisted_not_active_stop_receipt(managers) -> None:
+    manager, restarted, engine, _engine_b, starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def not_active(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "not_active"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(
+            side_effect=not_active
+        )
+        original_terminalize = manager._terminalize_durable_turn
+
+        def crash_after_receipt(*args, **kwargs):
+            if kwargs.get("evidence_kind") == "stop_not_active":
+                raise OSError("crash after Stop receipt commit")
+            return original_terminalize(*args, **kwargs)
+
+        manager._terminalize_durable_turn = crash_after_receipt
+        with pytest.raises(OSError, match="Stop receipt"):
+            await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="restart successor",
+                ),
+                context=_context(),
+            )
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_turn_id = str(old["control_successor_turn_id"])
+        assert old["control_receipt_outcome"] == "not_active"
+
+        restarted._active_identity = lambda *_args: None
+        await restarted.recover_durable_delivery_state()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return turn_id, successor_turn_id
+
+    old_turn_id, successor_turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        old = delivery_store.get_turn(conn, old_turn_id)
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+    assert old is not None and old["state"] == "terminal"
+    assert old["terminal_outcome"] == "canceled"
+    assert successor is not None and successor["state"] == "starting"
+    assert [turn for turn, text in starts if text == "restart successor"] == [
+        successor_turn_id
+    ]
+
+
 def test_two_idle_p3_admissions_leave_one_fifo_loser(managers) -> None:
     """MESSAGE-DELIVERY-015: two connections cannot own two live Turns."""
 

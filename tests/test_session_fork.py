@@ -1544,7 +1544,7 @@ def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
                     platform="avibe",
                     agent_name="worker",
                     backend="codex",
-                    event_type="legacy_silent_terminal",
+                    event_type="silent_terminal",
                     visibility="trace",
                     sequence=None,
                     content_text=None,

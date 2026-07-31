@@ -23,6 +23,7 @@ from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, Deli
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
+    persist_silent_terminal,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -1486,6 +1487,8 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if mutates_turn_lifecycle and context.platform != "avibe":
+                    persist_silent_terminal(context, is_error=is_error)
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may

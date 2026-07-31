@@ -408,6 +408,17 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         dispatcher._record_agent_run_terminal_result.assert_called_once()
 
+    async def test_silent_im_terminal_records_non_message_turn_evidence(self):
+        controller = self._terminal_lifecycle_controller()
+
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            _dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+            )
+
+        persist.assert_called_once_with(context, is_error=False)
+
     async def test_stop_output_release_names_the_stop_and_records_no_run_terminal(self):
         """HFR-036: the synthetic result a user stop emits must NOT record the run.
 

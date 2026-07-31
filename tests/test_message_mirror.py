@@ -30,6 +30,7 @@ from core.message_mirror import (
     mirror_harness_inbound,
     mirror_inbound,
     persist_agent_message,
+    persist_silent_terminal,
 )
 from modules.im import MessageContext
 from storage import messages_service
@@ -286,6 +287,62 @@ def test_persist_agent_im_uses_delivery_scope_not_session(isolated_state):
     # scope = C_delivery, session = ses_im (anchored under C_source).
     assert row["session_id"] == "ses_im"
     assert row["content_text"] == "routed answer"
+
+
+def test_silent_im_terminal_is_trace_evidence_not_transcript(isolated_state):
+    engine = create_sqlite_engine()
+    now = "2026-06-01T10:00:00Z"
+    with engine.begin() as conn:
+        source_scope = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C_source_terminal",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_im_terminal",
+                scope_id=source_scope,
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses_im_terminal",
+                native_session_id="",
+                status="active",
+                visibility="foreground",
+                pinned=0,
+                agent_status="running",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    context = MessageContext(
+        user_id="U_terminal",
+        channel_id="C_delivery_terminal",
+        platform="slack",
+        platform_specific={
+            "agent_session_id": "ses_im_terminal",
+            "turn_token": "turn-im-terminal",
+        },
+    )
+
+    persist_silent_terminal(context, is_error=True)
+
+    with engine.connect() as conn:
+        event = conn.execute(
+            select(agent_events).where(
+                agent_events.c.session_id == "ses_im_terminal"
+            )
+        ).mappings().one()
+        transcript_row = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_im_terminal")
+        ).first()
+    assert event["event_type"] == "silent_terminal"
+    assert json.loads(event["metadata_json"])["terminal_outcome"] == "failed"
+    assert transcript_row is None
 
 
 def test_duplicate_native_message_id_is_swallowed(isolated_state):

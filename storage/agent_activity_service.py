@@ -115,7 +115,7 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     Terminals: a visible ``result``/``error`` reply, a ``backend_failure`` ``notify``
     diagnostic, OR — when the turn produced nothing user-visible (a ``<silent>``-
     stripped/empty final, or a reply-less bookkeeping turn) — the invisible ``silent``
-    marker persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
+    event persisted at the delivery chokepoint. Only cancel/Stop (no terminal at all)
     stays ``interrupted``.
 
     A PLAIN ``notify`` is deliberately NOT terminal: agents emit mid-turn notify rows
@@ -167,6 +167,15 @@ def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
     return int(ts.timestamp() * 1_000_000)
 
 
+def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
+    metadata = event.get("metadata") or {}
+    legacy_message_id = metadata.get("legacy_message_id")
+    return _emit_micros(
+        str(legacy_message_id) if legacy_message_id else event.get("id"),
+        ts,
+    )
+
+
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -180,7 +189,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     events = agent_events_service.list_session_events(
         conn,
         session_id=session_id,
-        event_types=("tool_call", "legacy_silent_terminal"),
+        event_types=("tool_call", "silent_terminal"),
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
@@ -229,10 +238,13 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     oldest_msg_sort = min((item["sort"] for item in items), default=None)
     for event in events:
         event_ts = _parse_ts(event.get("created_at"))
-        event_sort = _emit_micros(event.get("id"), event_ts)
+        event_sort = _event_emit_micros(event, event_ts)
         if oldest_msg_sort is not None and event_sort < oldest_msg_sort:
             continue
-        if event.get("event_type") == "legacy_silent_terminal":
+        if event.get("event_type") == "silent_terminal":
+            terminal_outcome = (event.get("metadata") or {}).get(
+                "terminal_outcome"
+            )
             items.append(
                 {
                     "ts": event_ts,
@@ -241,11 +253,13 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                     "created_at": event.get("created_at"),
                     "kind": "terminal",
                     "id": event.get("id"),
-                    "mtype": "legacy_silent_terminal",
+                    "mtype": "silent_terminal",
                     "row_kind": "turn_terminal",
                     "text": None,
                     "is_silent": True,
-                    "terminal_status": "done",
+                    "terminal_status": (
+                        "failed" if terminal_outcome == "failed" else "done"
+                    ),
                 }
             )
             continue

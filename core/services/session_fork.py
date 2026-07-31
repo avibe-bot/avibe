@@ -638,7 +638,7 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         select(agent_events.c.created_at)
         .where(
             agent_events.c.session_id == source_session_id,
-            agent_events.c.event_type == "legacy_silent_terminal",
+            agent_events.c.event_type == "silent_terminal",
         )
         .order_by(agent_events.c.created_at.desc(), agent_events.c.id.desc())
         .limit(1)

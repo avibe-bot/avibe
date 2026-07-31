@@ -3881,6 +3881,7 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
     """A retried harness callback already sitting in the queue is a duplicate,
     not a scheduler failure."""
     from core.services import sessions as sessions_service
+    from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
@@ -3940,6 +3941,17 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
             evidence={"kind": "test_native_acceptance"},
         )
         assert accepted is not None
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="accepted before delivery migration",
+            native_message_id="watch:def-watch:legacy-accepted",
+        )
     session_id = session["id"]
 
     async def _explode_dispatch_turn(*args, **kwargs):
@@ -3989,11 +4001,22 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
                 running_ctx,
                 "running duplicate",
             )
+            legacy_ctx = MessageContext(
+                user_id="workbench",
+                channel_id=session_id,
+                platform="avibe",
+                message_id="watch:def-watch:legacy-accepted",
+            )
+            legacy_duplicate = await controller.session_turn_gate.submit_scheduled(
+                session_id,
+                legacy_ctx,
+                "legacy accepted duplicate",
+            )
         finally:
             chat_task.cancel()
-        return first, second, running_duplicate
+        return first, second, running_duplicate, legacy_duplicate
 
-    assert asyncio.run(_go()) == ("enqueued", "duplicate", "duplicate")
+    assert asyncio.run(_go()) == ("enqueued", "duplicate", "duplicate", "duplicate")
     with engine.connect() as conn:
         queued = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in queued] == ["first"]

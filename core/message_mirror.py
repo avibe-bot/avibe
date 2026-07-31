@@ -440,6 +440,52 @@ def persist_agent_message(
         return None
 
 
+def persist_silent_terminal(context: MessageContext, *, is_error: bool) -> None:
+    """Record reply-less IM terminal evidence outside the Message transcript.
+
+    Durable Workbench turns settle through ``session_turns``. IM turns do not have
+    that execution owner, so their empty/silent terminal result is retained as an
+    append-only trace event for activity grouping and fork-boundary recovery.
+    """
+
+    session_id = (context.platform_specific or {}).get("agent_session_id")
+    if not context.platform or not session_id:
+        return
+    try:
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            if context.platform == "avibe":
+                session_row = _session_row(conn, session_id)
+                scope_id = session_row["scope_id"] if session_row else None
+            else:
+                session_row = None
+                scope_id = _resolve_scope_id(conn, context)
+            if scope_id is None and session_row is None:
+                return
+            agent_name, backend = _agent_provenance_from_context(context, session_row)
+            turn_id, run_id = _trace_ids_from_context(context)
+            agent_events_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform=context.platform,
+                event_type="silent_terminal",
+                visibility="trace",
+                metadata={
+                    "terminal_outcome": "failed" if is_error else "completed",
+                },
+                agent_name=agent_name,
+                backend=backend,
+                turn_id=turn_id,
+                run_id=run_id,
+            )
+    except Exception:
+        logger.exception(
+            "persist_silent_terminal: failure on platform=%s",
+            context.platform,
+        )
+
+
 def agent_message_exists(context: MessageContext, native_message_id: str | None) -> bool:
     """Check a stable output identity before external delivery.
 

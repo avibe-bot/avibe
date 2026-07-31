@@ -142,6 +142,21 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
                 content_text, content_json, metadata_json, created_at, updated_at,
                 delivered_at, read_at
             ) values (
+                'msg_fsm_dedupe', null, 'ses_fsm', 'avibe', 'harness',
+                'harness_dedupe', null, null, 'harness', 'watch:legacy:run-1',
+                null, '', '{}', '{}', ?, ?, null, null
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, author_id,
+                author_name, source, native_message_id, parent_native_message_id,
+                content_text, content_json, metadata_json, created_at, updated_at,
+                delivered_at, read_at
+            ) values (
                 'msg_fsm_draft', null, 'ses_fsm', 'avibe', 'user', 'draft', null,
                 null, 'user', null, null, 'unfinished thought',
                 '{"text":"unfinished thought"}', '{}', ?, ?, null, null
@@ -168,6 +183,10 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         ).fetchone()
         delivery = conn.execute(
             "select state, dispatch_text, snapshot_json from message_deliveries where id = 'msg_fsm'"
+        ).fetchone()
+        migrated_dedupe = conn.execute(
+            "select state, dedupe_key from message_deliveries "
+            "where id = 'msg_fsm_dedupe'"
         ).fetchone()
         hold_state = conn.execute(
             "select queue_hold_state from agent_sessions where id = 'ses_fsm'"
@@ -199,6 +218,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert existing is None
     assert delivery[0:2] == ("queued", "hello")
     assert json.loads(delivery[2])["content_text"] == "hello"
+    assert migrated_dedupe == ("retired", "avibe:watch:legacy:run-1")
     assert hold_state == ("held",)
     assert draft_state == ("unfinished thought", now)
     assert version == (HEAD_REVISION,)
@@ -229,11 +249,15 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             "select content_text, type from messages "
             "where session_id = 'ses_fsm' and type = 'draft'"
         ).fetchone()
+        restored_dedupe = conn.execute(
+            "select type, native_message_id from messages where id = 'msg_fsm_dedupe'"
+        ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert "session_turns" not in tables
     assert "message_deliveries" not in tables
     assert existing == ("hello", "queued", "ses_fsm")
     assert restored_draft == ("unfinished thought", "draft")
+    assert restored_dedupe == ("harness_dedupe", "watch:legacy:run-1")
     assert version == ("20260729_0042",)
 
 
@@ -298,7 +322,7 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
                 (tool_event_id, "unrelated", "{}", now, now),
                 (
                     "evt_existing_silent",
-                    "legacy_silent_terminal",
+                    "silent_terminal",
                     json.dumps({"legacy_message_id": silent_message_id}),
                     now,
                     now,
@@ -320,7 +344,7 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
             (tool_message_id,),
         ).fetchall()
         silent_events = conn.execute(
-            "select id from agent_events where event_type = 'legacy_silent_terminal' "
+            "select id from agent_events where event_type = 'silent_terminal' "
             "and json_extract(metadata_json, '$.legacy_message_id') = ?",
             (silent_message_id,),
         ).fetchall()
