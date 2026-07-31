@@ -2,27 +2,10 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 
 import type { InstanceCapabilities, SessionInfo } from './ApiContext';
-
-const DENIED_CAPABILITIES: InstanceCapabilities = {
-  is_instance_owner: false,
-  can_read_instance: false,
-  can_chat: false,
-  can_manage_projects: false,
-  can_manage_agents: false,
-  can_manage_instance: false,
-  can_use_agents: false,
-  can_use_skills: false,
-  can_use_vault_secrets: false,
-  can_use_show_pages: false,
-  can_use_terminal_files: false,
-  can_use_terminal: false,
-  can_use_files: false,
-  can_use_system: false,
-};
-
-const OWNER_CAPABILITIES: InstanceCapabilities = Object.fromEntries(
-  Object.keys(DENIED_CAPABILITIES).map((key) => [key, true]),
-) as InstanceCapabilities;
+import {
+  DENIED_INSTANCE_CAPABILITIES,
+  OWNER_INSTANCE_CAPABILITIES,
+} from '../lib/sessionInfo';
 
 interface InstanceAuthorizationValue {
   remote: boolean;
@@ -33,7 +16,7 @@ interface InstanceAuthorizationValue {
 const InstanceAuthorizationContext = createContext<InstanceAuthorizationValue>({
   remote: false,
   instanceRole: null,
-  capabilities: DENIED_CAPABILITIES,
+  capabilities: DENIED_INSTANCE_CAPABILITIES,
 });
 
 export const InstanceAuthorizationProvider = ({
@@ -48,11 +31,11 @@ export const InstanceAuthorizationProvider = ({
       return {
         remote: false,
         instanceRole: session.instance_role ?? 'owner',
-        capabilities: session.capabilities ?? OWNER_CAPABILITIES,
+        capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
       };
     }
     if (!session.authenticated) {
-      return { remote: true, instanceRole: null, capabilities: DENIED_CAPABILITIES };
+      return { remote: true, instanceRole: null, capabilities: DENIED_INSTANCE_CAPABILITIES };
     }
     return {
       remote: true,
