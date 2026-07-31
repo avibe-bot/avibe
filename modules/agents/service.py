@@ -393,6 +393,15 @@ class AgentService:
         gate.runtime_started = True
         gate.liveness_probe = self._capture_backend_liveness(gate, context)
         self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
+        manager = getattr(self.controller, "session_turns", None)
+        bind_native = getattr(manager, "on_native_start", None)
+        if callable(bind_native):
+            bind_native(
+                context,
+                backend=str(gate.backend or ""),
+                runtime_key=runtime_key,
+                runtime_turn_id=runtime_token,
+            )
 
     def _capture_backend_liveness(
         self,
@@ -658,6 +667,10 @@ class AgentService:
         gate = self._turn_gates.get(runtime_key)
         if gate is None or gate.token != runtime_token:
             return
+        manager = getattr(self.controller, "session_turns", None)
+        bind_terminal = getattr(manager, "on_native_terminal", None)
+        if callable(bind_terminal):
+            bind_terminal(context, outcome="terminal")
         self.release_runtime_turn_key(runtime_key, runtime_token)
 
     def release_runtime_turn_key(self, runtime_key: str, runtime_token: str | None = None) -> None:

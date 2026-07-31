@@ -26,7 +26,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260729_0042"
+HEAD_REVISION = "20260731_0043"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -97,6 +97,99 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 
     assert len(heads) == 1
     assert heads[0] == HEAD_REVISION
+
+
+def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260729_0042")
+    now = "2026-07-31T00:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_id, agent_name, agent_backend, agent_variant,
+                model, reasoning_effort, session_anchor, workdir, native_session_id,
+                title, status, visibility, pinned, agent_status, created_at,
+                updated_at, last_active_at, metadata_json
+            ) values (
+                'ses_fsm', null, null, 'codex', 'codex', 'codex', null, null,
+                'ses_fsm', '/tmp', '', null, 'active', 'foreground', 0, 'idle',
+                ?, ?, ?, '{}'
+            )
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, author_id,
+                author_name, source, native_message_id, parent_native_message_id,
+                content_text, content_json, metadata_json, created_at, updated_at,
+                delivered_at, read_at
+            ) values (
+                'msg_fsm', null, 'ses_fsm', 'avibe', 'user', 'pending', null,
+                null, 'user', null, null, 'hello', '{"text":"hello"}', '{}',
+                ?, ?, null, null
+            )
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+        turn_columns = {
+            row[1] for row in conn.execute("pragma table_info(session_turns)")
+        }
+        delivery_columns = {
+            row[1] for row in conn.execute("pragma table_info(session_deliveries)")
+        }
+        existing = conn.execute(
+            "select content_text, type from messages where id = 'msg_fsm'"
+        ).fetchone()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert {"session_turns", "session_deliveries"}.issubset(tables)
+    assert {
+        "start_attempt_id",
+        "runtime_turn_id",
+        "native_turn_id",
+        "terminal_outcome",
+        "version",
+    }.issubset(turn_columns)
+    assert {
+        "message_id",
+        "priority",
+        "target_turn_id",
+        "successor_turn_id",
+        "steer_attempt_id",
+        "expected_native_turn_id",
+        "receipt_outcome",
+        "receipt_body_json",
+        "version",
+    }.issubset(delivery_columns)
+    assert existing == ("hello", "pending")
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+        existing = conn.execute(
+            "select content_text, type from messages where id = 'msg_fsm'"
+        ).fetchone()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert "session_turns" not in tables
+    assert "session_deliveries" not in tables
+    assert existing == ("hello", "pending")
+    assert version == ("20260729_0042",)
 
 
 def test_upgrade_keeps_historical_conflated_callback_rows_sent(

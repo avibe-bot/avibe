@@ -995,6 +995,49 @@ def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
     return bool(result.rowcount)
 
 
+def project_session_delivery(
+    conn: Connection,
+    message_id: str,
+    *,
+    state: str,
+) -> bool:
+    """Project a durable delivery owner onto its immutable Message row.
+
+    ``session_deliveries`` owns lifecycle CAS. This helper only keeps legacy
+    transcript/queue readers compatible and never replaces or clones the
+    Message identity.
+    """
+
+    row = conn.execute(
+        select(
+            messages.c.type,
+            messages.c.author,
+            messages.c.source,
+            messages.c.author_name,
+        ).where(messages.c.id == message_id)
+    ).mappings().first()
+    if row is None:
+        return False
+    accepted_type = pending_message_target_type(
+        row.get("author"),
+        row.get("source"),
+        row.get("author_name"),
+    )
+    if state == "queued":
+        target_type = QUEUED_TYPE
+    elif state == "accepted":
+        target_type = accepted_type
+    else:
+        raise ValueError(f"unsupported Session delivery projection: {state}")
+    result = conn.execute(
+        update(messages)
+        .where(messages.c.id == message_id)
+        .where(messages.c.type.in_((PENDING_TYPE, QUEUED_TYPE, accepted_type)))
+        .values(type=target_type, updated_at=_utc_now_iso())
+    )
+    return result.rowcount == 1
+
+
 def pending_message_target_type(
     author: Optional[str],
     source: Optional[str],

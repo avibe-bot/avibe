@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
@@ -36,10 +37,18 @@ from core.run_settlement import (
     SETTLED_BY_TERMINAL_RESULT,
 )
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
+from core.services.agent_steering import (
+    SteerOutcome,
+    SteerRequest,
+    active_steer_identity,
+    steer_active_turn,
+)
 from storage import messages_service
+from storage import session_deliveries as delivery_store
+from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import normalize_run_status
-from storage.models import agent_runs, messages
+from storage.models import agent_runs, agent_sessions, messages, session_turns as session_turn_rows
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
 from vibe.i18n import t as i18n_t
@@ -730,6 +739,32 @@ class Turn:
     #: caller already owns its own durable queue row; they must not interrupt the
     #: same active turn more than once.
     send_now_task: Optional[asyncio.Task[dict[str, Any]]] = None
+    logical_turn_id: Optional[str] = None
+    delivery_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DeliveryRequest:
+    """Private P0/P1/P3 admission contract owned by ``SessionTurnManager``."""
+
+    session_id: str
+    priority: Literal["p0", "p1", "p3"]
+    content: str | None = None
+    message_id: str | None = None
+    scope_id: str | None = None
+    source: str = "user"
+    author: str = "user"
+    author_id: str | None = None
+    author_name: str | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    delivery_id: str | None
+    message_id: str | None
+    state: str
+    turn_id: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1030,6 +1065,959 @@ class SessionTurnManager:
         # Chunks are discarded — the browser renders from ``message.new``.
         return None
 
+    def _delivery_context(self, session_id: str) -> "MessageContext":
+        if self._build_context is None:
+            raise RuntimeError("Session delivery context builder is not bound")
+        return self._build_context(session_id)
+
+    def _delivery_backend(self, session_id: str, context: Optional["MessageContext"]) -> tuple[str, "MessageContext"]:
+        resolved = context or self._delivery_context(session_id)
+        backend = self._context_backend(resolved)
+        if not backend:
+            raise RuntimeError(f"Session {session_id} has no resolved backend")
+        return backend, resolved
+
+    @staticmethod
+    def _delivery_message(
+        conn: Connection,
+        request: DeliveryRequest,
+    ) -> str | None:
+        if request.content is None:
+            return None
+        if request.message_id:
+            row = messages_service.get_message(
+                conn,
+                request.message_id,
+                session_id=request.session_id,
+            )
+            if row is None:
+                raise ValueError("delivery Message does not belong to the target Session")
+            return request.message_id
+        row = messages_service.append(
+            conn,
+            scope_id=request.scope_id,
+            session_id=request.session_id,
+            platform="avibe",
+            author=request.author,
+            source=request.source,
+            message_type=messages_service.PENDING_TYPE,
+            text=request.content,
+            author_id=request.author_id,
+            author_name=request.author_name,
+        )
+        return str(row["id"])
+
+    def _active_identity(
+        self,
+        backend: str,
+        session_id: str,
+        logical_turn_id: str,
+    ) -> tuple[str, str] | None:
+        return active_steer_identity(
+            self.controller,
+            backend,
+            session_id,
+            expected_logical_turn_id=logical_turn_id,
+        )
+
+    async def _steer(self, backend: str, request: SteerRequest):
+        return await steer_active_turn(self.controller, backend, request)
+
+    def _observe_active_delivery_turn(
+        self,
+        session_id: str,
+    ) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+        with self._sqlite_engine().connect() as conn:
+            turn = delivery_store.active_turn(conn, session_id)
+        if turn is None or turn["state"] != "active":
+            return turn, None
+        identity = self._active_identity(
+            str(turn["backend"]),
+            session_id,
+            str(turn["id"]),
+        )
+        persisted_native_id = str(turn.get("native_turn_id") or "").strip()
+        if identity is None and persisted_native_id:
+            identity = (str(turn["id"]), persisted_native_id)
+        return turn, identity
+
+    async def deliver(
+        self,
+        request: DeliveryRequest,
+        *,
+        context: Optional["MessageContext"] = None,
+    ) -> DeliveryResult:
+        """Execute the private durable P0/P1/P3 ownership state machine."""
+
+        if not request.session_id:
+            raise ValueError("Session delivery requires a Session id")
+        if request.priority not in {"p0", "p1", "p3"}:
+            raise ValueError(f"unsupported delivery priority: {request.priority}")
+        if request.priority in {"p1", "p3"} and request.content is None and request.priority == "p3":
+            raise ValueError("P3 requires content")
+        backend, resolved_context = self._delivery_backend(request.session_id, context)
+        if request.priority == "p3":
+            return await self._admit_p3(request, backend, resolved_context)
+        if request.priority == "p1":
+            return await self._admit_p1(request, backend, resolved_context)
+        return await self._admit_p0(request, backend, resolved_context)
+
+    async def _admit_p3(
+        self,
+        request: DeliveryRequest,
+        backend: str,
+        context: "MessageContext",
+    ) -> DeliveryResult:
+        delivery_id = delivery_store.new_delivery_id()
+        turn_id: str | None = None
+        drain_existing = False
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            active = delivery_store.active_turn(conn, request.session_id)
+            head = delivery_store.fifo_head(conn, request.session_id)
+            message_id = self._delivery_message(conn, request)
+            if active is not None or head is not None:
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p3",
+                    state="queued",
+                )
+                if message_id and not messages_service.project_session_delivery(
+                    conn, message_id, state="queued"
+                ):
+                    raise RuntimeError("P3 Message projection lost ownership")
+                state = "queued"
+                drain_existing = active is None
+            else:
+                turn_id = delivery_store.new_turn_id()
+                delivery_store.insert_turn(
+                    conn,
+                    turn_id=turn_id,
+                    session_id=request.session_id,
+                    state="starting",
+                    backend=backend,
+                )
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p3",
+                    state="starting",
+                    target_turn_id=turn_id,
+                )
+                if message_id and not messages_service.project_session_delivery(
+                    conn, message_id, state="accepted"
+                ):
+                    raise RuntimeError("started P3 Message projection lost ownership")
+                state = "starting"
+        if turn_id:
+            await self._start_persisted_turn(turn_id, context=context)
+        elif drain_existing:
+            await self.drain_delivery_queue(request.session_id)
+        return DeliveryResult(delivery_id, message_id, state, turn_id)
+
+    async def _admit_p1(
+        self,
+        request: DeliveryRequest,
+        backend: str,
+        context: "MessageContext",
+    ) -> DeliveryResult:
+        if request.content is None:
+            return await self._promote_fifo_head(request.session_id, backend, context)
+
+        observed, identity = self._observe_active_delivery_turn(request.session_id)
+        observed_id = str((observed or {}).get("id") or "") or None
+        delivery_id = delivery_store.new_delivery_id()
+        steer_attempt_id: str | None = None
+        expected_native_id: str | None = None
+        turn_id: str | None = None
+        state: str
+        priority = "p1"
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            current = delivery_store.active_turn(conn, request.session_id)
+            message_id = self._delivery_message(conn, request)
+            same_active = bool(
+                current is not None
+                and observed_id
+                and str(current["id"]) == observed_id
+                and current["state"] == "active"
+                and identity is not None
+                and identity[0] == observed_id
+            )
+            if same_active:
+                steer_attempt_id = delivery_store.new_attempt_id()
+                expected_native_id = str(identity[1])
+                turn_id = observed_id
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p1",
+                    state="steering",
+                    target_turn_id=turn_id,
+                    steer_attempt_id=steer_attempt_id,
+                    expected_native_turn_id=expected_native_id,
+                )
+                state = "steering"
+            elif current is None:
+                turn_id = delivery_store.new_turn_id()
+                priority = "p3" if observed_id else "p1"
+                head = delivery_store.fifo_head(conn, request.session_id)
+                if priority == "p1" or head is None:
+                    delivery_store.insert_turn(
+                        conn,
+                        turn_id=turn_id,
+                        session_id=request.session_id,
+                        state="starting",
+                        backend=backend,
+                    )
+                    delivery_store.insert_delivery(
+                        conn,
+                        delivery_id=delivery_id,
+                        session_id=request.session_id,
+                        message_id=message_id,
+                        priority=priority,
+                        state="starting",
+                        target_turn_id=turn_id,
+                        receipt_outcome="not_active" if observed_id else None,
+                    )
+                    if message_id and not messages_service.project_session_delivery(
+                        conn, message_id, state="accepted"
+                    ):
+                        raise RuntimeError("idle P1 Message projection lost ownership")
+                    state = "starting"
+                else:
+                    turn_id = None
+                    delivery_store.insert_delivery(
+                        conn,
+                        delivery_id=delivery_id,
+                        session_id=request.session_id,
+                        message_id=message_id,
+                        priority="p3",
+                        state="queued",
+                        receipt_outcome="not_active",
+                    )
+                    if message_id and not messages_service.project_session_delivery(
+                        conn, message_id, state="queued"
+                    ):
+                        raise RuntimeError("P1 FIFO fallback Message projection lost ownership")
+                    state = "queued"
+            else:
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p1",
+                    state="reconciling",
+                    target_turn_id=str(current["id"]),
+                    receipt_outcome="unknown",
+                    receipt_body={"reason": "native_identity_unavailable"},
+                )
+                turn_id = str(current["id"])
+                state = "reconciling"
+
+        if state == "starting" and turn_id:
+            await self._start_persisted_turn(turn_id, context=context)
+        elif state == "steering" and turn_id and steer_attempt_id and expected_native_id:
+            receipt = await self._steer(
+                backend,
+                SteerRequest(
+                    target_session_id=request.session_id,
+                    expected_logical_turn_id=turn_id,
+                    expected_native_turn_id=expected_native_id,
+                    text=request.content,
+                ),
+            )
+            return await self._finish_steer(delivery_id, receipt, context=context)
+        return DeliveryResult(delivery_id, message_id, state, turn_id)
+
+    async def _promote_fifo_head(
+        self,
+        session_id: str,
+        backend: str,
+        context: "MessageContext",
+    ) -> DeliveryResult:
+        with self._sqlite_engine().connect() as conn:
+            observed_head = delivery_store.fifo_head(conn, session_id)
+        if observed_head is None:
+            return DeliveryResult(None, None, "empty")
+        observed_turn, identity = self._observe_active_delivery_turn(session_id)
+        observed_turn_id = str((observed_turn or {}).get("id") or "") or None
+        delivery_id = str(observed_head["id"])
+        turn_id: str | None = None
+        attempt_id: str | None = None
+        native_id: str | None = None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            current_head = delivery_store.fifo_head(conn, session_id)
+            if current_head is None or str(current_head["id"]) != delivery_id:
+                return DeliveryResult(delivery_id, observed_head.get("message_id"), "refused", reason="stale_head")
+            current_turn = delivery_store.active_turn(conn, session_id)
+            if current_turn is None:
+                turn_id = delivery_store.new_turn_id()
+                delivery_store.insert_turn(
+                    conn,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    state="starting",
+                    backend=backend,
+                )
+                claimed = delivery_store.cas_delivery(
+                    conn,
+                    delivery_id,
+                    expected_version=int(current_head["version"]),
+                    expected_states=("queued",),
+                    values={"priority": "p1", "state": "starting", "target_turn_id": turn_id},
+                )
+                if claimed is None:
+                    raise RuntimeError("FIFO head start CAS lost after writer reservation")
+                message_id = str(current_head.get("message_id") or "") or None
+                if message_id and not messages_service.project_session_delivery(
+                    conn, message_id, state="accepted"
+                ):
+                    raise RuntimeError("promoted FIFO Message projection lost ownership")
+                state = "starting"
+            elif (
+                observed_turn_id
+                and str(current_turn["id"]) == observed_turn_id
+                and current_turn["state"] == "active"
+                and identity is not None
+                and identity[0] == observed_turn_id
+            ):
+                turn_id = observed_turn_id
+                attempt_id = delivery_store.new_attempt_id()
+                native_id = str(identity[1])
+                claimed = delivery_store.cas_delivery(
+                    conn,
+                    delivery_id,
+                    expected_version=int(current_head["version"]),
+                    expected_states=("queued",),
+                    values={
+                        "priority": "p1",
+                        "state": "steering",
+                        "target_turn_id": turn_id,
+                        "steer_attempt_id": attempt_id,
+                        "expected_native_turn_id": native_id,
+                    },
+                )
+                if claimed is None:
+                    raise RuntimeError("FIFO head steering CAS lost after writer reservation")
+                state = "steering"
+                message_id = str(current_head.get("message_id") or "") or None
+            else:
+                return DeliveryResult(
+                    delivery_id,
+                    current_head.get("message_id"),
+                    "refused",
+                    reason="stale_turn",
+                )
+
+        if state == "starting" and turn_id:
+            await self._start_persisted_turn(turn_id, context=context)
+        elif state == "steering" and turn_id and attempt_id and native_id:
+            message = str(observed_head.get("message_id") or "")
+            with self._sqlite_engine().connect() as conn:
+                row = messages_service.get_message(conn, message, session_id=session_id)
+            receipt = await self._steer(
+                backend,
+                SteerRequest(
+                    target_session_id=session_id,
+                    expected_logical_turn_id=turn_id,
+                    expected_native_turn_id=native_id,
+                    text=str((row or {}).get("text") or ""),
+                ),
+            )
+            return await self._finish_steer(delivery_id, receipt, context=context)
+        return DeliveryResult(delivery_id, message_id, state, turn_id)
+
+    async def _finish_steer(
+        self,
+        delivery_id: str,
+        receipt: Any,
+        *,
+        context: Optional["MessageContext"],
+    ) -> DeliveryResult:
+        outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
+        outcome_value = str(getattr(outcome, "value", outcome))
+        body = {
+            "reason": getattr(receipt, "reason", None),
+            "details": dict(getattr(receipt, "details", {}) or {}),
+        }
+        start_turn_id: str | None = None
+        message_id: str | None = None
+        state = "reconciling"
+        try:
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                delivery = delivery_store.get_delivery(conn, delivery_id)
+                if delivery is None:
+                    return DeliveryResult(delivery_id, None, "reconciling", reason="missing_delivery")
+                message_id = str(delivery.get("message_id") or "") or None
+                if outcome is SteerOutcome.ACCEPTED:
+                    saved = delivery_store.record_steer_receipt(
+                        conn,
+                        delivery_id,
+                        expected_version=int(delivery["version"]),
+                        outcome="accepted",
+                        state="attached",
+                        body=body,
+                    )
+                    if saved is None:
+                        return DeliveryResult(delivery_id, message_id, "reconciling", reason="receipt_cas_lost")
+                    if message_id and not messages_service.project_session_delivery(
+                        conn, message_id, state="accepted"
+                    ):
+                        raise RuntimeError("accepted steer Message projection lost ownership")
+                    return DeliveryResult(
+                        delivery_id,
+                        message_id,
+                        "attached",
+                        str(delivery.get("target_turn_id") or "") or None,
+                    )
+                if outcome is SteerOutcome.UNKNOWN:
+                    saved = delivery_store.record_steer_receipt(
+                        conn,
+                        delivery_id,
+                        expected_version=int(delivery["version"]),
+                        outcome="unknown",
+                        state="reconciling",
+                        body=body,
+                    )
+                    return DeliveryResult(
+                        delivery_id,
+                        message_id,
+                        "reconciling",
+                        str(delivery.get("target_turn_id") or "") or None,
+                        None if saved is not None else "receipt_cas_lost",
+                    )
+
+                current = delivery_store.active_turn(conn, str(delivery["session_id"]))
+                values: dict[str, Any] = {
+                    "priority": "p3",
+                    "receipt_outcome": outcome_value,
+                    "receipt_body_json": json.dumps(body, sort_keys=True),
+                    "steer_attempt_id": delivery.get("steer_attempt_id"),
+                }
+                head = delivery_store.fifo_head(conn, str(delivery["session_id"]))
+                if current is None and head is None:
+                    start_turn_id = delivery_store.new_turn_id()
+                    delivery_store.insert_turn(
+                        conn,
+                        turn_id=start_turn_id,
+                        session_id=str(delivery["session_id"]),
+                        state="starting",
+                        backend=str(
+                            (delivery_store.get_turn(conn, str(delivery.get("target_turn_id") or "")) or {}).get(
+                                "backend"
+                            )
+                            or self._context_backend(context)
+                            or ""
+                        ),
+                    )
+                    values.update({"state": "starting", "target_turn_id": start_turn_id})
+                    state = "starting"
+                else:
+                    values.update({"state": "queued", "target_turn_id": None})
+                    state = "queued"
+                saved = delivery_store.cas_delivery(
+                    conn,
+                    delivery_id,
+                    expected_version=int(delivery["version"]),
+                    expected_states=("steering",),
+                    values=values,
+                )
+                if saved is None:
+                    return DeliveryResult(delivery_id, message_id, "reconciling", reason="fallback_cas_lost")
+                if message_id and not messages_service.project_session_delivery(
+                    conn,
+                    message_id,
+                    state="accepted" if state == "starting" else "queued",
+                ):
+                    raise RuntimeError("P1 fallback Message projection lost ownership")
+        except Exception:
+            logger.exception("failed to persist steering receipt for delivery=%s", delivery_id)
+            return DeliveryResult(delivery_id, message_id, "reconciling", reason="receipt_persistence_lost")
+
+        if start_turn_id:
+            await self._start_persisted_turn(start_turn_id, context=context)
+        elif state == "queued":
+            target_session_id = str(delivery["session_id"])
+            if await self.drain_delivery_queue(target_session_id):
+                with self._sqlite_engine().connect() as conn:
+                    refreshed = delivery_store.get_delivery(conn, delivery_id)
+                if refreshed is not None and refreshed["state"] == "starting":
+                    state = "starting"
+                    start_turn_id = str(refreshed.get("target_turn_id") or "") or None
+        return DeliveryResult(delivery_id, message_id, state, start_turn_id)
+
+    async def _admit_p0(
+        self,
+        request: DeliveryRequest,
+        backend: str,
+        context: "MessageContext",
+    ) -> DeliveryResult:
+        delivery_id = delivery_store.new_delivery_id()
+        successor_id: str | None = None
+        interrupt_target_id: str | None = None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            current = delivery_store.active_turn(conn, request.session_id)
+            current_id = str((current or {}).get("id") or "") or None
+            message_id = self._delivery_message(conn, request)
+            if current is None:
+                if message_id is None:
+                    delivery_store.insert_delivery(
+                        conn,
+                        delivery_id=delivery_id,
+                        session_id=request.session_id,
+                        message_id=None,
+                        priority="p0",
+                        state="completed",
+                        receipt_outcome="not_active",
+                    )
+                    return DeliveryResult(delivery_id, None, "completed", reason="not_active")
+                successor_id = delivery_store.new_turn_id()
+                delivery_store.insert_turn(
+                    conn,
+                    turn_id=successor_id,
+                    session_id=request.session_id,
+                    state="starting",
+                    backend=backend,
+                )
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p0",
+                    state="starting",
+                    successor_turn_id=successor_id,
+                )
+                if not messages_service.project_session_delivery(
+                    conn, message_id, state="accepted"
+                ):
+                    raise RuntimeError("idle P0 Message projection lost ownership")
+            else:
+                interrupt_target_id = current_id
+                if message_id is not None:
+                    successor_id = delivery_store.new_turn_id()
+                    delivery_store.insert_turn(
+                        conn,
+                        turn_id=successor_id,
+                        session_id=request.session_id,
+                        state="pending",
+                        backend=backend,
+                    )
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=request.session_id,
+                    message_id=message_id,
+                    priority="p0",
+                    state="interrupting",
+                    target_turn_id=current_id,
+                    successor_turn_id=successor_id,
+                )
+
+        if current is None and successor_id:
+            await self._start_persisted_turn(successor_id, context=context)
+            return DeliveryResult(delivery_id, message_id, "starting", successor_id)
+        interrupted = await self._interrupt_durable_turn(
+            request.session_id,
+            interrupt_target_id,
+            delivery_id,
+        )
+        return DeliveryResult(
+            delivery_id,
+            message_id,
+            str(interrupted.get("state") or "reconciling"),
+            interrupt_target_id,
+            interrupted.get("reason"),
+        )
+
+    async def _interrupt_durable_turn(
+        self,
+        session_id: str,
+        logical_turn_id: str | None,
+        delivery_id: str,
+    ) -> dict[str, Any]:
+        turn = self.in_flight.get(session_id)
+        if (
+            turn is None
+            or not logical_turn_id
+            or turn.logical_turn_id != logical_turn_id
+            or turn.task.done()
+        ):
+            return {"state": "reconciling", "reason": "runtime_owner_unavailable"}
+        if turn.context.platform_specific is None:
+            turn.context.platform_specific = {}
+        turn.context.platform_specific["suppress_stop_no_active_notice"] = True
+        try:
+            stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
+        except Exception:
+            logger.exception("durable P0 interrupt failed for Session=%s", session_id)
+            stopped = False
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            delivery = delivery_store.get_delivery(conn, delivery_id)
+            if delivery is None:
+                return {"state": "reconciling", "reason": "delivery_missing"}
+            if delivery["state"] != "interrupting":
+                return {"state": str(delivery["state"]), "reason": None}
+            if stopped:
+                saved = delivery_store.cas_delivery(
+                    conn,
+                    delivery_id,
+                    expected_version=int(delivery["version"]),
+                    expected_states=("interrupting",),
+                    values={"state": "waiting_terminal", "receipt_outcome": "accepted"},
+                )
+                return {
+                    "state": "waiting_terminal" if saved is not None else "reconciling",
+                    "reason": None if saved is not None else "receipt_cas_lost",
+                }
+            saved = delivery_store.cas_delivery(
+                conn,
+                delivery_id,
+                expected_version=int(delivery["version"]),
+                expected_states=("interrupting",),
+                values={"state": "reconciling", "receipt_outcome": "unknown"},
+            )
+            return {
+                "state": "reconciling",
+                "reason": "stop_unknown" if saved is not None else "receipt_cas_lost",
+            }
+
+    async def _start_persisted_turn(
+        self,
+        turn_id: str,
+        *,
+        context: Optional["MessageContext"] = None,
+    ) -> bool:
+        attempt_id = delivery_store.new_attempt_id()
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            turn = delivery_store.get_turn(conn, turn_id)
+            if turn is None or turn["state"] != "starting":
+                return False
+            claimed = delivery_store.claim_start_attempt(
+                conn,
+                turn_id,
+                expected_version=int(turn["version"]),
+                attempt_id=attempt_id,
+            )
+            if claimed is None:
+                return False
+            delivery = delivery_store.delivery_for_turn(conn, turn_id)
+            message = delivery_store.message_for_delivery(conn, delivery or {})
+        if message is None:
+            logger.error("durable content Turn has no immutable Message: %s", turn_id)
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_turn(conn, turn_id)
+                if latest is not None and latest["state"] == "starting":
+                    delivery_store.cas_turn(
+                        conn,
+                        turn_id,
+                        expected_version=int(latest["version"]),
+                        expected_states=("starting",),
+                        values={"state": "quarantined"},
+                    )
+            return False
+        try:
+            resolved = context or self._delivery_context(str(turn["session_id"]))
+        except Exception:
+            logger.exception("durable native start failed before dispatch for Turn=%s", turn_id)
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                queued = delivery_store.requeue_prewrite_failure(
+                    conn,
+                    turn_id,
+                    outcome="pre_write_failure",
+                )
+                message_id = str((queued or {}).get("message_id") or "") or None
+                if message_id and not messages_service.project_session_delivery(
+                    conn,
+                    message_id,
+                    state="queued",
+                ):
+                    raise RuntimeError("pre-write failure Message projection lost ownership")
+            return False
+        try:
+            resolved.message_id = str(message["id"])
+            text = str(message.get("content_text") or "")
+            await self._run(
+                str(turn["session_id"]),
+                resolved,
+                text,
+                logical_turn_id=turn_id,
+                delivery_id=str((delivery or {}).get("id") or "") or None,
+                durable_preallocated=True,
+            )
+            return True
+        except Exception:
+            logger.exception("durable native start became ambiguous for Turn=%s", turn_id)
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_turn(conn, turn_id)
+                if latest is not None and latest["state"] == "starting":
+                    delivery_store.cas_turn(
+                        conn,
+                        turn_id,
+                        expected_version=int(latest["version"]),
+                        expected_states=("starting",),
+                        values={"state": "quarantined"},
+                    )
+            return False
+
+    async def drain_delivery_queue(self, session_id: str) -> bool:
+        turn_id: str | None = None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            if delivery_store.active_turn(conn, session_id) is not None:
+                return False
+            head = delivery_store.fifo_head(conn, session_id)
+            if head is None:
+                return False
+            turn_id = delivery_store.new_turn_id()
+            message_turn = delivery_store.get_turn(
+                conn,
+                str(head.get("target_turn_id") or ""),
+            )
+            backend = str((message_turn or {}).get("backend") or "")
+            if not backend:
+                backend = self._context_backend(self._delivery_context(session_id))
+            delivery_store.insert_turn(
+                conn,
+                turn_id=turn_id,
+                session_id=session_id,
+                state="starting",
+                backend=backend,
+            )
+            claimed = delivery_store.cas_delivery(
+                conn,
+                str(head["id"]),
+                expected_version=int(head["version"]),
+                expected_states=("queued",),
+                values={"state": "starting", "target_turn_id": turn_id},
+            )
+            if claimed is None:
+                raise RuntimeError("FIFO drain CAS lost after writer reservation")
+            message_id = str(head.get("message_id") or "") or None
+            if message_id and not messages_service.project_session_delivery(
+                conn, message_id, state="accepted"
+            ):
+                raise RuntimeError("drained Message projection lost ownership")
+        return await self._start_persisted_turn(turn_id)
+
+    def _terminalize_durable_turn(self, turn_id: str, outcome: str) -> dict[str, Any]:
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            result = delivery_store.terminalize_and_claim_successor(
+                conn,
+                turn_id,
+                outcome=outcome,
+            )
+            delivery_id = str(result.get("delivery_id") or "")
+            if delivery_id:
+                delivery = delivery_store.get_delivery(conn, delivery_id)
+                message_id = str((delivery or {}).get("message_id") or "")
+                if message_id and not messages_service.project_session_delivery(
+                    conn, message_id, state="accepted"
+                ):
+                    raise RuntimeError("P0 successor Message projection lost ownership")
+            for requeued_id in result.get("requeued_delivery_ids", []):
+                requeued = delivery_store.get_delivery(conn, str(requeued_id))
+                message_id = str((requeued or {}).get("message_id") or "")
+                if message_id and not messages_service.project_session_delivery(
+                    conn,
+                    message_id,
+                    state="queued",
+                ):
+                    raise RuntimeError("deferred P0 Message projection lost ownership")
+            return result
+
+    async def terminalize_turn(self, turn_id: str, *, outcome: str = "completed") -> bool:
+        result = self._terminalize_durable_turn(turn_id, outcome)
+        successor_id = str(result.get("successor_turn_id") or "")
+        if successor_id:
+            await self._start_persisted_turn(successor_id)
+        return bool(result.get("changed"))
+
+    def on_native_start(
+        self,
+        context: "MessageContext",
+        *,
+        backend: str,
+        runtime_key: str,
+        runtime_turn_id: str,
+    ) -> None:
+        logical_turn_id = str(
+            (getattr(context, "platform_specific", None) or {}).get("turn_token") or ""
+        ).strip()
+        session_id = self.controller._session_id_from_context(context) if self.controller else None
+        if not logical_turn_id or not session_id:
+            return
+        identity = self._active_identity(backend, session_id, logical_turn_id)
+        native_turn_id = identity[1] if identity and identity[0] == logical_turn_id else None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            turn = delivery_store.get_turn(conn, logical_turn_id)
+            if turn is None or turn["session_id"] != session_id:
+                return
+            delivery_store.bind_native_start(
+                conn,
+                logical_turn_id,
+                expected_version=int(turn["version"]),
+                runtime_key=runtime_key,
+                runtime_turn_id=runtime_turn_id,
+                native_turn_id=native_turn_id,
+            )
+
+    def on_native_terminal(self, context: "MessageContext", *, outcome: str) -> None:
+        payload = getattr(context, "platform_specific", None) or {}
+        logical_turn_id = str(payload.get("turn_token") or "").strip()
+        runtime_turn_id = str(payload.get("agent_runtime_turn_token") or "").strip()
+        if not logical_turn_id:
+            return
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            turn = delivery_store.get_turn(conn, logical_turn_id)
+            if turn is None or turn["state"] not in delivery_store.TURN_OWNER_STATES:
+                return
+            expected_runtime_id = str(turn.get("runtime_turn_id") or "").strip()
+            if expected_runtime_id and runtime_turn_id != expected_runtime_id:
+                return
+            result = delivery_store.terminalize_and_claim_successor(
+                conn,
+                logical_turn_id,
+                outcome=outcome,
+            )
+            delivery_id = str(result.get("delivery_id") or "")
+            if delivery_id:
+                delivery = delivery_store.get_delivery(conn, delivery_id)
+                message_id = str((delivery or {}).get("message_id") or "")
+                if message_id and not messages_service.project_session_delivery(
+                    conn,
+                    message_id,
+                    state="accepted",
+                ):
+                    raise RuntimeError("native terminal successor projection lost ownership")
+            for requeued_id in result.get("requeued_delivery_ids", []):
+                requeued = delivery_store.get_delivery(conn, str(requeued_id))
+                message_id = str((requeued or {}).get("message_id") or "")
+                if message_id and not messages_service.project_session_delivery(
+                    conn,
+                    message_id,
+                    state="queued",
+                ):
+                    raise RuntimeError("native terminal deferred P0 projection lost ownership")
+
+    async def recover_durable_delivery_state(self, session_id: str | None = None) -> list[str]:
+        """Restore evidence, reconcile exact identities, then project status."""
+
+        with self._sqlite_engine().connect() as conn:
+            turns = delivery_store.recovery_turns(conn, session_id)
+        dispatchable: list[str] = []
+        recovered: list[str] = []
+        for turn in turns:
+            turn_id = str(turn["id"])
+            target_session = str(turn["session_id"])
+            identity = self._active_identity(
+                str(turn["backend"]),
+                target_session,
+                turn_id,
+            )
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_turn(conn, turn_id)
+                if latest is None or latest["state"] not in delivery_store.TURN_OWNER_STATES:
+                    continue
+                if identity and identity[0] == turn_id:
+                    bound = delivery_store.bind_native_start(
+                        conn,
+                        turn_id,
+                        expected_version=int(latest["version"]),
+                        runtime_key=str(latest.get("runtime_key") or "recovered"),
+                        runtime_turn_id=str(latest.get("runtime_turn_id") or "recovered"),
+                        native_turn_id=identity[1],
+                    )
+                    if bound is not None:
+                        recovered.append(target_session)
+                    continue
+                if latest["state"] == "starting" and latest.get("start_attempt_id") is None:
+                    dispatchable.append(turn_id)
+                    continue
+                if latest["state"] != "quarantined":
+                    delivery_store.cas_turn(
+                        conn,
+                        turn_id,
+                        expected_version=int(latest["version"]),
+                        expected_states=(str(latest["state"]),),
+                        values={"state": "quarantined"},
+                    )
+
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            for attempt in delivery_store.unsettled_attempts(conn, session_id):
+                if attempt["state"] == "steering":
+                    delivery_store.cas_delivery(
+                        conn,
+                        str(attempt["id"]),
+                        expected_version=int(attempt["version"]),
+                        expected_states=("steering",),
+                        values={"state": "reconciling", "receipt_outcome": "unknown"},
+                    )
+
+        for turn_id in dispatchable:
+            if await self._start_persisted_turn(turn_id):
+                with self._sqlite_engine().connect() as conn:
+                    row = delivery_store.get_turn(conn, turn_id)
+                if row:
+                    recovered.append(str(row["session_id"]))
+        self.project_durable_agent_status()
+        return sorted(set(recovered))
+
+    def project_durable_agent_status(self) -> None:
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            live = delivery_store.session_ids_with_live_turns(conn)
+            cleared = conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.agent_status == "running")
+                .where(~agent_sessions.c.id.in_(live) if live else True)
+                .values(agent_status="idle")
+            )
+            _ = cleared.rowcount
+            if live:
+                running = conn.execute(
+                    update(agent_sessions)
+                    .where(agent_sessions.c.id.in_(live))
+                    .where(agent_sessions.c.agent_status != "running")
+                    .values(agent_status="running")
+                )
+                _ = running.rowcount
+
+    async def _resume_durable_session(self, session_id: str) -> None:
+        with self._sqlite_engine().connect() as conn:
+            owner = delivery_store.active_turn(conn, session_id)
+        if (
+            owner is not None
+            and owner["state"] == "starting"
+            and owner.get("start_attempt_id") is None
+        ):
+            await self._start_persisted_turn(str(owner["id"]))
+            return
+        if owner is None:
+            await self.drain_delivery_queue(session_id)
+
     async def submit(
         self,
         session_id: Optional[str],
@@ -1141,6 +2129,9 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
+        logical_turn_id: str | None = None,
+        delivery_id: str | None = None,
+        durable_preallocated: bool = False,
     ) -> None:
         """Start a fire-and-forget turn and HOLD it open until it settles.
 
@@ -1160,6 +2151,42 @@ class SessionTurnManager:
         only by a real terminal signal (Phase 1a — STUCK/sentinel removed).
         """
         from core.inbox_events import bus
+
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        if isinstance(session_id, str) and session_id:
+            if logical_turn_id is None:
+                logical_turn_id = delivery_store.new_turn_id()
+            if not durable_preallocated:
+                with self._sqlite_engine().begin() as conn:
+                    reserve_write_lock(conn)
+                    session_exists = conn.execute(
+                        select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
+                    ).scalar_one_or_none()
+                    if session_exists is not None:
+                        existing = delivery_store.active_turn(conn, session_id)
+                        if existing is not None:
+                            raise RuntimeError(
+                                f"Session {session_id} already has durable Turn {existing['id']}"
+                            )
+                        delivery_store.insert_turn(
+                            conn,
+                            turn_id=logical_turn_id,
+                            session_id=session_id,
+                            state="starting",
+                            backend=self._context_backend(context),
+                        )
+                        claimed = delivery_store.claim_start_attempt(
+                            conn,
+                            logical_turn_id,
+                            expected_version=1,
+                            attempt_id=delivery_store.new_attempt_id(),
+                        )
+                        if claimed is None:
+                            raise RuntimeError("legacy Turn start attempt was not claimed")
+        else:
+            logical_turn_id = logical_turn_id or uuid.uuid4().hex
+        context.platform_specific["turn_token"] = logical_turn_id
 
         async def _runner() -> None:
             cancelled = False
@@ -1210,7 +2237,16 @@ class SessionTurnManager:
                     # user stopped it, or dispatch raised before any backend turn.
                     # NO turn-duration timeout: the slot is freed only by a real
                     # terminal signal here (Phase 1a — STUCK/sentinel removed).
-                    turn = self.in_flight.pop(session_id, None)
+                    current = self.in_flight.get(session_id)
+                    turn = (
+                        current
+                        if current is not None
+                        and current.task is asyncio.current_task()
+                        and current.logical_turn_id == logical_turn_id
+                        else None
+                    )
+                    if turn is not None:
+                        self.in_flight.pop(session_id, None)
                     if turn is not None:
                         bus.publish("turn.end", {"session_id": session_id})
                     if cancelled:
@@ -1223,6 +2259,29 @@ class SessionTurnManager:
                             getattr(turn, "cancel_settled_by", None) if turn is not None else None
                         ) or SETTLED_BY_STOPPED
                     self._settle_model_hub_turn(context, settled_by)
+                    if logical_turn_id:
+                        if cancelled:
+                            self._terminalize_durable_turn(logical_turn_id, "canceled")
+                        elif settled_by is not None:
+                            # A released waiter is positive evidence that this
+                            # logical Turn no longer owns native work. This also
+                            # covers explicit no-result completion and a refused
+                            # pre-dispatch sink claim. Process loss before such
+                            # evidence leaves the durable starting owner intact
+                            # for startup reconciliation instead.
+                            self._terminalize_durable_turn(logical_turn_id, "completed")
+                        elif failed:
+                            with self._sqlite_engine().begin() as conn:
+                                reserve_write_lock(conn)
+                                durable_turn = delivery_store.get_turn(conn, logical_turn_id)
+                                if durable_turn is not None and durable_turn["state"] == "starting":
+                                    delivery_store.cas_turn(
+                                        conn,
+                                        logical_turn_id,
+                                        expected_version=int(durable_turn["version"]),
+                                        expected_states=("starting",),
+                                        values={"state": "quarantined"},
+                                    )
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before
@@ -1254,6 +2313,7 @@ class SessionTurnManager:
                         self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
                     elif should_flush:
                         await self.flush_queue(session_id)
+                    await self._resume_durable_session(session_id)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
@@ -1261,6 +2321,8 @@ class SessionTurnManager:
                 task=task,
                 context=context,
                 started_at=_utc_now_iso(),
+                logical_turn_id=logical_turn_id,
+                delivery_id=delivery_id,
             )
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside
@@ -2089,6 +3151,15 @@ class SessionTurnManager:
         session_id = self.controller._session_id_from_context(context)
         if not session_id:
             return
+        logical_turn_id = str(
+            (getattr(context, "platform_specific", None) or {}).get("turn_token")
+            or ""
+        ).strip()
+        if logical_turn_id:
+            self._terminalize_durable_turn(
+                logical_turn_id,
+                "failed" if is_error else "completed",
+            )
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
 
     def on_terminal_delivery_complete(self, context: "MessageContext") -> None:
@@ -2134,7 +3205,57 @@ class SessionTurnManager:
             return False
         from core.inbox_events import bus
 
-        turn_token = (getattr(context, "platform_specific", None) or {}).get("turn_token")
+        payload = getattr(context, "platform_specific", None) or {}
+        turn_token = str(payload.get("turn_token") or delivery_store.new_turn_id())
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific["turn_token"] = turn_token
+        engine = self._sqlite_engine()
+        with engine.connect() as conn:
+            durable_schema = conn.dialect.has_table(
+                conn,
+                "session_turns",
+            ) and conn.dialect.has_table(conn, "agent_sessions")
+            session_exists = durable_schema and (
+                conn.execute(
+                    select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+        durable_turn_registered = False
+        if session_exists:
+            with engine.begin() as conn:
+                reserve_write_lock(conn)
+                durable = delivery_store.get_turn(conn, turn_token)
+                if durable is None:
+                    if delivery_store.active_turn(conn, session_id) is not None:
+                        return False
+                    delivery_store.insert_turn(
+                        conn,
+                        turn_id=turn_token,
+                        session_id=session_id,
+                        state="starting",
+                        backend=self._context_backend(context),
+                    )
+                    durable = delivery_store.claim_start_attempt(
+                        conn,
+                        turn_token,
+                        expected_version=1,
+                        attempt_id=delivery_store.new_attempt_id(),
+                    )
+                if durable is None:
+                    return False
+                bound = delivery_store.bind_native_start(
+                    conn,
+                    turn_token,
+                    expected_version=int(durable["version"]),
+                    runtime_key=str(payload.get("agent_runtime_turn_key") or "agent-initiated"),
+                    runtime_turn_id=str(payload.get("agent_runtime_turn_token") or "agent-initiated"),
+                    native_turn_id=None,
+                )
+                durable_turn_registered = bound is not None
+            if not durable_turn_registered:
+                return False
         done = asyncio.Event()
         self.register_turn_sink(
             session_key,
@@ -2153,9 +3274,17 @@ class SessionTurnManager:
                 raise
             finally:
                 self.pop_turn_sink(session_key, done)
-                turn = self.in_flight.pop(session_id, None)
+                current = self.in_flight.get(session_id)
+                turn = current if current is not None and current.task is asyncio.current_task() else None
+                if turn is not None:
+                    self.in_flight.pop(session_id, None)
                 if turn is not None:
                     bus.publish("turn.end", {"session_id": session_id})
+                if durable_turn_registered:
+                    self._terminalize_durable_turn(
+                        turn_token,
+                        "canceled" if cancelled else "completed",
+                    )
                 # Flush the send-while-busy queue on NATURAL completion (mirrors
                 # ``_run``): a plain Stop keeps the queue, send_now opts back in.
                 should_flush = (not cancelled and not (turn is not None and turn.stop_no_flush)) or (
@@ -2166,6 +3295,8 @@ class SessionTurnManager:
                         await self.flush_queue(session_id)
                     except Exception:
                         logger.debug("agent-initiated turn: flush_queue failed", exc_info=True)
+                if durable_turn_registered:
+                    await self._resume_durable_session(session_id)
 
         try:
             task = asyncio.create_task(_holder(), name="agent-initiated-turn-holder")
@@ -2178,6 +3309,7 @@ class SessionTurnManager:
             task=task,
             context=context,
             started_at=_utc_now_iso(),
+            logical_turn_id=turn_token,
         )
         bus.publish("turn.start", {"session_id": session_id})
         if self._pop_context_flag(context, _SHOW_CHECKPOINT_DEFERRED_START_KEY):
@@ -2394,20 +3526,26 @@ class SessionTurnManager:
 
     @staticmethod
     def reset_stale() -> None:
-        """Crash recovery (boot): no turn survives a restart, so any avibe session
-        left ``running`` in the table is stale → reset it to ``idle`` so the sidebar
-        dot doesn't show a phantom green forever. Runs in ``Controller.__init__``
-        BEFORE any ``/internal/events`` subscriber exists, so it does NOT broadcast
-        ``session.status`` (the bus drops events with no subscribers); the browser
-        reconciles by refetching sessions when its inbox stream (re)connects."""
+        """Reset only legacy running projections with no durable Turn owner."""
         try:
-            from core.services import sessions as workbench_sessions_service
-
             engine = get_cached_sqlite_engine()
             with engine.begin() as conn:
-                reset = workbench_sessions_service.reset_running_agent_status(conn)
+                reserve_write_lock(conn)
+                live = select(session_turn_rows.c.session_id).where(
+                    session_turn_rows.c.state.in_(delivery_store.TURN_OWNER_STATES)
+                )
+                result = conn.execute(
+                    update(agent_sessions)
+                    .where(agent_sessions.c.agent_status == "running")
+                    .where(~agent_sessions.c.id.in_(live))
+                    .values(agent_status="idle")
+                )
+                reset = result.rowcount or 0
             if reset:
-                logger.info("Reset %s stale 'running' agent session(s) to idle on startup", reset)
+                logger.info(
+                    "Reset %s ownerless 'running' agent session(s) to idle on startup",
+                    reset,
+                )
         except Exception:
             logger.debug("agent_status startup reset failed", exc_info=True)
 

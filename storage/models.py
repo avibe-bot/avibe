@@ -413,6 +413,64 @@ messages = Table(
     Index("ix_messages_author_created", "author", "created_at"),
 )
 
+# Durable ownership for one logical Agent Turn per Session. ``agent_status`` and
+# message types remain read/display projections; lifecycle CAS happens only on
+# these versioned rows. A quarantined owner still blocks a replacement Turn
+# because native start may have written even though its receipt is ambiguous.
+session_turns = Table(
+    "session_turns",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("state", String, nullable=False),
+    Column("backend", String, nullable=False),
+    Column("start_attempt_id", String, nullable=True),
+    Column("runtime_key", Text, nullable=True),
+    Column("runtime_turn_id", Text, nullable=True),
+    Column("native_turn_id", Text, nullable=True),
+    Column("terminal_outcome", String, nullable=True),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("started_at", String, nullable=True),
+    Column("terminal_at", String, nullable=True),
+    Index("ix_session_turns_session_created", "session_id", "created_at", "id"),
+    Index(
+        "uq_session_turns_live_session",
+        "session_id",
+        unique=True,
+        sqlite_where=text("state in ('starting', 'active', 'quarantined')"),
+    ),
+)
+
+# One durable delivery owner per logical input. A content delivery references
+# the immutable Message row; control-only P0 deliveries deliberately leave
+# ``message_id`` NULL. Steering and native-start attempts stay fields on their
+# owners rather than growing a third attempt table.
+session_deliveries = Table(
+    "session_deliveries",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("message_id", String, ForeignKey("messages.id", ondelete="RESTRICT"), nullable=True),
+    Column("priority", String, nullable=False),
+    Column("state", String, nullable=False),
+    Column("target_turn_id", String, ForeignKey("session_turns.id", ondelete="RESTRICT"), nullable=True),
+    Column("successor_turn_id", String, ForeignKey("session_turns.id", ondelete="RESTRICT"), nullable=True),
+    Column("steer_attempt_id", String, nullable=True),
+    Column("expected_native_turn_id", Text, nullable=True),
+    Column("receipt_outcome", String, nullable=True),
+    Column("receipt_body_json", Text, nullable=False, server_default="{}"),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    UniqueConstraint("message_id", name="uq_session_deliveries_message"),
+    UniqueConstraint("steer_attempt_id", name="uq_session_deliveries_steer_attempt"),
+    Index("ix_session_deliveries_session_state_created", "session_id", "state", "created_at", "id"),
+    Index("ix_session_deliveries_target_turn", "target_turn_id"),
+    Index("ix_session_deliveries_successor_turn", "successor_turn_id"),
+)
+
 # Opaque-token proxy for chat media. The workbench browser can't load
 # ``file://`` and we deliberately neuter arbitrary remote images, so a local
 # file referenced by an agent reply (or uploaded by the user) is registered
