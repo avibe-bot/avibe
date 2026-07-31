@@ -2891,6 +2891,158 @@ def test_cancelled_run_with_blocking_activity_keeps_its_terminal_intent_parked(
     assert settled["metadata"]["interrupt_reason"] == "evicted"
 
 
+def _mark_run_running(run_id: str) -> None:
+    """Put a run in the state a live turn's row is actually in."""
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(status="running"))
+
+
+def _blocking_activity(registry: SessionActivityRegistry, run_id: str, activity_id: str) -> None:
+    """Start a background Activity that owns ``run_id`` and blocks its settlement."""
+
+    registry.start(
+        backend="codex",
+        runtime_key="runtime-325",
+        session_id="target-session",
+        activity_id=activity_id,
+        kind="background_task",
+        run_id=run_id,
+    )
+
+
+def test_evicted_workbench_turn_with_blocking_activity_parks_its_settlement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-325: the MANAGER lane must consult the Activity registry too.
+
+    HFR-127 taught the scheduler lane to park a terminal intent while a background
+    Activity still owns the row, but the guard lived inside
+    ``_terminalize_cancelled_request`` — one lane's private code. The manager lane
+    reaches settlement by a different road: ``release_for_teardown`` cancels the
+    Workbench turn, ``_run``'s ``finally`` calls ``_settle_turn_owned_agent_runs``,
+    and that lands in ``settle_agent_runs_without_result`` ->
+    ``_settle_agent_run_without_result``, which called ``settle_without_result``
+    IMMEDIATELY. So evicting or shutting down a turn that had spawned a blocking
+    Activity terminalized the run on the spot: the callback drain could discover a
+    finished run and tell the user the work ended, and the Activity's output then
+    arrived against an already-failed row — HFR-127's exact defect, reached from the
+    other lane.
+
+    The guard applies ONLY to the teardown causes this lane newly carries
+    (``evicted`` / ``restarted`` / ``interrupted``). ``stopped`` keeps settling
+    immediately, and the companion assertion below pins that: master never parked a
+    user's Stop behind an Activity, and a user stopping a run is a decision about the
+    whole run including the Activities inside it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="a Workbench turn that spawned a background Activity",
+        agent_name="codex",
+    )
+
+    registry = SessionActivityRegistry()
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=registry),
+        _t=lambda key, **_kwargs: key,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+
+    _mark_run_running(request.id)
+    _blocking_activity(registry, request.id, "bg-325")
+
+    # The real manager-lane road: the turn's own context names the run it owns, and
+    # ``_settle_turn_owned_agent_runs`` is what ``_run``'s ``finally`` calls with the
+    # cause ``release_for_teardown`` recorded on the Turn.
+    manager = SessionTurnManager(controller)
+    context = MessageContext(user_id="U", channel_id="ses_evicted", platform="avibe")
+    context.platform_specific = {"task_execution_id": request.id}
+    manager._settle_turn_owned_agent_runs(context, SETTLED_BY_EVICTED)
+
+    parked = request_store.get_run(request.id)
+    assert parked is not None
+    # Still open: the Activity owns the row, so no callback is discoverable yet.
+    assert parked["status"] == "running"
+    assert parked["completed_at"] is None
+    payload = parked["result_payload"]
+    assert payload["deferred_terminal_status"] == "failed"
+    assert payload["deferred_terminal_error"]
+    assert payload["deferred_terminal_metadata"] == {"interrupt_reason": "evicted"}
+
+    # The Activity ends; its own lifecycle applies the parked intent with THIS cause.
+    activity = registry.complete(
+        backend="codex",
+        runtime_key="runtime-325",
+        activity_id="bg-325",
+        status="failed",
+    )
+    assert activity is not None
+    assert service.settle_activity_runs(activity) == [request.id]
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
+def test_stopped_manager_lane_settlement_ignores_a_blocking_activity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-325: the Activity guard is scoped to teardown causes; Stop is unchanged.
+
+    Master semantics, pinned so the HFR-325 guard cannot quietly widen. A user
+    pressing Stop is a decision about the whole run — the Activities inside it
+    included — and it settles ``canceled``, which parks no ``interrupt_reason`` to
+    apply later anyway (HFR-012/037). Parking it would leave the row ``running``
+    after the user was told it stopped.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="a Workbench turn the user stops while an Activity runs",
+        agent_name="codex",
+    )
+
+    registry = SessionActivityRegistry()
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=registry),
+        _t=lambda key, **_kwargs: key,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+
+    _mark_run_running(request.id)
+    _blocking_activity(registry, request.id, "bg-325-stop")
+
+    manager = SessionTurnManager(controller)
+    context = MessageContext(user_id="U", channel_id="ses_stopped", platform="avibe")
+    context.platform_specific = {"task_execution_id": request.id}
+    manager._settle_turn_owned_agent_runs(context, SETTLED_BY_STOPPED)
+
+    stopped = request_store.get_run(request.id)
+    assert stopped is not None
+    assert stopped["status"] == "canceled"
+    assert stopped["completed_at"] is not None
+
+
 def test_file_store_cancellation_terminalizes_via_complete(tmp_path: Path) -> None:
     """HFR-112: the legacy backend has one terminal path, and it must be taken.
 

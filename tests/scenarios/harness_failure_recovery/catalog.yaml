@@ -2981,6 +2981,46 @@ scenarios:
     # left unreconciled, for the staleness sweep and restart recovery to find. An
     # unsettled run is recoverable; a wrongly terminalized live one is not.
     test: tests/test_running_agents_service.py::test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend
+  - id: HFR-325
+    name: a manager-lane teardown parks its settlement while an Activity owns the run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 6, and HFR-127 reached from the OTHER lane. HFR-127 taught the
+    # scheduler lane to park a terminal intent while a background Activity still owns
+    # the row, but the guard was written inside _terminalize_cancelled_request -- one
+    # lane's private code, not a shared rule.
+    # The manager lane arrives by a different road and had no guard at all:
+    # release_for_teardown cancels the Workbench turn, _run's finally calls
+    # SessionTurnManager._settle_turn_owned_agent_runs, and that lands in
+    # ScheduledTaskService.settle_agent_runs_without_result ->
+    # _settle_agent_run_without_result, which called settle_without_result IMMEDIATELY.
+    # So evicting or shutting down a turn that had spawned a blocking (or
+    # pending-output) SessionActivity terminalized the run on the spot: the callback
+    # drain could discover a finished run and tell the user the work ended, and the
+    # Activity's own output then arrived against an already-failed row -- HFR-127's
+    # exact defect, one lane over.
+    # FIX (build once): the park-or-settle sequence is extracted out of
+    # _terminalize_cancelled_request into ScheduledTaskService._park_or_settle_run --
+    # defer_run_terminal, then the getattr-guarded has_blocking_run_activity /
+    # has_pending_run_output consult against _activity_registry(), then
+    # settle_deferred_run only when unblocked. Both lanes call the ONE copy;
+    # _terminalize_cancelled_request's behaviour is unchanged and HFR-127/HFR-322 stay
+    # green. The parked intent is applied later, with THIS cause, by settle_activity_runs
+    # or _recover_activity_lifecycle -- same as HFR-127.
+    # THE SCOPE IS THE DESIGN. The guard applies only to the three TEARDOWN causes PR2
+    # routed into this lane (evicted / restarted / interrupted), listed in
+    # ACTIVITY_GUARDED_TEARDOWN_SETTLEMENTS. stopped, no_terminal_result and
+    # backend_refresh keep master's immediate settle: parking changes WHEN a user learns
+    # their run ended, which is a product decision rather than a bug fix, and a user
+    # pressing Stop is a decision about the whole run including the Activities inside it
+    # (it also maps to canceled, which parks no interrupt_reason for a later lifecycle to
+    # apply -- HFR-012/037). backend_refresh predates this lane's teardown work and is
+    # consciously preserved.
+    # The Stop half is pinned separately so the guard cannot quietly widen:
+    # tests/test_scheduled_tasks.py::test_stopped_manager_lane_settlement_ignores_a_blocking_activity
+    test: tests/test_scheduled_tasks.py::test_evicted_workbench_turn_with_blocking_activity_parks_its_settlement
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

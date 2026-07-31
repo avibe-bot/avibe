@@ -43,6 +43,7 @@ from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_EVICTED,
     SETTLED_BY_INTERRUPTED,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_RESTARTED,
@@ -92,6 +93,28 @@ from vibe import runtime
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+#: Settlement causes whose MANAGER-LANE terminal write must wait for a background
+#: Activity to finish (HFR-325).
+#:
+#: Scoped deliberately, and the scope is the whole design. The turn lane has always
+#: settled ``no_terminal_result``, ``stopped`` and ``backend_refresh`` immediately,
+#: and this set does not touch them: parking a settlement changes when the user
+#: learns their run ended, which is a product decision, not a bug fix. The three
+#: below are the TEARDOWN causes the turn lane newly carries — a session reclaimed,
+#: the service going down, an unattributed external cancellation — none of which
+#: expresses any intent about the Activity running inside the run, so a row that
+#: Activity still owns must keep its intent parked exactly as the scheduler lane's
+#: HFR-127 guard does.
+#:
+#: ``stopped`` stays immediate for a second, independent reason: it maps to
+#: ``canceled``, which parks no ``interrupt_reason`` for a later lifecycle to apply
+#: (HFR-012/037), so parking it would buy nothing and leave the row open after the
+#: user was told it stopped. ``backend_refresh`` stays immediate as preserved master
+#: behaviour — it predates this lane's teardown work and changing it is out of scope.
+ACTIVITY_GUARDED_TEARDOWN_SETTLEMENTS = frozenset(
+    {SETTLED_BY_EVICTED, SETTLED_BY_RESTARTED, SETTLED_BY_INTERRUPTED}
+)
 
 AGENT_RUN_DELIVERY_QUEUE = "queue"
 AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
@@ -2605,6 +2628,58 @@ class ScheduledTaskService:
 
     def _activity_registry(self) -> Any:
         return getattr(getattr(self.controller, "agent_service", None), "activities", None)
+
+    def _park_or_settle_run(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        error: Optional[str],
+        metadata: Optional[dict[str, Any]],
+    ) -> bool:
+        """Record a run's terminal intent, then settle it only if no Activity owns it.
+
+        THE ONE COPY OF THE PARK-OR-SETTLE SEQUENCE. Both settlement lanes reach a
+        row that a background Activity may still own, and both owe it the same
+        answer, so the decision lives here rather than being written twice and
+        drifting: the scheduler lane calls it from
+        :meth:`_terminalize_cancelled_request` (HFR-127) and the manager/turn lane
+        from :meth:`_settle_agent_run_without_result` (HFR-325).
+
+        Writes through the DEFER/SETTLE pair, never ``update_run_status``: that
+        UPDATE has no status predicate and would clobber a row a concurrent
+        ``vibe runs cancel`` already settled. The defer also carries the status,
+        the user-visible copy and ``interrupt_reason`` durably ACROSS the two
+        statements, so nothing is lost when the settle is withheld.
+
+        Withholding it is the point. A background Activity still running inside
+        this run, or holding output not yet delivered, means terminalizing now
+        makes the run's callback discoverable by the drain before that lifecycle
+        finishes: the user is told the run ended while its Activity is still
+        working, and the output then lands against a closed run. The parked intent
+        is applied later, with THIS cause, by the Activity's own lifecycle —
+        :meth:`settle_activity_runs` on the Activity's terminal, or
+        :meth:`_recover_activity_lifecycle` at startup.
+
+        Returns ``True`` only when this call performed the terminal write, so a
+        caller can mark the callback drain dirty exactly when there is something
+        for it to find.
+        """
+
+        self.request_store.defer_run_terminal(
+            run_id,
+            terminal_status=terminal_status,
+            error=error,
+            metadata=metadata,
+        )
+        registry = self._activity_registry()
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        if callable(has_blocker) and has_blocker(run_id):
+            return False
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
+        if callable(has_pending_output) and has_pending_output(run_id):
+            return False
+        return bool(self.request_store.settle_deferred_run(run_id))
 
     def _recover_activity_lifecycle(self) -> None:
         """Reconcile persisted Activity blockers before queued-Run recovery."""
@@ -5787,32 +5862,16 @@ class ScheduledTaskService:
                 )
                 self._drain_dirty = True
                 return
-            registry = self._activity_registry()
-            has_blocker = getattr(registry, "has_blocking_run_activity", None)
-            has_pending_output = getattr(registry, "has_pending_run_output", None)
             for run_id in run_ids:
-                self.request_store.defer_run_terminal(
+                # PARK, DON'T SETTLE, WHILE AN ACTIVITY STILL OWNS THE ROW. The
+                # decision and its rationale live in ``_park_or_settle_run``, which
+                # the manager/turn lane shares (HFR-127 / HFR-325).
+                if self._park_or_settle_run(
                     run_id,
                     terminal_status=terminal_status,
                     error=error_text,
                     metadata=metadata,
-                )
-                # PARK, DON'T SETTLE, WHILE AN ACTIVITY STILL OWNS THE ROW — the same
-                # test ``settle_activity_runs`` makes, for the same reason. A
-                # background Activity is still running inside this run, or has output
-                # not yet delivered; terminalizing the row here makes its callback
-                # discoverable by the drain before that lifecycle finishes, so the
-                # user is told the run ended while its Activity is still working and
-                # its output arrives against a closed run. The defer above already
-                # wrote the status, error and ``interrupt_reason`` durably, so nothing
-                # is lost: the Activity lifecycle (``settle_activity_runs`` on the
-                # Activity's own terminal, ``_recover_activity_lifecycle`` at startup)
-                # applies the parked intent with THIS cause when it ends.
-                if callable(has_blocker) and has_blocker(run_id):
-                    continue
-                if callable(has_pending_output) and has_pending_output(run_id):
-                    continue
-                if self.request_store.settle_deferred_run(run_id):
+                ):
                     self._drain_dirty = True
         except Exception:
             logger.warning(
@@ -6217,13 +6276,45 @@ class ScheduledTaskService:
         The terminal status comes from ``SETTLEMENT_TERMINAL_STATUS``: an explicit
         user stop is ``canceled``, an infrastructure fault is ``failed``.
 
+        A TEARDOWN cause goes through ``_park_or_settle_run`` instead (HFR-325).
+        ``settle_without_result`` terminalizes on the spot, which is right for the
+        settlements this lane has always handled but wrong for the ones PR2 routed
+        into it: evicting or shutting down a turn that spawned a background Activity
+        would fire the run's callback while that Activity is still working, and its
+        output would land on an already-failed row. The shared helper is the same
+        guard the scheduler lane uses (HFR-127) — see
+        ``ACTIVITY_GUARDED_TEARDOWN_SETTLEMENTS`` for why the set is exactly three
+        causes and why Stop is deliberately not one of them.
+
         Returns ``True`` when this store owns the terminal write (whether or not this
-        call is the one that performed it — an already-terminal row is settled too),
-        and ``False`` only when the store has no guarded writer at all.
+        call is the one that performed it — an already-terminal row is settled too,
+        and so is one whose intent was parked), and ``False`` only when the store has
+        no guarded writer at all.
         """
 
         if not self.request_store.supports_guarded_settlement():
             return False
+        if settled_by in ACTIVITY_GUARDED_TEARDOWN_SETTLEMENTS:
+            wrote_terminal = self._park_or_settle_run(
+                execution_id,
+                terminal_status=SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed"),
+                error=error,
+                metadata={"interrupt_reason": settled_by},
+            )
+            if wrote_terminal:
+                logger.warning(
+                    "Agent run %s settled without a terminal result (%s)",
+                    execution_id,
+                    settled_by,
+                )
+            else:
+                logger.info(
+                    "Agent run %s kept its %s intent parked (an Activity still owns it "
+                    "or it was already settled elsewhere)",
+                    execution_id,
+                    settled_by,
+                )
+            return True
         settled = self.request_store.settle_without_result(
             execution_id,
             terminal_status=SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed"),
