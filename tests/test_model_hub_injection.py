@@ -2262,6 +2262,7 @@ def test_mh_inj_claude_channel_change_waits_for_active_turn() -> None:
         assert await task is None
         handler.cleanup_session.assert_awaited_once_with(
             key,
+            settled_by="backend_refresh",
             retire_model_hub_scope=False,
         )
 

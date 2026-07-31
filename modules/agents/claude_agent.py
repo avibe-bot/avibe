@@ -14,6 +14,12 @@ from core.message_output import (
     terminal_turn_output,
 )
 from core.reply_enhancer import strip_silent_blocks
+from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_EVICTED,
+    SETTLED_BY_INTERRUPTED,
+    SETTLED_BY_STOPPED,
+)
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -306,7 +312,10 @@ class ClaudeAgent(BaseAgent):
                 sessions_to_clear.append(composite_id)
 
         for composite_id in sessions_to_clear:
-            await self._cleanup_runtime_session(composite_id)
+            # Clearing a session recreates its runtime; the process stays up.
+            await self._cleanup_runtime_session(
+                composite_id, settled_by=SETTLED_BY_BACKEND_REFRESH
+            )
 
         # Legacy session manager cleanup (best-effort)
         await self.session_manager.clear_session(session_key)
@@ -337,7 +346,9 @@ class ClaudeAgent(BaseAgent):
         session_ids = self.runtime_turn_keys()
 
         for composite_id in session_ids:
-            await self._cleanup_runtime_session(composite_id)
+            await self._cleanup_runtime_session(
+                composite_id, settled_by=SETTLED_BY_BACKEND_REFRESH
+            )
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 
@@ -362,7 +373,9 @@ class ClaudeAgent(BaseAgent):
         if composite_key not in self.claude_sessions and composite_key not in self.receiver_tasks:
             return
 
-        await self._cleanup_runtime_session(composite_key)
+        await self._cleanup_runtime_session(
+            composite_key, settled_by=SETTLED_BY_BACKEND_REFRESH
+        )
         logger.info("Prepared Claude runtime for resumed session %s", composite_key)
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
@@ -436,15 +449,24 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         *,
+        settled_by: str,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
     ) -> None:
-        """Drop Claude runtime state without canceling the current receiver task."""
+        """Drop Claude runtime state without canceling the current receiver task.
+
+        ``settled_by`` is required for the reason ``SessionHandler.cleanup_session``
+        requires it — this method is the adapter's door to that teardown, and a
+        default here would reinstate the inference the parameter exists to remove.
+        Each call site below names the event it is handling: a user Stop, an
+        eviction, a runtime refresh, or a fault the run did not survive.
+        """
 
         await self._prepare_steering_cleanup(composite_key)
         try:
             await self._cleanup_runtime_session_state(
                 composite_key,
+                settled_by=settled_by,
                 current_receiver_task=current_receiver_task,
                 preserve_pending_request_state=preserve_pending_request_state,
             )
@@ -455,6 +477,7 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         *,
+        settled_by: str,
         current_receiver_task: asyncio.Task | None = None,
         preserve_pending_request_state: bool = False,
     ) -> None:
@@ -474,7 +497,11 @@ class ClaudeAgent(BaseAgent):
                 self._requeue_request_activity(pending_request)
         cleanup = getattr(self.session_handler, "cleanup_session", None)
         if callable(cleanup):
-            await cleanup(composite_key, current_receiver_task=current_receiver_task)
+            await cleanup(
+                composite_key,
+                settled_by=settled_by,
+                current_receiver_task=current_receiver_task,
+            )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
@@ -518,6 +545,9 @@ class ClaudeAgent(BaseAgent):
             try:
                 await self._cleanup_runtime_session(
                     composite_key,
+                    # This IS the stuck-active eviction backstop, reached only from
+                    # ``evict_idle_sessions``.
+                    settled_by=SETTLED_BY_EVICTED,
                     preserve_pending_request_state=True,
                 )
             except Exception:
@@ -935,7 +965,10 @@ class ClaudeAgent(BaseAgent):
         self._suppress_receiver_runtime_release.add(composite_key)
         try:
             self._mark_session_idle_if_no_pending_requests(composite_key)
-            await self._cleanup_runtime_session(composite_key)
+            # A user pressed Stop. Anything still running settles ``canceled`` with no
+            # interruption notice -- reporting their own decision back to them as an
+            # infrastructure failure is the inversion HFR-012/037 pin.
+            await self._cleanup_runtime_session(composite_key, settled_by=SETTLED_BY_STOPPED)
         except Exception as err:
             logger.error("Failed to clean up stopped Claude session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)
@@ -981,7 +1014,8 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     exc_info=True,
                 )
-        await self._cleanup_runtime_session(composite_key)
+        # Reached from the Running tab's End, i.e. a user decision.
+        await self._cleanup_runtime_session(composite_key, settled_by=SETTLED_BY_STOPPED)
         return True
 
     async def _receive_messages(
@@ -1035,6 +1069,7 @@ class ClaudeAgent(BaseAgent):
                 if settling_ambiguous_primary:
                     await self._cleanup_runtime_session_state(
                         composite_key,
+                        settled_by=SETTLED_BY_INTERRUPTED,
                         current_receiver_task=asyncio.current_task(),
                         preserve_pending_request_state=True,
                     )
@@ -1566,6 +1601,9 @@ class ClaudeAgent(BaseAgent):
             if not self._has_pending_requests(composite_key):
                 await self._cleanup_runtime_session(
                     composite_key,
+                    # The stream ended under us. Not an eviction, not a restart, not
+                    # anything the user asked for.
+                    settled_by=SETTLED_BY_INTERRUPTED,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
                 )
@@ -1668,6 +1706,7 @@ class ClaudeAgent(BaseAgent):
 
         await self._cleanup_runtime_session(
             composite_key,
+            settled_by=SETTLED_BY_INTERRUPTED,
             current_receiver_task=asyncio.current_task(),
             preserve_pending_request_state=True,
         )
@@ -1818,6 +1857,7 @@ class ClaudeAgent(BaseAgent):
             self._retire_failed_auth_turn(composite_key, context)
             await self._cleanup_runtime_session(
                 composite_key,
+                settled_by=SETTLED_BY_INTERRUPTED,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
             )
@@ -3170,6 +3210,7 @@ class ClaudeAgent(BaseAgent):
         if handled:
             await self._cleanup_runtime_session(
                 composite_key,
+                settled_by=SETTLED_BY_INTERRUPTED,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
             )

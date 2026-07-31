@@ -28,7 +28,8 @@ from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
-from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT, SETTLED_BY_RESTARTED
+from core.session_teardown import teardown_session_runs
 from core.runtime_commands import RuntimeCommandWatcher
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
@@ -1559,6 +1560,45 @@ class Controller:
             logger.info("Idle cleanup loop stopped.")
             raise
 
+    async def _settle_inflight_turns_for_shutdown(self) -> None:
+        """Settle every live Workbench turn as ``restarted`` before backends die.
+
+        ``ScheduledTaskService.stop()`` runs just before this and already cancels its
+        own lane with the same cause — but only its own. An avibe-targeted run does
+        not stay in that lane: ``_execute_request`` hands the turn to the gate and
+        returns, so the real work continues under ``SessionTurnManager`` where the
+        scheduler's maps cannot see it. Shutting down without this leaves exactly
+        those turns holding runs that nothing will ever settle, because the very next
+        steps of ``cleanup_sync`` tear down all three backends.
+
+        This is the shared teardown helper applied per live session, so a shutdown and
+        an eviction differ only in the cause they record — which is the whole point of
+        recording the cause at the cancel site.
+
+        Everything is reached through ``getattr``: this runs on the shutdown path,
+        where a half-built controller (a failed boot, a test double) must not turn a
+        clean stop into a traceback.
+        """
+
+        manager = getattr(self, "session_turns", None)
+        busy_session_ids = getattr(manager, "busy_session_ids", None)
+        if not callable(busy_session_ids):
+            return
+        try:
+            # Snapshot: the set mutates as each turn settles.
+            session_ids = sorted(busy_session_ids())
+        except Exception:  # noqa: BLE001
+            logger.debug("Shutdown: could not enumerate in-flight session turns", exc_info=True)
+            return
+        if not session_ids:
+            return
+        logger.info(
+            "Settling %d in-flight session turn(s) as restarted before backend teardown",
+            len(session_ids),
+        )
+        for session_id in session_ids:
+            await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
+
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""
         logger.info("Cleaning up controller resources (sync, best-effort)...")
@@ -1600,6 +1640,7 @@ class Controller:
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
+        _stop_loop_coroutine(self._settle_inflight_turns_for_shutdown(), "In-flight session turns")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)

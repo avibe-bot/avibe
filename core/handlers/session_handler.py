@@ -42,7 +42,13 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
+from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_EVICTED,
+    SETTLED_BY_INTERRUPTED,
+)
 from core.services.session_fork import pending_native_fork_source
+from core.session_teardown import teardown_composite_session_runs
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
 
@@ -205,6 +211,10 @@ class SessionHandler(BaseHandler):
             await self._wait_for_claude_session_idle(composite_key)
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -224,6 +234,10 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -236,6 +250,10 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -247,6 +265,10 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -287,6 +309,10 @@ class SessionHandler(BaseHandler):
             await self._wait_for_claude_session_idle(composite_key)
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -304,6 +330,10 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -315,6 +345,10 @@ class SessionHandler(BaseHandler):
             )
             await self.cleanup_session(
                 composite_key,
+                # Recreating a runtime whose launch inputs changed is a refresh of the
+                # backend inside a process that keeps running -- not an eviction, and
+                # nothing the user asked for.
+                settled_by=SETTLED_BY_BACKEND_REFRESH,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
             )
             return None
@@ -1507,10 +1541,32 @@ class SessionHandler(BaseHandler):
         self,
         composite_key: str,
         *,
+        settled_by: str,
         current_receiver_task=None,
         retire_model_hub_scope: bool = True,
     ):
-        """Clean up a specific session by composite key"""
+        """Clean up a specific session by composite key.
+
+        ``settled_by`` is REQUIRED and has no default. Every caller reaches this
+        method for its own reason — a runtime recreated because the system prompt
+        changed, an idle session reclaimed, a transport that broke mid-turn — and the
+        run executing inside the session must be settled with THAT reason, not with a
+        story inferred here from a composite key that carries none. A default would
+        make the commonest cause silently absorb the rest, which is precisely how an
+        infrastructure fault ends up reported as a user's own Stop (and the reverse).
+        Requiring it also means a caller added later cannot inherit somebody else's
+        explanation by accident: the omission is a hard error at the call site,
+        where the decision actually lives.
+
+        The settlement runs FIRST, before a single piece of runtime state is dropped.
+        Once the SDK client is disconnected nothing can settle the turn it was
+        running, so a run still in flight here would be stranded ``running`` forever
+        with its session lock held — the zombie this ordering exists to prevent.
+        """
+
+        await teardown_composite_session_runs(
+            self.controller, composite_key, settled_by=settled_by
+        )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
         if client is not None and retire_model_hub_scope:
@@ -1679,6 +1735,17 @@ class SessionHandler(BaseHandler):
                 if recheck_idle < idle_timeout:
                     continue
                 logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
+            # Settle before ANY branch tears anything down. Both branches reclaim the
+            # session out from under whatever is running in it, and both reach a
+            # teardown this method does not own — the stuck-active branch hands off to
+            # the Claude adapter's force cleanup entirely — so the settlement cannot
+            # live inside either one. Nothing here is conditional on the branch: an
+            # idle session and a stuck-active session owe their runs the same
+            # explanation, and it is the same one, because the reason is the eviction
+            # rather than the state that qualified for it.
+            await teardown_composite_session_runs(
+                self.controller, composite_key, settled_by=SETTLED_BY_EVICTED
+            )
             if composite_key in self.active_sessions:
                 agent_service = getattr(self.controller, "agent_service", None)
                 claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
@@ -1686,9 +1753,9 @@ class SessionHandler(BaseHandler):
                 if callable(force_cleanup):
                     await force_cleanup(composite_key)
                 else:
-                    await self.cleanup_session(composite_key)
+                    await self.cleanup_session(composite_key, settled_by=SETTLED_BY_EVICTED)
             else:
-                await self.cleanup_session(composite_key)
+                await self.cleanup_session(composite_key, settled_by=SETTLED_BY_EVICTED)
             evicted += 1
 
         return evicted
@@ -1766,7 +1833,14 @@ class SessionHandler(BaseHandler):
             )
         elif "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                # A transport fault mid-turn: nobody evicted this session and the
+                # process is not restarting, so there is no idleness or shutdown
+                # claim to make -- only that the run was interrupted.
+                settled_by=SETTLED_BY_INTERRUPTED,
+                current_receiver_task=asyncio.current_task(),
+            )
 
             # Notify user and suggest retry
             await self._get_im_client(context).send_message(
@@ -1782,7 +1856,14 @@ class SessionHandler(BaseHandler):
             or is_claude_sdk_buffer_error(error)
         ):
             logger.error(f"Session {composite_key} is broken - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                # A transport fault mid-turn: nobody evicted this session and the
+                # process is not restarting, so there is no idleness or shutdown
+                # claim to make -- only that the run was interrupted.
+                settled_by=SETTLED_BY_INTERRUPTED,
+                current_receiver_task=asyncio.current_task(),
+            )
 
             # Notify user
             await self._get_im_client(context).send_message(

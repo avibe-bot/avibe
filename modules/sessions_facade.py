@@ -70,6 +70,23 @@ class SessionsFacade:
             return None
         return getter(user_key, agent_name, thread_id)
 
+    def find_session_ids_for_anchor(
+        self,
+        session_anchor: str,
+        *,
+        workdir: Optional[str] = None,
+    ) -> list[str]:
+        """Session ids for a runtime anchor with no scope key — teardown's resolve.
+
+        Read-only, and tolerates stores without support (returns ``[]``) so a
+        teardown never fails because a legacy store cannot answer.
+        """
+
+        finder = getattr(self.sessions_store, "find_session_ids_for_anchor", None)
+        if not callable(finder):
+            return []
+        return finder(session_anchor, workdir=workdir)
+
     def find_session_for_anchor(self, user_id: Union[int, str], session_anchor: str) -> Optional[dict]:
         """Latest session row for ``(scope, anchor)`` regardless of backend, or
         ``None``. Lets a turn pin a thread to its OWN backend instead of the

@@ -65,7 +65,7 @@ class _StubController:
         self.claude_client = SimpleNamespace(_is_skip_message=lambda message: False)
         self.agent_auth_service = SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False))
 
-        async def _cleanup_session(composite_key, *, current_receiver_task=None):
+        async def _cleanup_session(composite_key, *, settled_by="", current_receiver_task=None):
             receiver_task = self.receiver_tasks.pop(composite_key, None)
             client = self.claude_sessions.pop(composite_key, None)
             cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
@@ -433,6 +433,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(runtime_key, controller.claude_sessions)
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             runtime_key,
+            settled_by="stopped",
             current_receiver_task=None,
         )
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
@@ -616,6 +617,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             runtime_key,
+            settled_by="stopped",
             current_receiver_task=None,
         )
         controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
@@ -1115,7 +1117,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         receiver_task = asyncio.create_task(_receiver())
         controller.receiver_tasks[session_key] = receiver_task
-        cleanup_task = asyncio.create_task(agent._cleanup_runtime_session(session_key))
+        cleanup_task = asyncio.create_task(
+            agent._cleanup_runtime_session(session_key, settled_by="interrupted")
+        )
 
         await disconnect_started.wait()
         self.assertNotIn(session_key, controller.receiver_tasks)
@@ -1162,7 +1166,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._last_assistant_text[session_key] = "old text"
         agent._pending_assistant_message[session_key] = "old assistant"
         controller.receiver_tasks[session_key] = old_receiver
-        cleanup_task = asyncio.create_task(agent._cleanup_runtime_session(session_key))
+        cleanup_task = asyncio.create_task(
+            agent._cleanup_runtime_session(session_key, settled_by="interrupted")
+        )
 
         await disconnect_started.wait()
         self.assertNotIn(session_key, controller.receiver_tasks)
@@ -1213,6 +1219,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         async def _receiver():
             await agent._cleanup_runtime_session(
                 session_key,
+                settled_by="interrupted",
                 current_receiver_task=asyncio.current_task(),
             )
             cleanup_returned.set()
@@ -1278,10 +1285,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[session_key] = ["request"]
         agent._native_session_ids[session_key] = "native-session-1"
 
-        await agent._cleanup_runtime_session(session_key, current_receiver_task=receiver_task)
+        await agent._cleanup_runtime_session(
+            session_key, settled_by="interrupted", current_receiver_task=receiver_task
+        )
 
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             session_key,
+            settled_by="interrupted",
             current_receiver_task=receiver_task,
         )
         self.assertNotIn(session_key, agent._last_assistant_text)
@@ -1506,6 +1516,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
+            settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
@@ -1989,6 +2000,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
+            # The stuck-active backstop IS an eviction, and says so.
+            settled_by="evicted",
             current_receiver_task=None,
         )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
@@ -2123,6 +2136,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         controller.session_handler.cleanup_session.assert_awaited_once_with(
             composite_key,
+            settled_by="interrupted",
             current_receiver_task=asyncio.current_task(),
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)

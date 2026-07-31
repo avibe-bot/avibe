@@ -394,6 +394,20 @@ class SessionsStore:
         self.get_agent_map(user_id, agent_name).setdefault(thread_id, "")
         return agent_session_id
 
+    def find_session_ids_for_anchor(
+        self,
+        session_anchor: str,
+        *,
+        workdir: str | None = None,
+    ) -> list[str]:
+        """Read-through to the scope-free anchor lookup used by session teardown."""
+
+        self._ensure_service()
+        finder = getattr(self._service, "find_session_ids_for_anchor", None)
+        if not callable(finder):
+            return []
+        return finder(session_anchor, workdir=workdir)
+
     def find_session_for_anchor(self, user_id: str, session_anchor: str):
         """Read-through to the SQLite service's ``(scope, anchor)`` lookup (latest
         row, any backend). Not cached — callers use it only to pin a thread's

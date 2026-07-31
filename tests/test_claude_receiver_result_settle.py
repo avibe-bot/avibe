@@ -873,6 +873,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.emit_agent_message.assert_awaited_once()
         agent._cleanup_runtime_session.assert_awaited_once_with(
             composite_key,
+            settled_by="interrupted",
             current_receiver_task=receiver_task,
             preserve_pending_request_state=True,
         )
@@ -1027,7 +1028,9 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
         self.assertTrue(ended)
         self.assertEqual(events, ["query", "interrupt"])
-        agent._cleanup_runtime_session.assert_awaited_once_with(composite_key)
+        agent._cleanup_runtime_session.assert_awaited_once_with(
+            composite_key, settled_by="stopped"
+        )
         self.assertIn(composite_key, agent._steering_closing_keys())
 
         receiver_task.cancel()

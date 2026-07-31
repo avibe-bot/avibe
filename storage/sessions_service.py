@@ -176,6 +176,59 @@ class SQLiteSessionsService:
                 .limit(1)
             ).scalar_one_or_none()
 
+    def find_session_ids_for_anchor(
+        self,
+        session_anchor: str,
+        *,
+        workdir: str | None = None,
+        limit: int = 4,
+    ) -> list[str]:
+        """Session ids for one anchor, WITHOUT a scope key. For teardown only.
+
+        Every other anchor lookup in this file starts from a scope key, because every
+        other caller is handling a message and has one. A teardown does not: idle
+        eviction holds ``f"{session_anchor}:{working_path}"`` and a Codex transport
+        eviction holds a base session id and a cwd — the runtime identities, with no
+        conversation context left to resolve a scope from. Refusing to answer without
+        a scope key would mean the runtime paths that most need to settle their runs
+        are the ones that cannot name them.
+
+        The cost of dropping the scope predicate is that ``(scope_id,
+        session_anchor)`` — not ``session_anchor`` alone — is the unique key, so two
+        scopes can hold the same anchor. Hence a LIST, not a row: the caller decides
+        what to do with an ambiguous answer rather than being handed an arbitrary one
+        that looks certain. ``workdir`` narrows it when known, keeping rows whose own
+        ``workdir`` is unset (nullable, and absence is not a mismatch).
+
+        Archived rows are excluded: they are terminal and inert, so nothing is
+        executing in them.
+        """
+
+        resolved_anchor = str(session_anchor or "").strip()
+        if not resolved_anchor or limit <= 0:
+            return []
+        resolved_workdir = str(workdir or "").strip()
+        with self.engine.connect() as conn:
+            stmt = (
+                select(agent_sessions.c.id, agent_sessions.c.workdir)
+                .where(agent_sessions.c.session_anchor == resolved_anchor)
+                .where(agent_sessions.c.status != "archived")
+                .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
+            )
+            rows = list(conn.execute(stmt).mappings())
+        session_ids: list[str] = []
+        for row in rows:
+            if resolved_workdir:
+                row_workdir = str(row["workdir"] or "").strip()
+                if row_workdir and row_workdir != resolved_workdir:
+                    continue
+            session_id = str(row["id"] or "").strip()
+            if session_id and session_id not in session_ids:
+                session_ids.append(session_id)
+            if len(session_ids) >= limit:
+                break
+        return session_ids
+
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:
         with self.engine.connect() as conn:
             row = conn.execute(

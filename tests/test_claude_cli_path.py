@@ -1636,6 +1636,101 @@ def test_evict_idle_sessions_keeps_stuck_active_below_cap(monkeypatch, tmp_path:
     assert composite_key in handler.active_sessions
 
 
+def _record_teardowns(monkeypatch) -> list[tuple[str, str]]:
+    """Capture every teardown settlement ``evict_idle_sessions`` asks for."""
+
+    recorded: list[tuple[str, str]] = []
+
+    async def _teardown(_controller, composite_key, *, settled_by, **_kwargs) -> int:
+        recorded.append((composite_key, settled_by))
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "teardown_composite_session_runs", _teardown)
+    return recorded
+
+
+def test_evict_idle_sessions_settles_runs_before_the_ordinary_idle_teardown(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-120 (ordinary idle branch): eviction settles the session's runs first.
+
+    Evicting a session disconnects the backend that would otherwise settle whatever
+    is running inside it, so a run left behind here has nothing left to terminalize
+    it — it stays ``running`` forever AND holds the session lock, so the next drain
+    cannot dispatch into the session either. Asserting the CAUSE as well as the call
+    is the point: ``evicted`` is what makes the run settle ``failed`` and earns the
+    user a notice, while a generic cancellation would report it as their own Stop.
+    """
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+    recorded = _record_teardowns(monkeypatch)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = 0.0
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    # ``cleanup_session`` settles again with the same cause; both entries are the
+    # eviction, and the second pass is a no-op because the first already ran.
+    assert recorded == [(composite_key, "evicted"), (composite_key, "evicted")]
+
+
+def test_evict_idle_sessions_settles_runs_before_the_stuck_active_backstop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-120 (stuck-active branch): the backstop owes its runs the same settlement.
+
+    This branch hands the teardown to the Claude adapter's force cleanup, so a
+    settlement written inside ``evict_idle_sessions``' own cleanup call would never
+    run here — and this is the branch where a live turn is MOST likely, because the
+    session qualified precisely by having an active flag nobody released. That is why
+    the settlement sits above the branch rather than in either arm of it.
+    """
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+    recorded = _record_teardowns(monkeypatch)
+
+    controller = _Controller(tmp_path)
+    cleanup_calls: list[str] = []
+
+    class _ClaudeAgent:
+        @staticmethod
+        async def force_cleanup_stuck_active_session(composite_key: str) -> None:
+            cleanup_calls.append(composite_key)
+            handler.clear_session_tracking(composite_key)
+
+    controller.agent_service = type("AgentService", (), {"agents": {"claude": _ClaudeAgent()}})()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = -1000.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    assert cleanup_calls == [composite_key]
+    # The force-cleanup arm never reaches ``cleanup_session`` from here, so the one
+    # settlement recorded is the one this branch would otherwise have skipped.
+    assert recorded == [(composite_key, "evicted")]
+
+
 def test_evict_idle_sessions_stuck_cap_floor_dominates_small_timeout(monkeypatch, tmp_path: Path) -> None:
     """A tiny idle timeout must not shrink the active-turn grace below 30min."""
     captured: dict[str, Any] = {}
@@ -1947,7 +2042,7 @@ def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path:
 
         controller.receiver_tasks[composite_key] = asyncio.create_task(_receiver())
         await asyncio.sleep(0)
-        await handler.cleanup_session(composite_key)
+        await handler.cleanup_session(composite_key, settled_by="interrupted")
 
     asyncio.run(_exercise_cleanup())
 
@@ -1994,7 +2089,7 @@ def test_cleanup_session_retires_model_hub_process_scope(
         )
     )
 
-    asyncio.run(handler.cleanup_session(composite_key))
+    asyncio.run(handler.cleanup_session(composite_key, settled_by="interrupted"))
 
     assert retired == [("claude", composite_key)]
 
@@ -2032,7 +2127,7 @@ def test_cleanup_session_swallows_receiver_task_failure(monkeypatch, tmp_path: P
 
         controller.receiver_tasks[composite_key] = asyncio.create_task(_receiver())
         await asyncio.sleep(0)
-        await handler.cleanup_session(composite_key)
+        await handler.cleanup_session(composite_key, settled_by="interrupted")
 
     asyncio.run(_exercise_cleanup())
 
@@ -2075,7 +2170,7 @@ def test_cleanup_session_drains_finished_receiver_task_failure(monkeypatch, tmp_
     receiver_task = _DoneReceiverTask()
     controller.receiver_tasks[composite_key] = receiver_task
 
-    asyncio.run(handler.cleanup_session(composite_key))
+    asyncio.run(handler.cleanup_session(composite_key, settled_by="interrupted"))
 
     assert client.disconnects == 1
     assert receiver_task.drained
@@ -2120,7 +2215,9 @@ def test_cleanup_session_cancels_receiver_when_disconnect_is_cancelled(monkeypat
 
         receiver_task = asyncio.create_task(_receiver())
         controller.receiver_tasks[composite_key] = receiver_task
-        cleanup_task = asyncio.create_task(handler.cleanup_session(composite_key))
+        cleanup_task = asyncio.create_task(
+            handler.cleanup_session(composite_key, settled_by="interrupted")
+        )
 
         await events["disconnect_started"].wait()
         assert composite_key not in controller.receiver_tasks
@@ -2177,7 +2274,9 @@ def test_cleanup_session_preserves_new_receiver_during_disconnect(monkeypatch, t
         new_receiver = asyncio.create_task(asyncio.sleep(3600))
         controller.receiver_tasks[composite_key] = old_receiver
         handler.mark_session_active(composite_key)
-        cleanup_task = asyncio.create_task(handler.cleanup_session(composite_key))
+        cleanup_task = asyncio.create_task(
+            handler.cleanup_session(composite_key, settled_by="interrupted")
+        )
 
         await events["disconnect_started"].wait()
         assert composite_key not in controller.receiver_tasks
@@ -2237,6 +2336,7 @@ def test_cleanup_session_defers_disconnect_for_current_receiver(monkeypatch, tmp
         async def _receiver():
             await handler.cleanup_session(
                 composite_key,
+                settled_by="interrupted",
                 current_receiver_task=asyncio.current_task(),
             )
             events["cleanup_returned"].set()

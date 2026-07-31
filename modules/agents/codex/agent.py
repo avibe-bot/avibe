@@ -33,6 +33,8 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from core.resource_governance import governor_from_controller
+from core.run_settlement import SETTLED_BY_EVICTED
+from core.session_teardown import teardown_runtime_session_runs
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -687,6 +689,25 @@ class CodexAgent(BaseAgent):
                     )
                 else:
                     logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
+
+                # SETTLE BEFORE STOPPING THE TRANSPORT. Everything below this point
+                # dismantles the runtime, and once the app-server is gone no run
+                # executing through it can ever be settled by its own turn — the
+                # generic teardown defect, reached here through Codex's own idle
+                # sweep. The cause is ``evicted`` for the same reason the Claude idle
+                # sweep uses it: nobody asked for these runs to end and their
+                # definitions are fine.
+                #
+                # Wired here rather than at the controller's periodic sweep because
+                # this is the only layer that knows WHICH sessions the evicted cwd
+                # covers; the shared helper it calls owns everything after that.
+                for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                    await teardown_runtime_session_runs(
+                        getattr(self, "controller", None),
+                        session_anchor=base_session_id,
+                        workdir=cwd,
+                        settled_by=SETTLED_BY_EVICTED,
+                    )
                 try:
                     await transport.stop()
                 except Exception as exc:

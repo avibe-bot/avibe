@@ -2419,6 +2419,101 @@ def test_release_for_teardown_records_the_cause_before_cancelling_and_awaits_set
     assert asyncio.run(manager.release_for_teardown("ses_never_ran", settled_by="evicted")) is False
 
 
+def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
+    tmp_path, monkeypatch
+):
+    """HFR-106: the turn lane is where an avibe-targeted run actually lives.
+
+    ``_execute_request`` hands an avibe-targeted scheduled run to the gate and
+    returns, so the outer execution leaves ``_inflight_executions`` while the real
+    work continues under ``SessionTurnManager`` — invisible to every scheduler-lane
+    join. Evicting that session used to reach nothing at all: the turn kept running
+    against a session being reclaimed, and its run stayed ``running`` forever.
+
+    The assertion is the STATUS AND THE REASON, deliberately. A terminality-only
+    check passes against ``SETTLED_BY_STOPPED``, which settles ``canceled`` and owes
+    no notice — i.e. it records an infrastructure event as something the user asked
+    for, which is exactly the inversion HFR-029 names, and it would have let the
+    wrong wiring ship.
+    """
+
+    from core.run_settlement import SETTLED_BY_EVICTED
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
+    from sqlalchemy import update as sa_update
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller.set_agent_status = lambda session_id, status: None
+
+    request_store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="a workbench turn interrupted by eviction",
+        agent_name="codex",
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == request.id)
+            .values(session_id="ses_evicted_106", status="running")
+        )
+
+    observed: dict = {}
+
+    async def _go():
+        started = asyncio.Event()
+
+        async def _busy():
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                observed["cause_at_cancel"] = manager.in_flight[
+                    "ses_evicted_106"
+                ].cancel_settled_by
+                raise
+
+        task = asyncio.create_task(_busy())
+        ctx = MessageContext(user_id="U", channel_id="ses_evicted_106", platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": "ses_evicted_106",
+            "agent_session_target": {"agent_backend": "codex"},
+            # How a turn declares the run it is executing: ``Turn`` carries no run-id
+            # field, so ownership is read off the context it started under.
+            "task_execution_id": request.id,
+        }
+        manager.in_flight["ses_evicted_106"] = session_turns.Turn(task=task, context=ctx)
+        await started.wait()
+        return await service.teardown_session_runs(
+            "ses_evicted_106", settled_by=SETTLED_BY_EVICTED
+        )
+
+    result = asyncio.run(_go())
+
+    # The turn was cancelled, and it learned WHY from inside its own cancellation.
+    assert result.cancelled_count == 1
+    assert observed["cause_at_cancel"] == "evicted"
+    # ...and the run it owned is terminal with the eviction on the record, so PR6's
+    # drain has a failure to deliver rather than a row that merely stopped moving.
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
 def test_release_for_backend_refresh_leaves_other_backend_turn_running():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)

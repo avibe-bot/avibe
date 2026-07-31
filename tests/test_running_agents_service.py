@@ -1350,3 +1350,174 @@ def test_end_rechecks_live_state_active_to_idle():
     )
     assert res["ok"] is True
     assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"
+
+
+def _settlement_service(tmp_path):
+    """A REAL settlement service over a real (temp-home) store.
+
+    End's settlement claims are about rows: which status a run lands in and whether
+    it carries an interruption the user gets told about. A recording double would
+    only prove a call was made, which is the assertion both owed tests were written
+    to be stronger than.
+    """
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
+
+    request_store = TaskExecutionStore()
+    service = ScheduledTaskService(
+        controller=types.SimpleNamespace(),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    return service, request_store
+
+
+def _running_harness_run(request_store, *, session_id: str, message: str) -> str:
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs
+
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message=message,
+        agent_name="codex",
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == request.id)
+            .values(session_id=session_id, status="running")
+        )
+    return request.id
+
+
+def test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_notice(
+    tmp_path, monkeypatch
+):
+    """HFR-107: End is a user's decision, and the run must be recorded as one.
+
+    The status and the ABSENCE of a notice are asserted together because either
+    alone is satisfied by the wrong outcome: a terminality-only check passes against
+    ``failed`` + ``interrupt_reason=stopped``, which would tell the user their run was
+    interrupted by infrastructure moments after they pressed the button, and count
+    against the definition's health. ``canceled`` with no interrupt reason and no
+    owed notice is the whole contract (HFR-012 / HFR-037, from the other direction).
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store, session_id="ses-end-107", message="a turn the user stopped"
+    )
+
+    sessions = {"slack_x:/w": types.SimpleNamespace(interrupt=_AsyncFlag())}
+
+    async def _cancel(_session_id):
+        # The real manager pops the SDK client during cancel; End must still succeed.
+        sessions.pop("slack_x:/w", None)
+        return {"ok": True, "status": "cancel_requested", "backend": "claude"}
+
+    wb_entry = types.SimpleNamespace(
+        task=types.SimpleNamespace(done=lambda: False),
+        context=types.SimpleNamespace(
+            platform_specific={"agent_session_target": {"agent_backend": "claude"}}
+        ),
+    )
+    controller = _make_controller()
+    controller.scheduled_task_service = service
+    controller.session_turns = types.SimpleNamespace(
+        is_in_flight=lambda sid: sid == "ses-end-107",
+        cancel=_cancel,
+        in_flight={"ses-end-107": wb_entry},
+        # The turn owns the run, so the pre-cancel snapshot is where its ownership
+        # is recorded -- the manager's own maps are empty again by reconcile time.
+        owned_agent_run_ids=lambda: {run_id},
+    )
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions=sessions, cleanup_session=_AsyncFlag()
+    )
+    # The service reads the turn lane through ITS controller, which is the same
+    # controller in production.
+    service.controller = controller
+    monkeypatch.setattr("modules.agents.claude_process_reaper._reap_pid_set", _AsyncFlag(ret=0))
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            state="active",
+            session_id="ses-end-107",
+            composite_key="slack_x:/w",
+        )
+    )
+
+    assert res["ok"] is True
+    settled = request_store.get_run(run_id)
+    assert settled is not None
+    assert settled["status"] == "canceled"
+    assert settled["completed_at"] is not None
+    metadata = settled["metadata"] or {}
+    assert "interrupt_reason" not in metadata
+    assert "owed_failure_notice" not in metadata
+
+
+def test_ending_an_idle_row_is_silent_and_settles_nothing(tmp_path, monkeypatch):
+    """HFR-108: the unconditional settlement must be SAFE, not merely correct.
+
+    End calls the cancellation whatever the live-state read returned, which is what
+    removes the race where a scheduler execution acquires the session just after the
+    read. That is only defensible if the idle case costs nothing: no run settled, no
+    message, no error. A run sitting on the same session that this process never
+    claimed is the sharpest version of the question, and it must survive untouched.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store, session_id="ses-end-108", message="somebody else's live run"
+    )
+
+    client = types.SimpleNamespace(interrupt=_AsyncFlag())
+    sessions = {"slack_y:/w": client}
+    cleanup = _AsyncFlag()
+    stop_calls: list = []
+
+    async def _handle_stop(context):
+        stop_calls.append(context)
+        return False
+
+    controller = _make_controller()
+    controller.scheduled_task_service = service
+    controller.session_turns = types.SimpleNamespace(
+        is_in_flight=lambda sid: False,
+        in_flight={},
+        owned_agent_run_ids=lambda: set(),
+    )
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions=sessions, cleanup_session=cleanup
+    )
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+    service.controller = controller
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            state="idle",
+            session_id="ses-end-108",
+            composite_key="slack_y:/w",
+        )
+    )
+
+    assert res["ok"] is True
+    # Silent: the idle branch never reaches the stop path at all, so there is no
+    # "nothing was running" message for it to suppress.
+    assert stop_calls == []
+    # ...and nothing was settled underneath it.
+    survivor = request_store.get_run(run_id)
+    assert survivor is not None
+    assert survivor["status"] == "running"
+    assert survivor["completed_at"] is None
+    assert not (survivor["metadata"] or {}).get("interrupt_reason")
