@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
 from urllib.parse import parse_qsl, urlsplit
@@ -426,6 +426,7 @@ class ModelHubService:
         )
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
+        self._engine_demanded = False
 
     @staticmethod
     def _source(config: ModelHubConfig, source_id: str) -> ModelHubSourceConfig:
@@ -591,6 +592,16 @@ class ModelHubService:
                     )
                 except OSError:
                     pass
+
+    async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
+        self._engine_demanded = True
+        if not already_synced:
+            await self._ensure_engine_synced()
+
+    def _runtime_status_after_demand(self, status: EngineStatus) -> EngineStatus:
+        if self._engine_demanded and status.health is EngineHealth.NOT_STARTED:
+            return replace(status, health=EngineHealth.DOWN)
+        return status
 
     @staticmethod
     def _credential_was_already_revoked(error: Exception) -> bool:
@@ -2563,7 +2574,7 @@ class ModelHubService:
                 ),
             }
 
-        await self._ensure_engine_synced()
+        await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         handle = await self._engine_call(
             self.adapter.invoke(
@@ -3051,10 +3062,10 @@ class ModelHubService:
 
     async def runtime_status(self) -> dict:
         status = await self._engine_call(self.adapter.status())
-        return _runtime_payload(status)
+        return _runtime_payload(self._runtime_status_after_demand(status))
 
     async def runtime_start(self) -> dict:
-        await self._ensure_engine_synced()
+        await self._prepare_engine_for_demand()
         status = await self._engine_call(self.adapter.start())
         return _runtime_payload(status)
 
@@ -3289,8 +3300,8 @@ class ModelHubService:
                     None,
                     supply_channel="native_cli",
                 )
-            if not engine_prepared:
-                await self._ensure_engine_synced()
+            await self._prepare_engine_for_demand(already_synced=engine_prepared)
+            engine_prepared = True
             if attempt_observer is not None:
                 attempt_observer(
                     source.id,

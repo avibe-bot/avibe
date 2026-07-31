@@ -120,7 +120,7 @@ export async function startRuntimeWithStatusRefresh(
     // A failed start changes supervisor health. Read that authoritative state
     // back so the persistent page does not keep presenting lazy-start idleness.
     const runtime = await api.getRuntimeStatus().catch(() => null);
-    return { runtime, failed: true };
+    return { runtime, failed: runtime?.status.health !== 'ok' };
   }
 }
 
@@ -130,18 +130,24 @@ export function pollRuntimeStatus(
   intervalMs = 5_000,
 ): () => void {
   let active = true;
+  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const schedule = () => {
+    timeout = globalThis.setTimeout(() => void refresh(), intervalMs);
+  };
   const refresh = async () => {
     try {
       const runtime = await api.getRuntimeStatus();
       if (active) onRuntime(runtime);
     } catch {
       // Keep the last authoritative snapshot and try again on the next tick.
+    } finally {
+      if (active) schedule();
     }
   };
-  const interval = globalThis.setInterval(() => void refresh(), intervalMs);
+  schedule();
   return () => {
     active = false;
-    globalThis.clearInterval(interval);
+    if (timeout !== undefined) globalThis.clearTimeout(timeout);
   };
 }
 

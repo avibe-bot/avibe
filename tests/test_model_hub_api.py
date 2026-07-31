@@ -392,6 +392,51 @@ def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
     assert [binding.source_id for binding in adapter.synced[0]] == ["src_runtime01"]
 
 
+def test_runtime_start_sync_failure_is_reported_as_down(tmp_path):
+    class IdleAdapter(FakeAdapter):
+        async def status(self):
+            return EngineStatus(
+                health=EngineHealth.NOT_STARTED,
+                installed_version="v7.2.95",
+                verified=True,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    store = MemoryStore()
+    store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_runtime01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Runtime source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="gpt-5", provenance="manual")],
+            credential_ref="cred_runtime01",
+        )
+    )
+    adapter = IdleAdapter()
+    adapter.fail_sync = True
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError, match="engine_down"):
+        asyncio.run(service.runtime_start())
+    runtime = asyncio.run(service.runtime_status())
+
+    assert adapter.start_calls == 0
+    assert runtime["status"]["health"] == "down"
+
+
 def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
     from vibe import model_hub_client
 

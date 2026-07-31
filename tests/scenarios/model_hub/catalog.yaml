@@ -17,9 +17,9 @@ status_legend:
 scenarios:
   - id: MH-RUNTIME-001
     name: Service restart reports an installed engine as idle until first demand
-    status: covered
+    status: partial
     kind: recovery
-    layer: scenario
+    layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts

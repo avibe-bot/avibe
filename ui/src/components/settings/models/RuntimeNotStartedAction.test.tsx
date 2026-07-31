@@ -74,6 +74,18 @@ describe('installed but not-started Model Hub runtime', () => {
     await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({ runtime: null, failed: true });
   });
 
+  it('accepts an authoritative healthy read after the start response is lost', async () => {
+    const api = {
+      startRuntime: vi.fn().mockRejectedValue(new Error('response lost')),
+      getRuntimeStatus: vi.fn().mockResolvedValue(runtime('ok')),
+    };
+
+    await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({
+      runtime: runtime('ok'),
+      failed: false,
+    });
+  });
+
   it('surfaces an automatic runtime transition on the next idle poll', async () => {
     vi.useFakeTimers();
     try {
@@ -105,6 +117,9 @@ describe('installed but not-started Model Hub runtime', () => {
       const stop = pollRuntimeStatus(api, onRuntime, 100);
 
       await vi.advanceTimersByTimeAsync(100);
+      expect(api.getRuntimeStatus).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(500);
       expect(api.getRuntimeStatus).toHaveBeenCalledOnce();
 
       stop();
