@@ -23,7 +23,7 @@ responses without changing the envelope version.
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → `{source, recovered, interrupted_pairs}` | API-key replacement. The optional `force` is a JSON body field, never a query parameter. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | → `{ok}` or `source_last_supplier` + `would_interrupt` | Guard evaluates the post-delete enabled orders. |
-| POST `/api/models/sources/<id>/test` | → `{discovered: integer}` | Explicit source re-discovery, including blocked-source recovery. |
+| POST `/api/models/sources/<id>/refresh` | → `{source: Source, discovered: integer}` | Explicit source re-discovery, including blocked-source recovery. The returned source contains the replacement model list and successful `last_discovered_at`. |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | source-order request → `{agent: AgentSupply}` | Full canonical order is re-echoed. |
@@ -393,16 +393,19 @@ API-key success:
 }
 ```
 
-## Blocked-source test
+## Source refresh and blocked-source recovery
 
-`POST /api/models/sources/<id>/test` is an explicit source-scoped operation. It may
-test a source whose global state is `needs_action` or `error`, even though normal
+`POST /api/models/sources/<id>/refresh` is an explicit source-scoped operation. It may
+refresh a source whose global state is `needs_action` or `error`, even though normal
 turn resolution and the chain probe exclude that source as non-runnable.
 
 On usable discovery it updates the discovered model set, clears the blocker, and
-sets the source to `standby`. A classified failure updates the source-global state
-and returns the normal safe error. This route is the only recovery test added; v3
-does not add a second “recover” endpoint.
+sets the source to `standby`. The response returns that complete updated source and
+the discovered count; clients do not reconstruct the model list from the count.
+`last_discovered_at` advances only on this successful replacement. A classified
+failure updates the source-global state, preserves the last successful model list and
+timestamp, and returns the normal safe error. This route is the only refresh/recovery
+operation; there is no parallel “test” or “recover” endpoint.
 
 ## OAuth completion
 
@@ -632,7 +635,7 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; source creation returns both `adopted_by` and `skipped_by` | API payload test |
+| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; every Source includes persisted `last_discovered_at`; source creation returns both `adopted_by` and `skipped_by`; source refresh returns the updated Source plus count | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
