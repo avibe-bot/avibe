@@ -12,6 +12,9 @@ import {
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './DockContext';
+import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
+
+export type { InstanceCapabilities, SessionInfo };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -1442,37 +1445,6 @@ export type RunningAgentCounts = {
 export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
-
-export type InstanceCapabilities = {
-  is_instance_owner: boolean;
-  can_read_instance: boolean;
-  can_chat: boolean;
-  can_manage_projects: boolean;
-  can_manage_agents: boolean;
-  can_manage_instance: boolean;
-  can_use_agents: boolean;
-  can_use_skills: boolean;
-  can_use_vault_secrets: boolean;
-  can_use_show_pages: boolean;
-  can_use_terminal_files: boolean;
-  can_use_terminal: boolean;
-  can_use_files: boolean;
-  can_use_system: boolean;
-};
-
-export type SessionInfo =
-  | { remote: false; instance_role?: 'owner'; capabilities?: InstanceCapabilities }
-  | { remote: true; authenticated: false; authorization_refresh_required?: boolean }
-  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
-  // be absent or shared across subjects).
-  | {
-      remote: true;
-      authenticated: true;
-      email: string;
-      sub?: string;
-      instance_role: 'owner' | 'editor' | 'viewer';
-      capabilities: InstanceCapabilities;
-    };
 
 export type LogEntry = {
   timestamp: string;
@@ -3194,7 +3166,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     startRemoteAccess: () => postJson('/api/remote-access/start', {}),
     stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
     optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}),
-    getAuthSession: () => getJson('/api/session'),
+    getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [showToast, t]);
