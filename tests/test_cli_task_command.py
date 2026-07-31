@@ -1858,6 +1858,42 @@ def test_hook_send_guards_an_explicit_agent_inside_enqueue(tmp_path: Path, capsy
     assert captured["expected_enabled_agent_id"] == agent.id
 
 
+def test_hook_send_guards_the_implicit_default_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--message",
+            "hello",
+        ]
+    )
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    default_agent = agent_store.ensure_default_agent(backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
+
+
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
     parser = cli.build_parser()
 

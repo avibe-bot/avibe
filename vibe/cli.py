@@ -3591,12 +3591,13 @@ def cmd_hook_send(args):
             help_command="vibe hook send --help",
             example_command="vibe hook send --session-id sesk8m4q2p7x",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key,
             help_command="vibe hook send --help",
         )
+        agent = agent_resolution.agent
         request = _task_request_store().enqueue_hook_send(
             session_key=session_key,
             session_id=session_id,
@@ -3607,7 +3608,9 @@ def cmd_hook_send(args):
             run_type="agent_run",
             source_kind="cli",
             expected_enabled_agent_id=(
-                agent.id if agent is not None and bool(getattr(args, "agent", None)) else None
+                agent.id
+                if agent is not None and agent_resolution.requires_enabled_write_guard
+                else None
             ),
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
