@@ -370,6 +370,7 @@ def _runtime_payload(status: EngineStatus) -> dict:
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     return {
+        "contract_version": 4,
         "manifest": EngineRuntimeManager().contract_manifest(),
         "status": {
             "installed_version": status.installed_version,
@@ -3050,6 +3051,11 @@ class ModelHubService:
 
     async def runtime_status(self) -> dict:
         status = await self._engine_call(self.adapter.status())
+        return _runtime_payload(status)
+
+    async def runtime_start(self) -> dict:
+        await self._ensure_engine_synced()
+        status = await self._engine_call(self.adapter.start())
         return _runtime_payload(status)
 
     def migration_scan(self) -> dict:

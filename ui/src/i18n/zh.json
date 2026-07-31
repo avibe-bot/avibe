@@ -688,7 +688,13 @@
         "direct": "直连 Direct"
       },
       "errors": {
-        "engineDown": "模型引擎未就绪,请稍后重试"
+        "engineDown": "模型引擎未就绪,请稍后重试",
+        "startFailed": "模型引擎启动失败"
+      },
+      "runtime": {
+        "notStarted": "未启动 · 首次使用时自动启动",
+        "startNow": "立即启动",
+        "starting": "正在启动"
       },
       "experimental": "实验",
       "agents": {

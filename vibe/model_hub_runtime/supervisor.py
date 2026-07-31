@@ -54,6 +54,7 @@ class EngineSupervisor:
         self._process: subprocess.Popen[bytes] | None = None
         self._connection: EngineConnection | None = None
         self._last_check: str | None = None
+        self._start_attempted = False
 
     def ensure_running(self) -> EngineConnection:
         with self._lock:
@@ -97,7 +98,7 @@ class EngineSupervisor:
                 listening = {"host": "127.0.0.1", "port": parsed_port}
                 health = "ok" if self._healthy_locked() else "degraded"
             elif installed:
-                health = "down"
+                health = "down" if self._start_attempted else "not_started"
             else:
                 health = "not_installed"
             return {
@@ -122,6 +123,7 @@ class EngineSupervisor:
             return EngineClient(self._connection)
 
     def _start_locked(self) -> EngineConnection:
+        self._start_attempted = True
         install = self.installer.ensure()
         if not install.get("ok"):
             reason = str(install.get("reason") or "engine_install_failed")

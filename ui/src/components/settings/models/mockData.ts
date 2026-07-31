@@ -357,6 +357,7 @@ function olderHistory(count: number): ResolutionEvent[] {
 
 export function buildMockRuntime(): RuntimeDependency {
   return {
+    contract_version: 4,
     manifest: {
       name: 'cliproxyapi',
       version: 'v7.2.95',

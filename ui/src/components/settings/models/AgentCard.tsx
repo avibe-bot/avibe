@@ -35,6 +35,7 @@ import {
   modelChainKey,
   modelHasOffOrderSupplier,
   modelNeedsAttention,
+  runtimeHealthNeedsAttention,
   type ModelChainIndex,
   type ModelChainRead,
 } from './modelRows';
@@ -291,7 +292,8 @@ const ModelRow: React.FC<{
   const selected = agent.selected_model_id === modelId;
   const head = runnableHead(read);
   const headIndex = read?.kind === 'ready' && head ? read.chain.chain.indexOf(head) : -1;
-  const runtimeBlocked = head?.channel === 'hub' && Boolean(runtime && runtime.status.health !== 'ok');
+  const runtimeBlocked = head?.channel === 'hub'
+    && Boolean(runtime && runtimeHealthNeedsAttention(runtime.status.health));
   const needsAttention = modelNeedsAttention(agent, modelId, read, runtime);
   const recoversAutomatically = read?.kind === 'ready' && read.chain.supply_state === 'waiting';
   const needsAction = needsAttention && !recoversAutomatically;
