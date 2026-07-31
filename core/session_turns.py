@@ -21,14 +21,21 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.run_settlement import (
+    SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
 from storage.background import normalize_run_status
@@ -68,6 +75,7 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+QUEUED_DISPATCH_TEXT_KEY = messages_service.QUEUED_DISPATCH_TEXT_KEY
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
 SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
@@ -86,6 +94,45 @@ _FLUSH_REBUILT_KEYS = frozenset(
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 MEMORY_USER_ID_METADATA = "_memory_user_id"
 MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+
+
+def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
+    """Move a reserved input row into the queue.
+
+    Queue rows keep user-visible transcript text in ``content_text``. The prompt
+    submitted by an entry point may be richer (attachment paths, Show event IDs,
+    reply guidance), so store that separately for ``flush_queue`` to replay.
+    This runs only from ``SessionTurnManager.submit``'s enqueue callback.
+    """
+    queueable_types = (messages_service.PENDING_TYPE,)
+    raw_metadata = conn.execute(
+        select(messages.c.metadata_json).where(
+            messages.c.id == message_id,
+            messages.c.type.in_(queueable_types),
+        )
+    ).scalar_one_or_none()
+    if raw_metadata is None:
+        return False
+    try:
+        metadata = json.loads(raw_metadata or "{}")
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata[QUEUED_DISPATCH_TEXT_KEY] = dispatch_text
+    result = conn.execute(
+        update(messages)
+        .where(
+            messages.c.id == message_id,
+            messages.c.type.in_(queueable_types),
+        )
+        .values(
+            type=messages_service.QUEUED_TYPE,
+            metadata_json=json.dumps(metadata),
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return bool(result.rowcount)
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -248,6 +295,31 @@ def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
             break
         segment.append(row)
         latest = row
+    return segment
+
+
+def _queued_memory_owner(row: dict) -> str | None:
+    owner = (row.get("metadata") or {}).get(MEMORY_USER_ID_METADATA)
+    return owner.strip() if isinstance(owner, str) and owner.strip() else None
+
+
+def _collect_user_segment(rows: list[dict]) -> list[dict]:
+    """Collect one user turn without crossing durable IDs or Memory owners."""
+    segment: list[dict] = []
+    segment_owner: str | None = None
+    for row in rows:
+        if _scheduled_provenance(row) is not None:
+            break
+        owner = _queued_memory_owner(row)
+        if segment and owner != segment_owner:
+            break
+        native_message_id = str(row.get("native_message_id") or "").strip()
+        if native_message_id:
+            if not segment:
+                segment.append(row)
+            break
+        segment.append(row)
+        segment_owner = owner
     return segment
 
 
@@ -535,6 +607,97 @@ def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]
     return claimed_row_ids
 
 
+def _promote_merged_user_segment(
+    conn: Connection,
+    segment: list[dict[str, Any]],
+    *,
+    text: str,
+    attachments: list[dict[str, Any]],
+    metadata: Optional[dict[str, Any]],
+    author_id: Optional[str],
+) -> dict[str, Any]:
+    """Replace a queued input segment with one freshly ordered visible message.
+
+    ``messages`` sort by ``(created_at, id)`` and ids encode creation time. Reusing
+    an old queued id with a new timestamp makes that pair contradictory, so mint
+    both together and atomically repoint every dependent record.
+    """
+    canonical = segment[0]
+    visible_type = messages_service.pending_message_target_type(
+        canonical.get("author"),
+        canonical.get("source"),
+        canonical.get("author_name"),
+    )
+    is_harness = messages_service.HARNESS_TYPE in {
+        canonical.get("author"),
+        canonical.get("source"),
+    }
+    native_message_ids = [
+        str(row.get("native_message_id") or "").strip()
+        for row in segment
+        if str(row.get("native_message_id") or "").strip()
+    ]
+    if native_message_ids and len(segment) != 1:
+        raise ValueError("independently identified user rows must flush as separate segments")
+    merged_content: dict[str, Any] = {"text": text}
+    annotation = (canonical.get("content") or {}).get("annotation")
+    if isinstance(annotation, dict):
+        merged_content["annotation"] = annotation
+    if attachments:
+        merged_content["attachments"] = attachments
+    visible = messages_service.append(
+        conn,
+        scope_id=canonical.get("scope_id"),
+        session_id=str(canonical["session_id"]),
+        platform=str(canonical.get("platform") or "avibe"),
+        author=messages_service.HARNESS_TYPE if is_harness else "user",
+        message_type=visible_type,
+        text=text,
+        content=merged_content,
+        metadata=metadata,
+        author_id=canonical.get("author_id") if is_harness else author_id,
+        author_name=canonical.get("author_name") if is_harness else None,
+        source=messages_service.HARNESS_TYPE if is_harness else "user",
+        parent_native_message_id=canonical.get("parent_native_message_id"),
+        delivered_at=canonical.get("delivered_at"),
+        read_at=canonical.get("read_at"),
+    )
+    source_ids = [str(row["id"]) for row in segment]
+    visible_id = str(visible["id"])
+    _repoint_message_dependents(conn, source_ids, visible_id)
+    messages_service.delete_queued(conn, source_ids)
+
+    native_message_id = native_message_ids[0] if native_message_ids else None
+    if native_message_id:
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == visible_id)
+            .values(native_message_id=native_message_id)
+        )
+        visible["native_message_id"] = native_message_id
+    return visible
+
+
+def _repoint_message_dependents(
+    conn: Connection,
+    source_ids: list[str],
+    target_id: str,
+) -> None:
+    """Retarget every foreign key to messages merged into one canonical row."""
+    for table in messages.metadata.tables.values():
+        if table is messages:
+            continue
+        for foreign_key in table.foreign_keys:
+            if foreign_key.column.table is not messages or foreign_key.column.name != messages.c.id.name:
+                continue
+            column = foreign_key.parent
+            conn.execute(
+                update(table)
+                .where(column.in_(source_ids))
+                .values({column.name: target_id})
+            )
+
+
 @dataclass
 class Turn:
     """The one active turn for an avibe session — the EXECUTION half of the FSM
@@ -566,6 +729,30 @@ class Turn:
     started_at: str = ""
     flush_on_cancel: bool = False
     stop_no_flush: bool = False
+    #: WHY this turn's task was cancelled, in the ``core.run_settlement``
+    #: vocabulary — set by the canceller BEFORE ``task.cancel()`` so ``_run`` can
+    #: attribute the run it owns correctly. ``None`` means a plain user Stop
+    #: (``cancel`` / ``send_now``), which is the default reading of a cancelled
+    #: turn; a backend runtime refresh sets ``SETTLED_BY_BACKEND_REFRESH`` so a
+    #: routine ``agents.*`` reconciliation is not reported as if the user pressed
+    #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
+    #: do: it retires when the turn is popped, with no parallel set to leak.
+    cancel_settled_by: Optional[str] = None
+    #: One shared backend Stop attempt for concurrent send-now callers. Each
+    #: caller already owns its own durable queue row; they must not interrupt the
+    #: same active turn more than once.
+    send_now_task: Optional[asyncio.Task[dict[str, Any]]] = None
+
+
+@dataclass(frozen=True)
+class TurnSubmissionResult:
+    """Routing decision plus the durable queue / delivery-intent outcome."""
+
+    route: Literal["ran", "enqueued"]
+    queue_persisted: bool | None = None
+    target_was_busy: bool = False
+    delivery_status: str | None = None
+    queue_owner_transferred: bool = False
 
 
 class SessionTurnManager:
@@ -614,6 +801,181 @@ class SessionTurnManager:
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
+
+    @staticmethod
+    def _agent_run_ids_from_spec(spec: Any) -> set[str]:
+        """Every ``agent_runs`` id a turn started under this spec is settling."""
+        if not isinstance(spec, dict):
+            return set()
+        found: set[str] = set()
+        primary = str(spec.get("task_execution_id") or "").strip()
+        if primary:
+            found.add(primary)
+        coalesced = spec.get("coalesced_queue")
+        execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        if isinstance(execution_ids, list):
+            for value in execution_ids:
+                execution_id = str(value or "").strip()
+                if execution_id:
+                    found.add(execution_id)
+        return found
+
+    def _settle_turn_owned_agent_runs(self, context: "MessageContext", settled_by: Optional[str]) -> None:
+        """Settle the ``agent_runs`` rows this turn owned when no result arrived.
+
+        The turn lane needs its own settlement because the harness cannot do it:
+        ``_execute_agent_run`` hands an avibe-targeted run to
+        ``session_turn_gate.submit_scheduled`` and returns with
+        ``complete_on_return=False`` while the turn is still running, so the outcome
+        this turn eventually produces is never seen there (Codex P1). Without this, a
+        stopped Workbench run whose backend emits no terminal result stays ``running``
+        until the staleness sweep relabels it ``orphaned`` — or forever when the sweep
+        is disabled.
+
+        Only a settlement that means "no result is coming" may terminalize the row —
+        membership in ``SETTLEMENTS_WITHOUT_RESULT``, not "anything but
+        ``terminal_result``". A real terminal output that completes the turn while
+        leaving the run to another owner (``turn_only_result``: the requeued Activity
+        behind a Claude delivery failure) must be left alone, or its run is failed and
+        its callback fired before the retry runs (Codex P1). ``None`` means no sink
+        existed, so there is nothing to conclude — do not guess. A coalesced turn settles EVERY id it owns, matching
+        ``owned_agent_run_ids``. A plain Chat turn carries no run attribution and no-ops
+        here. The write itself is the guarded first-writer-wins one, so racing an honest
+        terminal result is safe in both directions.
+        """
+
+        if settled_by not in SETTLEMENTS_WITHOUT_RESULT:
+            return
+        run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        if not run_ids:
+            return
+        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
+        settle = getattr(service, "settle_agent_runs_without_result", None)
+        if not callable(settle):
+            # A fake/partial controller (tests, a boot window before the service
+            # exists). The sweep remains the backstop; guessing is not an option.
+            logger.debug("turn settlement: no harness settlement writer available")
+            return
+        try:
+            settle(sorted(run_ids), settled_by=settled_by)
+        except Exception:
+            logger.warning(
+                "turn settlement: failed to settle runs %s as %s",
+                sorted(run_ids),
+                settled_by,
+                exc_info=True,
+            )
+
+    def owned_agent_run_ids(self) -> set[str]:
+        """Run ids a live turn in THIS process is currently executing.
+
+        The staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.1) needs
+        to know which ``running`` rows still have an owner before it declares any of
+        them orphaned. ``ScheduledTaskService`` can answer for its own drain path, but
+        the workbench lane never enters ``_inflight_executions``:
+        ``claim_queued_runs_for_workbench_in_connection`` claims rows that
+        ``flush_queue`` executes. ``Turn`` carries no run-id field, so the ids are read
+        off the context each turn started under — the same ``task_execution_id`` /
+        ``coalesced_queue`` keys ``_turn_sink_identity`` reads.
+
+        A coalesced turn owns EVERY id it is settling, not just the primary, or the
+        sweep would fail the siblings out from under a live flush.
+
+        Live streaming sinks are unioned in as well. They carry the same attribution
+        and are registered/popped on a different boundary than ``in_flight``, so a run
+        visible through either one is owned. Over-reporting an owner only delays a
+        sweep; under-reporting one fails a live run.
+
+        A malformed context contributes no ids rather than raising — but note the
+        caller must still fail closed if this method is missing or raises outright,
+        because "no owners" and "cannot tell" are opposite answers.
+        """
+        owned: set[str] = set()
+        for turn in list(self.in_flight.values()):
+            owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
+        for sink in list(self.active_turn_sinks.values()):
+            owned |= self._agent_run_ids_from_spec(sink)
+        return owned
+
+    def busy_session_ids(self) -> set[str]:
+        """Sessions whose gate is occupied by a live turn RIGHT NOW.
+
+        This is the exemption the staleness sweep needs for the ``queue_hold_expired``
+        class, and it is deliberately NOT expressible through
+        :meth:`owned_agent_run_ids`: a run the gate parked behind a live turn is not one
+        the live turn is executing, so it has no owner to report it, yet it is not
+        abandoned either — ``flush_queue`` will pick it up when the turn ends. Without
+        this, a legitimate Workbench turn lasting longer than the hold TTL had its own
+        queued follower failed underneath it (Codex P2).
+
+        ``in_flight`` is the right predicate because it is the same map
+        ``submit``/``submit_scheduled`` consult before answering ``enqueued`` — the very
+        decision that created the hold. Sinks are not unioned in here: they are keyed by
+        session KEY, not session id, and a streaming turn always has an ``in_flight``
+        entry anyway.
+        """
+        return {session_id for session_id in list(self.in_flight) if session_id}
+
+    def model_hub_turn_id_for_task(
+        self,
+        task: Optional[asyncio.Task] = None,
+    ) -> Optional[str]:
+        """Return the existing FSM turn token owned by ``task``.
+
+        Model Hub launch resolution runs inside the turn's dispatch task. IM and
+        CLI calls do not enter this registry, so they intentionally return no id.
+        """
+
+        owner = task or asyncio.current_task()
+        if owner is None:
+            return None
+        for turn in list(self.in_flight.values()):
+            if turn.task is not owner or turn.task.done():
+                continue
+            token = str(
+                (getattr(turn.context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            return token or None
+        return None
+
+    def _settle_model_hub_turn(
+        self,
+        context: "MessageContext",
+        settled_by: Optional[str],
+    ) -> None:
+        runtime = getattr(self.controller, "model_hub_runtime", None)
+        settle = getattr(runtime, "settle_turn", None)
+        turn_id = str(
+            (getattr(context, "platform_specific", None) or {}).get("turn_token")
+            or ""
+        ).strip()
+        if not turn_id or not callable(settle):
+            return
+        try:
+            from modules.agents.model_hub import (
+                launch_for_context,
+                turn_mode_for_context,
+            )
+
+            launch = launch_for_context(context)
+            mode = turn_mode_for_context(context)
+            if mode is None and launch is not None:
+                mode = "direct" if launch.channel == "direct" else "hub"
+            settle(
+                turn_id,
+                settled_by=settled_by,
+                ts=_utc_now_iso(),
+                mode=mode,
+            )
+        except Exception:
+            logger.warning(
+                "Model Hub provenance settlement failed for turn=%s",
+                turn_id,
+                exc_info=True,
+            )
 
     def bind_context(self, build_context: Callable[[str], "MessageContext"]) -> None:
         """Inject the routing-context builder (it lives in ``internal_server``) once
@@ -687,30 +1049,49 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        enqueue: Optional[Callable[[], None]] = None,
-    ) -> str:
+        enqueue: Optional[Callable[[], bool]] = None,
+        delivery_intent: Literal["queue", "send_now"] = "queue",
+    ) -> TurnSubmissionResult:
         """Unified turn entry for BOTH Chat and the scheduler: idle → run now; busy
         (or a pre-existing send-while-busy queue) → enqueue and run later.
 
-        Returns ``"ran"`` or ``"enqueued"``. The busy / pre-existing-queue decision,
-        the idle-with-queue drain, and the run are unified here; the caller supplies
-        ``enqueue`` — a 0-arg callable that persists the SOURCE-specific queued row
-        (Chat promotes its pre-saved pending row; the scheduler appends a harness
-        row) — because that row's shape depends on the request. The in_flight check
-        and the enqueue have no ``await`` between them (single-threaded loop), so a
-        running turn cannot end + flush in the gap — the enqueue stays atomic.
+        The result separates the routing decision (``route``) from whether the
+        SOURCE-specific enqueue callback actually persisted its row
+        (``queue_persisted``). Chat promotes its pre-saved pending row; the
+        scheduler appends a harness row. Their shapes differ, so the caller owns the
+        write and reports its durable result through the callback.
+
+        The in_flight check and callback have no ``await`` between them, which only
+        prevents this event loop from finishing + flushing the active turn in that
+        gap. It does NOT make the callback atomic with external transactions such as
+        session archival; callers must use ``queue_persisted`` (and any domain-owned
+        post-submit observation) rather than infer durability from ``route``.
         """
+        if delivery_intent not in {"queue", "send_now"}:
+            raise ValueError(f"unsupported delivery intent: {delivery_intent}")
         if not (isinstance(session_id, str) and session_id):
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
-            return "ran"
+            return TurnSubmissionResult(
+                route="ran",
+                delivery_status="ran" if delivery_intent == "send_now" else None,
+            )
 
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
-        if backend in self._draining_backends:
+        if delivery_intent == "send_now":
+            # Send-now always enters through the durable queue, even if the
+            # Session became idle before admission. Busy and idle delivery then
+            # share the same FIFO, provenance, and restart contract.
+            should_enqueue = True
+            if backend in self._draining_backends:
+                self._deferred_restart_sessions.setdefault(backend, set()).add(
+                    session_id
+                )
+        elif backend in self._draining_backends:
             should_enqueue = True
             self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
         elif busy:
@@ -719,9 +1100,22 @@ class SessionTurnManager:
             with self._sqlite_engine().connect() as conn:
                 should_enqueue = bool(messages_service.list_queued(conn, session_id))
         if should_enqueue:
-            if enqueue is not None:
-                enqueue()
-            if busy or backend in self._draining_backends:
+            queue_persisted = bool(enqueue()) if enqueue is not None else False
+            delivery_status = None
+            if queue_persisted and delivery_intent == "send_now":
+                if backend in self._draining_backends and not busy:
+                    # The row is durable, but a backend cutover deliberately owns
+                    # when the next turn may start. Report the deferral instead of
+                    # mislabelling the still-present queue as empty.
+                    delivery_status = "deferred"
+                else:
+                    delivery_result = await self.send_now(session_id)
+                    delivery_status = str(
+                        delivery_result.get("status")
+                        or delivery_result.get("code")
+                        or "failed"
+                    )
+            if queue_persisted and (busy or backend in self._draining_backends):
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
                 # (the later flush emits its own queue.updated when it pops). This
@@ -729,14 +1123,28 @@ class SessionTurnManager:
                 from core.inbox_events import bus
 
                 bus.publish("queue.updated", {"session_id": session_id})
-            else:
+            elif (
+                delivery_intent != "send_now"
+                and not busy
+                and backend not in self._draining_backends
+            ):
                 # Idle + pre-existing queue → no running turn to flush behind, so
-                # drain the whole queue (this row included) now, in order. flush_queue
-                # publishes queue.updated itself.
+                # drain the durable queue now, in order. If this callback lost an
+                # archival race, only pre-existing rows remain. flush_queue publishes
+                # queue.updated itself.
                 await self.flush_queue(session_id)
-            return "enqueued"
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=queue_persisted,
+                target_was_busy=busy,
+                delivery_status=delivery_status,
+            )
         await self._run(session_id, context, text, source=source)
-        return "ran"
+        return TurnSubmissionResult(
+            route="ran",
+            target_was_busy=busy,
+            delivery_status="ran" if delivery_intent == "send_now" else None,
+        )
 
     async def _run(
         self,
@@ -768,8 +1176,14 @@ class SessionTurnManager:
         async def _runner() -> None:
             cancelled = False
             failed = False
+            # How this turn's waiter was released, in the ``core.run_settlement``
+            # vocabulary. Anything other than a real terminal result means no result
+            # is coming, so an ``agent_runs`` row this turn owns has to be settled
+            # here — the gate lane returns to ``_execute_agent_run`` long before the
+            # turn ends, so nobody downstream can do it (Codex P1).
+            settled_by: Optional[str] = None
             try:
-                await dispatch_turn(
+                outcome = await dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -784,8 +1198,14 @@ class SessionTurnManager:
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
                 )
+                settled_by = outcome.settled_by
             except asyncio.CancelledError:
                 cancelled = True
+                # Do NOT decide the reason here: the canceller knows it, and it is
+                # recorded on the Turn (``cancel_settled_by``) which is only popped
+                # in the ``finally`` below. A plain Stop leaves it unset and reads
+                # as ``SETTLED_BY_STOPPED``; a backend runtime refresh sets its own
+                # value so it is not misreported as a user stop (Codex P1).
                 raise
             except Exception:
                 # dispatch_turn raised before any backend turn was actually
@@ -794,6 +1214,7 @@ class SessionTurnManager:
                 # NOT auto-flush the send-while-busy queue onto a fresh turn (Codex
                 # P2). (An explicit send-now flush_on_cancel still flushes.)
                 failed = True
+                settled_by = SETTLED_BY_NO_TERMINAL_RESULT
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
                 if isinstance(session_id, str):
@@ -804,6 +1225,16 @@ class SessionTurnManager:
                     turn = self.in_flight.pop(session_id, None)
                     if turn is not None:
                         bus.publish("turn.end", {"session_id": session_id})
+                    if cancelled:
+                        # Attribute the cancellation to whoever caused it. The Turn
+                        # carries the cause when the canceller had a more specific one
+                        # than "the user stopped this"; a plain Stop / send-now leaves
+                        # it unset, and ``stopped`` (→ ``canceled``) stays the default
+                        # reading of a cancelled turn.
+                        settled_by = (
+                            getattr(turn, "cancel_settled_by", None) if turn is not None else None
+                        ) or SETTLED_BY_STOPPED
+                    self._settle_model_hub_turn(context, settled_by)
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before
@@ -817,6 +1248,11 @@ class SessionTurnManager:
                             is_error=True,
                             output=terminal_turn_output(),
                         )
+                    # Settle before flushing: the next turn must not start while a run
+                    # this one owned is still ``running``. Placed after the failure
+                    # emit above so the honest outbound terminal writes first and this
+                    # guarded write degrades to a no-op.
+                    self._settle_turn_owned_agent_runs(context, settled_by)
                     # Flush intents ride on the popped Turn (set by cancel / send_now),
                     # so they retire with it — no parallel set to discard. Don't flush
                     # after a plain Stop (keep the queue) or a terminal failure; send-now
@@ -854,13 +1290,15 @@ class SessionTurnManager:
         """Drain the send-while-busy queue ONE segment per call — the turn's
         completion re-flushes the next, so segments run in order, one at a time.
 
-        A leading run of consecutive USER rows is merged into a single user turn (the
-        user's choice — one dispatch, not N). A SCHEDULED row (it carries stored
-        provenance) is NOT merged: it runs as its OWN ``SOURCE_SCHEDULED`` turn with
-        its delivery / attribution provenance restored, so a scheduled run that was
-        enqueued behind an active turn keeps its suppress-delivery / delivery-target /
-        source when it finally runs (#84). Returns True if a turn was started, False
-        on an empty queue / failure."""
+        A leading run of anonymous USER rows is merged into one user turn (the
+        user's choice — one dispatch, not N). A row with ``native_message_id`` is
+        already an independently addressable event and therefore runs as its own
+        segment. A SCHEDULED row (it carries stored provenance) is NOT merged: it
+        runs as its OWN ``SOURCE_SCHEDULED`` turn with its delivery / attribution
+        provenance restored, so a scheduled run that was enqueued behind an active
+        turn keeps its suppress-delivery / delivery-target / source when it finally
+        runs (#84). Returns True if a turn was started, False on an empty queue /
+        failure."""
         from core.inbox_events import bus
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
         from storage.background import run_update_event_transaction
@@ -892,6 +1330,11 @@ class SessionTurnManager:
         pending_agent_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
         claimed_agent_run_ids: list[str] = []
+        dispatch_text = ""
+        memory_user: str | None = None
+        memory_metadata_present = False
+        memory_cli_admitted = False
+        memory_ordinary_text = False
         engine = self._sqlite_engine()
         try:
             with run_update_event_transaction(engine) as conn:
@@ -970,38 +1413,52 @@ class SessionTurnManager:
                                     scheduled_text = coalesced_prompt
                             pending_scheduled_segment = segment
                 else:
-                    # User segment: the leading run of consecutive non-scheduled rows
-                    # for one resolved user. Missing identity rows remain isolated.
-                    segment = []
-                    segment_owner = None
-                    for r in rows:
-                        if _scheduled_provenance(r) is not None:
-                            break
-                        owner = (r.get("metadata") or {}).get(MEMORY_USER_ID_METADATA)
-                        owner = owner.strip() if isinstance(owner, str) and owner.strip() else None
-                        if segment and (owner is None or segment_owner is None or owner != segment_owner):
-                            break
-                        segment.append(r)
-                        segment_owner = owner
-                        if owner is None:
-                            break
-                if segment and not pending_agent_run_ids:
+                    segment = _collect_user_segment(rows)
+                if is_scheduled and segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
-                    texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
+                    texts = [str(r.get("text") or "") for r in segment if str(r.get("text") or "").strip()]
+                    dispatch_texts = [
+                        str((r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY) or r.get("text") or "")
+                        for r in segment
+                        if str(
+                            (r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY)
+                            or r.get("text")
+                            or ""
+                        ).strip()
+                    ]
                     # Carry attachments queued in this user segment so a file
                     # attached while the agent was busy still reaches the merged
-                    # turn. An attachment-ONLY segment has empty texts but must
-                    # still run (the agent reads the files), so guard on both.
+                    # turn. An attachment-only input or annotation with an empty
+                    # display body still has work to dispatch, so the guard uses
+                    # agent-facing text rather than transcript text.
                     queued_attachments = [
                         att
                         for r in segment
                         for att in ((r.get("content") or {}).get("attachments") or [])
                     ]
-                    if not texts and not queued_attachments:
+                    if not dispatch_texts and not queued_attachments:
+                        messages_service.delete_queued(conn, [r["id"] for r in segment])
                         return False
-                    memory_user = segment_owner
-                    web_push_owners = list(
+                    memory_user = _queued_memory_owner(segment[0])
+                    memory_metadata_present = any(
+                        any(
+                            key in (row.get("metadata") or {})
+                            for key in (
+                                MEMORY_USER_ID_METADATA,
+                                MEMORY_ORDINARY_TEXT_METADATA,
+                                "_memory_cli_admitted",
+                            )
+                        )
+                        for row in segment
+                    )
+                    memory_cli_admitted = all(
+                        (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
+                    )
+                    memory_ordinary_text = all(
+                        (row.get("metadata") or {}).get(MEMORY_ORDINARY_TEXT_METADATA) is True for row in segment
+                    )
+                    user_owners = list(
                         dict.fromkeys(
                             owner.strip()
                             for row in segment
@@ -1012,39 +1469,32 @@ class SessionTurnManager:
                             and owner.strip()
                         )
                     )
-                    web_push_owner = web_push_owners[0] if len(web_push_owners) == 1 else None
-                    memory_cli_admitted = all(
-                        (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
-                    )
-                    memory_ordinary_text = all(
-                        (row.get("metadata") or {}).get(MEMORY_ORDINARY_TEXT_METADATA) is True
-                        for row in segment
-                    )
-                    user_metadata = {
-                        MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
-                        "_memory_cli_admitted": memory_cli_admitted,
-                    }
-                    if memory_user:
-                        user_metadata[MEMORY_USER_ID_METADATA] = memory_user
-                    if web_push_owner:
-                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_owner
-                    elif web_push_owners:
-                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_owners
+                    user_owner = user_owners[0] if len(user_owners) == 1 else None
+                    user_metadata = dict(segment[0].get("metadata") or {})
+                    user_metadata.pop(QUEUED_DISPATCH_TEXT_KEY, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
+                    if memory_metadata_present:
+                        user_metadata[MEMORY_ORDINARY_TEXT_METADATA] = memory_ordinary_text
+                        user_metadata["_memory_cli_admitted"] = memory_cli_admitted
+                        if memory_user:
+                            user_metadata[MEMORY_USER_ID_METADATA] = memory_user
+                    if user_owner:
+                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = user_owner
+                    elif user_owners:
+                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = user_owners
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )
-                    user_row = messages_service.append(
+                    visible_text = "\n".join(texts)
+                    dispatch_text = "\n".join(dispatch_texts)
+                    user_row = _promote_merged_user_segment(
                         conn,
-                        scope_id=segment[0]["scope_id"],
-                        session_id=session_id,
-                        platform="avibe",
-                        author="user",
-                        source="user",
-                        message_type="user",
-                        text="\n".join(texts),
-                        content={"attachments": queued_attachments} if queued_attachments else None,
+                        segment,
+                        text=visible_text,
+                        attachments=queued_attachments,
                         metadata=user_metadata,
-                        author_id=web_push_owner,
+                        author_id=user_owner,
                     )
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
         except Exception:
@@ -1068,16 +1518,18 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
-            context.user_id = memory_user or "workbench"
-            context.message_id = str(segment[-1]["id"])
-            context.is_ordinary_text = memory_ordinary_text
-            if context.platform_specific is None:
-                context.platform_specific = {}
-            if memory_cli_admitted:
-                context.platform_specific["memory_cli_admitted"] = True
-            else:
-                context.platform_specific.pop("memory_cli_admitted", None)
-            await self._run(session_id, context, user_row.get("text") or "")
+            context.message_id = user_row["id"]
+            if memory_metadata_present:
+                if memory_user:
+                    context.user_id = memory_user
+                context.is_ordinary_text = memory_ordinary_text
+                if context.platform_specific is None:
+                    context.platform_specific = {}
+                if memory_cli_admitted:
+                    context.platform_specific["memory_cli_admitted"] = True
+                else:
+                    context.platform_specific.pop("memory_cli_admitted", None)
+            await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt
             # (fresh-routing) context, then run as SOURCE_SCHEDULED — not a plain user
@@ -1406,6 +1858,11 @@ class SessionTurnManager:
             if turn_backend and turn_backend != backend:
                 continue
             turn.stop_no_flush = True
+            # Record the cause BEFORE cancelling: this is a runtime refresh, not a
+            # user Stop, so a scheduled run this turn owns must not settle as
+            # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
+            # it off the Turn when it pops it.
+            turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
@@ -1497,14 +1954,53 @@ class SessionTurnManager:
         turn.task.cancel()
         return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
 
+    @staticmethod
+    def _clear_send_now_task(
+        turn: Turn,
+        task: asyncio.Task[dict[str, Any]],
+    ) -> None:
+        if turn.send_now_task is task:
+            turn.send_now_task = None
+
+    async def _interrupt_for_send_now(self, session_id: str, turn: Turn) -> dict:
+        """Own one backend Stop attempt shared by concurrent send-now callers."""
+
+        turn.flush_on_cancel = True
+        if turn.context.platform_specific is None:
+            turn.context.platform_specific = {}
+        turn.context.platform_specific["suppress_stop_no_active_notice"] = True
+        stopped = False
+        try:
+            stopped = bool(
+                await self.controller.command_handler.handle_stop(turn.context)
+            )
+        except Exception:
+            logger.exception(
+                "internal send-now: backend stop failed for session=%s",
+                session_id,
+            )
+        if not stopped:
+            turn.flush_on_cancel = False
+            return {
+                "ok": False,
+                "code": "stop_failed",
+                "session_id": session_id,
+            }
+        turn.task.cancel()
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "status": "interrupted",
+        }
+
     async def send_now(self, session_id: str) -> dict:
         """Run the session's send-while-busy queue immediately ("立即发送").
 
         If a turn is running (and something is queued), interrupt it (the user chose
         to cut in) and opt into ``flush_on_cancel`` so the queue runs as that turn
         unwinds. If nothing is running, flush directly as a fresh turn. No-op when
-        the queue is empty. Returns a result dict (``code='stop_failed'`` → 409 for
-        the HTTP adapter).
+        the queue is empty. A refused Stop or idle flush returns a typed failure for
+        the HTTP/CLI caller while leaving the durable queue retryable.
         """
         turn = self.in_flight.get(session_id)
         if turn is not None and not turn.task.done():
@@ -1515,27 +2011,58 @@ class SessionTurnManager:
                 has_queue = bool(messages_service.list_queued(conn, session_id))
             if not has_queue:
                 return {"ok": True, "session_id": session_id, "status": "empty"}
-            # Record the flush intent BEFORE awaiting the interrupt (same race as
-            # cancel, opposite intent: send-now WANTS the queue to run). Drop it on a
-            # refused stop and leave the turn + queue untouched (Codex P2).
-            turn.flush_on_cancel = True
-            if turn.context.platform_specific is None:
-                turn.context.platform_specific = {}
-            turn.context.platform_specific["suppress_stop_no_active_notice"] = True
-            stopped = False
+            # Concurrent send-now callers share one Stop attempt and therefore one
+            # truthful result. Shield the transition because caller cancellation
+            # cannot undo an already-admitted durable queue row.
+            send_now_task = turn.send_now_task
+            if send_now_task is None:
+                send_now_task = asyncio.create_task(
+                    self._interrupt_for_send_now(session_id, turn),
+                    name=f"send-now:{session_id}",
+                )
+                turn.send_now_task = send_now_task
             try:
-                stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
-            except Exception:
-                logger.exception("internal send-now: backend stop failed for session=%s", session_id)
-            if not stopped:
-                turn.flush_on_cancel = False
-                return {"ok": False, "code": "stop_failed", "session_id": session_id}
-            turn.task.cancel()
-            return {"ok": True, "session_id": session_id, "status": "interrupted"}
+                result = await asyncio.shield(send_now_task)
+            finally:
+                if (
+                    send_now_task.done()
+                    and not bool(send_now_task.result().get("ok"))
+                ):
+                    # Existing waiters are already queued to resume. Clearing on
+                    # the next loop tick lets a later explicit refusal retry make
+                    # a new Stop attempt without duplicating this one. A successful
+                    # Stop stays attached until the Turn is popped, so no caller
+                    # can interrupt the same unwinding Turn twice.
+                    asyncio.get_running_loop().call_soon(
+                        self._clear_send_now_task,
+                        turn,
+                        send_now_task,
+                    )
+            return dict(result)
         # No running turn — flush the queue directly as a new turn (rebuilds routing
-        # from the current session row internally). ``empty`` when nothing flushed.
+        # from the current session row internally). A false flush is only ``empty``
+        # when the queue is now actually empty; context/claim/dispatch failures keep
+        # their durable rows and must enter the caller's queue-recovery path.
         flushed = await self.flush_queue(session_id)
-        return {"ok": True, "session_id": session_id, "status": "flushed" if flushed else "empty"}
+        if flushed:
+            return {"ok": True, "session_id": session_id, "status": "flushed"}
+        try:
+            with self._sqlite_engine().connect() as conn:
+                queue_remains = bool(messages_service.list_queued(conn, session_id))
+        except Exception:
+            logger.exception(
+                "send-now: failed to verify queue after a refused flush for session=%s",
+                session_id,
+            )
+            queue_remains = True
+        return {
+            "session_id": session_id,
+            **(
+                {"ok": False, "code": "flush_failed"}
+                if queue_remains
+                else {"ok": True, "status": "empty"}
+            ),
+        }
 
     # --- shared turn chokepoints (status + Show checkpoint projection) ------------
 
@@ -1873,12 +2400,25 @@ class SessionTurnManager:
 
         This is a fallback for stop paths that successfully interrupt a backend
         but do not emit a terminal result. It only releases the dispatch waiter;
-        run completion is still owned by the backend's terminal emit. Current
-        live backends emit that terminal before ``handle_stop`` returns, and the
-        bound stop context carries the original agent-run attribution so the emit
-        records the run terminal. The identity guard is intentionally object-based
-        so a late stop cannot complete a newer sink registered under the same
-        session key.
+        run completion is still owned by the backend's terminal emit when one
+        arrives, and the bound stop context carries the original agent-run
+        attribution so that emit records the run terminal. The identity guard is
+        intentionally object-based so a late stop cannot complete a newer sink
+        registered under the same session key.
+
+        Ordering against a real terminal result is resolved by precedence, not by
+        timing luck. A terminal that lands *before* this call finds ``done`` already
+        set and we bail out, leaving ``settled_by="terminal_result"`` so the run
+        settles from its true result. A terminal that lands *after* the stop was
+        acknowledged cannot take the reason back — the dispatcher refuses to overwrite
+        a recorded ``stopped`` — so this run is always settled through the ``canceled``
+        mapping (``SETTLEMENT_TERMINAL_STATUS``). Whether ``canceled`` reaches the row
+        is then ordinary first-writer-wins: both writers are scoped to
+        ``queued|running``, so if the result's own row write got there first the run
+        keeps ``succeeded``. That is deliberate rather than lossy — the backend really
+        did finish, its text is recorded in the run's outputs either way, and forcing
+        ``canceled`` over an existing terminal status would mean breaking the single
+        guarantee every other settlement path relies on.
         """
         if not isinstance(binding, dict):
             return False
@@ -1895,6 +2435,10 @@ class SessionTurnManager:
         is_set = getattr(done, "is_set", None)
         if callable(is_set) and is_set():
             return False
+        # A stop that interrupted the backend without a terminal result: record it so
+        # ``dispatch_turn``'s caller settles the run instead of leaving it ``running``
+        # forever. ``setdefault`` keeps an already-recorded real terminal result.
+        sink.setdefault("settled_by", SETTLED_BY_STOPPED)
         done.set()
         return True
 

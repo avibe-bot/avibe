@@ -406,6 +406,27 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            # A session may pin a setting to NOTHING on purpose. The cascade above
+            # cannot express that: every `or` reads NULL as "inherit", which is the
+            # correct reading for the whole existing table and the WRONG one for a
+            # preserved `create_once` rebind, whose whole point is that the session
+            # it replaced pinned no model and must keep pinning none (D3). Only
+            # sessions carrying the explicit-override marker are re-read here, so
+            # the global meaning of NULL is untouched -- reinterpreting it would
+            # silently re-route every session that is merely inheriting.
+            explicit_overrides: set[str] = set()
+            if isinstance(session_target, dict):
+                session_meta = session_target.get("metadata")
+                if isinstance(session_meta, dict):
+                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
+                    if isinstance(marked, (list, tuple, set)):
+                        explicit_overrides = {str(name) for name in marked}
+            if "model" in explicit_overrides:
+                effective_model = session_target.get("model")
+            if "reasoning_effort" in explicit_overrides:
+                effective_reasoning_effort = session_target.get("reasoning_effort")
             # Materialize the resolved route into EMPTY workbench session
             # columns NOW, at turn start. A session created on an inherited
             # default carries NULLs (dispatch resolves the live Agent default);
@@ -553,9 +574,11 @@ class MessageHandler(BaseHandler):
                 if processed_files:
                     logger.info(f"Processed {len(processed_files)} file attachments for message")
 
+            user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
             if audio_transcripts:
                 message = append_audio_transcripts_to_message(message, audio_transcripts)
+                user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
             message = await self._prepend_message_metadata(context, message, include_user_info=is_human)
@@ -574,6 +597,7 @@ class MessageHandler(BaseHandler):
             request = self._build_agent_request(
                 context=context,
                 message=message,
+                user_message=user_message,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -788,6 +812,14 @@ class MessageHandler(BaseHandler):
             return control_text
         return message
 
+    @staticmethod
+    def _get_user_message(context: MessageContext, message: str) -> str:
+        payload = context.platform_specific or {}
+        normalized_user_text = payload.get("normalized_user_text")
+        if isinstance(normalized_user_text, str):
+            return normalized_user_text
+        return message
+
     async def handle_callback_query(self, context: MessageContext, callback_data: str):
         """Route callback queries to appropriate handlers"""
         try:
@@ -890,6 +922,7 @@ class MessageHandler(BaseHandler):
                 request = AgentRequest(
                     context=context,
                     message=callback_data,
+                    user_message="",
                     working_path=working_path,
                     base_session_id=base_session_id,
                     composite_session_id=composite_key,
@@ -982,6 +1015,7 @@ class MessageHandler(BaseHandler):
             request = AgentRequest(
                 context=context,
                 message="stop",
+                user_message="",
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,

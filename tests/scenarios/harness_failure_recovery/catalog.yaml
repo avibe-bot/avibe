@@ -6,6 +6,9 @@ capability:
     - tests/test_agent_backend_alive.py
     - tests/test_agent_service.py
     - tests/test_scheduled_tasks.py
+    - tests/test_dispatcher_stream_chunk.py
+    - tests/test_message_dispatcher_result_fallback.py
+    - tests/test_agent_stop_settlement.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -67,7 +70,1412 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_failed_run_records_error_and_enqueues_one_terminal_callback
+  - id: HFR-009
+    name: turn that ends without a terminal result settles its Run
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_settles_failed_when_sink_released_without_terminal_result
+  - id: HFR-010
+    name: refused concurrent turn settles its Run instead of stranding it
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn
+  - id: HFR-011
+    name: cancel landing mid-settlement stays canceled
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_cancel_racing_settlement_keeps_canceled
+  - id: HFR-012
+    name: user-stopped Run settles canceled, not failed
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_stopped_by_user_settles_canceled
+  - id: HFR-013
+    name: running Run whose owner vanished is swept terminal
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_terminalizes_orphaned_running_run
+  - id: HFR-014
+    name: Run owned by a live out-of-band turn is never swept
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_running_run_owned_by_workbench_turn
+  - id: HFR-015
+    name: unknown ownership fails closed instead of sweeping
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_fails_closed_when_ownership_is_unknown
+  - id: HFR-016
+    name: queued Run stranded by a dead transport ages out with an explanation
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport
+  - id: HFR-017
+    name: queued Run merely waiting on a busy Session is never swept
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_leaves_a_queued_run_whose_session_is_merely_busy
+  - id: HFR-018
+    name: leaked Session lock is released without freeing a live one
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_releases_a_leaked_session_lock
+  - id: HFR-019
+    name: finishing predecessor cannot steal a successor's Session lock owner
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_execution_completion_does_not_steal_a_later_lock_owner
+  - id: HFR-020
+    name: staleness evidence stamp does not self-feed the drain loop
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_stranded_queued_run_does_not_trigger_repeated_metadata_writes
+  - id: HFR-021
+    name: stale transport evidence never fails a run that is deliverable now
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back
+  - id: HFR-022
+    name: unknown queue deliverability disables the transport class
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_transport_class_when_deliverability_is_unknown
+  - id: HFR-023
+    name: terminal result cannot overwrite an acknowledged stop's settlement reason
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_dispatcher_stream_chunk.py::test_result_does_not_overwrite_an_acknowledged_stop_stamp
+  - id: HFR-024
+    name: transport TTL is measured from the outage, not the enqueue
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_ages_a_transport_failure_from_when_it_started
+  - id: HFR-025
+    name: a transport reason with no timestamp is never acted on
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp
+  - id: HFR-026
+    name: live ownership exempts an aged queue hold from its TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns
+  - id: HFR-027
+    name: gate-owned Workbench turn settles its own Run when no result arrives
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_workbench_turn_settles_its_agent_run_when_no_result_arrives
+  - id: HFR-028
+    name: swept Run's persisted queue segment is retired immediately
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_retires_the_queue_segment_of_the_run_it_expired
+  - id: HFR-029
+    name: backend runtime refresh settles its Run as a refresh, not a user stop
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop
+  - id: HFR-030
+    name: terminal output that keeps the Run elsewhere is stamped turn-only
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_turn_only_terminal_release_does_not_claim_the_run
+  - id: HFR-031
+    name: turn lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_turn_only_result_leaves_an_activity_owned_run_alone
+  - id: HFR-032
+    name: drain lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it
+  - id: HFR-033
+    name: a recovered transport gives the next outage its own full TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_grants_a_second_outage_its_own_ttl_after_a_recovery
+  - id: HFR-034
+    name: a hold parked behind a live session turn is spared
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_hold_parked_behind_a_live_session_turn
+  - id: HFR-035
+    name: unknown live turns disable the hold class instead of failing holds
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_hold_class_when_live_session_turns_are_unknown
+  - id: HFR-036
+    name: a stop's synthetic result records no run terminal
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_stop_output_release_names_the_stop_and_records_no_run_terminal
+  - id: HFR-037
+    name: a stopped run settles canceled rather than succeeded
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_stopped_run_settles_canceled_not_succeeded
+  - id: HFR-038
+    name: stop output ends the turn while preserving the request's output policy
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_stop_output_ends_the_turn_without_owning_the_run
+  - id: HFR-039
+    name: a backend's live stop path emits stop semantics
+    status: covered
+    kind: failure
+    layer: contract
+    backend: codex
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_codex_stop_emits_stop_semantics
+  - id: HFR-040
+    name: no backend stop may use the terminal-turn default
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_no_backend_stop_uses_the_terminal_turn_default
+  - id: HFR-041
+    name: every Harness run records its terminal result text, not just agent_run
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_scheduled_run_records_result_text_on_an_already_terminal_row
+  - id: HFR-042
+    name: an already-terminal run is given its missing result text without re-settling
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_terminal_backfill_never_overwrites_a_real_terminal_result
+  - id: HFR-043
+    name: a recovered Activity in a suppressed Session records the result on its real Run
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_recovered_activity_in_a_suppressed_session_records_result_on_its_run
+  - id: HFR-044
+    name: a Harness turn attributes its background Activity to that turn's Run
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: claude
+    test: tests/test_claude_agent_initiated_turn.py::ActivityRunAttributionTests::test_scheduled_turn_attributes_its_activity_to_its_run
+  - id: HFR-045
+    name: a late result never dresses up a canceled run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_a_canceled_run
+  - id: HFR-046
+    name: a late failure never attaches an error to a succeeded run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_an_error_on_a_succeeded_run
+  - id: HFR-047
+    name: a failed harness run still receives its diagnostic result text
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_still_diagnoses_a_failed_run
+  - id: HFR-048
+    name: a late success body never lands on a swept failed run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_success_text_on_a_failed_run
+  - id: HFR-049
+    name: clearing a session pauses bound definitions instead of orphaning them
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_session_archive.py::test_delete_agent_sessions_reclaims_bound_definitions
+  - id: HFR-050
+    name: shared reclaim keeps archive terminal while /new stays recoverable
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_session_archive.py::test_archive_still_soft_deletes_bound_definitions
+  - id: HFR-051
+    name: models declare the (scope, anchor) session invariant
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_models_declare_scope_anchor_unique_index
+  - id: HFR-052
+    name: a same-anchor row owned by another backend is adopted, not collided with
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_adopts_row_owned_by_other_backend
+  - id: HFR-053
+    name: find-then-create loses the session-row race gracefully
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_agent_run_target.py::test_resolve_agent_run_target_tolerates_concurrent_row_insert
+  - id: HFR-054
+    name: an unresolvable pinned session pauses its definition and notifies once
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_execute_task_pauses_and_notifies_when_pinned_session_is_missing
+  - id: HFR-055
+    name: a create_once definition rebinds instead of failing forever
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_create_once_rebinds_when_session_deleted
+  - id: HFR-056
+    name: a rebind preserves the deleted session's agent and model
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_rebind_preserves_model_of_the_deleted_session
+  - id: HFR-057
+    name: superseding a bound session preserves its thread routing
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_superseding_a_bound_row_keeps_its_thread_routing
+  - id: HFR-058
+    name: a paused watch is given watch commands, not task commands
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_command_handler_user_names.py::CommandHandlerUserNameTests::test_new_command_gives_watches_their_own_recovery_commands
+  - id: HFR-059
+    name: a prefix clear does not hard-delete a superseded row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_prefix_clear_does_not_delete_a_superseded_row
+  - id: HFR-240
+    name: the backend-wide clear does not delete a superseded row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_does_not_delete_a_superseded_row
+  - id: HFR-241
+    name: the superseded exclusion still deletes a row carrying no marker
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_still_deletes_a_rows_with_an_empty_anchor
+  - id: HFR-242
+    name: /new end to end keeps a superseded session and its bound definitions
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_command_handler_user_names.py::NewCommandStorageIntegrationTests::test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one
+  - id: HFR-243
+    name: a rebind whose snapshot Agent is gone falls back to scope defaults
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone
+  - id: HFR-244
+    name: a snapshot's null model survives the rebind instead of adopting the Agent's
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents
+  - id: HFR-245
+    name: an unrelated task update keeps the rebound session's Agent authority
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # The schema carries one path, so this stays the primary test. A second test
+    # covers the same id in the report's literal order (unrelated edit BEFORE the
+    # default moves), where the persisted-state assertion is the load-bearing one:
+    # tests/test_scheduled_tasks.py::test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves
+    test: tests/test_scheduled_tasks.py::test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority
+  - id: HFR-246
+    name: adopting an unbound row replaces the old backend's whole route
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_legacy_adoption_replaces_the_whole_route_of_an_unbound_row
+  - id: HFR-247
+    name: the workbench Default action drops the explicit-override marker
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_core_services_sessions.py::test_workbench_default_action_drops_the_explicit_override_marker
+  - id: HFR-248
+    name: forking an explicit-null session copies its pins, not just its nulls
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_session_fork.py::test_forking_an_inherited_null_session_keeps_its_explicit_pins
+  - id: HFR-249
+    name: turn-start materialization never fills an explicitly pinned setting
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_materialize_agent_session_route_never_fills_an_explicitly_pinned_field
+  - id: HFR-250
+    name: a native bind by id replaces the whole route of an unbound row
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # HFR-246 covers the (scope, anchor) adoption door (``_claim_anchor_row``); this
+    # is the second one, ``bind_agent_session_by_id``, which binds an explicitly
+    # targeted reserved row. Two companion tests hold the edges: an already-bound
+    # row keeps its backend identity (write-once), and an ordinary same-backend bind
+    # keeps the row's model / reasoning_effort and their marker.
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_keeps_the_backend_of_an_already_bound_row
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_keeps_the_pins_of_a_same_backend_bind
+    test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_replaces_the_whole_route_of_an_unbound_row
+  - id: HFR-251
+    name: a native bind by id that loses the race leaves the winner's row intact
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # kind=safety, not idempotency: two DIFFERENT callers with different natives and
+    # different Agent identities are not repeats of one another, so there is no
+    # "same call twice" to be idempotent about. What must hold is that losing the
+    # race destroys NOTHING the winner owns -- not merely "the write-once native id
+    # survives". The winner's native, backend, Agent id / name / variant,
+    # model / reasoning_effort, explicit-override marker, status and
+    # updated_at / last_active_at all stand. HFR-250 fixed WHAT the adoption branch
+    # writes; this covers WHEN it is allowed to, since its snapshot reads reserve
+    # nothing and SQLite only locks at the UPDATE.
+    # Three halves, one window. The two same-backend first-bind halves cover the
+    # branch where _set_native_once's SELECT was the only thing enforcing
+    # write-once, and specifically the two routes through the fall-through that
+    # dropped the identity columns only when requested_backend != winner_backend --
+    # the loser naming the winner's own backend (comparison equal), and the loser
+    # naming no backend at all (comparison cannot fire). Both were red asserting
+    # the winner's Agent identity and timestamps while its native id stood:
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_first_bind_without_a_requested_backend
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind
+    test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_cross_backend_adoption
+  - id: HFR-252
+    name: a session archived mid-bind stays archived, whichever branch the bind takes
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The third read in bind_agent_session_by_id -- the status SELECT that refuses
+    # archived rows -- has the same read-then-write shape HFR-251 closed twice, but
+    # it decides no write: all three UPDATEs re-assert status != 'archived'
+    # themselves, so a late archive makes the write a no-op and the call returns
+    # None. So this entry is a PROOF, green before it was written, not a red-green
+    # regression. It exists because nothing failed if a future edit dropped one of
+    # those predicates and left the SELECT to "guard" the write; each case was
+    # confirmed to fail with its own predicate removed, one statement each.
+    # The other two statements: the cross-backend adopt, and the idempotent re-bind
+    # that is the only shape reaching the final UPDATE (write-once declines, so it
+    # is a bare id match carrying status='active'):
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_cannot_adopt_a_session_archived_inside_its_window
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_session
+    test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_cannot_resurrect_a_session_archived_inside_its_window
+  - id: HFR-253
+    name: >-
+      an anchor relabel that loses the race leaves the winner's row intact and
+      returns no id for an archived winner
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The THIRD writer with the HFR-251 shape, and the one that re-asserted nothing
+    # at all: _claim_anchor_row's unbound branch decided "relabel this row to the
+    # incoming backend and replace its whole route" and then issued
+    # UPDATE ... WHERE id = ?, with no write-once, no backend and no archive
+    # predicate -- while its sibling bind_agent_session_by_id, added by the same PR,
+    # got all three. Production path: the channel Agent switches to Claude while the
+    # previous Codex turn is still finishing, so the Codex native id commits inside
+    # the window and the row comes out agent_backend='claude' holding a Codex native.
+    # The scope key is part of the mechanism: a 3-part key (slack::channel::C1)
+    # upserts the scope first, so the transaction already holds the write lock and the
+    # window does not exist; only the 2-part form build_context_session_key emits for
+    # ordinary channel/thread turns is exposed.
+    # The paired half covers the same window with a terminal archive as the competing
+    # write:
+    # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
+    # THE INVARIANT IS WIDER THAN THE ROW: what the function RETURNS is part of it.
+    # Guarding the UPDATE stopped the relabel, but the lost-race path still handed
+    # back the winner's id even when the winner ARCHIVED the row -- and an archive is
+    # terminal, vacates the anchor, and is filtered out by every read path here. There
+    # is no later re-resolve to correct it: BaseAgent.ensure_agent_session_id pins any
+    # non-empty answer into context.platform_specific['agent_session_id'] and the turn
+    # runs against that row. So a lost relabel whose winner archived yields NO usable
+    # session: None, propagated through get_or_create_agent_session_row ->
+    # SQLiteSessionsService.ensure_agent_session_id, which is what the two sibling
+    # bind paths already answer for the same interleaving -- and NOT a fresh row,
+    # which would be a second write decided from the snapshot the relabel was just
+    # refused for. A LIVE bound winner is a real session, so the primary test pins the
+    # other answer just as explicitly: its id is still returned. Asserted at the
+    # storage boundary by both halves and end to end (the id is never pinned into the
+    # turn context) by:
+    # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_archive_race_never_pins_an_agent_session_id
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window
+  - id: HFR-254
+    name: the legacy-scope native bind destroys nothing a concurrent winner owns
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # bind_agent_session is the legacy-scope twin of bind_agent_session_by_id and was
+    # missed by HFR-251/252: _set_native_once is a preceding SELECT, and the UPDATE
+    # acting on its answer carried neither coalesce(native_session_id,'') = '' nor
+    # status != 'archived' while unconditionally setting status='active'. One
+    # competing commit inside that window therefore lost its write-once native AND
+    # had its terminal archive undone, with the losing caller reporting success.
+    # The invariant is the same as HFR-251's and is NOT just write-once + archive:
+    # losing the race must destroy NOTHING the winner owns -- its native id, its
+    # Agent id / name / variant, model / reasoning_effort and the explicit-override
+    # marker, its status, and its updated_at / last_active_at all stand.
+    # Two halves, one window. The archive half asserts the write-once native, the
+    # surviving archive and the None return. The identity half is the one the first
+    # fix reintroduced and had to close a second time: with a LIVE winner the
+    # rowcount-0 first bind FELL THROUGH to the final UPDATE, whose shared values
+    # dict carries status='active', both timestamps and the caller's agent_id /
+    # agent_name, so the loser stamped its own Agent identity and clock over the
+    # winner while the native id stood. An archived winner hides it -- that write is
+    # refused wholesale by status != 'archived'. Same correction as the twin's:
+    # tests/test_sqlite_sessions_store.py::test_bind_agent_session_loses_a_concurrent_same_backend_first_bind
+    # The 2-part scope key (slack::C4) is part of the mechanism: a 3-part key upserts
+    # the scope, taking the write lock before the window opens.
+    test: tests/test_sqlite_sessions_store.py::test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window
+  - id: HFR-255
+    name: vibe task update rejects --agent together with --clear-agent
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # The follow-the-session marker (HFR-245) was defeatable in ONE command. The pair
+    # honoured neither flag: --clear-agent won for agent_name (-> None) while the mere
+    # presence of --agent set explicit_agent_requested, which POPS the marker, so the
+    # definition looked like "unpinned and not following its Session" and the resolve
+    # wrote today's scope/default Agent back as a hard pin. Fixed by rejecting the
+    # contradictory pair, the convention --name / --clear-name already uses; the test
+    # asserts both pairs so they cannot drift apart.
+    # The sibling hole in vibe watch update is closed by HFR-256.
+    test: tests/test_cli_task_command.py::test_task_update_rejects_agent_together_with_clear_agent
+  - id: HFR-256
+    name: vibe watch update keeps the bound Session's Agent authority
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # cmd_watch_update is the sibling definition command over the same run_definitions
+    # rows and had NO follow-the-session logic at all: --clear-agent / --agent were a
+    # silent if/elif with no contradictory-pair rejection, and the command then ran the
+    # same "agent_name is None and session_policy != 'existing'" re-resolution as the
+    # task side, writing today's scope/default Agent back as a HARD PIN. So
+    # --clear-agent was silently undone, and any unrelated edit (--name) re-pinned a
+    # watch whose Agent authority belonged to its Session. Parity fix: reuse
+    # BINDING_FOLLOWS_SESSION_METADATA_KEY, keep all three durable states
+    # (clear/follow, preserve on unrelated edits, exit on explicit --agent), and reject
+    # --agent together with --clear-agent (HFR-255's shape).
+    # The proof is NOT the CLI payload: after the unrelated edit the scope default is
+    # moved and the watch is FIRED through its production path -- the real
+    # ManagedWatchService._run_watch reads the STORED definition, _enqueue_hook queues a
+    # "watch" request carrying agent_name, and the real ScheduledTaskService
+    # claim/execute path hands it to the real MessageHandler. The assertions are on the
+    # AgentRequest that handler built (Agent identity, backend, system prompt). Only the
+    # waiter subprocess is stubbed.
+    # NOTE: _recover_pinned_session_binding (the reset-rebind writer of the marker) is
+    # reached only from _execute_task and takes a ScheduledTask, so it never runs for a
+    # watch definition; a watch enters the state through --clear-agent. Extending reset
+    # rebinding to watches is a separate change.
+    # The contradictory-pair half:
+    # tests/test_cli_watch_command.py::test_watch_update_rejects_agent_together_with_clear_agent
+    test: tests/test_scheduled_tasks.py::test_unrelated_watch_update_keeps_the_follow_session_agent_authority
+  # HFR-257..260 are the rest of the SET. HFR-251..254 each closed one instance of the
+  # same defect -- decide from a SELECT, then write with a predicate that re-asserts
+  # nothing -- one per review round, in the BIND writers. These four come from
+  # enumerating every UPDATE / INSERT / DELETE in storage/session_reclaim.py,
+  # storage/agent_session_rows.py and on their teardown call path and asking the same
+  # question of each, so the class is closed rather than sampled again.
+  - id: HFR-257
+    name: a reclaim that loses to a repoint changes nothing and is reported to nobody
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # reclaim_bound_definitions read every live definition bound to the dying session
+    # and then wrote WHERE run_definitions.id = ? alone. The hard-delete path
+    # (_delete_agent_session_rows) reaches it after nothing but reads -- a resolved
+    # 2-part scope key never upserts -- so a user repointing that task/watch to another
+    # Session (upsert_scheduled_task, a full-row UPDATE) inside the window had the
+    # definition paused on its NEW live binding, with its session_settings_snapshot
+    # overwritten by the DEAD session's settings; that snapshot is what a later
+    # create_once rebind reads, so the task would return on the wrong model / agent.
+    # Guarded by re-asserting both halves of what the read decided: session_id = <the
+    # binding this reclaim is for> AND deleted_at IS NULL.
+    # THE ACCOUNTING IS THE OTHER HALF, and it is a user-visible invariant, not
+    # bookkeeping: the returned summary is what the archive confirm dialog reports and
+    # the ledger is what /new counts in its reply, so both are credited only on
+    # rowcount. Measured at b366384b: summary {'paused': 1, 'snapshotted': 1} and a
+    # ledger entry for a definition that was never the teardown's to touch.
+    # The /new half drives the production path (delete_agent_sessions ->
+    # _delete_agent_session_rows -> reclaim, inside the command handler's
+    # session_teardown_context) with two definitions, so the ledger has to name exactly
+    # the one that did NOT move:
+    # tests/test_sqlite_sessions_store.py::test_new_teardown_path_reports_only_the_definitions_it_reclaimed
+    test: tests/test_sqlite_sessions_store.py::test_reclaim_leaves_a_definition_repointed_inside_its_window_alone
+  - id: HFR-258
+    name: a lost anchor supersede returns the winning session instead of raising
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The SECOND branch of _claim_anchor_row, and the one HFR-253 left behind: it
+    # guarded the relabel and not the supersede. Two turns on one thread claim a bound
+    # row for a new backend; the winner moves the anchor aside and inserts its
+    # replacement, then the loser's UPDATE ... WHERE id = ? "succeeds" (it re-supersedes
+    # an already-moved anchor), reports the slot freed, and falls into
+    # create_agent_session_row -- whose INSERT collides with the winner's replacement on
+    # the UNIQUE (scope_id, session_anchor) index. Red at b366384b with
+    # IntegrityError: UNIQUE constraint failed: agent_sessions.scope_id,
+    # agent_sessions.session_anchor escaping ensure_agent_session_id.
+    # Guarded by re-asserting status != 'archived', the anchor the row was resolved by,
+    # and the backend the branch decided against; on rowcount 0 the current anchor
+    # HOLDER is re-read and returned (None when it archived or is gone, which is what
+    # every caller of get_or_create_agent_session_row already handles). What the
+    # function RETURNS is part of the invariant, exactly as in HFR-253.
+    test: tests/test_sqlite_sessions_store.py::test_anchor_supersede_returns_the_winner_of_a_concurrent_supersede
+  - id: HFR-259
+    name: the placeholder relabel never hands back a row it lost the race for
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _find_agent_session_row_id runs BEFORE get_or_create_agent_session_row on both
+    # bind entry points, and its legacy branch is itself a read-then-write: select a row
+    # whose agent_backend / agent_variant are still the blank / "default" placeholder,
+    # then relabel it with UPDATE ... WHERE id = ? and RETURN that id. Two ways to lose,
+    # both asserted. An archive committed inside the window was relabelled and then
+    # handed back -- and ensure_agent_session_id returns its answer unchanged while
+    # BaseAgent.ensure_agent_session_id pins any non-empty id into
+    # context.platform_specific['agent_session_id'] without re-resolving, so the turn ran
+    # against a terminal row (HFR-253's invariant, in a different function). A concurrent
+    # concrete-backend claim was overwritten, leaving the row labelled with this caller's
+    # backend while holding the winner's write-once native id.
+    # The answer on loss is None -- what this finder already returns when it sees nothing
+    # usable -- so the caller re-resolves through the guarded (scope, anchor) path and
+    # converges with the serial order instead of deciding twice from one snapshot.
+    # The identity half:
+    # tests/test_sqlite_sessions_store.py::test_placeholder_relabel_cannot_overwrite_a_backend_claimed_inside_its_window
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_never_returns_a_placeholder_archived_inside_its_window
+  - id: HFR-260
+    name: a /new clear keeps a session superseded inside its window
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _delete_agent_session_rows evaluated the WHOLE teardown query -- scope, agent-name
+    # match and the include_superseded=False guard -- in the id READ, before any write
+    # lock existed, then hard-deleted by id list. Superseding PROMISES the row is kept
+    # (write-once native id, unrecoverable transcript), so a supersede committed inside
+    # that window made /new hard-delete exactly the row the guard protects, and count it.
+    # Fixed by re-running id_query inside the DELETE, which re-evaluates every predicate
+    # under the lock whichever caller built them, and returning only rows actually
+    # removed.
+    # DELIBERATELY NOT ROLLED BACK: the reclaim runs first (it needs both rows visible
+    # for the settings snapshot), and wrapping the pair in a SAVEPOINT makes it worse --
+    # under WAL the SAVEPOINT opens the transaction before the reclaim's own SELECT, so
+    # the read pins a snapshot and the reclaim UPDATE fails with SQLITE_BUSY_SNAPSHOT on
+    # this very interleaving (measured). The pause therefore stands and the ledger says
+    # so; pause is the recoverable mode and the kept row is one the thread has moved off.
+    test: tests/test_sqlite_sessions_store.py::test_new_teardown_keeps_a_session_superseded_inside_its_window
+  # HFR-261..262 continue the same class from the OTHER side. HFR-249..260 guarded the
+  # writers that decide from a read one statement earlier; these two are the writer whose
+  # read is a whole LAYER earlier (a CLI command's payload) and the one race a guarded
+  # statement cannot answer at all -- there the loser is refused the write lock outright,
+  # so the remedy is to hold the lock from before the read rather than re-assert it.
+  - id: HFR-261
+    name: a full-row definition write cannot undo the reclaim it lost to
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # upsert_scheduled_task and upsert_watch write EVERY column of run_definitions from a
+    # payload the caller built out of a read one layer up (vibe task/watch update reads
+    # the definition, then resolves Agents, Sessions and delivery targets before writing).
+    # A reclaim committed in that window -- /new or the archive dialog, whose own CAS was
+    # closed by HFR-257 -- was then silently REVERTED: the stale payload restored
+    # session_id, enabled, deleted_at (no in-memory definition even carries the column, so
+    # it was always written back as NULL, resurrecting a soft-deleted task) and the
+    # pre-teardown metadata_json, including the session_settings_snapshot a later
+    # create_once rebind reads for the dead session's workdir/agent/model (D3). The
+    # reclaim's counters and the /new ledger had already told the user "1 task paused".
+    # PREDICATE SET = the state teardown owns: session_id, enabled, deleted_at, and the
+    # snapshot's captured_at. The fourth is not redundant: for an ALREADY-paused
+    # definition the reclaim changes none of the first three, it only refreshes the
+    # snapshot. Deliberately NOT updated_at / the whole row -- a version guard would
+    # refuse a rename racing a run-result stamp and turn a working edit into an error.
+    # Both writers share one guarded statement (_upsert_definition) and the
+    # unchanged_text idiom of storage/agent_session_rows.py, so the pair cannot drift.
+    # CALLERS: vibe task update / vibe watch update and pause/resume raise
+    # DefinitionWriteConflict -> exit 1 with code definition_write_conflict (a lost write
+    # must not be reported as an applied edit); the runtime stamps (mark_task_result,
+    # mark_cycle_start/result, record_binding_recovery) return False and reload the
+    # mirror; the reset-rebind persist logs and keeps the rebind for that fire only.
+    # The watch half, same window, same command shape:
+    # tests/test_cli_watch_command.py::test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read
+    # The deleted_at half (archive + an in-flight run's result stamp):
+    # tests/test_scheduled_tasks.py::test_task_result_stamp_cannot_resurrect_a_definition_the_archive_deleted
+    # The snapshot-marker half (the reclaim shape the lifecycle guards cannot see):
+    # tests/test_scheduled_tasks.py::test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced
+    test: tests/test_cli_task_command.py::test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read
+  - id: HFR-262
+    name: a first-turn insert holds the write lock across the reads it decides from
+    status: covered
+    kind: reliability
+    layer: contract
+    backend: shared
+    # get_or_create_agent_session_row's create branch READ and then wrote with no lock
+    # between: SAVEPOINT opened the transaction and new_session_id's scan pinned a WAL read
+    # snapshot inside it, so a competing first turn committing between that scan and the
+    # INSERT left the loser unable to become a writer at all. SQLite answers
+    # SQLITE_BUSY_SNAPSHOT (extended code 517) -- a PLAIN OperationalError whose primary
+    # code and "database is locked" message are the ones every unrelated busy error
+    # carries -- and busy_timeout never retries it, because waiting cannot make a snapshot
+    # newer. Measured at ed4ddd93: 517 escaping ensure_agent_session_id on an ordinary
+    # first turn, from the shared get-or-create every platform reaches.
+    # MECHANISM: reserve_write_lock, called BEFORE the reads the INSERT decides from, so
+    # the failure cannot occur instead of being recovered from afterwards. The create path
+    # becomes the writer, re-reads the anchor under the lock, and only then inserts -- with
+    # one writer allowed, nothing it decided from can change, so neither SQLITE_BUSY_SNAPSHOT
+    # nor the UNIQUE-index IntegrityError is reachable there. Exactly the guarantee
+    # _claim_anchor_row's supersede branch already relied on (its anchor-move UPDATE takes
+    # the lock, which is why its own INSERT needs no re-read), now available to the paths
+    # with no write to lead with.
+    # WHY NOT DETECTION. Identifying 517 needs sqlite3.Error.sqlite_errorcode, which is
+    # Python 3.11+, while requires-python is >= 3.10. Verified on 3.10.12: the attribute is
+    # absent, the round-14 detect-and-retry fix let OperationalError("database is locked")
+    # escape a first turn, and the same test passed on 3.13 -- a fix that only works on
+    # some supported interpreters. Not producing the error needs nothing from the
+    # interpreter, so the 517 catch, its bounded retry, the SAVEPOINT and the
+    # "gave up, no usable session" answer are all DELETED rather than left unreachable.
+    # TWO SPELLINGS, ONE GUARANTEE, because SQLite has no LOCK TABLE: BEGIN IMMEDIATE when
+    # the connection is in autocommit (which is every entry point that resolves its scope
+    # with a pure SELECT, since pysqlite opens no transaction for a bare SELECT), and a
+    # never-matching UPDATE when a transaction is already open and BEGIN IMMEDIATE would be
+    # illegal (a 3-part scope key upserts the scope first). SQLite takes the write lock at
+    # the START of an UPDATE program, before its WHERE loop, which is pinned by a test
+    # rather than trusted.
+    # SCOPE: the create branch only. The read-mostly fast path where a session row already
+    # exists stays unlocked and keeps re-asserting its read inside the statement
+    # (unchanged_text, HFR-249..260), so no inbound message serialises on this. The window
+    # that remains -- a winner committing between the unlocked first read and the
+    # reservation -- is why the create re-decides under the lock, and is covered.
+    # COST: concurrent FIRST turns on one database queue behind each other for the length
+    # of the caller's transaction, bounded by busy_timeout (5s); the previous behaviour on
+    # that interleaving was an exception, not a faster answer.
+    # PROVEN AS A FACT, NOT AN ARGUMENT: a competing writer given busy_timeout = 0 must be
+    # REFUSED at the last read before the INSERT, checked for every production entry point
+    # and paired with a statement-sequence assertion that a reservation precedes that read.
+    # Both observations are version-independent, and the whole set passes on 3.10.12 and
+    # 3.13.5 and fails against both the pre-round-14 and the round-14 module.
+    # Every production path into the contested INSERT:
+    # tests/test_sqlite_sessions_store.py::test_every_first_turn_entry_point_reserves_the_write_lock
+    # tests/test_agent_run_target.py::test_resolve_agent_run_target_reserves_the_write_lock_for_its_first_turn_insert
+    # The window kept open on purpose, and the reserved re-read that closes it:
+    # tests/test_sqlite_sessions_store.py::test_first_turn_insert_joins_a_winner_that_committed_before_the_reservation
+    # The never-matching UPDATE actually takes the lock and changes nothing:
+    # tests/test_sqlite_sessions_store.py::test_write_lock_reservation_takes_the_lock_without_touching_a_row
+    test: tests/test_sqlite_sessions_store.py::test_first_turn_insert_reserves_the_write_lock_before_the_reads_it_decides_from
+  # WHAT THE WHOLE-ROW-WRITER HUNT FOUND, and what the id HFR-263 actually holds now.
+  # The hunt for a THIRD whole-row writer that could clobber a guarded transition came
+  # back empty, and that negative still stands: the only one found is
+  # SQLiteSessionsService.save_state (config/v2_sessions.py::SessionsStore.save →
+  # on_conflict_do_update over agent_sessions, which overwrites status /
+  # native_session_id / agent_backend / metadata_json from a legacy in-memory map), and
+  # it is the one DEFERRED instance, tracked as issue #1076 and not fixed here.
+  # HFR-263 was briefly recorded as "hunted, does not exist" on the strength of that
+  # negative. That was the wrong conclusion to draw from it: the hunt asked who ELSE
+  # writes whole rows, and the open question was the opposite one -- who CONSUMES a
+  # guarded write's refusal. HFR-263..266 are that question's answers, and the id
+  # HFR-263 now belongs to the watch consuming end below.
+  # HFR-263..266 are the CONSUMING end of the guards HFR-249..262 added. A guarded write
+  # that correctly refuses is only half an invariant: the caller still has to stop, and
+  # four of them did not. Two discarded the refusal outright (the watch supervisor's
+  # wrapper, the scheduled-fire result stamp), one discarded it and notified anyway, and
+  # one inferred a settled catalog fact from a broad catch and so read an infrastructure
+  # fault as one. Same shape as the guards themselves, one layer out: nothing that did
+  # not happen may be reported as though it had.
+  - id: HFR-263
+    name: a refused cycle-start stamp stops the watch before it runs anything
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # /new pauses a bound watch (reclaim, HFR-257) and replies "1 watch paused". The
+    # supervisor loop is already past its own maybe_reload, so it holds the pre-teardown
+    # mirror; mark_cycle_start is the guarded full-row write (HFR-261) that refuses that
+    # stale payload and returns False.
+    # THE HOLE WAS THE WRAPPER. _watch_store_call was `callback(); return True` -- it
+    # discarded the callback's own return value and reported the refusal to the loop as a
+    # landed write. The cycle then spawned its waiter subprocess and enqueued a hook into
+    # the session the teardown had just deleted, after /new told the user the watch was
+    # paused. Both the command execution and the delivery happen AFTER the stamp, so both
+    # are reachable from one discarded bool.
+    # FIX: guarded=True makes the callback's False a refusal the wrapper propagates, for
+    # mark_cycle_start and every mark_cycle_result site. Opt-in, not the default, because
+    # a False return is not universally a refusal -- maybe_reload returns False for
+    # "nothing changed", which is the common case and must not stop the watch. A refusal
+    # does NOT fuse the store: the database is healthy, this write simply lost.
+    # Driven through the REAL _run_watch with the reclaim committed from a second
+    # connection inside the write window; _run_cycle is the only double and returns a
+    # SUCCESS result on purpose, because on the unfixed wrapper that is what produces the
+    # hook the test forbids.
+    test: tests/test_watches.py::test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim
+  - id: HFR-264
+    name: a refused result stamp cannot complete the run ok
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The task twin of HFR-263, and the one that reaches the run ledger. A one-shot task
+    # fires, the user archives the bound Session mid-run, reclaim(mode='delete')
+    # soft-deletes the definition, and mark_task_result refuses the stale terminal stamp
+    # (HFR-261) -- last_run_at, last_error and the one-shot disable are not stored.
+    # _execute_task discarded that False and returned a TaskExecutionResult with
+    # error=None, so _execute_claimed_request completed the run ok=True: the database
+    # refused the stamp and BOTH the caller and agent_runs reported success. The user sees
+    # a green run for a task whose stored state never moved, and an `at` task that was
+    # never disabled can fire again.
+    # CARRIED ON THE EXISTING ERROR CHANNEL, deliberately: a non-empty `error` is already
+    # what makes complete(ok=not error) record a failure and what the CLI and the Harness
+    # detail pane show. No new settlement machinery, no notification/replay work. A real
+    # failure keeps its own message; only a would-be success gains one.
+    test: tests/test_scheduled_tasks.py::test_a_refused_result_stamp_cannot_complete_the_run_ok
+  - id: HFR-265
+    name: the deleted-Agent fallback has a type, so a fault cannot spend the route
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _rebind_create_once_session tries the reclaim snapshot's settings first and falls
+    # back to a reset attempt that degrades to scope defaults. The fallback exists for
+    # exactly two facts -- the snapshot's Agent was deleted, or disabled (HFR-243) -- and
+    # it decided that from a BROAD `except Exception`, which cannot tell a settled catalog
+    # fact from SQLite contention, a migration failure or a filesystem error. On any of
+    # those the reset attempt then SUCCEEDED: _persist_task_session_id wrote the reset
+    # route, agent_name was dropped, binding_follows_session was stamped, and the task
+    # PERMANENTLY lost the Agent and model the snapshot was holding for it -- under a
+    # notice claiming the settings "could not be recovered". A transient fault became
+    # data loss. Same shape as the forbidden broad OperationalError retry: a catch wide
+    # enough to convert an infrastructure fault into silence.
+    # FIX: a typed contract. VibeAgentStore.require / require_enabled raise
+    # AgentUnavailableError(reason='missing'|'disabled'), and _reserve_runtime_session
+    # raises it with reason='no_default' for the absent default Agent; the fallback
+    # catches THAT and nothing else. Operational failures propagate, with the
+    # definition's route, lifecycle and durable metadata untouched and NO fallback
+    # reservation -- the run fails through _execute_claimed_request's existing handler and
+    # the next fire re-resolves from the stored row. AgentUnavailableError subclasses
+    # ValueError and keeps the old messages, so every existing `except ValueError` caller
+    # (CLI, UI server, controller route resolution) is unchanged, and HFR-243's
+    # missing-Agent fallback half stays green.
+    # The typed contract itself:
+    # tests/test_scheduled_tasks.py::test_agent_resolution_types_the_deleted_or_disabled_condition
+    test: tests/test_scheduled_tasks.py::test_rebind_propagates_an_operational_fault_instead_of_resetting_the_route
+  - id: HFR-266
+    name: a refused recovery record must not notify a transition it cannot dedup
+    status: covered
+    kind: reliability
+    layer: contract
+    backend: shared
+    # Found by the sweep HFR-263/264 prompted: the same question asked of every guarded
+    # write this PR added. _emit_binding_change promises "once per binding transition,
+    # never once per fire", and the ONLY thing that makes it once is the durable
+    # metadata.binding_recovery marker it writes first. That write is guarded (HFR-261)
+    # and refuses when the definition was reclaimed, repointed or removed in the window --
+    # and its False was ignored, so the notice went out with nothing behind it: a daily
+    # cron re-notifies every day, about a recovery the stored definition no longer
+    # reflects. The notification is now conditional on the marker landing.
+    # THE SWEEP'S OTHER ANSWERS, checked and NOT defects:
+    # * archive_session's `reclaimed` tally is taken BEFORE its reclaim, so it looks like
+    #   the same shape -- but archive_session runs entirely inside one engine.begin() and
+    #   takes the write lock at its first UPDATE, before both the count and the reclaim's
+    #   read. Its reclaim cannot refuse, so the tally cannot diverge. Left alone.
+    # * /new's ledger already counts only landed writes (HFR-257), which is what
+    #   "N tasks paused" reports.
+    # * vibe task/watch update and pause/resume raise DefinitionWriteConflict -> exit 1
+    #   (HFR-261); _pause_task swallows it deliberately and documentedly (the teardown
+    #   already applied the state it was going to write).
+    #   CORRECTED BY HFR-268: this round also credited _persist_task_session_id's swallow
+    #   as deliberate, on the strength of its own comment ("the rebind stands for one
+    #   fire"). That was checking the return-value handling, not the ORDERING -- the fire
+    #   goes on to dispatch a real turn on the unpersisted rebind. See HFR-268.
+    # * modules/agents/base.py's `bound or reserved_id` substitution after a refused
+    #   by-id bind is pre-existing and deliberate: the reserved row is the publish target
+    #   for the open Chat, not a claim that the native id was recorded. Not this PR's.
+    test: tests/test_scheduled_tasks.py::test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup
+  - id: HFR-267
+    name: a watch cycle hook must be enqueued after its guarded stamp, never before
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE QUESTION THIS ROUND CHANGED. HFR-263..266 asked "does the caller respect the
+    # guard's answer?" and closed every site where it did not. That is not sufficient.
+    # Here the caller DID respect it -- and the side effect had already escaped.
+    # All four hook-enqueueing branches of _run_watch (success, per-cycle timeout,
+    # terminal failure, lifetime expiry) ran:
+    #     self._enqueue_hook(...)                          # durable, unrecallable
+    #     if not self._watch_store_call(..., guarded=True):
+    #         return                                       # refusal, too late
+    # enqueue_hook_send writes a request row a SEPARATE drain loop claims and executes,
+    # so `return` after the refusal unqueues nothing. When /new, an archive or a
+    # concurrent edit reclaims the watch mid-cycle, the guard correctly refuses the
+    # result stamp and the prompt is still delivered into the session the teardown
+    # deleted, for a definition the database has torn down -- after /new told the user
+    # "1 watch paused". A guard only means something when it runs BEFORE the effect it
+    # authorises. _stop_watch_for_missing_cwd already had that order; the four branches
+    # now match it, and _enqueue_hook carries the invariant in its docstring.
+    # Driven through the real _run_watch, with the real reclaim committed from a second
+    # connection inside the RESULT stamp's write window (occurrence-selected, so the
+    # start stamp is accepted first and the cycle genuinely ran). Each branch also has a
+    # control case proving it DOES deliver its own hook when the stamp lands, so the
+    # refusal cases cannot pass by never reaching the branch.
+    test: tests/test_watches.py::test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused
+  - id: HFR-268
+    name: a refused rebind must not dispatch the turn it was reserved for
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The ordering sweep HFR-267 prompted, applied to the task twin. Same class, one
+    # step subtler: the guard IS called first here and its answer is dropped rather than
+    # never requested. _persist_task_session_id swallowed DefinitionWriteConflict and
+    # returned None, so _recover_pinned_session_binding still reported action="rebound"
+    # with a new_session_id, and _execute_task dispatched a REAL agent turn -- prompt run,
+    # reply posted to the user's channel -- against a session whose binding the store had
+    # just refused to record. HFR-266's own notice went out too, saying "rebound to a new
+    # agent session X ... preserved" for a rebind that was never stored, because
+    # record_binding_recovery recomputes its expectation from the post-teardown mirror and
+    # so lands. The refusal also covers the soft-delete shape (expect.deleted_at is None),
+    # which is why "the rebind stands for THIS fire only" was not a safe reading of it.
+    # The persist now reports, and a refusal returns action="reclaimed" with no
+    # new_session_id -- the field _execute_task reads to decide whether to fire -- so the
+    # turn cannot run and both the durable error and the notice say what happened.
+    # RESIDUE, stated rather than hidden: the replacement session row is reserved before
+    # the guarded write, because the write needs the id it produces. A refusal therefore
+    # leaves one unreferenced background session row, the same residue create_per_run
+    # leaves by design. No user-visible effect escapes; the row does.
+    test: tests/test_scheduled_tasks.py::test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused
+  - id: HFR-269
+    name: >-
+      a guarded stamp and the outbox row it authorises must be one transaction: no
+      teardown commits between them, and a failed outbox write retires nothing
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE QUESTION THIS ROUND CHANGED AGAIN. HFR-263..266 asked "does the caller respect
+    # the guard's answer?"; HFR-267 asked "does the guard run before the effect?". Both
+    # are true here and the guard still fails, because TWO COMMITS ARE NOT ONE DECISION:
+    #     self.store.mark_cycle_result(...)              # transaction 1, COMMITS
+    #     self.request_store.enqueue_hook_send(...)       # transaction 2, COMMITS
+    # A /new reclaim or an archive from another connection commits in the GAP between
+    # those commits. The stamp is accepted -- it won its compare-and-set fairly, against
+    # the state that existed when it ran -- and the hook is queued afterwards anyway:
+    # a durable request row the drain loop delivers into a session the teardown deleted,
+    # under a definition it paused or soft-deleted, after the user was told so. Nothing
+    # is refused, because by then there is nothing left to refuse. HFR-267 moved the race
+    # window; it could not close it.
+    # THE INVERSE HFR-267 INTRODUCED: a fault between the two commits (full disk, locked
+    # database) left a once/terminal watch durably DISABLED with its completion hook
+    # LOST -- the definition says "finished", the user was never told, nothing runs it
+    # again. One failure traded for another.
+    # STEP 1, THE FACT THAT DECIDED THE FIX: run_definitions (the definition) and
+    # agent_runs (the outbox) are two tables in ONE SQLite database. Both stores default
+    # to paths.get_sqlite_state_path() -- ManagedWatchStore._sqlite and
+    # TaskExecutionStore._sqlite are separate SQLiteBackgroundTaskStore instances over
+    # the same file -- so one transaction is available and is the honest fix, not
+    # claim-time validation. Both stores also have FILE backends (a JSON file of watches,
+    # a directory of run JSON files), used only by tests and legacy state; those cannot
+    # share a transaction, and they also have no compare-and-set at all
+    # (ManagedWatchStore._write_watch returns True unconditionally without SQLite), so
+    # there is no guard there for a teardown to outrun. _shared_run_ledger_backend states
+    # that choice per configuration instead of assuming it.
+    # FIX: upsert_watch_with_queued_run commits the guarded run_definitions UPDATE and
+    # the agent_runs INSERT on one connection, guard first, and _commit_cycle_result is
+    # the single idiom all five result-stamp sites in _run_watch use (success, per-cycle
+    # timeout, terminal failure, lifetime expiry, missing cwd). A refusal or an exception
+    # rolls back BOTH, which removes the inverse instead of reversing it.
+    # THE SEPARATE-TRANSACTIONS SWEEP, and why the rest are not this defect:
+    # * mark_cycle_start -> spawning the waiter subprocess, and _persist_task_session_id /
+    #   record_binding_recovery -> dispatching a turn or sending a notice: the authorised
+    #   effect is a process or a network send, so no transaction can contain it. Ordering
+    #   (HFR-267/268) plus a guarded terminal stamp is the whole available guarantee.
+    # * mark_task_result -> the run-ledger settlement is REPORTING of an effect that
+    #   already happened, not an effect the stamp authorises; HFR-264 made it report the
+    #   refusal.
+    # * _run_task's enqueue and enqueue_session_callback are authorised by a READ, not by
+    #   a guarded write, and both dedup on re-entry (pending-run scan, find_callback_run).
+    # * delete_agent_sessions/archive_session run the reclaim inside the caller's
+    #   transaction already; reserve_forked_session is one begin() for reads and insert;
+    #   settle_run_terminal/claim_pending_run publish their events after the commit.
+    # * _drain_callbacks writes the callback run and THEN marks it sent -- effect before
+    #   marker -- but the marker is not a guard and the enqueue is idempotent through
+    #   find_callback_run.
+    # Driven through the real _run_watch over the real agent_runs ledger, with the real
+    # archive reclaim attempted from a second connection at the instant the outbox INSERT
+    # is about to run and PRAGMA busy_timeout = 0, so "could a teardown commit in the
+    # gap?" is answered by the database rather than by a sleep.
+    # ONE ID, TWO FAILURE HALVES. The schema carries one path, so the teardown-in-the-gap
+    # half stays the primary test. The INVERSE half is the same defect and the same id,
+    # tested separately because it fails for the opposite reason -- no teardown, no race,
+    # just a fault on the second commit, which left the watch disabled and retired with
+    # the hook that reports it gone (a once watch is unrecoverable there). Sharing the
+    # transaction rolls both back together, so the watch stays enabled and its completion
+    # is still owed; the fault is injected at the INSERT itself, on whichever connection
+    # the code under test writes the row through:
+    # tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
+    # SUCCESSFUL CONTROL PER TERMINAL BRANCH, so the contract cannot pass by refusing
+    # everything: with no teardown and no injected fault, the transaction must COMMIT and
+    # carry both halves -- the branch's own result transition read back from the
+    # definition, and exactly one outbox row with that branch's own prompt text. All five
+    # hook-producing branches, and every parametrized test here shares the same
+    # _HOOK_BRANCHES table so a new branch cannot be added without its control:
+    # tests/test_watches.py::test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them
+    test: tests/test_watches.py::test_no_teardown_can_commit_between_the_result_stamp_and_its_hook
+  - id: HFR-270
+    name: a refused rebind must reclaim the session and workspace it reserved
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # ONE STEP PAST HFR-268, and the reason a refusal is not finished when it stops the
+    # effect. _rebind_create_once_session COMMITS the replacement session before
+    # _persist_task_session_id is called at all -- a different store, a different
+    # transaction, and for a standalone placement a mkdir of a Show Page workspace too.
+    # HFR-268 correctly stopped the dispatch and left that row behind: nothing points at
+    # it (the definition still names the session the teardown cleared and the notice says
+    # "not rebound"), so it is a live, unreferenced background session that nothing will
+    # ever run, list or delete, plus its workspace, and one more of each for every fire
+    # that loses the same race.
+    # ATOMIC vs EXPLICIT RECLAIM, and why reclaim: the reservation and the write that
+    # adopts it go through two different services with two different engines, and the
+    # reservation's mkdir is a side effect no SQL transaction can roll back. One atomic
+    # operation would mean threading a single connection through both stores and STILL
+    # leaving the directory. Naming the one row this call created and giving it back is
+    # smaller, is exact about which row it may touch, and does not depend on the two
+    # stores continuing to live in one database.
+    # NARROW BY CONSTRUCTION: release_reserved_agent_session names the row by the id the
+    # reservation returned, requires native_session_id still empty and no run_definitions
+    # row pointing at it, and re-asserts both IN the delete (_delete_agent_session_rows
+    # re-runs the id query with the write lock held). The workspace is removed only when
+    # it IS show/<session_id> -- the directory that reservation created and nothing else
+    # can own -- so a scoped reservation's inherited Scope workdir is never touched.
+    # Both placements are driven through the real _execute_task with a concurrent winner
+    # reserved through the SAME branch, so "delete the unreferenced background sessions"
+    # would fail the test:
+    test: tests/test_scheduled_tasks.py::test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved
+  - id: HFR-271
+    name: a write that raises must roll the in-process mirror back with the transaction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE RULE THE REST OF THIS ROUND CAME FROM: a rollback is not proven by re-reading
+    # the durable row. It is proven when the durable row AND the live in-process state
+    # agree. HFR-269's inverse test read the rolled-back watch through a freshly built
+    # ManagedWatchStore -- ordinarily good hygiene, and here exactly what hid the defect,
+    # because the half that stayed wrong was the service still running.
+    # ManagedWatchStore is a write-through cache: mark_cycle_result mutates the cached
+    # ManagedWatch (enabled=False, retired_at, last_finished_at, last_exit_code) and THEN
+    # calls _write_watch. _write_watch reloaded only when the compare-and-set RETURNED
+    # False, never when the write RAISED, and _watch_store_call swallows the exception
+    # into the store fuse, so nothing downstream corrected it. Reproduced on the real
+    # _run_watch: durable row enabled=True/retired=None, service.store enabled=False/
+    # retired_at=<ts>/exit_code=0.
+    # WHO READS THE STALE MIRROR: reconcile_watches picks which watches keep running out
+    # of that dict, vibe watch list renders it, and _read_state derives the NEXT
+    # compare-and-set's expectation from it, so one stale entry also mis-guards the next
+    # write. FIX: every way the write can fail to land reloads, at the one choke point,
+    # and if the reload itself fails the entry is dropped rather than kept (absent reads
+    # as "gone" and stops the watch; stale keeps it running on state that never existed).
+    # No broad retry. Parametrized over every guarded writer that goes through the choke
+    # point, with the fault injected at the run_definitions statement itself rather than
+    # at one caller's second write:
+    # tests/test_watches.py::test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_database
+    # The HFR-269 inverse test now asserts both halves as well, which is what makes it
+    # able to see this class at all:
+    test: tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
+  - id: HFR-272
+    name: the task store's mirror must roll back with a raised write too
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # HFR-271 applied to the sibling store rather than waiting for a second report.
+    # ScheduledTaskStore is the same write-through cache with the same choke point:
+    # set_enabled / update_task / record_binding_recovery / mark_task_result each mutate
+    # the cached ScheduledTask and hand the whole row to _write_task, and _write_task
+    # reloaded only on the False return. reconcile_jobs schedules from that dict and
+    # _read_state derives the next guard's expectation from it, so a raised write left
+    # the scheduler acting on an edit the database rolled back. Same fix, same shape,
+    # same drop-on-failed-reload fallback:
+    test: tests/test_scheduled_tasks.py::test_a_definition_write_that_raises_leaves_no_live_task_mirror_ahead_of_the_database
+  - id: HFR-273
+    name: a teardown that rolls back must not report definitions as reclaimed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The same rule applied to the one piece of teardown state that is NOT in the
+    # database. reclaim_bound_definitions appends to the teardown ledger as it pauses
+    # each definition, and the ledger is what /new counts for "N tasks paused". It was
+    # append-only: a transaction that reclaimed and then ABORTED -- a locked database on
+    # a later statement or on the COMMIT, the class of fault this whole PR is about --
+    # rolled the pause back and left the entry. handle_new wraps clear_session_base in
+    # except Exception: logger.debug(...) and reports the ledger anyway, so the user is
+    # told a task was paused while it is still enabled, still bound to the session they
+    # cleared, and still firing into it.
+    # FIX: reclaim_ledger_transaction wraps each transaction that can reclaim, OUTSIDE
+    # begin() so the truncation runs after the rollback, and discards only entries this
+    # transaction added. Deliberately NOT the same case as a reclaim whose own DELETE was
+    # refused -- that reclaim really did commit, and _delete_agent_session_rows documents
+    # why keeping it is the recoverable half:
+    test: tests/test_session_archive.py::test_a_teardown_that_rolls_back_reports_nothing_as_reclaimed
+  - id: HFR-274
+    name: the live session map must keep what the teardown SQL deliberately kept
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The consuming half of HFR-240/241, found the same way. clear_session_base
+    # hand-pruned state.session_mappings by the prefix rule the SQL used to use --
+    # key == base or key.startswith(base + ":") -- which stopped being the same rule when
+    # delete_agent_sessions grew its include_superseded=False guard. A superseded row is
+    # anchored <base>:superseded:<id>, so the database KEEPS it (its native id is
+    # write-once and its transcript is not recoverable) while the prefix scan deleted the
+    # only pointer this process had to it, and save_state made that permanent: the guard
+    # preserved a row nothing can reach.
+    # FIX: re-read the map from the service, exactly as clear_agent_sessions and
+    # remove_agent_session already do, so the local half cannot disagree with a delete
+    # whose rules it no longer reimplements. Asserted on the live SessionsStore inside
+    # the same /new run that reads the durable rows:
+    test: tests/test_command_handler_user_names.py::NewCommandStorageIntegrationTests::test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one
+  - id: HFR-275
+    name: the create and delete entry points must roll their mirror back too
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The last two writers HFR-271/272 did not reach, found by sweeping BOTH definition
+    # stores for the mirror shape rather than for the guarded-write shape: an in-memory
+    # entry mutated BEFORE the persistence call, with no restore when it fails.
+    # upsert_watch / upsert_task are the create-and-adopt entry points and take no
+    # ``expect`` (their payload is not a re-read), so they never went through the guarded
+    # choke point. They are also the only writers that can add an id the database has
+    # NEVER seen, which is the worse direction: the caller is told the definition could
+    # not be created, while reconcile_watches / reconcile_jobs pick it out of exactly
+    # that dict and start running it -- spawning the waiter command, or firing the prompt
+    # into a channel -- with no durable row to stop it and nothing that will reload it
+    # away.
+    # remove_watch / remove_task are the same shape in the conservative direction: the
+    # entry is dropped before the soft delete, so a failure stops a definition the
+    # database still has. Silently, and NOT self-healing -- the row is unchanged, so
+    # maybe_reload sees no external write and it stays stopped until a restart.
+    # Both now reload through the same _reload_after_lost_write helper, which is correct
+    # for a create (the id is simply absent from the database) and for an adopt or a
+    # delete (the previous row comes back).
+    test: tests/test_watches.py::test_a_failed_create_leaves_no_phantom_watch_in_the_live_store
+  - id: HFR-276
+    name: a reclaim that fails must record the orphan, not report a completed reclaim
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer INSIDE the HFR-270 fix, and the same class as HFR-263..266: the caller
+    # ignored the guard's answer. _release_reserved_session is deliberately never fatal
+    # (it runs on a path already reporting a failure to the user), so it catches every
+    # exception and returns False; _recover_pinned_session_binding dropped that boolean
+    # and emitted SessionBindingChange(action="reclaimed") regardless. A locked database
+    # or an I/O fault during the release therefore left exactly the orphan HFR-270
+    # promises cannot remain -- a live, unreferenced background session and its workspace
+    # -- told the user it had been given back, and lost the only handle on it: the
+    # reserved id is random and is never written to the definition, so the next fire that
+    # loses the same race reserved and leaked another one, untracked.
+    # FIX, both clauses. The boolean is consumed and the losing branch emits a distinct
+    # action="orphaned" whose detail names the session that is still live; and the id is
+    # recorded durably on the definition that reserved it
+    # (metadata.orphaned_reservations in run_definitions.metadata_json, the same row the
+    # binding-recovery record already uses), so a reservation may accumulate only in a
+    # TRACKED, retryable form. That record is itself written through the guarded full-row
+    # writer, so its own False is consumed too: the notice then says the id could not be
+    # recorded either. The next fire of the same definition retries the release from the
+    # record (_retry_orphaned_reservations) and drops the entries it resolves, keeping the
+    # ones whose release failed again. release_reserved_agent_session keeps its exact-id /
+    # empty-native / unreferenced predicates unchanged, so no retry can take a concurrent
+    # winner. Asserted on the live store mirror AND the durable row:
+    # tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
+    # THE SHARED-FAULT HALF, which the first regression could not see because it raised
+    # from a monkeypatched release while leaving SQLite healthy: the record is written
+    # through the SAME database whose fault just refused the release, so the stated
+    # production cases (locked database, I/O fault) refuse both writes for one reason --
+    # and _write_task RAISES on a faulted write (HFR-272), which the first fix's
+    # boolean-only handling let unwind past the notice branch entirely. FIX, two parts.
+    # The raise and the refusal are consumed as one "not recorded" branch in
+    # _track_orphaned_reservation and _retry_orphaned_reservations; and the durable
+    # handle no longer depends on the record at all: the recovery rebind stamps the
+    # reserving definition's id into the reservation row's own metadata
+    # (reserved_by_harness_definition), inside the reservation's INSERT transaction, so
+    # if the row committed the handle committed with it. The next fire sweeps rows
+    # stamped with this definition's id that are still empty-native and unreferenced
+    # (the HFR-279 classification facts, one consistent read) and releases them, so
+    # recovery survives a restart with nothing in memory. The stamp is written ONLY by
+    # the create_once recovery rebind, whose fires serialize on the pinned session's
+    # lock -- a create_per_run reservation is legitimately unbound and unreferenced
+    # between reserve and dispatch, and its fires can overlap, so it must never be
+    # inside the sweep's definition of an orphan. The regression takes a REAL
+    # BEGIN IMMEDIATE on the database file across the release and the record, asserts
+    # the record did NOT land, then recovers through freshly constructed stores (the
+    # restart shape) and finally proves a stamped-AND-adopted rebound session is never
+    # swept:
+    # tests/test_scheduled_tasks.py::test_a_locked_database_that_refuses_release_and_record_still_recovers_the_orphan
+    test: tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
+  - id: HFR-277
+    name: a mirror dropped by a failed write reloads without an unrelated commit
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The consuming end of HFR-271/272's OWN recovery path, and the same class as
+    # HFR-263..266 one layer further in: the fix trusted a mechanism that cannot see what
+    # it needs to see. _reload_after_lost_write drops the entry when the guarded write
+    # fails AND the immediate recovery load fails too -- correct, an absent definition is
+    # safer to act on than a mutated one the database never accepted -- and documented
+    # that maybe_reload restores it "once the database is reachable again". It did not.
+    # maybe_reload consulted only SqliteInvalidationProbe, i.e. PRAGMA data_version,
+    # which moves when another connection COMMITS; the failed write ROLLED BACK, so
+    # data_version was unchanged and every later tick answered "nothing changed". The
+    # definition stayed durably enabled in SQLite and invisible in-process until a
+    # restart or an unrelated commit happened to bump the counter -- and reconcile_jobs /
+    # reconcile_watches choose what to schedule and what keeps running out of exactly
+    # those dicts, so a cron task stopped firing and a watch stopped being reconciled
+    # while their rows still said enabled.
+    # FIX, both definition stores: an in-process _reload_required flag set where the
+    # entry is dropped, which makes the NEXT maybe_reload load unconditionally, and is
+    # cleared only by the load that repairs the mirror (so a reload that fails again is
+    # retried on the tick after). In-process rather than a database column on purpose: it
+    # describes THIS mirror, not the data; a restart reloads from SQLite anyway; and
+    # persisting it would mean writing to the database that was just proven unwritable.
+    # Both tests end the fault the way a transient fault ends -- by going away, writing
+    # nothing -- and a witness probe on its own connection asserts data_version is
+    # UNCHANGED at that instant, so recovering because some other writer committed cannot
+    # be mistaken for recovering because the store remembered. Asserted on the live
+    # mirror (get / list) AND the durable row:
+    # tests/test_watches.py::test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it
+    test: tests/test_scheduled_tasks.py::test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it
+  - id: HFR-278
+    name: releasing a reservation cannot damage a definition that adopted it
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer inside our own HFR-270 fix, and the same window HFR-257..260 closed
+    # statement by statement -- reached this time through the reservation cleanup HFR-270
+    # added. release_reserved_agent_session -> _delete_agent_session_rows runs its
+    # id_query first and reclaim_bound_definitions second, and the id read reserves
+    # nothing (pysqlite opens no transaction for a bare SELECT). An adoption committing
+    # between the two left the reclaim reading the WINNER's definition: it paused it,
+    # stamped its last_error with the release's reason, and overwrote its
+    # session_settings_snapshot -- which a later create_once rebind reads. The final
+    # DELETE then re-evaluated NOT EXISTS and correctly PRESERVED the session, which is
+    # why nothing surfaced: the release returned False, logged "not releasing", and the
+    # winner was disabled anyway. The reclaim is deliberately never rolled back
+    # (_delete_agent_session_rows documents why under WAL), so nothing corrected it.
+    # FIX: reserve_write_lock(conn) -- the HFR-262 precedent -- at the top of the
+    # release's transaction, BEFORE the read the decision rests on. Nothing has been read
+    # on that connection yet, so it is the cheap BEGIN IMMEDIATE spelling, which takes
+    # the write lock and the read snapshot in one statement. The adoption can then only
+    # land before the release looks (the exact-id / native-empty / unreferenced
+    # predicates see it and the release backs off, all three kept unchanged) or after the
+    # release has committed. Re-asserting the predicates in the DELETE protects the ROW;
+    # the damage was to a definition, which is why order and not detection is the fix.
+    # Asserted on the FULL row the winner owns (the HFR-251 lesson): its Session row, its
+    # Show workspace on disk, its route/anchor, its pins and explicit override markers,
+    # its definition's enabled state, pause reason, settings snapshot, every timestamp,
+    # and the teardown ledger that must credit nothing. The mechanism itself is pinned
+    # separately, the two ways the HFR-262 tests do it (reservation ahead of the read in
+    # the statement sequence, and a zero-patience competing writer REFUSED at it):
+    # tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read
+    test: tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_cannot_damage_a_definition_that_adopted_it
+  - id: HFR-279
+    name: an adopted reservation is dropped from the retry record without being touched
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer inside HFR-276's own fix, found by the exact-head Codex review of that
+    # fix. release_reserved_agent_session answers False for three different facts --
+    # the row is gone, the row was adopted, the release faulted -- and the retry's
+    # absence-only probe (_reserved_session_is_gone) resolved only the first. A tracked
+    # reservation that was since adopted (a native session dispatched into it, or a
+    # run_definitions row pointing at it) is not absent and can never be released, so
+    # its entry stayed on metadata.orphaned_reservations forever and every later fire
+    # of the original definition re-took SQLite's write lock (the release's
+    # BEGIN IMMEDIATE) to retry a cleanup that cannot succeed -- the loser's
+    # bookkeeping taxing the winner's row on every fire, indefinitely.
+    # FIX: an explicit classification (classify_reserved_agent_session) that runs
+    # BEFORE any release attempt and reads both adoption facts -- native binding and
+    # definition reference -- in ONE SQL statement, so the verdict is a state the row
+    # actually was in. Four verdicts, four actions: absent -> resolved and dropped;
+    # adopted -> resolved and dropped WITHOUT being read under the write lock, let
+    # alone mutated; still empty-native and unreferenced -> a genuine orphan, released
+    # through the unchanged guarded release (whose predicates re-assert both facts
+    # under the write lock, so a classification that raced an adoption destroys
+    # nothing -- the entry stays and the next fire classifies it as adopted); a
+    # classification that cannot read -> the entry is KEPT, never guessed away. The
+    # regression adopts one tracked reservation each way, asserts the winners' FULL
+    # rows (route/anchor, workdir, pins and metadata markers, every timestamp) and the
+    # adopting definition's full row are byte-identical across the retry, that no
+    # release was attempted against either winner or the absent id, and that the
+    # record dropped the resolved entries durably and in the live mirror. The fault
+    # verdict is pinned separately:
+    # tests/test_scheduled_tasks.py::test_a_retry_classification_that_cannot_read_keeps_the_entry
+    test: tests/test_scheduled_tasks.py::test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched
+  - id: HFR-280
+    name: >-
+      a Workbench PATCH cannot mutate a session archived inside its window, and the
+      archive outranks the backend lock
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The FOURTH session writer with the HFR-251/253/254 shape, and the last public one:
+    # workbench_sessions_service.update_session, the service behind PATCH /api/sessions/
+    # <id>. RED, unlike HFR-252's proofs -- its archive guard was ONLY a read-then-write
+    # pre-check at the top of the function, and its single UPDATE matched on id alone
+    # (plus the backend-lock predicate, on the backend-changing path). That read reserves
+    # nothing, so a stale tab's rename or re-route landed on an already-archived row.
+    # The production window is not hypothetical: archive_session cannot cancel an
+    # in-flight chat turn inside its transaction, so the DELETE route commits the archive
+    # FIRST and cancels best-effort afterwards -- and the route's own is_session_archived
+    # pre-flight runs on a separate connection, widening the same window further.
+    # FIX: status != 'archived' on the UPDATE (unconditional, so every write this
+    # function makes carries it), the pre-check demoted in comment to what it always was
+    # -- a fast path -- and the rowcount-0 branch re-reading the row to say WHICH
+    # predicate refused.
+    # PRECEDENCE IS PART OF THE INVARIANT, not a detail: two predicates on one statement
+    # make rowcount 0 ambiguous, and the branch previously belonged to the backend lock.
+    # Reporting the RETRYABLE backend_locked for a TERMINAL archived row is the exact
+    # defect this PR's round 5d fixed one layer out in the route, so archive wins here
+    # whenever both apply. Second test, with one commit carrying both the finishing
+    # turn's native bind (which locks the backend) and the archive:
+    # tests/test_sqlite_sessions_store.py::test_update_session_archive_race_outranks_the_backend_lock
+    # Both fail against the pre-fix service: the rename lands silently (DID NOT RAISE),
+    # the re-route answers SessionBackendLockedError. Same _commit_competing_bind_after
+    # harness and the same real _archive_write payload as HFR-252.
+    test: tests/test_sqlite_sessions_store.py::test_update_session_cannot_rename_a_session_archived_inside_its_window
+  - id: HFR-430
+    name: an Agent Run can apply the Workbench send-now transition to a busy Session
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Agent-to-Agent delivery previously had only the queue path even though
+    # Workbench already owned the cross-backend interrupt-and-flush transition.
+    # The delivery intent is durable on the Agent Run. The shared turn owner first
+    # persists the harness-attributed queue row, then marks the active turn for
+    # flush-on-cancel and interrupts it through the ordinary Stop handler. The old
+    # turn settles exactly once and the FIFO head starts as a new scheduled turn.
+    # A refused Stop leaves both owners intact, and an idle backlog starts directly
+    # without a post-submit call racing and interrupting the newly started head.
+    test: tests/test_internal_server.py::test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
 plan: docs/plans/harness-session-failure-recovery.md
+plans:
+  - docs/plans/harness-session-failure-recovery.md
+  - docs/plans/agent-run-zombie-settlement.md

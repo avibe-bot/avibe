@@ -17,6 +17,12 @@ const LinkedImageContext = React.createContext(false);
 export const LinkedImageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <LinkedImageContext.Provider value={true}>{children}</LinkedImageContext.Provider>
 );
+export const LinkedImageContent: React.FC<{
+  linked: React.ReactNode;
+  unlinked: React.ReactNode;
+}> = ({ linked, unlinked }) => (
+  React.useContext(LinkedImageContext) ? linked : unlinked
+);
 
 // Preview caps (mirror the design): an image renders at its natural size, scaled
 // down to fit a max width of 22rem and a max height of 15rem, never upscaled.

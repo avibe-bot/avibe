@@ -29,8 +29,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
+from core.run_settlement import (
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_REFUSED_CONCURRENT_TURN,
+)
 from modules.im import MessageContext
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
@@ -46,6 +51,27 @@ SOURCE_HUMAN = "human"
 SOURCE_SCHEDULED = "scheduled"
 
 
+@dataclass(frozen=True)
+class TurnDispatchOutcome:
+    """What a dispatched turn produced, and how its waiter was released.
+
+    ``settled_by`` is the settlement vocabulary from ``core.run_settlement``. It is
+    ``None`` for exactly one case — a caller that passed no ``on_chunk``, so no sink
+    was ever registered and there was nothing to wait on. Every streaming caller
+    gets a real value, including the concurrent-turn refusal below which returns
+    before a sink exists.
+
+    A caller that owns a durable record of the turn (``ScheduledTaskService`` and
+    its ``agent_runs`` row) MUST branch on this: only
+    ``SETTLED_BY_TERMINAL_RESULT`` means "the backend emitted a terminal result, so
+    the out-of-band writer will settle the record". Every other value means no
+    terminal result is coming and the caller has to settle it itself.
+    """
+
+    error: Optional[str]
+    settled_by: Optional[str]
+
+
 async def dispatch_turn(
     controller: "Controller",
     context: MessageContext,
@@ -55,6 +81,30 @@ async def dispatch_turn(
     on_chunk: Optional[ChunkCallback] = None,
 ) -> Optional[str]:
     """Run one agent turn for ``context`` and return the primary message id.
+
+    Thin wrapper over :func:`dispatch_turn_with_outcome` for the callers that only
+    need the error/message-id channel (IM, web Chat, CLI).
+    """
+
+    outcome = await dispatch_turn_with_outcome(
+        controller,
+        context,
+        text,
+        source=source,
+        on_chunk=on_chunk,
+    )
+    return outcome.error
+
+
+async def dispatch_turn_with_outcome(
+    controller: "Controller",
+    context: MessageContext,
+    text: str,
+    *,
+    source: str = SOURCE_HUMAN,
+    on_chunk: Optional[ChunkCallback] = None,
+) -> TurnDispatchOutcome:
+    """Run one agent turn for ``context`` and report how its waiter was released.
 
     ``source`` selects between the human-initiated and scheduler-initiated
     paths in ``MessageHandler``; today they only differ in source tagging.
@@ -80,7 +130,7 @@ async def dispatch_turn(
 
     if on_chunk is None:
         # IM / CLI: fire-and-forget; no live stream to hold open.
-        return await _run()
+        return TurnDispatchOutcome(error=await _run(), settled_by=None)
 
     session_key = controller._get_session_key(context)
     if controller.get_turn_sink(session_key) is not None:
@@ -92,7 +142,11 @@ async def dispatch_turn(
         # with a terminal chunk instead of racing — the in-flight turn keeps
         # streaming undisturbed.
         await on_chunk({"kind": "error", "text": controller._t("error.streamTurnInProgress"), "message_id": None})
-        return None
+        # No sink was registered for THIS turn, so there is no sink to carry the
+        # settlement — report it directly. A caller holding a durable record (an
+        # ``agent_runs`` row) must settle it: this turn never reached a backend, so
+        # no terminal result will ever arrive for it.
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_REFUSED_CONCURRENT_TURN)
     # Tag this turn with a unique token, stamped into the context the agent
     # receiver will carry. ``_stream_chunk`` only forwards an emit to the sink
     # when the emit's context token matches the registered sink's token, so a
@@ -118,7 +172,16 @@ async def dispatch_turn(
         # user Stop/cancel cancels this task; the ``CancelledError`` propagates
         # out of ``done.wait()`` and the ``finally`` below pops the sink.
         await done.wait()
-        return result
+        # Read the settlement off OUR sink before the ``finally`` pops it. A sink
+        # released without a terminal result (``mark_turn_complete`` / an external
+        # stop) leaves no other trace, so this is the only place the distinction
+        # survives. Default defensively to "no terminal result": an unexplained
+        # release must never be reported as a healthy turn.
+        sink = controller.get_turn_sink(session_key)
+        settled_by = SETTLED_BY_NO_TERMINAL_RESULT
+        if isinstance(sink, dict) and sink.get("done_event") is done:
+            settled_by = str(sink.get("settled_by") or SETTLED_BY_NO_TERMINAL_RESULT)
+        return TurnDispatchOutcome(error=result, settled_by=settled_by)
     finally:
         # Pass our own done event so a turn that was superseded by a newer
         # concurrent turn doesn't evict the newer turn's sink on cleanup.

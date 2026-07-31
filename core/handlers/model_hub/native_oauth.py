@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
-from .adapter import OAuthFlowState
+from .adapter import OAuthFlowState, RetainedMaterialDisposition
 from .events import contains_credential_material
 from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
 
@@ -25,7 +25,15 @@ _MAX_FLOWS = 100
 class AgentAuthService(Protocol):
     setup_timeout_seconds: float
 
-    async def start_web_setup(self, backend: str, *, force_reset: bool = True) -> Any: ...
+    async def start_web_setup(
+        self,
+        backend: str,
+        *,
+        force_reset: bool = True,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> Any: ...
 
     def get_web_flow_status(self, flow_id: str) -> dict[str, Any]: ...
 
@@ -121,11 +129,47 @@ class AgentAuthNativeOAuthAdapter:
         self._flows: dict[str, _FlowBinding] = {}
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+        return await self._start_oauth(
+            source_id,
+            vendor,
+            force_reset=False,
+        )
+
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> OAuthFlowState:
+        return await self._start_oauth(
+            source_id,
+            vendor,
+            force_reset=True,
+            on_irreversible_start=on_irreversible_start,
+        )
+
+    async def _start_oauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        force_reset: bool,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> OAuthFlowState:
         backend = _VENDOR_BACKENDS.get(vendor)
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        flow = await self._agent_auth_service.start_web_setup(backend, force_reset=False)
+        flow = await self._agent_auth_service.start_web_setup(
+            backend,
+            force_reset=force_reset,
+            on_irreversible_start=on_irreversible_start,
+        )
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError
@@ -242,6 +286,9 @@ class AgentAuthNativeOAuthAdapter:
             error_key=error_key,
             expires_at_iso=binding.expires_at_iso,
             credential_ref=None,
+            channel="native_cli",
+            retained_material_disposition=RetainedMaterialDisposition.NONE,
+            retained_credential_ref=None,
         )
 
     async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:

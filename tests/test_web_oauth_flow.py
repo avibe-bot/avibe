@@ -356,6 +356,100 @@ def test_claude_oauth_settings_cleanup_failure_fails_web_start(
     service._create_claude_control_client.assert_not_awaited()
 
 
+def test_claude_web_start_checks_prerequisites_before_irreversible_callback(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    irreversible_starts = []
+    monkeypatch.setattr(
+        "core.agent_auth_service.CLAUDE_SDK_AVAILABLE",
+        False,
+    )
+
+    flow = _run(
+        service.start_web_setup(
+            "claude",
+            force_reset=True,
+            on_irreversible_start=lambda: irreversible_starts.append("started"),
+        )
+    )
+
+    assert flow.state == "failed"
+    assert irreversible_starts == []
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_native_web_start_spawn_failure_preserves_irreversible_callback(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    irreversible_transitions = []
+
+    async def fail_spawn(*_args, **_kwargs):
+        raise FileNotFoundError("configured CLI is unavailable")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+    if backend == "claude":
+        monkeypatch.setattr(
+            "core.agent_auth_service.CLAUDE_SDK_AVAILABLE",
+            True,
+        )
+        service._create_claude_control_client = AsyncMock(
+            side_effect=FileNotFoundError("configured CLI is unavailable")
+        )
+
+    def prepare_irreversible_start():
+        irreversible_transitions.append("prepared")
+
+        def restore():
+            irreversible_transitions.append("restored")
+
+        return restore
+
+    flow = _run(
+        service.start_web_setup(
+            backend,
+            force_reset=True,
+            on_irreversible_start=prepare_irreversible_start,
+        )
+    )
+
+    assert flow.state == "failed"
+    assert irreversible_transitions == ["prepared", "restored"]
+
+
+def test_utility_start_callback_runs_before_subprocess_creation(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            events.append("communicate")
+            return b"", b""
+
+    async def spawn(*_args, **_kwargs):
+        events.append("spawn")
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    result = _run(
+        service._run_utility_command(
+            "codex",
+            "logout",
+            prepare_start=lambda: events.append("callback"),
+        )
+    )
+
+    assert result == (True, None)
+    assert events == ["callback", "spawn", "communicate"]
+
+
 def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(
     service: AgentAuthService,
 ) -> None:

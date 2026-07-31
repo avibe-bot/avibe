@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -764,6 +765,13 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
     monkeypatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {"clients": []}
+    from modules.agents import model_hub as model_hub_module
+
+    original_resolve = model_hub_module.resolve_model_hub_launch
+
+    async def capture_model_hub_scope(*args, **kwargs):
+        captured["model_hub_process_scope"] = kwargs.get("process_scope")
+        return await original_resolve(*args, **kwargs)
 
     class _SubagentSessions(_Sessions):
         @staticmethod
@@ -802,6 +810,11 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        model_hub_module,
+        "resolve_model_hub_launch",
+        capture_model_hub_scope,
+    )
 
     controller = _Controller(tmp_path)
     controller.settings_manager = _RoutingSettingsManager()
@@ -816,6 +829,7 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
     client = _run_session(handler, context)
 
     composite_key = f"slack_C123:reviewer:{tmp_path}"
+    assert captured["model_hub_process_scope"] == composite_key
     assert client.options.resume is None
     assert not hasattr(client, "_vibe_native_session_id")
     assert controller.claude_sessions[composite_key] is client
@@ -1344,6 +1358,78 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
     assert exc_info.value.working_path == str(tmp_path)
     assert stale_session_id in exc_info.value.stderr
     assert captured["options"].resume == stale_session_id
+
+
+def test_claude_startup_failure_is_recorded_before_scope_retirement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    events: list[tuple] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+
+        async def connect(self) -> None:
+            raise RuntimeError("startup failed")
+
+    class _Runtime:
+        async def resolve(self, backend, requested_model, **kwargs):
+            return ModelHubLaunch(
+                backend=backend,
+                channel="native_cli",
+                requested_model=requested_model,
+                target_model="claude-opus",
+                runtime_model="claude-opus",
+                source_id="src_native01",
+            )
+
+        async def record_native_failure(self, context, diagnostic):
+            events.append(("record", diagnostic))
+            return False
+
+        def retire_process_scope(
+            self,
+            backend,
+            process_scope,
+            *,
+            terminal_turn_id=None,
+        ):
+            events.append(
+                (
+                    "retire",
+                    backend,
+                    process_scope,
+                    terminal_turn_id,
+                )
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = _Runtime()
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"turn_token": "turn_startup_failure"},
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        _run_session(handler, context)
+
+    assert events == [
+        ("record", "startup failed"),
+        (
+            "retire",
+            "claude",
+            f"slack_C123:{tmp_path}",
+            "turn_startup_failure",
+        ),
+    ]
 
 
 def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, tmp_path: Path) -> None:
@@ -1911,6 +1997,48 @@ def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path:
     assert events == ["disconnect", "cancel"]
     assert composite_key not in controller.receiver_tasks
     assert composite_key not in controller.claude_sessions
+
+
+def test_cleanup_session_retires_model_hub_process_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeAgentOptions",
+        _StubClaudeAgentOptions,
+    )
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeSDKClient",
+        _StubClaudeSDKClient,
+    )
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    retired: list[tuple[str, str]] = []
+    controller.model_hub_runtime = SimpleNamespace(
+        retire_process_scope=lambda backend, scope: retired.append(
+            (backend, scope)
+        )
+    )
+
+    asyncio.run(handler.cleanup_session(composite_key))
+
+    assert retired == [("claude", composite_key)]
 
 
 def test_cleanup_session_swallows_receiver_task_failure(monkeypatch, tmp_path: Path) -> None:

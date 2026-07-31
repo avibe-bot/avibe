@@ -1,0 +1,101 @@
+{
+  "defaults": {
+    "transcript": false,
+    "searchable": false,
+    "inputAuthors": [],
+    "inboxActivity": true,
+    "inboxPreview": false,
+    "inboxSettlesReply": false,
+    "activityRole": "none",
+    "terminalWhenEvents": [],
+    "unread": false,
+    "webPush": false,
+    "webPushWhenEvents": [],
+    "acceptedReservation": false,
+    "render": "none"
+  },
+  "types": {
+    "user": {
+      "transcript": true,
+      "searchable": true,
+      "inputAuthors": [
+        "user"
+      ],
+      "activityRole": "turn_start",
+      "acceptedReservation": true,
+      "render": "user"
+    },
+    "harness": {
+      "transcript": true,
+      "searchable": true,
+      "inputAuthors": [
+        "harness"
+      ],
+      "activityRole": "turn_start",
+      "acceptedReservation": true,
+      "render": "harness"
+    },
+    "annotation": {
+      "transcript": true,
+      "searchable": true,
+      "inputAuthors": ["harness"],
+      "acceptedReservation": true,
+      "render": "annotation"
+    },
+    "result": {
+      "transcript": true,
+      "searchable": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "activityRole": "terminal",
+      "unread": true,
+      "webPush": true,
+      "render": "agent"
+    },
+    "notify": {
+      "transcript": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "terminalWhenEvents": [
+        "backend_failure"
+      ],
+      "webPushWhenEvents": [
+        "backend_failure"
+      ],
+      "render": "status"
+    },
+    "error": {
+      "transcript": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "activityRole": "terminal",
+      "webPush": true,
+      "render": "status"
+    },
+    "assistant": {
+      "activityRole": "activity",
+      "render": "activity"
+    },
+    "tool_call": {
+      "render": "activity"
+    },
+    "queued": {
+      "inboxActivity": false,
+      "acceptedReservation": true
+    },
+    "draft": {
+      "inboxActivity": false
+    },
+    "pending": {
+      "inboxActivity": false
+    },
+    "harness_dedupe": {
+      "inboxActivity": false
+    },
+    "silent": {
+      "inboxActivity": false,
+      "inboxSettlesReply": true,
+      "activityRole": "terminal"
+    }
+  }
+}

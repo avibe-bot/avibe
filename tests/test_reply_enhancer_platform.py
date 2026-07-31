@@ -3,18 +3,17 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.message_dispatcher import ConsolidatedMessageDispatcher
+import core.reply_enhancer as reply_enhancer
 from core.controller import Controller
-from core.reply_enhancer import process_reply
-from core.system_prompt_injection import (
-    build_system_prompt_injection,
-    memory_cli_prompt_admitted,
-)
+from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.reply_enhancer import process_reply, strip_silent_blocks
+from core.system_prompt_injection import build_system_prompt_injection, memory_cli_prompt_admitted
 from config import paths
+from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
 
 
@@ -85,6 +84,13 @@ class _StubController:
 
     def get_settings_manager_for_context(self, context=None):
         return self.settings_manager
+
+
+class _StubAgent(BaseAgent):
+    name = "stub"
+
+    async def handle_message(self, request: AgentRequest) -> None:
+        return None
 
 
 class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
@@ -466,6 +472,906 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.files, [])
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_silent_file_link_literal_inside_code(self):
+        specimens = [
+            "Example `<silent>[file](file:///tmp/secret.txt)</silent>` remains.",
+            "```markdown\n<silent>[file](file:///tmp/secret.txt)</silent>\n```",
+            "```markdown\n> <silent>[file](file:///tmp/secret.txt)</silent>\n```",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                reply = process_reply(text)
+                self.assertEqual(reply.text, text)
+                self.assertEqual(reply.files, [])
+
+    def test_process_reply_only_extracts_file_links_outside_markdown_code(self):
+        text = (
+            "Attach [report](file:///tmp/report.txt); preserve "
+            "`<silent>[example](file:///tmp/secret.txt)</silent>`."
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(
+            reply.text,
+            "Attach report; preserve "
+            "`<silent>[example](file:///tmp/secret.txt)</silent>`.",
+        )
+        self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
+
+    def test_process_reply_recovers_attachment_label_from_original_text(self):
+        reply = process_reply("[see `report`](file:///tmp/report.txt)")
+
+        self.assertEqual(reply.text, "see `report`")
+        self.assertEqual([file.label for file in reply.files], ["see `report`"])
+
+    def test_process_reply_uses_shared_code_mask_for_secret_requests(self):
+        text = (
+            "````markdown\n"
+            "text ``` inner\n"
+            "<silent>$<OPENAI_KEY></silent>\n"
+            "````"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.secret_requests, [])
+
+    def test_process_reply_uses_shared_code_mask_for_quick_replies(self):
+        text = (
+            "```markdown\n"
+            "<silent>literal</silent>\n"
+            "---\n"
+            "[Yes] | [No]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
+        trailing_report = "\n".join(
+            [
+                "2. Keep queue and cancellation work in their existing lanes.",
+                "3. Persist the complete terminal message and callback payload.",
+                "4. Re-run the exact-head review and CI gates.",
+            ]
+        )
+        text = (
+            "Intermediate assistant text must not leave its Session; "
+            "the literal directive is `<silent>`.\n\n"
+            f"{trailing_report}"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_fenced_code_byte_for_byte(self):
+        text = (
+            "Examples:\n\n"
+            "```markdown\n"
+            "<silent>complete example</silent>\n"
+            "<silent>\n"
+            "substantial text after the unmatched literal\n"
+            "```\n\n"
+            "~~~text\n"
+            "<SILENT data-example=\"true\">\n"
+            "more literal text\n"
+            "~~~\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_container_fences_byte_for_byte(self):
+        text = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "  ```\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "> ~~~\n\n"
+            "> - ````markdown\n"
+            ">   ```nested```\n"
+            ">   <silent>nested literal</silent>\n"
+            ">   ````\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_tab_indented_list_fence(self):
+        text = (
+            "-\t```text\n"
+            "\t<silent>tab-indented literal</silent>\n"
+            "\t```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_continuation_line_list_fence(self):
+        text = (
+            "10. Example\n"
+            "    ```text\n"
+            "    <silent>continuation literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_retains_list_state_across_lazy_continuation(self):
+        text = (
+            "- item\n"
+            "lazy continuation\n"
+            "    ```text\n"
+            "    <silent>lazy list literal</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_tracks_nested_list_context_across_lines(self):
+        text = (
+            "- Outer\n"
+            "  1. Inner\n"
+            "     ```text\n"
+            "     <silent>nested continuation literal</silent>\n"
+            "     ```\n"
+            "  ```text\n"
+            "  > <silent>outer continuation literal</silent>\n"
+            "  ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_tracks_empty_ordered_list_item(self):
+        text = (
+            "10.\n"
+            "    ```text\n"
+            "    <silent>empty-item continuation literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_tracks_quote_nested_inside_list(self):
+        text = (
+            "- > ```text\n"
+            "  > <silent>list quote literal</silent>\n"
+            "  > ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_enforces_list_indent_before_nested_quote(self):
+        text = (
+            "- > ```text\n"
+            "> <silent>remove outside code</silent>\n"
+            "> ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "- > ```text\n> \n> ```")
+
+    def test_silent_parser_tracks_alternating_quote_and_list_containers(self):
+        text = (
+            "> - > - ```text\n"
+            ">   >   <silent>alternating container literal</silent>\n"
+            ">   >   ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_inline_code_after_non_one_list_text(self):
+        text = (
+            "Paragraph\n"
+            "10. Not a list interruption\n"
+            "    ```text\n"
+            "    <silent>paragraph code literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_rejects_empty_list_interrupting_paragraph(self):
+        text = (
+            "Paragraph\n"
+            "-\n"
+            "    ```text\n"
+            "  <silent>remove outside code</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+        expected = (
+            "Paragraph\n"
+            "-\n"
+            "    ```text\n"
+            "  \n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_uses_list_relative_indented_code_threshold(self):
+        text = (
+            "- item\n"
+            "\n"
+            "    <silent>remove list paragraph content</silent>\n"
+            "\n"
+            "      <silent>preserve list indented code</silent>"
+        )
+        expected = (
+            "- item\n"
+            "\n"
+            "    \n"
+            "\n"
+            "      <silent>preserve list indented code</silent>"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_uses_nested_list_indented_code_threshold(self):
+        text = (
+            "- outer\n"
+            "  - middle\n"
+            "    - inner\n"
+            "\n"
+            "        <silent>remove inner list content</silent>"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "- outer\n  - middle\n    - inner",
+        )
+
+    def test_silent_parser_preserves_alternating_container_indented_code(self):
+        text = "- >     <silent>alternating indented literal</silent>"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_resets_paragraph_state_after_heading(self):
+        text = (
+            "# Heading\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>heading list literal</silent>\n"
+            "    ```\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_inline_code_after_orphan_setext_marker(self):
+        text = (
+            "===\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>paragraph code literal</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_keeps_invalid_fence_line_in_paragraph_state(self):
+        text = (
+            "``` foo`bar\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>remove outside code</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "``` foo`bar\n10. item\n    ```text\n    \n    ```",
+        )
+
+    def test_silent_parser_allows_list_after_link_reference_definition(self):
+        text = (
+            "[ref]: /url\n"
+            "10. item\n"
+            "    ```text\n"
+            "    <silent>link definition literal</silent>\n"
+            "    ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_stops_unclosed_fence_at_container_boundary(self):
+        text = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "List ended.\n"
+            "<silent>remove after list</silent>\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "Quote ended.\n"
+            "<silent>remove after quote</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "- ```text\n"
+            "  <silent>list literal</silent>\n"
+            "List ended.\n"
+            "\n\n"
+            "> ~~~text\n"
+            "> <silent>quote literal</silent>\n"
+            "Quote ended.\n"
+            "\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_removes_real_blocks_while_preserving_code_examples(self):
+        text = (
+            "Start\n"
+            "<silent>remove one</silent>\n"
+            "Inline `<silent>literal one</silent>` stays.\n"
+            "<SILENT reason=\"hidden\">remove two</silent >\n"
+            "````markdown\n"
+            "```nested fence```\n"
+            "<silent>literal two</silent>\n"
+            "````\n"
+            "End"
+        )
+        expected = (
+            "Start\n"
+            "\n"
+            "Inline `<silent>literal one</silent>` stays.\n"
+            "\n"
+            "````markdown\n"
+            "```nested fence```\n"
+            "<silent>literal two</silent>\n"
+            "````\n"
+            "End"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_handles_backtick_and_escape_edges(self):
+        protected = "Double ``literal `<silent>` marker`` remains."
+        escaped = r"Before \`<silent>remove me</silent>\` after"
+        partial_escape = "\\``<silent>literal</silent>`"
+        escaped_closer = r"`<silent>literal</silent>\`"
+
+        self.assertEqual(strip_silent_blocks(protected), protected)
+        self.assertEqual(strip_silent_blocks(escaped), r"Before \`\` after")
+        self.assertEqual(strip_silent_blocks(partial_escape), partial_escape)
+        self.assertEqual(strip_silent_blocks(escaped_closer), escaped_closer)
+
+    def test_silent_parser_preserves_multiline_inline_code_span(self):
+        text = "`foo\n<silent>multiline literal</silent>\nbar`\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_ignores_backticks_inside_raw_html_tags(self):
+        text = '<a title="`">x</a> <silent>remove me</silent> `tail'
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            '<a title="`">x</a>  `tail',
+        )
+
+    def test_silent_parser_rejects_invalid_raw_html_tag_grammar(self):
+        text = '<a? title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_honors_escape_before_raw_html_candidate(self):
+        text = r'\<a title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_rejects_unicode_space_in_raw_html_tag(self):
+        text = '<a\u00a0title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_rejects_attributes_on_raw_html_closing_tags(self):
+        text = '</a title="`"> [literal](file:///tmp/secret.txt) `'
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_parses_html_as_text_inside_open_code_span(self):
+        text = (
+            '`prefix <a title="`"> '
+            "<silent>remove outside code</silent> "
+            "`tail`"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            '`prefix <a title="`">  `tail`',
+        )
+
+    def test_silent_parser_ignores_backticks_inside_uri_autolinks(self):
+        text = (
+            "<https://example.com/`> "
+            "<silent>remove outside code</silent> "
+            "`tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "<https://example.com/`>  `tail",
+        )
+
+    def test_silent_parser_strips_quote_prefixes_before_inline_html(self):
+        text = (
+            "> text <!A\n"
+            "> `> <silent>remove outside code</silent> `tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "> text <!A\n> `>  `tail",
+        )
+
+    def test_silent_parser_maps_normalized_nul_to_original_source(self):
+        text = (
+            "`before\x00"
+            "[literal](file:///tmp/secret.txt) "
+            "<silent>literal</silent>"
+            "after`"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_maps_tab_expanded_list_continuation(self):
+        text = (
+            "- item\n"
+            "\t`<silent>[literal](file:///tmp/secret.txt)</silent>`"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_handles_many_unmatched_backtick_runs(self):
+        unmatched_runs = " ".join("`" * length for length in range(2, 502))
+        text = f"Literal `<silent>` remains.\n{unmatched_runs}\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_does_not_pair_inline_spans_across_lines(self):
+        text = "    ```\n<silent>remove outside code</silent>\n    ```\nTail remains."
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "    ```\n\n    ```\nTail remains.",
+        )
+
+    def test_silent_parser_ends_quoted_fence_at_unmarked_blank_line(self):
+        text = (
+            "> ```text\n"
+            "\n"
+            "> <silent>remove outside code</silent>\n"
+            "> ```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "> ```text\n\n> \n> ```")
+
+    def test_silent_parser_preserves_indented_code_literal(self):
+        text = "Example:\n\n    <silent>indented literal</silent>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_preserves_quoted_indented_code_literal(self):
+        text = ">     <silent>quoted indented literal</silent>"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_ignores_fences_inside_raw_html_blocks(self):
+        text = (
+            "<pre>\n"
+            "```\n"
+            "<silent>remove real directive</silent>\n"
+            "```\n"
+            "</pre>\n"
+            "Tail remains."
+        )
+        expected = "<pre>\n```\n\n```\n</pre>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_does_not_mask_indented_content_in_raw_html_block(self):
+        text = (
+            "<pre>\n"
+            "\n"
+            "    <silent>remove real directive</silent>\n"
+            "</pre>"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "<pre>\n\n    \n</pre>")
+
+    def test_silent_parser_ignores_fences_inside_html_comment_blocks(self):
+        text = (
+            "<!--\n"
+            "```\n"
+            "-->\n"
+            "<silent>remove real directive</silent>\n"
+            "```"
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "<!--\n```\n-->\n\n```")
+
+    def test_silent_parser_does_not_parse_code_spans_in_unterminated_html_blocks(self):
+        for opener in ("<!--", "<?target", "<![CDATA[", "<!DOCTYPE"):
+            with self.subTest(opener=opener):
+                text = f"{opener}\n`<silent>hidden</silent>`"
+
+                self.assertEqual(strip_silent_blocks(text), f"{opener}\n``")
+
+    def test_process_reply_keeps_fence_newline_before_quick_replies(self):
+        text = "```text\nexample\n```\n---\n[Yes] | [No]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, "```text\nexample\n```")
+        self.assertEqual([button.text for button in reply.buttons], ["Yes", "No"])
+
+    def test_silent_parser_removes_many_control_blocks_in_one_pass(self):
+        blocks = "".join(
+            f"visible-{index}<silent>hidden-{index}</silent>"
+            for index in range(2_000)
+        )
+        expected = "".join(f"visible-{index}" for index in range(2_000))
+
+        self.assertEqual(strip_silent_blocks(blocks), expected)
+
+    def test_silent_parser_parses_progressively_exposed_blocks_once(self):
+        lengths = range(1, 201)
+        blocks = "".join(
+            f"<silent>{'`' * length}</silent>" for length in lengths
+        )
+        closers = " ".join("`" * length for length in lengths)
+        text = f"prefix {blocks} {closers}"
+
+        with patch.object(
+            reply_enhancer._BLOCK_MARKDOWN,
+            "parse",
+            wraps=reply_enhancer._BLOCK_MARKDOWN.parse,
+        ) as parse:
+            result = strip_silent_blocks(text)
+
+        self.assertEqual(result, f"prefix  {closers}")
+        self.assertEqual(parse.call_count, 1)
+
+    def test_silent_parser_handles_many_malformed_html_prefixes_linearly(self):
+        text = "<a" * 8_000 + " `<silent>literal</silent>`"
+
+        self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_silent_parser_strips_many_malformed_html_comments_linearly(self):
+        text = "<!--" * 8_000 + " `<silent>literal</silent>`"
+
+        self.assertEqual(strip_silent_blocks(text), "<!--" * 8_000 + " ``")
+
+    def test_reply_enhancer_treats_unicode_digits_as_plain_text(self):
+        text = "². item\n①. item"
+
+        self.assertEqual(process_reply(text).text, text)
+
+    def test_silent_parser_does_not_pair_inline_spans_across_cr_lines(self):
+        text = "    ```\r<silent>remove outside code</silent>\r    ```\rTail remains."
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "    ```\r\r    ```\rTail remains.",
+        )
+
+    def test_silent_parser_closes_real_block_before_parsing_hidden_markdown(self):
+        text = "Before\n<silent>\n```\nhidden\n</silent>\nTail remains."
+
+        self.assertEqual(strip_silent_blocks(text), "Before\n\nTail remains.")
+
+    def test_silent_parser_keeps_hidden_fences_from_masking_later_blocks(self):
+        text = (
+            "Before\n"
+            "<silent>\n```\nhidden\n</silent>\n"
+            "<silent>second secret</silent>\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), "Before\n\n\nTail remains.")
+
+    def test_silent_parser_restores_code_literals_after_hidden_fence(self):
+        text = (
+            "Before\n"
+            "<silent>\n````\nhidden\n</silent>\n"
+            "```text\n"
+            "<silent>literal\n```\n</silent>\n"
+            "<silent>remove two</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "Before\n\n"
+            "```text\n"
+            "<silent>literal\n```\n</silent>\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_process_reply_reparses_after_multiline_control_html_block(self):
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>inline literal</silent>`\n"
+            "```text\n"
+            "<silent>[literal](file:///tmp/secret.txt)</silent>\n"
+            "```\n"
+            "Tail remains."
+        )
+        expected = (
+            "`<silent>inline literal</silent>`\n"
+            "```text\n"
+            "<silent>[literal](file:///tmp/secret.txt)</silent>\n"
+            "```\n"
+            "Tail remains."
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, expected)
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_reparses_unmatched_literal_after_html_block(self):
+        tail = "\n".join(f"substantial trailing line {index}" for index in range(50))
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>unmatched literal opener`\n"
+            f"{tail}"
+        )
+        expected = "`<silent>unmatched literal opener`\n" + tail
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_does_not_cross_pair_provisional_code_literal(self):
+        text = (
+            "<silent>\ninternal\n</silent>\n"
+            "`<silent>unmatched literal opener`\n"
+            "<silent>remove later control</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "`<silent>unmatched literal opener`\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_reparses_html_block_inside_quote(self):
+        text = (
+            "> <silent>\n"
+            "> internal\n"
+            "> </silent>\n"
+            "> `<silent>literal</silent>`\n"
+            "> Tail remains."
+        )
+        expected = (
+            "> \n"
+            "> `<silent>literal</silent>`\n"
+            "> Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_does_not_pair_code_opener_with_real_closer(self):
+        text = (
+            "```text\n"
+            "<silent>unterminated literal\n"
+            "```\n"
+            "<silent>remove real block</silent>\n"
+            "Tail remains."
+        )
+        expected = (
+            "```text\n"
+            "<silent>unterminated literal\n"
+            "```\n\n"
+            "Tail remains."
+        )
+
+        self.assertEqual(strip_silent_blocks(text), expected)
+
+    def test_silent_parser_bounds_hidden_unmatched_fence_refinement(self):
+        blocks = "".join(
+            f"<silent>\n{'`' * length}\nhidden\n</silent>\n"
+            for length in range(205, 4, -1)
+        )
+
+        with patch.object(
+            reply_enhancer._BLOCK_MARKDOWN,
+            "parse",
+            wraps=reply_enhancer._BLOCK_MARKDOWN.parse,
+        ) as parse:
+            result = strip_silent_blocks(f"Before\n{blocks}Tail remains.")
+
+        self.assertNotIn("<silent", result)
+        self.assertTrue(result.startswith("Before\n"))
+        self.assertTrue(result.endswith("Tail remains."))
+        self.assertLessEqual(parse.call_count, 4)
+
+    def test_silent_parser_partitions_sorted_ranges_in_one_pass(self):
+        class CountingPosition:
+            comparisons = 0
+
+            def __init__(self, value):
+                self.value = value
+
+            def __le__(self, other):
+                type(self).comparisons += 1
+                return self.value <= other.value
+
+            def __lt__(self, other):
+                type(self).comparisons += 1
+                return self.value < other.value
+
+        count = 8_000
+        containers = [
+            (CountingPosition(index * 4), CountingPosition(index * 4 + 1))
+            for index in range(count)
+        ]
+        ranges = [
+            source_range
+            for index in range(count)
+            for source_range in (
+                (CountingPosition(index * 4), CountingPosition(index * 4)),
+                (
+                    CountingPosition(index * 4 + 2),
+                    CountingPosition(index * 4 + 2),
+                ),
+            )
+        ]
+
+        outside, inside = reply_enhancer._partition_ranges_by_start(
+            ranges,
+            containers,
+        )
+
+        self.assertEqual(len(outside), count)
+        self.assertEqual(len(inside), count)
+        self.assertLess(
+            CountingPosition.comparisons,
+            8 * (len(ranges) + len(containers)),
+        )
+
+    def test_silent_parser_scans_malformed_openers_without_unbounded_regex(self):
+        text = "<silent" * 16_000 + "\nTail remains."
+
+        with patch.object(
+            reply_enhancer,
+            "_SILENT_OPEN_RE",
+            None,
+            create=True,
+        ):
+            self.assertEqual(strip_silent_blocks(text), text)
+
+    def test_process_reply_keeps_original_enhancement_eligibility(self):
+        text = (
+            "`<silent>hidden</silent>``\n"
+            "[report](file:///tmp/report.txt)\n"
+            "$<REPORT_TOKEN>\n"
+            "---\n"
+            "[Continue] | [Stop]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, "```\nreport\n$<REPORT_TOKEN>")
+        self.assertEqual([file.path for file in reply.files], ["/tmp/report.txt"])
+        self.assertEqual(
+            [request.name for request in reply.secret_requests],
+            ["REPORT_TOKEN"],
+        )
+        self.assertEqual(
+            [button.text for button in reply.buttons],
+            ["Continue", "Stop"],
+        )
+
+    async def test_base_agent_result_keeps_attachment_eligibility_after_silent_removal(self):
+        class _DispatchingController(_StubController):
+            def __init__(self):
+                super().__init__("slack")
+                self.config.show_duration = False
+                self.dispatcher = ConsolidatedMessageDispatcher(self)
+
+            async def emit_agent_message(self, context, message_type, text, **kwargs):
+                return await self.dispatcher.emit_agent_message(
+                    context,
+                    message_type,
+                    text,
+                    **kwargs,
+                )
+
+        controller = _DispatchingController()
+        upload_file_links = AsyncMock()
+        controller.dispatcher._upload_file_links = upload_file_links
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+        )
+        source = (
+            "`<silent>hidden</silent>``\n"
+            "[report](file:///tmp/report.txt)"
+        )
+
+        await _StubAgent(controller).emit_result_message(
+            context,
+            source,
+            duration_ms=0,
+        )
+
+        uploaded_files = upload_file_links.await_args.args[2]
+        self.assertEqual(
+            [(file.label, file.path) for file in uploaded_files],
+            [("report", "/tmp/report.txt")],
+        )
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("C1", "```\nreport", "markdown")],
+        )
+
+    def test_silent_parser_keeps_unterminated_recovery_outside_code(self):
+        text = "Visible result\n<silent>unfinished hidden diagnostic\nmust not leak"
+
+        self.assertEqual(strip_silent_blocks(text), "Visible result")
+
+    def test_silent_parser_keeps_all_silent_response_empty(self):
+        self.assertEqual(strip_silent_blocks("<silent>internal only</silent>"), "")
+
+    def test_silent_parser_preserves_boundary_indented_code(self):
+        text = (
+            "<silent>remove real directive</silent>\n\n"
+            "    <silent>[literal](file:///tmp/secret.txt)</silent>"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(
+            reply.text,
+            "    <silent>[literal](file:///tmp/secret.txt)</silent>",
+        )
+        self.assertEqual(reply.files, [])
+
+    def test_silent_parser_does_not_reparse_synthesized_openers(self):
+        text = (
+            "Visible <sil"
+            "<silent>hidden</silent>"
+            "ent>KEEP</silent> tail"
+        )
+
+        self.assertEqual(
+            strip_silent_blocks(text),
+            "Visible <silent>KEEP</silent> tail",
+        )
+
     def test_process_reply_can_disable_quick_reply_button_parsing_only(self):
         reply = process_reply(
             "Report [file](file:///tmp/report.txt)\n\n---\n[Continue] | [Stop]",
@@ -626,6 +1532,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tailwind CSS v4 utility classes are built in", prompt)
         self.assertIn("restyle the built-in `@/components/ui/*` components", prompt)
         self.assertIn('must keep `@import "tailwindcss";` and `@import "@avibe/show-ui/theme.css";` at the top', prompt)
+        self.assertIn("Theme with standard shadcn variables", prompt)
+        self.assertIn("values are complete CSS colors usable directly through `var(...)`", prompt)
+        self.assertIn('under `.dark` or `[data-theme="dark"]` for dark mode', prompt)
+        self.assertIn("import `cn` from `@/lib/utils`", prompt)
+        self.assertNotIn("theme through the `@avibe/show-ui/theme` CSS variables", prompt)
         self.assertNotIn("Ready to visualize", prompt)
         self.assertIn("@/components/ui/progress", prompt)
         self.assertNotIn("Excalidraw-style static SVG/PNG diagrams", prompt)
@@ -669,6 +1580,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("### Choosing the right Harness shape", prompt)
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
+        self.assertIn(
+            "| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |",
+            prompt,
+        )
+        self.assertIn(
+            "| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |",
+            prompt,
+        )
+        self.assertIn(
+            "| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |",
+            prompt,
+        )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
         self.assertIn("Tasks created from an Avibe Agent shell continue this conversation by default", prompt)
         self.assertIn("`vibe task add` creates a time-triggered saved Agent message", prompt)
@@ -689,6 +1612,46 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(delegate_guidance, prompt)
         self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
+        self.assertIn(
+            "That existing-Session send queues behind an active turn by default",
+            prompt,
+        )
+        self.assertIn(
+            "an explicit user request is one signal, not a prerequisite",
+            prompt,
+        )
+        self.assertIn(
+            "Both forms require a Web/Workbench Session",
+            prompt,
+        )
+        self.assertIn(
+            "vibe agent run --session-id <id> --send-now --message ...",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session send-now <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue list <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue remove <id> <message-id>",
+            prompt,
+        )
+        self.assertIn(
+            "Always list first and use the returned stable message id",
+            prompt,
+        )
+        self.assertIn(
+            "the new message does not leapfrog it",
+            prompt,
+        )
+        self.assertIn(
+            "If interruption is refused, the active turn and durable queue remain intact",
+            prompt,
+        )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)

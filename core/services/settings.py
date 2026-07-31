@@ -79,7 +79,7 @@ def default_config() -> V2Config:
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),
         ),
-        model_hub=ModelHubConfig.fresh(),
+        model_hub=ModelHubConfig(),
     )
 
 

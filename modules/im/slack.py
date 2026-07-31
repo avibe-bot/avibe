@@ -1957,6 +1957,11 @@ class SlackBot(BaseIMClient):
                 if not shared_text and not route_text and not file_attachments:
                     logger.debug("Ignoring shared message with no extractable content")
                     return
+            normalized_user_text = route_text
+            if shared_text:
+                normalized_user_text = (
+                    f"{normalized_user_text}\n\n{shared_text}" if normalized_user_text else shared_text
+                )
 
             # Extract context
             # For Slack: if no thread_ts, use the message's own ts as thread_id (start of thread)
@@ -1976,6 +1981,7 @@ class SlackBot(BaseIMClient):
                     "bot_user_id": bot_user_id,
                     "bot_mention": bot_mention,
                     "control_text": route_text,
+                    "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
                 is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
@@ -2053,6 +2059,11 @@ class SlackBot(BaseIMClient):
 
             # Extract shared/forwarded message content (defer appending until after command check)
             shared_text = await self._extract_shared_message_content(event)
+            normalized_user_text = route_text
+            if shared_text:
+                normalized_user_text = (
+                    f"{normalized_user_text}\n\n{shared_text}" if normalized_user_text else shared_text
+                )
 
             had_mention_only = not route_text and not file_attachments and not shared_text
 
@@ -2070,6 +2081,7 @@ class SlackBot(BaseIMClient):
                     "bot_user_id": bot_user_id,
                     "bot_mention": bot_mention,
                     "control_text": route_text,
+                    "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
                 is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),

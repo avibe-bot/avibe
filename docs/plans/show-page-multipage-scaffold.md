@@ -85,13 +85,14 @@ Runtime-owned shell (unchanged, skip-if-exists): `index.html`, `src/main.tsx`,
 
 Fresh-workspace multi-page demo (written only when `src/App.tsx` does not yet exist, so
 existing single-page workspaces stay byte-identical):
-- `src/App.tsx` — router host: `ThemeProvider` + `Layout` (nav) + `<RouterView/>`.
+- `src/App.tsx` — router host using standard semantic theme utilities + `<RouterView/>`.
 - `src/router.tsx` — dependency-free hash-router engine + file-based discovery.
 - `src/pages/index.tsx` — Home (overview + how to add a page).
 - `src/pages/items/index.tsx` — a list page linking into the nested route.
 - `src/pages/items/[id].tsx` — nested dynamic route; deep-linkable/refreshable.
 - `src/styles.css` — minimal: keeps `@import "tailwindcss";` + `@import
-  "@avibe/show-ui/theme.css";`, plus a small base; demo styling uses Tailwind + show-ui.
+  "@avibe/show-ui/theme.css";`, plus a small base; standard shadcn variables are
+  the theme authority and the demo styling uses Tailwind + show-ui.
 
 ## Compatibility
 

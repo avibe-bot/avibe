@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +9,16 @@ from unittest.mock import AsyncMock
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from config.v2_config import (
+    ModelHubModelConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+)
+from core.handlers.model_hub.service import ModelHubError
+from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
+from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
 
 
 class _FakeNextTurnRuntime:
@@ -41,7 +50,236 @@ class _FakeCodexNextTurnRuntime:
         return "turn-ok"
 
 
+class _CodexProviderBindingSessions:
+    def get_agent_session_id(self, *_args, **_kwargs):
+        return "thread-existing"
+
+    def ensure_agent_session_id(self, *_args, **_kwargs):
+        return "ses-provider"
+
+    def bind_agent_session(self, *_args, **_kwargs):
+        return "ses-provider"
+
+
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
+        """Scenario: AUTH-SETUP-903"""
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(platform="avibe", reply_enhancements=True)
+        )
+        agent.codex_config = SimpleNamespace(
+            default_model=None,
+            auth_mode="api_key",
+            base_url="https://relay.example/v1",
+        )
+        agent.sessions = _CodexProviderBindingSessions()
+        agent._session_mgr = SimpleNamespace(set_thread_id=lambda *_args: None)
+        agent._build_thread_developer_instructions = lambda _request: None
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={},
+                user_id="U1",
+                channel_id="C1",
+                thread_id=None,
+            ),
+            base_session_id="base-provider",
+            session_key="avibe::project::provider",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_id=None,
+            vibe_agent_name=None,
+        )
+        provider_config = {
+            "name": "OpenAI",
+            "base_url": "https://relay.example/v1",
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": False,
+        }
+
+        calls = []
+
+        async def send_request(method, params):
+            calls.append((method, params))
+            if method == "config/read":
+                return {
+                    "config": {
+                        "model_provider": "openai-managed",
+                        "model_providers": {"openai-managed": provider_config},
+                    }
+                }
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "id": "thread-existing",
+                        "modelProvider": "openai-managed",
+                    }
+                }
+            if method == "thread/resume":
+                return {"thread": {"id": "thread-existing"}}
+            raise AssertionError(f"Unexpected Codex request: {method}")
+
+        thread_id = await agent._start_or_resume_thread(
+            SimpleNamespace(send_request=send_request),
+            request,
+        )
+
+        self.assertEqual(thread_id, "thread-existing")
+        resume = next(params for method, params in calls if method == "thread/resume")
+        self.assertEqual(resume["modelProvider"], "openai-managed")
+
+    async def test_native_model_hub_reauth_confirms_before_honest_failure(self):
+        """Scenario: AUTH-SETUP-106"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(
+            Path(state_dir.name),
+        )
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                )
+            ],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.reauth_source(source.id, {})
+
+        self.assertEqual(
+            refused.exception.code,
+            "reauth_confirmation_required",
+        )
+        self.assertEqual(harness.agent_auth.flows, {})
+        self.assertEqual(harness.store.config.sources[0].state.status, "standby")
+        self.assertEqual(
+            [model.id for model in harness.store.config.sources[0].models],
+            ["claude-opus-4-6"],
+        )
+
+        started = await harness.service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+        flow_id = started["flow"]["flow_id"]
+        self.assertEqual(started["flow"]["intent"], "reauth")
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        harness.agent_auth.timeout(flow_id)
+        failed = await harness.service.oauth_status(flow_id)
+
+        self.assertEqual(failed["flow"]["state"], "failed")
+        self.assertNotIn("source", failed)
+        self.assertEqual(
+            harness.store.config.sources[0].state.status,
+            "needs_action",
+        )
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "interrupted",
+        )
+
+    async def test_native_reauth_reuses_a_pending_flow_and_cancel_commits_a_finished_one(self):
+        """Scenario: AUTH-SETUP-107
+
+        Pins the three server-side rules the 模型 page's re-auth dialog is built
+        on, in the order a single abandoned journey meets them: a start REUSES a
+        live pending flow, cancelling a pending flow destroys the very flow a
+        successor would have reused, and the same cancel against a FINISHED flow
+        materializes the re-auth instead of cancelling it.
+
+        This is also the closed-loop evidence for the client-side ownership rules
+        in `ui/src/components/settings/models/asyncLifetime.ts` (`releaseFlow`):
+        the dialog only skips a teardown cancel when it no longer owns the source's
+        flow, and never skips the refetch, and both of those are conclusions about
+        the sequence asserted here. The dialog itself cannot be driven from this
+        harness — it is React, and this is an asyncio TestCase with no DOM — so the
+        UI-side interleavings are exercised in `asyncLifetime.test.ts` against the
+        same rules.
+        """
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig(
+            id="src_native0001",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Claude subscription",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
+        )
+        harness.store.config.sources.append(source)
+        harness.store.config.refresh_follow_orders()
+        ack = {"acknowledge_irreversible": True}
+
+        # 1. A second start for the same source is handed the SAME flow, and the
+        #    irreversible half is not paid twice: one spawn, one marking.
+        first = await harness.service.reauth_source(source.id, ack)
+        flow_id = first["flow"]["flow_id"]
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        reused = await harness.service.reauth_source(source.id, ack)
+        self.assertEqual(reused["flow"]["flow_id"], flow_id)
+        self.assertEqual(harness.agent_auth.start_calls, [("claude", True)])
+        # A start answers with the flow ALONE — no repair tail — which is why the
+        # page has to re-read a start that comes back already finished.
+        self.assertEqual(set(reused), {"flow"})
+
+        # 2. Cancelling a still-pending flow destroys it, so the next start has to
+        #    open a new one — and pay the irreversible half again.
+        await harness.service.oauth_cancel(flow_id)
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+
+        restarted = await harness.service.reauth_source(source.id, ack)
+        successor_flow_id = restarted["flow"]["flow_id"]
+        self.assertNotEqual(successor_flow_id, flow_id)
+        self.assertEqual(
+            harness.agent_auth.start_calls,
+            [("claude", True), ("claude", True)],
+        )
+        self.assertEqual(harness.store.config.sources[0].state.status, "needs_action")
+        self.assertEqual(harness.store.config.sources[0].models, [])
+
+        # 3. The same call against a FINISHED flow is not a cancel at all: it
+        #    materializes the re-auth. Nothing polls the status first, so this call
+        #    is the only thing that could have written the row.
+        harness.agent_auth.complete(successor_flow_id)
+        await harness.service.oauth_cancel(successor_flow_id)
+
+        self.assertEqual(harness.agent_auth.cancelled, [flow_id])
+        repaired = harness.store.config.sources[0]
+        self.assertEqual(repaired.state.status, "standby")
+        self.assertIn("claude-opus-4-6", [model.id for model in repaired.models])
+        self.assertEqual(
+            harness.service.get_agent_sources("claude")["supply_status"],
+            "ok",
+        )
+
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
         harness = AuthSetupScenarioHarness()

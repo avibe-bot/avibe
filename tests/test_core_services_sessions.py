@@ -85,10 +85,16 @@ def test_public_surface_is_stable():
             "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
+        # Terminal-archive guard raised by update_session on an archived row:
+        "SessionArchivedError",
+        # Localized user-facing copy for that guard's 409 body:
+        "session_archived_message",
     }
-    assert set(sessions_service.__all__) == expected
+    assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:
         assert callable(getattr(sessions_service, name))
+    # The one non-callable member: the i18n key constant the parity guard pins.
+    assert isinstance(sessions_service.SESSION_ARCHIVED_I18N_KEY, str)
 
 
 def test_each_workbench_function_delegates_to_storage():
@@ -306,6 +312,31 @@ def test_archive_marks_session(isolated_state):
     with engine.connect() as conn:
         page = sessions_service.list_sessions(conn, scope_id=scope_id, status="active")
     assert page["sessions"] == [], "archived sessions should not appear in the active list"
+
+
+def test_update_session_rejects_archived_session(isolated_state):
+    """Archive is terminal: an archived row can never be renamed or re-routed.
+
+    ``archive_session`` itself writes the row directly, so archiving does not trip
+    the guard — only a later mutation attempt does. The archived payload stays
+    fully readable via ``get_session`` (search + the read-only chat depend on it)."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        sid = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="claude", title="Before"
+        )["id"]
+        sessions_service.archive_session(conn, sid)
+
+        with pytest.raises(sessions_service.SessionArchivedError):
+            sessions_service.update_session(conn, sid, title="Renamed")
+        with pytest.raises(sessions_service.SessionArchivedError):
+            sessions_service.update_session(conn, sid, agent_name="codex", agent_backend="codex")
+        # Nothing was written, and the transcript row stays readable.
+        after = sessions_service.get_session(conn, sid)
+        assert after["title"] == "Before"
+        assert after["agent_backend"] == "claude"
+        assert after["status"] == "archived"
 
 
 def test_update_session_present_null_clears_model_and_effort(isolated_state):
@@ -744,3 +775,121 @@ def test_update_session_legacy_blank_backend_keeps_initial_pin_escape(isolated_s
         # Now pinned: a different backend is rejected.
         with pytest.raises(sessions_service.SessionBackendLockedError):
             sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+
+
+# --- HFR-247: the override marker must not outlive the columns it describes ----
+
+
+def test_workbench_default_action_drops_the_explicit_override_marker(isolated_state, tmp_path):
+    """HFR-247 — the Chat header's "Default" must actually restore the defaults.
+
+    ``agent_sessions.metadata_json.explicit_setting_overrides`` tells dispatch
+    that this session's NULL ``model`` / ``reasoning_effort`` are a deliberate pin
+    ("inherit nothing"), not the ordinary "inherit from the Agent". Only the
+    ``create_once`` rebind wrote it -- but any writer of those columns replaces
+    what the marker describes. ``update_session`` only rewrote ``metadata_json``
+    on a title change or a scope move, so the Workbench "Default" action (present
+    nulls for the whole route) left the marker in place: the session then showed a
+    cleared route, and every turn still ran with NO model and NO reasoning effort
+    while claiming to run as the default Agent. The control looked like it worked
+    and routed nothing.
+    """
+
+    import asyncio
+
+    from config import paths
+    from core.handlers.message_handler import MessageHandler
+    from core.internal_server import _build_session_context
+    from core.vibe_agents import VibeAgentStore
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+    from tests.test_scheduled_tasks import _DispatchController, _DispatchSessionHandler
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.ensure_builtin_default_agents(["codex"])
+        agent_store.set_default_agent_name("codex")
+        # The Agent the cleared session must fall back to. Distinctive values so
+        # "inherited the Agent's defaults" cannot pass on a None == None compare.
+        default_agent = agent_store.update(
+            "codex", model="gpt-5.5-default", reasoning_effort="xhigh"
+        )
+    finally:
+        agent_store.close()
+    assert default_agent.model == "gpt-5.5-default"
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn, workdir=str(workdir))
+        # A session that pins NOTHING on purpose -- the shape a preserved
+        # ``create_once`` rebind reserves (D3) and the user then opens in Chat.
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="codex",
+            agent_name="codex",
+            agent_variant="codex",
+            model=None,
+            reasoning_effort=None,
+            metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+        )
+        sid = session["id"]
+
+        # An UNRELATED edit must not touch a marker entry it knows nothing about.
+        renamed = sessions_service.update_session(conn, sid, title="Nightly digest")
+        assert renamed["metadata"][SESSION_SETTINGS_OVERRIDE_KEY] == [
+            "model",
+            "reasoning_effort",
+        ], "a title-only edit dropped an override marker it never wrote"
+
+        # The Chat header's "Default" item: present nulls for the whole route.
+        cleared = sessions_service.update_session(
+            conn,
+            sid,
+            agent_id=None,
+            agent_name=None,
+            agent_backend=None,
+            agent_variant=None,
+            model=None,
+            reasoning_effort=None,
+        )
+
+    assert cleared["model"] is None
+    assert cleared["reasoning_effort"] is None
+    assert SESSION_SETTINGS_OVERRIDE_KEY not in cleared["metadata"], (
+        "'Default' replaced model/reasoning_effort but left the explicit-override "
+        "marker, so dispatch keeps honouring a pin the user just removed"
+    )
+    # The title metadata the earlier edit wrote is still there: reconciling the
+    # marker must compose with the other metadata writers, not replace them.
+    assert cleared["metadata"]["title_source"] == "user"
+
+    # The deliverable is the turn, not the row. Build the REAL workbench dispatch
+    # context from the stored row and run the REAL MessageHandler.
+    context = _build_session_context(sid, message_id="m1")
+    controller = _DispatchController(paths.get_sqlite_state_path(), workdir)
+    handler = MessageHandler(controller)
+    handler.set_session_handler(_DispatchSessionHandler(str(workdir)))
+    controller.message_handler = handler
+    controller.session_handler = handler.session_handler
+    try:
+        asyncio.run(handler.handle_user_message(context, "hello"))
+    finally:
+        controller.sessions.close()
+        controller.vibe_agent_store.close()
+
+    assert len(controller.agent_service.dispatched) == 1
+    backend_name, request = controller.agent_service.dispatched[0]
+    assert backend_name == default_agent.backend
+    assert request.vibe_agent_name == default_agent.name
+    assert request.vibe_agent_model == "gpt-5.5-default", (
+        f"dispatch handed the backend model={request.vibe_agent_model!r}: the stale "
+        "marker still forces the cleared session's NULL, so 'Default' changed the "
+        "stored row and nothing else"
+    )
+    assert request.vibe_agent_reasoning_effort == "xhigh", (
+        f"dispatch handed the backend reasoning_effort="
+        f"{request.vibe_agent_reasoning_effort!r} instead of the default Agent's"
+    )

@@ -896,3 +896,84 @@ def test_storage_lookup_includes_harness_driving_message():
     assert show_git.load_turn_checkpoint_context(
         session_id, after="2099-01-01T00:00:00+00:00"
     ) == expected
+
+    with get_cached_sqlite_engine().begin() as conn:
+        for index, author in enumerate(("user", "agent"), start=2):
+            display_only = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author=author,
+                message_type=messages_service.ANNOTATION_TYPE,
+                text=f"display-only annotation from {author}",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == display_only["id"])
+                .values(created_at=f"2099-01-01T00:00:0{index}+00:00")
+            )
+
+    assert show_git.load_turn_checkpoint_context(session_id) == TurnCheckpointContext()
+    assert show_git.load_turn_checkpoint_context(
+        session_id, after="2099-01-01T00:00:01.500000+00:00"
+    ) == TurnCheckpointContext()
+
+
+def test_storage_lookup_includes_annotation_driving_message():
+    from storage import messages_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(primary_platform="avibe")
+    session_id = "ses_annotation_checkpoint"
+    with get_cached_sqlite_engine().begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_annotation_checkpoint",
+            now="2026-07-27T00:00:00+00:00",
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-07-27T00:00:00+00:00",
+                updated_at="2026-07-27T00:00:00+00:00",
+                last_active_at="2026-07-27T00:00:00+00:00",
+            )
+        )
+        prompt = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            message_type=messages_service.ANNOTATION_TYPE,
+            source="harness",
+            text="tighten the heading hierarchy",
+            native_message_id="show:show_evt_checkpoint",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == prompt["id"])
+            .values(created_at="2099-01-01T00:00:01+00:00")
+        )
+
+    expected = TurnCheckpointContext(
+        message="tighten the heading hierarchy",
+        message_id=prompt["id"],
+    )
+    assert show_git.load_turn_checkpoint_context(session_id) == expected
+    assert show_git.load_turn_checkpoint_context(
+        session_id, after="2099-01-01T00:00:00+00:00"
+    ) == expected

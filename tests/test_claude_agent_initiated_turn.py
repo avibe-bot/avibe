@@ -2502,3 +2502,85 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ActivityRunAttributionTests(unittest.IsolatedAsyncioTestCase):
+    """HFR-044 (re-validates HFR-031 / HFR-032): the fifth trigger-kind gate.
+
+    A background Activity started inside a Harness turn must carry that turn's
+    run ids. Those ids are the ONLY route by which a later recovered-Activity
+    completion can find its run — its own context carries a synthetic
+    ``activity:<backend>:<id>`` execution id, not a run id.
+    """
+
+    @staticmethod
+    def _pending(**platform_specific):
+        return SimpleNamespace(
+            context=SimpleNamespace(platform_specific=dict(platform_specific))
+        )
+
+    async def test_scheduled_turn_attributes_its_activity_to_its_run(self):
+        agent, _service = _build_agent()
+        composite_key = "session-scheduled-activity:/tmp/work"
+        agent._pending_requests[composite_key] = [
+            self._pending(
+                task_trigger_kind="scheduled",
+                task_execution_id="run-scheduled",
+                coalesced_queue={"execution_ids": ["run-scheduled", "run-coalesced"]},
+            )
+        ]
+
+        run_ids = agent._activity_run_ids(
+            composite_key,
+            SimpleNamespace(platform_specific={}),
+        )
+
+        self.assertEqual(run_ids, ["run-scheduled", "run-coalesced"])
+
+    async def test_watch_turn_attributes_its_activity_to_its_run(self):
+        agent, _service = _build_agent()
+        composite_key = "session-watch-activity:/tmp/work"
+        agent._pending_requests[composite_key] = [
+            self._pending(task_trigger_kind="watch", task_execution_id="run-watch")
+        ]
+
+        run_ids = agent._activity_run_ids(
+            composite_key,
+            SimpleNamespace(platform_specific={}),
+        )
+
+        self.assertEqual(run_ids, ["run-watch"])
+
+    async def test_recovered_activity_execution_id_is_not_read_as_a_run_id(self):
+        """``activity_recovery`` is excluded on purpose: its execution id is a
+        synthetic Activity id, so attributing it as a run id would address every
+        later write to a row that cannot exist."""
+        agent, _service = _build_agent()
+        composite_key = "session-activity-recovery:/tmp/work"
+        agent._pending_requests[composite_key] = [
+            self._pending(
+                task_trigger_kind="activity_recovery",
+                task_execution_id="activity:claude:act-1",
+            )
+        ]
+
+        run_ids = agent._activity_run_ids(
+            composite_key,
+            SimpleNamespace(platform_specific={}),
+        )
+
+        self.assertEqual(run_ids, [])
+
+    async def test_ordinary_user_turn_attributes_no_run(self):
+        agent, _service = _build_agent()
+        composite_key = "session-user-turn:/tmp/work"
+        agent._pending_requests[composite_key] = [
+            self._pending(task_execution_id="not-a-run")
+        ]
+
+        run_ids = agent._activity_run_ids(
+            composite_key,
+            SimpleNamespace(platform_specific={}),
+        )
+
+        self.assertEqual(run_ids, [])

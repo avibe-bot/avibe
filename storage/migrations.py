@@ -78,6 +78,7 @@ HEAD_REQUIRED_COLUMNS = {
         "message",
         "message_payload_json",
         "last_run_id",
+        "retired_at",
     },
     "agent_runs": {
         "definition_id",
@@ -445,6 +446,7 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "message": "TEXT",
         "message_payload_json": "TEXT",
         "last_run_id": "VARCHAR",
+        "retired_at": "VARCHAR",
     }.items():
         if column not in definition_columns:
             conn.execute(f'alter table "run_definitions" add column "{column}" {column_type}')

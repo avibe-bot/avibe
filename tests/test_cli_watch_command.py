@@ -254,7 +254,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["watch"]["agent_name"] == default_agent.name
+    assert payload["definition"]["agent_name"] == default_agent.name
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
@@ -284,11 +284,12 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["watch"]["name"] == "Wait for export"
-    assert payload["watch"]["shell_command"] == "python3 scripts/wait.py"
-    assert payload["watch"]["command"] == []
-    assert payload["watch"]["mode"] == "once"
-    assert payload["watch"]["retry_exit_codes"] == [75]
+    assert "watch" not in payload
+    assert payload["definition"]["name"] == "Wait for export"
+    assert payload["definition"]["shell_command"] == "python3 scripts/wait.py"
+    assert payload["definition"]["command"] == []
+    assert payload["definition"]["mode"] == "once"
+    assert payload["definition"]["retry_exit_codes"] == [75]
 
 
 def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
@@ -333,8 +334,8 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
             "native_session_id": "native-opencode-1",
         },
     }
-    assert payload["watch"]["metadata"]["created_by"] == expected
-    stored = ManagedWatchStore(store_path).get_watch(payload["watch"]["id"])
+    assert payload["definition"]["metadata"]["created_by"] == expected
+    stored = ManagedWatchStore(store_path).get_watch(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
 
@@ -397,12 +398,12 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_policy"] == "create_per_run"
-    assert payload["watch"]["deliver_key"] is None
-    assert payload["watch"]["cwd"] == str(invoke_dir)
-    assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
-    assert "session_workdir" not in payload["watch"]["metadata"]
-    assert payload["watch"]["agent_name"] == "project-agent"
+    assert payload["definition"]["session_policy"] == "create_per_run"
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["cwd"] == str(invoke_dir)
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
+    assert "session_workdir" not in payload["definition"]["metadata"]
+    assert payload["definition"]["agent_name"] == "project-agent"
 
 
 def test_watch_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
@@ -434,7 +435,7 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
         result = cli.cmd_watch_add(args)
 
     assert result == 0
-    watch = json.loads(capsys.readouterr().out)["watch"]
+    watch = json.loads(capsys.readouterr().out)["definition"]
     assert watch["session_policy"] == "create_per_run"
     assert watch["session_id"] is None
     assert watch["deliver_key"] is None
@@ -500,12 +501,12 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    target = cli.resolve_session_id_target(payload["watch"]["session_id"], db_path=db_path)
+    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["watch"]["cwd"] == str(invoke_dir)
-    assert "session_workdir" not in payload["watch"]["metadata"]
+    assert payload["definition"]["cwd"] == str(invoke_dir)
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
@@ -553,8 +554,8 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] == "sesCaller"
-    assert payload["watch"]["session_policy"] == "existing"
+    assert payload["definition"]["session_id"] == "sesCaller"
+    assert payload["definition"]["session_policy"] == "existing"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
         "message": "Watch target Session defaulted to this Agent Session.",
@@ -586,8 +587,8 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["message"] == "Summarize the waiter output."
-    assert payload["watch"]["prefix"] is None
+    assert payload["definition"]["message"] == "Summarize the waiter output."
+    assert payload["definition"]["prefix"] is None
 
 
 def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -> None:
@@ -624,9 +625,9 @@ def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["mode"] == "forever"
-    assert payload["watch"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
-    assert payload["watch"]["retry_exit_codes"] == [1, 75]
+    assert payload["definition"]["mode"] == "forever"
+    assert payload["definition"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
+    assert payload["definition"]["retry_exit_codes"] == [1, 75]
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -657,7 +658,7 @@ def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: py
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["cwd"] == str(workdir.resolve())
+    assert payload["definition"]["cwd"] == str(workdir.resolve())
 
 
 def test_watch_add_returns_structured_error_when_startup_fails(tmp_path: Path) -> None:
@@ -837,8 +838,8 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
 
 
 def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = store.add_watch(
         name="Watch CI",
         session_key="slack::channel::C123",
@@ -875,13 +876,13 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watches"][0]["state"] == "running"
-    assert payload["watches"][0]["mode"] == "forever"
+    assert payload["definitions"][0]["state"] == "running"
+    assert payload["definitions"][0]["mode"] == "forever"
 
 
 def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     active = _add_test_watch(store, name="Active")
     completed = _add_test_watch(store, name="Completed")
     failed = _add_test_watch(store, name="Failed")
@@ -900,15 +901,15 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = {item["id"] for item in payload["watches"]}
+    ids = {item["id"] for item in payload["definitions"]}
     assert ids == {active.id, failed.id, paused.id, failed_forever.id}
     assert completed.id not in ids
-    assert next(item for item in payload["watches"] if item["id"] == failed.id)["state"] == "failed"
+    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = _add_test_watch(store, name="Resumable")
     store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
 
@@ -922,16 +923,16 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
         assert cli.cmd_watch_list() == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in payload["watches"]] == [watch.id]
-    assert payload["watches"][0]["state"] == "paused"
+    assert [item["id"] for item in payload["definitions"]] == [watch.id]
+    assert payload["definitions"][0]["state"] == "paused"
 
 
 def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = _add_test_watch(store, name="Change mode", mode="forever")
     store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
     store.set_enabled(watch.id, False)
@@ -961,13 +962,13 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
         assert cli.cmd_watch_list() == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in payload["watches"]] == [watch.id]
-    assert payload["watches"][0]["state"] == "paused"
+    assert [item["id"] for item in payload["definitions"]] == [watch.id]
+    assert payload["definitions"][0]["state"] == "paused"
 
 
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(25):
         _add_test_watch(store, name=f"Watch {index:02d}")
 
@@ -979,7 +980,8 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 20
+    assert "watches" not in payload
+    assert len(payload["definitions"]) == 20
     assert payload["pagination"] == {
         "page": 1,
         "limit": 20,
@@ -995,8 +997,8 @@ def test_watch_list_cli_dispatches_pagination_flags(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(3):
         _add_test_watch(store, name=f"Watch {index}")
 
@@ -1010,13 +1012,13 @@ def test_watch_list_cli_dispatches_pagination_flags(
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
 
 
 def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(3):
         watch = _add_test_watch(store, name=f"Finished {index}")
         store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
@@ -1033,7 +1035,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
         "vibe watch list --include-finished --page 2 --limit 2"
@@ -1072,11 +1074,11 @@ def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> N
     ):
         assert cli.cmd_watch_set_enabled(watch.id, False) == 0
         paused = json.loads(capsys.readouterr().out)
-        assert paused["watch"]["enabled"] is False
+        assert paused["definition"]["enabled"] is False
 
         assert cli.cmd_watch_set_enabled(watch.id, True) == 0
         resumed = json.loads(capsys.readouterr().out)
-        assert resumed["watch"]["enabled"] is True
+        assert resumed["definition"]["enabled"] is True
 
         assert cli.cmd_watch_remove(watch.id) == 0
         removed = json.loads(capsys.readouterr().out)
@@ -1137,17 +1139,17 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["id"] == watch.id
-    assert payload["watch"]["name"] == "Watch deploy"
-    assert payload["watch"]["session_key"] == "slack::channel::C456"
-    assert payload["watch"]["post_to"] == "channel"
-    assert payload["watch"]["prefix"] == "Deploy finished."
-    assert payload["watch"]["mode"] == "forever"
-    assert payload["watch"]["timeout_seconds"] == 1200
-    assert payload["watch"]["lifetime_timeout_seconds"] == 7200
-    assert payload["watch"]["retry_exit_codes"] == [1, 75]
-    assert payload["watch"]["retry_delay_seconds"] == 10
-    assert payload["watch"]["shell_command"] == "python3 wait_deploy.py"
+    assert payload["definition"]["id"] == watch.id
+    assert payload["definition"]["name"] == "Watch deploy"
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["post_to"] == "channel"
+    assert payload["definition"]["prefix"] == "Deploy finished."
+    assert payload["definition"]["mode"] == "forever"
+    assert payload["definition"]["timeout_seconds"] == 1200
+    assert payload["definition"]["lifetime_timeout_seconds"] == 7200
+    assert payload["definition"]["retry_exit_codes"] == [1, 75]
+    assert payload["definition"]["retry_delay_seconds"] == 10
+    assert payload["definition"]["shell_command"] == "python3 wait_deploy.py"
 
 
 def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
@@ -1180,8 +1182,8 @@ def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] is None
-    assert payload["watch"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["session_id"] is None
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
 
 
 def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1222,10 +1224,10 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["post_to"] is None
-    assert payload["watch"]["deliver_key"] is None
-    assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
-    assert payload["watch"]["metadata"]["session_workdir"] == str(tmp_path)
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
+    assert payload["definition"]["metadata"]["session_workdir"] == str(tmp_path)
 
 
 def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
@@ -1257,8 +1259,8 @@ def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
-    assert payload["watch"]["shell_command"] is None
+    assert payload["definition"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
+    assert payload["definition"]["shell_command"] is None
 
 
 def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> None:
@@ -1401,9 +1403,9 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] == "sesExisting"
-    assert payload["watch"]["cwd"] == str(new_cwd)
-    assert "session_workdir" not in payload["watch"]["metadata"]
+    assert payload["definition"]["session_id"] == "sesExisting"
+    assert payload["definition"]["cwd"] == str(new_cwd)
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:
@@ -1455,3 +1457,229 @@ def test_watch_add_rejects_deprecated_prompt_argument() -> None:
     assert result == 1
     assert payload["code"] == "deprecated_prompt_argument"
     assert "--message" in payload["hint"]
+
+
+def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
+    """HFR-256 — ``--agent X --clear-agent`` re-pinned today's default Agent.
+
+    The sibling half of HFR-255, on ``vibe watch update``. The two flags mean
+    opposite things and -- unlike ``--name`` / ``--clear-name`` in the same command
+    -- the pair raised nothing. It also did not simply pick one: ``--clear-agent``
+    won for ``agent_name`` (-> None) while the mere PRESENCE of ``--agent`` POPS the
+    follow-the-session marker, so the definition looked like "no Agent pinned, and
+    not following its Session" and the re-resolution wrote today's scope / default
+    Agent back as a HARD PIN -- with neither flag's meaning honoured.
+
+    THE FIX is the convention ``--name`` / ``--clear-name`` already sets in this very
+    command: reject the contradictory pair, because the intent is genuinely ambiguous.
+    Asserted BOTH ways below so the two pairs cannot drift apart.
+
+    The stored definition must also be untouched: a rejected command may not have
+    written a pin on its way to failing.
+    """
+    from storage.importer import ensure_sqlite_state
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        # The Agent the definition's Session runs as, and a DIFFERENT current
+        # default. The gap between them is what makes the re-pin observable at all.
+        agent_store.create(name="rebound", backend="codex")
+        successor = agent_store.create(name="successor", backend="claude")
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="ci watch",
+        session_key="slack::channel::C123",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix="CI finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key="slack::channel::C123",
+        agent_name=None,
+        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+    )
+
+    def _update(*argv: str) -> tuple[int, str]:
+        """Run the REAL command. Returns ``(exit code, raw stderr)``.
+
+        Stderr is returned unparsed on purpose: the pre-fix command SUCCEEDS and
+        writes nothing there, so parsing it eagerly would turn the interesting red
+        into a ``JSONDecodeError`` and hide which field was corrupted.
+        """
+        args = _parse_watch_update([watch.id, *argv])
+        cli_agent_store = cli.VibeAgentStore(db_path)
+        stderr = io.StringIO()
+        try:
+            with (
+                patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+                patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+                patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+                patch("vibe.cli._watch_store", return_value=store),
+                patch("vibe.cli._watch_runtime_store", return_value=WatchRuntimeStateStore(tmp_path / "watch_runtime.json")),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+                redirect_stderr(stderr),
+            ):
+                return cli.cmd_watch_update(args), stderr.getvalue()
+        finally:
+            cli_agent_store.close()
+
+    result, stderr_text = _update("--agent", "rebound", "--clear-agent")
+
+    # The persisted definition first: this is the damage, and asserting it before the
+    # exit code keeps the red pointed at the regression rather than at the reporting.
+    stored = store.get_watch(watch.id)
+    assert stored is not None
+    assert stored.agent_name is None, (
+        f"the contradictory pair pinned agent_name={stored.agent_name!r} — today's "
+        f"default Agent ({successor.name!r}), which is neither the Agent that was "
+        "passed nor the cleared state that was asked for; every future watch hook now "
+        "runs as the wrong Agent"
+    )
+    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the contradictory pair dropped the follow-the-session state, so the bound "
+        "Session no longer governs the definition's Agent"
+    )
+    assert result == 1, (
+        "vibe watch update accepted --agent together with --clear-agent; it honours "
+        "neither flag and re-pins the definition to today's default Agent instead"
+    )
+    assert json.loads(stderr_text)["code"] == "conflicting_agent_update", stderr_text
+
+    # The convention this mirrors, asserted so the two pairs cannot drift apart.
+    name_result, name_stderr = _update("--name", "renamed", "--clear-name")
+    assert name_result == 1
+    assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
+
+
+def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """The shared teardown reclaim, run against the isolated state database."""
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A Session row worth snapshotting, with no Agent for the CLI to resolve."""
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+    """HFR-261, watch half — ``upsert_watch`` is the same full-row write.
+
+    Watches live in the same ``run_definitions`` table, are reclaimed by the same
+    ``reclaim_bound_definitions`` call, and were written back by the same whole-row
+    UPDATE keyed on ``id`` alone. Guarding only the task side would have left the
+    identical hole open for every ``vibe watch update``: the reclaim's pause, its
+    reason and its ``session_settings_snapshot`` restored to their pre-teardown
+    values, with the command reporting success.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _create_bare_agent_session(workdir=tmp_path)
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+
+    summary = _reclaim_bound_definitions_now(
+        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+    )
+    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
+        "meaningless"
+    )
+
+    args = _parse_watch_update([watch.id, "--name", "Renamed by the user"])
+    stderr = io.StringIO()
+    with (
+        redirect_stderr(stderr),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_update(args)
+
+    assert result == 1, (
+        "the command reported success for a write the database refused; the stored "
+        "watch is whatever the teardown left, not what the user was shown"
+    )
+    payload = json.loads(stderr.getvalue())
+    assert payload["code"] == "definition_write_conflict"
+    assert payload["details"]["watch_id"] == watch.id
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the stale full-row write re-enabled a watch the teardown paused; its "
+        "supervisor starts cycles again against a session that no longer exists"
+    )
+    assert stored.last_error == "the bound agent session was cleared"
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata"
+    )
+    assert stored.name == "Watch CI", (
+        "the refused write partially landed — a lost compare-and-set must change NOTHING"
+    )
+    # HFR-271's rule: the store the COMMAND used is still in scope, and it is the half a
+    # fresh read cannot see. A refusal must leave both halves saying the same thing.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the write was refused and the live store kept the mutation: it still serves "
+        f"name={None if live is None else live.name!r} "
+        f"enabled={None if live is None else live.enabled!r} while the row says "
+        f"name={stored.name!r} enabled={stored.enabled!r}"
+    )

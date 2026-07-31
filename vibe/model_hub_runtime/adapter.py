@@ -15,6 +15,7 @@ from core.handlers.model_hub.adapter import (
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
+    RetainedMaterialDisposition,
     SourceBinding,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
@@ -68,6 +69,10 @@ class _OAuthFlow:
     state: str = "awaiting_action"
     error_key: str | None = None
     credential_ref: str | None = None
+    retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
+    retained_credential_ref: str | None = None
+    grant_write_possible: bool = False
+    retained_material_decided: bool = False
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def snapshot(self) -> OAuthFlowState:
@@ -83,6 +88,9 @@ class _OAuthFlow:
             error_key=self.error_key,
             expires_at_iso=self.expires_at_iso,
             credential_ref=self.credential_ref,
+            channel="hub",
+            retained_material_disposition=self.retained_material_disposition,
+            retained_credential_ref=self.retained_credential_ref,
         )
 
 
@@ -197,6 +205,33 @@ class CLIProxyEngineAdapter:
         await asyncio.to_thread(self.supervisor.invalidate_configs)
         await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
 
+    async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:
+        try:
+            await asyncio.to_thread(
+                self.state_store.assert_credential_unbound,
+                credential_ref,
+            )
+            metadata = await asyncio.to_thread(
+                self.state_store.credential_metadata_if_present,
+                credential_ref,
+            )
+        except EngineStateError:
+            return False
+        # Revocation is ordered after both auth-file deletions. Therefore an
+        # absent ref proves cleanup already converged, including never-created
+        # refs whose postcondition held vacuously.
+        if metadata is None:
+            return True
+        auth_name = metadata.get("auth_name") if metadata["kind"] == "oauth" else None
+        if not isinstance(auth_name, str) or not auth_name:
+            return False
+        client = await asyncio.to_thread(self.supervisor.client_if_running)
+        return await self._cleanup_oauth_material(
+            client,
+            auth_name,
+            credential_ref,
+        )
+
     async def discover_models(
         self,
         vendor: str,
@@ -278,6 +313,7 @@ class CLIProxyEngineAdapter:
                 device_code=device_code,
                 expires_at_iso=(datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat(),
                 before_auth_fingerprints={identity: record.fingerprint for identity, record in before.items()},
+                grant_write_possible=expects == "none",
             )
         except Exception:
             with self._oauth_lock:
@@ -323,6 +359,9 @@ class CLIProxyEngineAdapter:
             submitted = value.strip()
             if not submitted:
                 raise EngineStateError("OAuth submission is empty")
+            # A transport failure after submission begins cannot prove whether
+            # the engine wrote grant material.
+            flow.grant_write_possible = True
             payload: dict[str, str] = {
                 "provider": flow.callback_provider,
                 "state": flow.engine_state,
@@ -361,6 +400,7 @@ class CLIProxyEngineAdapter:
                 )
             except (EngineClientError, EngineUnavailableError):
                 pass
+            self._mark_retention_unknown_if_needed(flow)
             flow.state = "cancelled"
             self._release_provider(flow)
 
@@ -408,6 +448,7 @@ class CLIProxyEngineAdapter:
             )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
+        flow.grant_write_possible = True
         inventory = await asyncio.to_thread(_auth_inventory, client)
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
         candidates = [
@@ -421,6 +462,7 @@ class CLIProxyEngineAdapter:
             if not candidates:
                 flow.state = "verifying"
                 return
+            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
@@ -429,17 +471,64 @@ class CLIProxyEngineAdapter:
                 self.state_store.oauth_credential_ref,
                 auth.name,
             )
+        except EngineStateError:
+            # The grant changed but duplicate persisted metadata means no single
+            # ref can be named safely.
+            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
+
+        existing_source_id: str | None = None
+        if existing_credential_ref is not None:
+            try:
+                existing_credential = await asyncio.to_thread(
+                    self.state_store.credential_metadata,
+                    existing_credential_ref,
+                )
+            except EngineStateError:
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+                self._fail_flow(flow, "models.oauth.binding_failed")
+                return
+            value = existing_credential.get("source_id")
+            existing_source_id = str(value) if value else None
+
+        try:
             credential_ref = await asyncio.to_thread(
                 self.state_store.bind_oauth_credential,
                 flow.source_id,
                 flow.vendor,
                 auth.name,
             )
+        except EngineStateError:
+            if existing_credential_ref is None or existing_source_id is None:
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            elif existing_source_id == flow.source_id:
+                self._set_retained_material(
+                    flow,
+                    RetainedMaterialDisposition.FLOW_SOURCE_REF,
+                    existing_credential_ref,
+                )
+            else:
+                # The existing ref belongs to another source. Withhold it so a
+                # consumer cannot revoke or journal foreign material.
+                self._set_retained_material(
+                    flow,
+                    RetainedMaterialDisposition.FOREIGN_SOURCE_REF,
+                )
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
+
+        try:
             credential = await asyncio.to_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
             )
         except EngineStateError:
+            self._set_retained_material(
+                flow,
+                RetainedMaterialDisposition.FLOW_SOURCE_REF,
+                credential_ref,
+            )
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
         try:
@@ -451,36 +540,82 @@ class CLIProxyEngineAdapter:
             )
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         except (EngineClientError, EngineStateError):
-            if existing_credential_ref is None:
-                if auth.identity not in flow.before_auth_fingerprints:
-                    try:
-                        await asyncio.to_thread(
-                            client.management_request,
-                            "DELETE",
-                            "/auth-files",
-                            query={"name": auth.name},
-                        )
-                    except EngineClientError:
-                        pass
-                    try:
-                        await asyncio.to_thread(
-                            self.state_store.delete_oauth_auth_file,
-                            auth.name,
-                        )
-                    except EngineStateError:
-                        pass
-                try:
-                    await asyncio.to_thread(
-                        self.state_store.revoke_credential,
+            if existing_credential_ref is not None:
+                self._set_retained_material(
+                    flow,
+                    RetainedMaterialDisposition.FLOW_SOURCE_REF,
+                    credential_ref,
+                )
+            else:
+                # Never destroy the only cleanup handle while grant material
+                # may remain behind it. Both auth-file deletions must be
+                # confirmed before revocation can discard the minted ref.
+                if auth.identity not in flow.before_auth_fingerprints and await self._cleanup_oauth_material(
+                    client,
+                    auth.name,
+                    credential_ref,
+                ):
+                    self._set_retained_material(
+                        flow,
+                        RetainedMaterialDisposition.NONE,
+                    )
+                else:
+                    self._set_retained_material(
+                        flow,
+                        RetainedMaterialDisposition.ORPHAN_REF,
                         credential_ref,
                     )
-                except EngineStateError:
-                    pass
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
         flow.credential_ref = credential_ref
+        self._set_retained_material(
+            flow,
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            credential_ref,
+        )
         flow.state = "success"
         self._release_provider(flow)
+
+    async def _cleanup_oauth_material(
+        self,
+        client: EngineClient | None,
+        auth_name: str,
+        credential_ref: str,
+    ) -> bool:
+        engine_delete_succeeded = client is None
+        if client is not None:
+            try:
+                await asyncio.to_thread(
+                    client.management_request,
+                    "DELETE",
+                    "/auth-files",
+                    query={"name": auth_name},
+                )
+            except EngineClientError:
+                engine_delete_succeeded = False
+            else:
+                engine_delete_succeeded = True
+
+        try:
+            await asyncio.to_thread(
+                self.state_store.delete_oauth_auth_file,
+                auth_name,
+            )
+        except EngineStateError:
+            local_delete_succeeded = False
+        else:
+            local_delete_succeeded = True
+
+        if not (engine_delete_succeeded and local_delete_succeeded):
+            return False
+        try:
+            await asyncio.to_thread(
+                self.state_store.revoke_credential,
+                credential_ref,
+            )
+        except EngineStateError:
+            return False
+        return True
 
     def _get_flow(self, flow_id: str) -> _OAuthFlow:
         with self._oauth_lock:
@@ -491,9 +626,31 @@ class CLIProxyEngineAdapter:
         return flow
 
     def _fail_flow(self, flow: _OAuthFlow, error_key: str) -> None:
+        self._mark_retention_unknown_if_needed(flow)
         flow.state = "failed"
         flow.error_key = error_key
         self._release_provider(flow)
+
+    @staticmethod
+    def _set_retained_material(
+        flow: _OAuthFlow,
+        disposition: RetainedMaterialDisposition,
+        credential_ref: str | None = None,
+    ) -> None:
+        carries_ref = disposition in {
+            RetainedMaterialDisposition.FLOW_SOURCE_REF,
+            RetainedMaterialDisposition.ORPHAN_REF,
+        }
+        if carries_ref != (credential_ref is not None):
+            raise AssertionError("retained material disposition/ref pairing is invalid")
+        flow.retained_material_disposition = disposition
+        flow.retained_credential_ref = credential_ref
+        flow.retained_material_decided = True
+
+    @classmethod
+    def _mark_retention_unknown_if_needed(cls, flow: _OAuthFlow) -> None:
+        if flow.grant_write_possible and not flow.retained_material_decided:
+            cls._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
 
     def _release_provider(self, flow: _OAuthFlow) -> None:
         with self._oauth_lock:
@@ -520,6 +677,7 @@ class CLIProxyEngineAdapter:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at <= now:
+            self._mark_retention_unknown_if_needed(flow)
             flow.state = "failed"
             flow.error_key = "models.oauth.expired"
             self._active_oauth_providers.discard(flow.auth_provider)
@@ -570,11 +728,7 @@ def _model_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
         return ()
     result: list[str] = []
     for item in models:
-        value = (
-            item.get("id") or item.get("alias") or item.get("name")
-            if isinstance(item, dict)
-            else item
-        )
+        value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
         if isinstance(value, str) and value and value not in result:
             result.append(value)
     return tuple(result)

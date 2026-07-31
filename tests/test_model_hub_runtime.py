@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,8 +24,10 @@ from core.handlers.model_hub.adapter import (
     EngineHealth,
     OriginNotAllowedError,
     RawOutcomeKind,
+    RetainedMaterialDisposition,
     SourceBinding,
 )
+from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -100,6 +103,168 @@ def _binding(credential_ref: str, **overrides: object) -> SourceBinding:
     }
     payload.update(overrides)
     return SourceBinding(**payload)  # type: ignore[arg-type]
+
+
+def test_oauth_retained_material_vocabulary_and_pairing_guard() -> None:
+    assert {item.value for item in RetainedMaterialDisposition} == {
+        "none",
+        "flow_source_ref",
+        "orphan_ref",
+        "foreign_source_ref",
+        "unknown",
+    }
+    flow = SimpleNamespace(
+        retained_material_disposition=RetainedMaterialDisposition.NONE,
+        retained_credential_ref=None,
+    )
+
+    for disposition, credential_ref in (
+        (RetainedMaterialDisposition.NONE, None),
+        (RetainedMaterialDisposition.FLOW_SOURCE_REF, "cred_flow"),
+        (RetainedMaterialDisposition.ORPHAN_REF, "cred_orphan"),
+        (RetainedMaterialDisposition.FOREIGN_SOURCE_REF, None),
+        (RetainedMaterialDisposition.UNKNOWN, None),
+    ):
+        CLIProxyEngineAdapter._set_retained_material(  # type: ignore[arg-type]
+            flow,
+            disposition,
+            credential_ref,
+        )
+
+    for disposition, credential_ref in (
+        (RetainedMaterialDisposition.NONE, "cred_invalid"),
+        (RetainedMaterialDisposition.FLOW_SOURCE_REF, None),
+        (RetainedMaterialDisposition.ORPHAN_REF, None),
+        (RetainedMaterialDisposition.FOREIGN_SOURCE_REF, "cred_invalid"),
+        (RetainedMaterialDisposition.UNKNOWN, "cred_invalid"),
+    ):
+        with pytest.raises(AssertionError, match="pairing"):
+            CLIProxyEngineAdapter._set_retained_material(  # type: ignore[arg-type]
+                flow,
+                disposition,
+                credential_ref,
+            )
+
+
+def test_orphaned_oauth_cleanup_keeps_ref_until_deletes_are_confirmed(
+    tmp_path: Path,
+) -> None:
+    class Client:
+        fail_delete = True
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("DELETE", "/auth-files")
+            if self.fail_delete:
+                raise EngineClientError("delete failed")
+            return {"status": "ok"}
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client_if_running(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            auth_file.name,
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is False
+        assert store.credential_metadata(credential_ref)["auth_name"] == auth_file.name
+
+        client.fail_delete = False
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+        with pytest.raises(EngineStateError, match="unavailable"):
+            store.credential_metadata(credential_ref)
+
+    asyncio.run(run())
+
+
+def test_orphaned_oauth_cleanup_retry_converges_after_journal_crash(
+    tmp_path: Path,
+) -> None:
+    class Client:
+        delete_calls = 0
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            assert (method, path) == ("DELETE", "/auth-files")
+            self.delete_calls += 1
+            return {"status": "ok"}
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client_if_running(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        auth_file = store.auth_dir / "claude-account.json"
+        auth_file.write_text("{}", encoding="utf-8")
+        auth_file.chmod(0o600)
+        credential_ref = store.bind_oauth_credential(
+            "src_fixture123",
+            "anthropic",
+            auth_file.name,
+        )
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        cleanup_journal = {credential_ref}
+
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+        assert credential_ref in cleanup_journal  # Crash before journal clear.
+        assert await adapter.cleanup_orphaned_oauth_material(credential_ref) is True
+        cleanup_journal.remove(credential_ref)
+
+        assert cleanup_journal == set()
+        assert client.delete_calls == 1
+
+    asyncio.run(run())
+
+
+def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
+    tmp_path: Path,
+) -> None:
+    class Supervisor:
+        def client_if_running(self):
+            raise AssertionError("an absent ref must not reach the engine")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        assert (
+            await adapter.cleanup_orphaned_oauth_material(
+                "cred_00000000000000000000000000000000"
+            )
+            is True
+        )
+
+    asyncio.run(run())
 
 
 def test_packaged_manifest_matches_frozen_runtime_dependency_values(
@@ -639,6 +804,18 @@ class Handler(BaseHTTPRequestHandler):
         if payload['model'].endswith('/unsafe-error-code'):
             self._json(400, {{'error': {{'type': 'invalid_key_upstream-secret'}}}})
             return
+        if payload['model'].endswith('/account-banned'):
+            self._json(403, {{'error': {{'type': 'account_banned', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/account-suspended'):
+            self._json(403, {{'error': {{'code': 'account_suspended', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/account-disabled'):
+            self._json(403, {{'error': {{'type': 'vendor_error', 'code': 'account_disabled', 'message': 'upstream-secret'}}}})
+            return
+        if payload['model'].endswith('/ban-token-in-message'):
+            self._json(403, {{'error': {{'message': 'prefix account_banned suffix upstream-secret'}}}})
+            return
         if payload['model'].endswith('/redirected'):
             self.send_response(307)
             self.send_header('Location', 'https://example.test/credential-leak')
@@ -818,7 +995,16 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
                 _binding(
                     credential_ref,
                     allowed_origins=("codex",),
-                    model_ids=("model-a", "rate-limited", "unsafe-error-code", "redirected"),
+                    model_ids=(
+                        "model-a",
+                        "rate-limited",
+                        "unsafe-error-code",
+                        "account-banned",
+                        "account-suspended",
+                        "account-disabled",
+                        "ban-token-in-message",
+                        "redirected",
+                    ),
                 )
             ]
         )
@@ -848,6 +1034,28 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         assert "upstream-secret" not in (failure.redacted_message or "")
         unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
         assert (await unsafe_code.outcome()).error_code is None
+        for model_id, error_code in (
+            ("account-banned", "account_banned"),
+            ("account-suspended", "account_suspended"),
+            ("account-disabled", "account_disabled"),
+        ):
+            banned = await adapter.invoke("src_fixture123", model_id, {}, False, "codex")
+            banned_outcome = await banned.outcome()
+            assert banned_outcome.error_code == error_code
+            assert banned_outcome.redacted_message == "upstream returned HTTP 403"
+            assert classify_outcome(banned_outcome).reason == "account_banned"
+        free_text = await adapter.invoke(
+            "src_fixture123",
+            "ban-token-in-message",
+            {},
+            False,
+            "codex",
+        )
+        free_text_outcome = await free_text.outcome()
+        assert free_text_outcome.error_code is None
+        assert "account_banned" not in (free_text_outcome.redacted_message or "")
+        assert "upstream-secret" not in (free_text_outcome.redacted_message or "")
+        assert classify_outcome(free_text_outcome).reason == "credential_revoked"
         redirected = await adapter.invoke("src_fixture123", "redirected", {}, False, "codex")
         redirect_outcome = await redirected.outcome()
         assert redirect_outcome.kind is RawOutcomeKind.HTTP_ERROR
@@ -1366,7 +1574,18 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
 
 @pytest.mark.parametrize(
     "oauth_record_case",
-    ["new", "refresh", "conflict", "patch_failure", "new_patch_failure"],
+    [
+        "new",
+        "refresh",
+        "conflict",
+        "duplicate_binding",
+        "metadata_failure",
+        "patch_failure",
+        "new_patch_failure",
+        "new_patch_engine_delete_failure",
+        "new_patch_local_delete_failure",
+        "new_patch_revoke_failure",
+    ],
 )
 def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
     tmp_path: Path,
@@ -1381,11 +1600,20 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             if path == "/auth-files":
                 if method == "DELETE":
+                    if oauth_record_case == "new_patch_engine_delete_failure":
+                        raise EngineClientError("delete failed")
                     self.deletes.append(str((query or {}).get("name")))
                     return {"status": "ok"}
                 self.auth_calls += 1
                 if self.auth_calls == 1:
-                    if oauth_record_case in {"new", "new_patch_failure"}:
+                    if oauth_record_case in {
+                        "new",
+                        "metadata_failure",
+                        "new_patch_failure",
+                        "new_patch_engine_delete_failure",
+                        "new_patch_local_delete_failure",
+                        "new_patch_revoke_failure",
+                    }:
                         return {"files": []}
                     return {
                         "files": [
@@ -1412,7 +1640,13 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
             if path == "/get-auth-status":
                 return {"status": "ok"}
             if path == "/auth-files/fields":
-                if oauth_record_case in {"patch_failure", "new_patch_failure"}:
+                if oauth_record_case in {
+                    "patch_failure",
+                    "new_patch_failure",
+                    "new_patch_engine_delete_failure",
+                    "new_patch_local_delete_failure",
+                    "new_patch_revoke_failure",
+                }:
                     raise EngineClientError("patch failed")
                 self.patches.append(dict(payload or {}))
                 return {"status": "ok"}
@@ -1439,13 +1673,24 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         (store.auth_dir / "claude-account.json").chmod(0o600)
         existing_ref = None
         existing_prefix = None
-        if oauth_record_case not in {"new", "new_patch_failure"}:
+        if oauth_record_case not in {
+            "new",
+            "metadata_failure",
+            "new_patch_failure",
+            "new_patch_engine_delete_failure",
+            "new_patch_local_delete_failure",
+            "new_patch_revoke_failure",
+        }:
             existing_ref = store.bind_oauth_credential(
                 "src_other1234" if oauth_record_case == "conflict" else "src_fixture123",
                 "anthropic",
                 "claude-account.json",
             )
             existing_prefix = store.credential_metadata(existing_ref)["prefix"]
+            if oauth_record_case == "duplicate_binding":
+                duplicate_path = store._credential_path(f"cred_{'f' * 32}")
+                duplicate_path.write_bytes(store._credential_path(existing_ref).read_bytes())
+                duplicate_path.chmod(0o600)
             if oauth_record_case == "patch_failure":
                 store.sync_sources(
                     [
@@ -1458,6 +1703,32 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                         )
                     ]
                 )
+
+        original_metadata = store.credential_metadata
+        original_local_delete = store.delete_oauth_auth_file
+        original_revoke = store.revoke_credential
+        revoke_calls: list[str] = []
+
+        def credential_metadata(credential_ref: str):
+            payload = original_metadata(credential_ref)
+            if oauth_record_case == "metadata_failure" and payload.get("source_id") == "src_fixture123":
+                raise EngineStateError("metadata read failed")
+            return payload
+
+        def delete_oauth_auth_file(auth_name: str) -> None:
+            if oauth_record_case == "new_patch_local_delete_failure":
+                raise EngineStateError("local delete failed")
+            original_local_delete(auth_name)
+
+        def revoke_credential(credential_ref: str) -> None:
+            revoke_calls.append(credential_ref)
+            if oauth_record_case == "new_patch_revoke_failure":
+                raise EngineStateError("revoke failed")
+            original_revoke(credential_ref)
+
+        store.credential_metadata = credential_metadata  # type: ignore[method-assign]
+        store.delete_oauth_auth_file = delete_oauth_auth_file  # type: ignore[method-assign]
+        store.revoke_credential = revoke_credential  # type: ignore[method-assign]
         client = Client()
         adapter = CLIProxyEngineAdapter(
             supervisor=Supervisor(store, client),  # type: ignore[arg-type]
@@ -1475,13 +1746,35 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         if oauth_record_case == "conflict":
             assert completed.state == "failed"
             assert completed.error_key == "models.oauth.binding_failed"
+            assert completed.channel == "hub"
+            assert completed.retained_material_disposition is RetainedMaterialDisposition.FOREIGN_SOURCE_REF
+            assert completed.retained_credential_ref is None
             assert concurrent.state == "failed"
             retry = await adapter.start_oauth("src_fixture123", "anthropic")
             assert retry.state == "awaiting_action"
             assert not client.patches
             return
 
-        if oauth_record_case in {"patch_failure", "new_patch_failure"}:
+        if oauth_record_case == "duplicate_binding":
+            assert completed.state == "failed"
+            assert completed.retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
+            assert completed.retained_credential_ref is None
+            return
+
+        if oauth_record_case == "metadata_failure":
+            assert completed.state == "failed"
+            assert completed.retained_material_disposition is RetainedMaterialDisposition.FLOW_SOURCE_REF
+            assert completed.retained_credential_ref is not None
+            assert completed.credential_ref is None
+            return
+
+        if oauth_record_case in {
+            "patch_failure",
+            "new_patch_failure",
+            "new_patch_engine_delete_failure",
+            "new_patch_local_delete_failure",
+            "new_patch_revoke_failure",
+        }:
             assert completed.state == "failed"
             assert completed.error_key == "models.oauth.binding_failed"
             assert concurrent.state == "failed"
@@ -1489,17 +1782,36 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
                 assert store.credential_metadata(existing_ref)["prefix"] == existing_prefix
                 assert (store.auth_dir / "claude-account.json").exists()
                 assert not client.deletes
-            else:
+                assert completed.retained_material_disposition is RetainedMaterialDisposition.FLOW_SOURCE_REF
+                assert completed.retained_credential_ref == existing_ref
+            elif oauth_record_case == "new_patch_failure":
                 assert client.deletes == ["claude-account.json"]
                 assert not (store.auth_dir / "claude-account.json").exists()
                 assert not list((store.root / "credentials").glob("*.json"))
+                assert completed.retained_material_disposition is RetainedMaterialDisposition.NONE
+                assert completed.retained_credential_ref is None
+                assert len(revoke_calls) == 1
+            else:
+                assert completed.retained_material_disposition is RetainedMaterialDisposition.ORPHAN_REF
+                assert completed.retained_credential_ref is not None
+                assert store._credential_path(completed.retained_credential_ref).exists()
+                if oauth_record_case in {
+                    "new_patch_engine_delete_failure",
+                    "new_patch_local_delete_failure",
+                }:
+                    assert revoke_calls == []
+                else:
+                    assert revoke_calls == [completed.retained_credential_ref]
             retry = await adapter.start_oauth("src_fixture123", "anthropic")
             assert retry.state == "awaiting_action"
             return
 
         assert completed.state == "success"
+        assert completed.channel == "hub"
         assert completed.source_id == "src_fixture123"
         assert completed.credential_ref and completed.credential_ref.startswith("cred_")
+        assert completed.retained_material_disposition is RetainedMaterialDisposition.FLOW_SOURCE_REF
+        assert completed.retained_credential_ref == completed.credential_ref
         if oauth_record_case == "refresh":
             assert completed.credential_ref == existing_ref
         assert concurrent.credential_ref == completed.credential_ref
@@ -1565,6 +1877,8 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
         failed = await adapter.oauth_status(failed_flow.flow_id)
         assert failed.state == "failed"
         assert failed.error_key == "models.oauth.engine_unavailable"
+        assert failed.retained_material_disposition is RetainedMaterialDisposition.NONE
+        assert failed.retained_credential_ref is None
 
         supervisor.unavailable = False
         expiring_flow = await adapter.start_oauth("src_other1234", "anthropic")
@@ -1574,6 +1888,57 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
         expired = await adapter.oauth_status(expiring_flow.flow_id)
         assert expired.state == "failed"
         assert expired.error_key == "models.oauth.expired"
+        assert expired.retained_material_disposition is RetainedMaterialDisposition.NONE
+        assert expired.retained_credential_ref is None
+
+    asyncio.run(run())
+
+
+def test_oauth_terminal_uncertainty_never_claims_cleanup(tmp_path: Path) -> None:
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                return {"files": []}
+            if path == "/anthropic-auth-url":
+                return {"state": "browser-state", "url": "https://example.test/oauth"}
+            if path == "/codex-auth-url":
+                return {
+                    "state": "device-state",
+                    "flow": "device",
+                    "user_code": "ABCD-EFGH",
+                    "url": "https://example.test/device",
+                }
+            if path == "/oauth-callback":
+                raise EngineClientError("response lost after submission")
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client(self):
+            return self._client
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, Client()),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        browser = await adapter.start_oauth("src_fixture123", "anthropic")
+        failed = await adapter.submit_oauth(browser.flow_id, "callback-code")
+        assert failed.state == "failed"
+        assert failed.retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
+        assert failed.retained_credential_ref is None
+
+        device = await adapter.start_oauth("src_other1234", "openai")
+        adapter._oauth_flows[device.flow_id].expires_at_iso = "2000-01-01T00:00:00+00:00"
+        expired = await adapter.oauth_status(device.flow_id)
+        assert expired.state == "failed"
+        assert expired.retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
+        assert expired.retained_credential_ref is None
 
     asyncio.run(run())
 

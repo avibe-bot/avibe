@@ -52,6 +52,7 @@
     "enable": "Enable",
     "disable": "Disable",
     "disabled": "Disabled",
+    "archived": "Archived",
     "default": "Default",
     "running": "Running",
     "stopped": "Stopped",
@@ -105,7 +106,12 @@
     "proxyUrl": "Proxy URL (optional)",
     "proxyUrlHint": "SOCKS5, SOCKS4, HTTP or HTTPS proxy. Leave empty to fall back to system SOCKS proxy detection or direct connection.",
     "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)",
-    "locked": "Locked"
+    "duration": {
+      "seconds": "s",
+      "minutes": "m",
+      "hours": "h",
+      "days": "d"
+    }
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -405,10 +411,10 @@
       "claudeBaseUrlReset": "Reset to default",
       "claudeSettingsConflictTitle": "Legacy Avibe key will be migrated",
       "claudeSettingsConflictBody": "Saving updates `{{var}}` in {{path}} and clears the old Avibe copy.",
-      "claudeInfoHint": "Saving here writes Claude Code's `settings.json` env values. Claude relaunches per request, so no Avibe restart is needed.",
-      "claudeSave": "Save Claude auth",
+      "claudeInfoHint": "Saving writes Claude Code's `settings.json` env values and refreshes Avibe's cached Claude sessions. The next request uses the selected authentication mode.",
+      "claudeSave": "Save and refresh Claude",
       "claudeSaving": "Saving…",
-      "claudeSaveSuccess": "Claude auth saved",
+      "claudeSaveSuccess": "Claude auth saved and runtime refreshed",
       "claudeSaveFailed": "Could not save Claude auth",
       "claudeSavePartial": "API key saved, but old Claude account credentials were not fully cleared: {{detail}}",
       "oauthAuthUrlLabel": "Authorization URL",
@@ -612,17 +618,32 @@
     "openSetup": "Open setup wizard",
     "models": {
       "title": "Models",
-      "subtitle": "Connect a source once and every agent uses it; the list order is the spend order — Avibe switches on exhaustion and switches back on recovery.",
+      "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
+      "status": {
+        "allHealthy": "All healthy",
+        "needsAction": "{{count}} model(s) need attention",
+        "noIssues": "No models need attention"
+      },
       "statusPill": {
-        "ok": "All good · {{count}} agents connected",
-        "degraded": "Some sources need attention · {{count}} agents connected"
+        "ok": "All good · {{count}} on the Hub",
+        "none": "No agent is on the Hub yet",
+        "engineDown": "Supply engine isn't ready · the Hub can't serve",
+        "interrupted": "{{count}} with no supply · needs attention",
+        "waiting": "{{count}} awaiting source recovery",
+        "needsAction": "{{source}} — {{detail}}",
+        "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
+        "andMore": "{{count}} more"
       },
       "sources": {
         "title": "Sources",
-        "subtitle": "One global list; drag to reorder — the order is the spend order",
-        "empty": "No sources yet — use “Add source” to connect a subscription or API key."
+        "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
+        "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
+        "modelCount": "{{count}} model(s)",
+        "addModel": "Add model",
+        "modelsEmpty": "No supplied models yet. Add one manually.",
+        "modelsEmptySubscription": "No supplied models were discovered."
       },
       "source": {
         "nativeSupply": "Native supply",
@@ -631,21 +652,35 @@
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
         "reorder": "Reorder",
-        "oauthSignedOut": "CLI subscription is signed out",
-        "cooldown": {
-          "timeout": "Repeated timeouts"
-        }
+        "oauthSignedOut": "CLI subscription is signed out"
+      },
+      "current": "Current",
+      "order": {
+        "title": "Source order · {{backend}}",
+        "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
+        "subtitleShort": "Used top to bottom; failures switch over and back. Affects {{backend}} only.",
+        "groupEnabled": "Enabled · {{count}}",
+        "groupDisabled": "Not enabled · {{count}}",
+        "groupIneligible": "Not applicable · {{count}}",
+        "customized": "Changed manually",
+        "restore": "Restore default",
+        "enable": "Enable",
+        "enableAria": "Enable {{name}}",
+        "disable": "Disable",
+        "enabledEmpty": "{{backend}} has no source enabled, so its next turn will fail. Enable one from the list below.",
+        "ineligibleUnknown": "Cannot supply {{backend}}",
+        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
       },
       "billing": {
         "monthly": "Monthly",
-        "metered": "Metered",
-        "meteredWithSymbol": "Metered {{symbol}}"
+        "metered": "Metered"
       },
       "state": {
-        "active": "In use",
-        "standby": "Standby",
-        "cooldown": "Cooling down",
-        "error": "Unavailable"
+        "active": "Healthy",
+        "standby": "Healthy",
+        "cooldown": "Cooling down (auto-recovers)",
+        "needs_action": "Needs attention",
+        "error": "Needs attention"
       },
       "usage": {
         "monthSpend": "{{amount}} this month"
@@ -663,24 +698,92 @@
       "experimental": "Experimental",
       "agents": {
         "title": "Agent",
-        "subtitle": "Which model each agent uses, and who supplies it",
+        "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
-        "modelMenu": "Model menu",
         "connectHub": "Connect to Hub",
-        "menuComingSoon": "Model menus arrive in the next milestone",
-        "modelCount": "{{count}} models",
-        "multiSource": "Multiple sources",
-        "multiSourceCustom": "Multiple sources · {{count}} custom",
-        "hubNoSupply": "On Hub · no source available yet (using Direct)",
-        "directNote": "Still supplied by the CLI's own config — not connected to the Hub"
+        "modelCount": "{{count}} model(s)",
+        "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
+        "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
+        "sourceOrder": "Source order",
+        "modelListCount": "{{count}} model(s)",
+        "enableManaged": "Manage centrally",
+        "emptyModels": "This agent has no models yet.",
+        "manageModels": "Manage models",
+        "menuKind": {
+          "fixed": "Fixed menu",
+          "open": "Open menu"
+        },
+        "policy": {
+          "follow": "Recommended",
+          "custom": "Custom"
+        },
+        "attribution": {
+          "interrupted": "No supply for {{names}}",
+          "waiting": "Awaiting source recovery for {{names}}",
+          "unassigned": "No source can supply {{models}}"
+        }
+      },
+      "modelStatus": {
+        "ok": "Healthy",
+        "cooldown": "Cooling down (auto-recovers)",
+        "needsAction": "Needs attention",
+        "checking": "Checking",
+        "direct": "Direct",
+        "noSource": "No available source",
+        "blocked": "Current source unavailable",
+        "currentSwitched": "Currently switched to {{source}}",
+        "currentSource": "Currently served by {{source}}",
+        "source": "Served by {{source}}",
+        "unknown": "Unable to confirm",
+        "retry": "Retry",
+        "runtime": "Model service is not ready",
+        "runtimeAction": "Resolve"
+      },
+      "emptySelection": {
+        "title": "No model selected",
+        "body": "This agent has no current model and needs one before its next run.",
+        "action": "Choose model"
+      },
+      "routes": {
+        "title": "Supply method",
+        "global": "Follow {{backend}}'s source order",
+        "manual": "Set route",
+        "liveSource": "Currently served by {{source}} · {{model}}",
+        "globalPending": "Restoring {{backend}}'s source order…",
+        "globalActual": "{{backend}}'s source order currently resolves to {{source}}.",
+        "globalUnavailable": "No source in {{backend}}'s source order can serve right now.",
+        "chooseTarget": "Choose target model",
+        "searchPlaceholder": "Search sources or models",
+        "empty": "No matching models",
+        "availableCount": "{{count}} available",
+        "manualBadge": "Manual",
+        "addManual": "Enter a model manually",
+        "multipleSources": "{{model}} · sources available: {{count}}",
+        "orderDecidesSource": "Actual source follows {{backend}}'s source order",
+        "compatibility": "Reasoning, cache, and tool semantics may differ from the original model.",
+        "openMenuGlobal": "Open models use {{backend}}'s source order; {{source}} currently serves this one.",
+        "none": "no source",
+        "expand": "Expand supply method"
+      },
+      "probe": {
+        "action": "Try it",
+        "running": "Testing",
+        "nativeReady": "{{source}} is ready and can run directly.",
+        "hubOk": "{{source}} responded successfully · {{ms}} ms",
+        "failed": "{{source}} failed: {{detail}}",
+        "unknown": "Source did not pass the test",
+        "error": "Test failed, please retry"
       },
       "recent": {
         "title": "Recent switches",
         "viewAll": "View all",
         "collapse": "Collapse",
+        "loadMore": "Load older entries",
+        "loadingMore": "Loading…",
         "today": "Today",
         "yesterday": "Yesterday",
-        "empty": "No switches yet"
+        "empty": "No switches yet",
+        "deletedSource": "deleted"
       },
       "advanced": {
         "title": "Advanced",
@@ -719,7 +822,7 @@
         "keyLabel": "API KEY",
         "baseUrlLabel": "SERVICE URL (BASE URL)",
         "baseUrlHint": "Official vendors are prefilled and editable; for a compatible service (relay, self-hosted gateway) enter the URL it gives you.",
-        "discovered": "Connected · discovered {{count}} models, added to the supply list",
+        "discovered": "Connected · discovered {{count}} model(s), added to the supply list",
         "failed": "Connection failed: {{detail}}",
         "testing": "Connecting…",
         "vendors": {
@@ -731,11 +834,16 @@
           "xai": "xAI"
         }
       },
+      "field": {
+        "apiKeyPlaceholder": "sk-…",
+        "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
       "oauth": {
         "title": {
           "anthropic": "Connect Claude subscription",
           "openai": "Connect ChatGPT subscription",
-          "generic": "Connect subscription"
+          "generic": "Connect subscription",
+          "reauth": "Sign in to “{{name}}” again"
         },
         "starting": "Preparing…",
         "connected": "Connected — added to your sources",
@@ -756,14 +864,14 @@
           "awaitingPaste": "Waiting for authorization · times out in {{time}}",
           "awaitingDevice": "Waiting to finish · detected automatically, nothing to paste",
           "verifying": "Verifying…",
-          "success": "Connected",
-          "finalizing": "Creating the source…"
+          "success": "Connected"
         },
         "error": {
           "start": "Couldn't start authorization, please retry",
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
           "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
         },
         "hubOption": {
@@ -787,20 +895,34 @@
         "reorderFailed": "Couldn't save the new order",
         "connected": "Connected to the Hub",
         "connectFailed": "Couldn't connect, please retry",
-        "refreshFailed": "Couldn't refresh, please retry",
-        "connectedNoSupply": "Switched to Hub, but no source can supply yet — still on Direct"
+        "refreshFailed": "Couldn't refresh, please retry"
+      },
+      "supply": {
+        "degraded": "On the Hub · a source is down, already switched to the next one",
+        "waiting": "On the Hub · every source is cooling down; turns fail until one recovers",
+        "interrupted": "On the Hub · supply interrupted, the next turn will fail",
+        "noSources": "On the Hub · no source enabled yet, the next turn will fail",
+        "nothingRunnable": "On the Hub · no enabled source can serve right now, the next turn will fail"
+      },
+      "adoption": {
+        "enabled": "Added to the source order of {{list}}",
+        "entry": "{{name}} (#{{position}})",
+        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used",
+        "noneSkipped": "No agent has enabled it yet · skipped for {{skipped}} (hand-picked order) — add it there to use it",
+        "partlySkipped": "Added to the source order of {{list}} · skipped for {{skipped}} (hand-picked order) — add it there to use it"
       },
       "menus": {
         "done": "Done",
         "resetAll": "Reset all to default",
         "saveFailed": "Couldn't save your changes, please retry",
+        "enrolled": "Added {{sources}} to {{backend}}’s source order so your selection has a supplier",
         "mapping": {
           "title": "{{backend}} · Model menu",
           "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",
           "builtinCol": "Built-in model ID",
           "supplyCol": "Actual supply",
-          "followNative": "Follow native · supply by priority",
-          "candidates": "By priority · {{sources}}",
+          "followNative": "Follow native · supply by source order",
+          "candidates": "Source order · {{sources}}",
           "candidatesUnavailable": "No source can supply this model yet",
           "warning": "Reasoning, cache and tool semantics aren't fully equivalent after remapping",
           "resetRow": "Reset to default",
@@ -824,8 +946,8 @@
           }
         },
         "custom": {
-          "title": "Add a custom model",
-          "subtitle": "Register a model that discovery missed and add it to the OpenCode menu.",
+          "title": "Add model manually",
+          "subtitle": "Register a model missing from this source so it can be selected or used as a route target.",
           "sourceLabel": "Source (able to supply this model)",
           "modelIdLabel": "Model ID",
           "modelIdPlaceholder": "glm-5.2-air",
@@ -834,7 +956,7 @@
           "previewLabel": "OpenCode identifier · generated",
           "previewEmpty": "Enter a model ID to preview",
           "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
-          "add": "Add to menu",
+          "add": "Add model",
           "failed": "Couldn't add the model, please retry",
           "delete": "Remove model",
           "deleteConfirmTitle": "Remove custom model?",
@@ -855,7 +977,7 @@
           "title": "Hub mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, priority and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, source order and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
         },
         "direct": {
           "title": "Direct mode",
@@ -863,12 +985,11 @@
           "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
           "import": "Import to Hub…"
         },
-        "switchedHubNoSupply": "Switched to Hub, but no source can supply yet — still on Direct",
-        "hubNoSupply": "Hub is selected, but no source can supply this backend yet, so it's still using Direct. Add or enable a source on the Models page to activate it."
+        "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
         "title": "Connect to the Model Hub",
-        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — all three Agents share one set of sources and priority.",
+        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — each agent then picks its own sources and their order.",
         "empty": "No native configuration detected to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Import failed, please retry",
@@ -898,6 +1019,8 @@
         "more": "More actions",
         "rename": "Rename",
         "rediscover": "Re-discover models",
+        "reauth": "Sign in again",
+        "replaceKey": "Replace API key",
         "delete": "Delete source",
         "renameTitle": "Rename source",
         "renameLabel": "Display name",
@@ -914,20 +1037,50 @@
         "deleteForceConfirm": "Force delete",
         "deleted": "Source deleted",
         "deleteFailed": "Couldn't delete, please retry",
-        "priorityLabel": "Priority {{position}}",
         "renameHint": "Changes the display name only — the credential is untouched",
         "rediscoverHint": "Re-fetch the models this source can supply",
-        "moveUp": "Move up one",
-        "moveUpHint": "Gets used earlier",
-        "moveUpHintAtTop": "Already first — can't move up",
-        "moveDown": "Move down one",
-        "moveDownHint": "Gets used later",
-        "moveDownHintAtBottom": "Already last — can't move down",
-        "deleteHint": "You'll be asked to confirm first"
+        "deleteHint": "You'll be asked to confirm first",
+        "reauthHint": "The old sign-in stops working right away",
+        "replaceKeyHint": "Enter a new key — the endpoint and name stay"
+      },
+      "repair": {
+        "reauth": "Sign in",
+        "replaceKey": "Replace key",
+        "retest": "Retry",
+        "reauthTitle": "Sign in to “{{name}}” again?",
+        "reauthBody": {
+          "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
+          "onFailure": "If this sign-in doesn’t go through, the source needs attention until you sign in again."
+        },
+        "reauthConfirm": "Start sign-in",
+        "replaceTitle": "Replace the API key for “{{name}}”",
+        "replaceBody": "Enter a new key — everything else stays the same.",
+        "replaceLabel": "New API key",
+        "replaceSubmit": "Replace",
+        "replacing": "Replacing…",
+        "replaceFailed": "Couldn't replace the key, please retry",
+        "forceTitle": "Replace it anyway?",
+        "forceConfirm": "Replace anyway",
+        "gapsTitle": "These agents will have no source left:",
+        "gapsDone": "These agents now have no source left:",
+        "gaps": "Some agents now have no source left",
+        "repaired": "Working again",
+        "refreshed": "Updated",
+        "unresolved": "Still not working",
+        "failed": "Couldn't do that, please retry"
+      },
+      "dryRun": {
+        "action": "Run a test turn",
+        "running": "Testing…",
+        "ok": "{{name}} is reachable · {{ms}} ms",
+        "okNoLatency": "{{name}} is reachable",
+        "failed": "{{name}} didn't go through · {{detail}}",
+        "failedUnknown": "{{name}} didn't go through",
+        "error": "Couldn't run the test, please retry"
       },
       "migrationBanner": {
         "title": "Native configs ready to import",
-        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — all three agents share one set of sources.",
+        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — each agent then picks its own sources and their order.",
         "import": "Import to Hub",
         "dismiss": "Dismiss"
       }
@@ -978,6 +1131,46 @@
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",
     "optimizeStarted": "A second Connector is evaluating a better route"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
+      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
+      "consent_required": "Needs your consent for experimental hub supply first"
+    },
+    "oauth": {
+      "upstream_failed": "The vendor didn't complete this sign-in, please retry",
+      "engine_unavailable": "The Hub isn't responding, please retry",
+      "submission_failed": "Couldn't submit what you pasted, please retry",
+      "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
+      "binding_failed": "That account is already used by another source",
+      "expired": "Authorization timed out, please reconnect"
+    },
+    "probe": {
+      "native_cli_unavailable": "Can't use the CLI's sign-in",
+      "no_candidate": {
+        "waiting": "Every source is cooling down",
+        "interrupted": "No source can serve this model right now"
+      }
+    },
+    "source": {
+      "cooldown": {
+        "network": "Network unreachable",
+        "timeout": "Repeated timeouts",
+        "rate_limited": "Rate limited",
+        "quota_exhausted": "Cycle quota used up",
+        "server_error": "Upstream server error"
+      },
+      "needs_action": {
+        "oauth_expired": "Needs a new sign-in",
+        "balance_exhausted": "Out of balance — top it up",
+        "credential_revoked": "Credential revoked — enter a new one",
+        "account_banned": "Account is restricted"
+      },
+      "error": {
+        "unclassified": "Unknown error — temporarily unavailable"
+      }
+    }
   },
   "accessBlocked": {
     "title": "Can't open the control panel here",
@@ -1405,6 +1598,7 @@
     },
     "search": {
       "roleYou": "You",
+      "includeArchived": "Include archived",
       "roleAutomated": "Automated",
       "roleAgent": "Agent",
       "title": "Search",
@@ -2326,6 +2520,28 @@
         "watch": "Watch",
         "disabled": "Disabled"
       },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "schedule": "Schedule",
+        "nextRun": "Next run",
+        "command": "Command",
+        "runtime": "Runtime",
+        "running": "Running",
+        "runningPid": "Running · pid {{pid}}",
+        "notRunning": "Not running",
+        "firedSessions": "Triggered sessions",
+        "noFiredSessions": "No sessions triggered in this window.",
+        "runsTitle": "Recent runs",
+        "taskActiveLabel": "Enabled",
+        "watchActiveLabel": "Watching",
+        "enabledToast": "Enabled",
+        "disabledToast": "Disabled",
+        "openInHarness": "Open in Harness",
+        "toggleFailed": "Couldn't update — try again."
+      },
       "search": {
         "placeholder": "Find a session or trigger…",
         "loading": "Loading…",
@@ -2339,7 +2555,8 @@
         "spawn": "Spawn",
         "trigger": "Task / Watch",
         "background": "Background",
-        "callbackNote": "Reports-to only in detail panel"
+        "callbackNote": "Reports-to only in detail panel",
+        "showDisabled": "Show disabled"
       },
       "status": {
         "active": "running",
@@ -2592,14 +2809,40 @@
   },
   "harness": {
     "title": "Harness",
-    "subtitle": "Scheduled tasks, watches, webhooks, and the run history of all three.",
-    "soon": "soon",
+    "subtitle": "Scheduled tasks, watches, and the run history of both.",
     "create": "Create",
     "searchPlaceholder": "Search…",
+    "searchRunsPlaceholder": "Search runs…",
     "statusFilter": {
       "all": "All",
-      "enabled": "Enabled only",
-      "disabled": "Disabled only"
+      "active": "Live",
+      "waiting": "Waiting",
+      "running": "Running",
+      "paused": "Paused",
+      "finished": "Finished"
+    },
+    "runStatus": {
+      "all": "All",
+      "queued": "Queued",
+      "running": "Running",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    },
+    "runType": {
+      "agent_run": "Agent run",
+      "watch": "Watch check",
+      "scheduled": "Scheduled task",
+      "task_run": "Task run",
+      "hook_send": "Message delivery",
+      "webhook": "Webhook trigger",
+      "watch_runtime": "Watcher heartbeat",
+      "unknown": "Run"
+    },
+    "runTypeFilter": {
+      "label": "Run type",
+      "default": "Default (no heartbeats)",
+      "all": "All types"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2614,25 +2857,14 @@
     "emptyTasks": "No scheduled tasks. Ask an agent to create one.",
     "emptyWatches": "No watches running. Ask an agent to start one.",
     "emptyRuns": "No runs yet. They appear here once a task or watch fires.",
-    "webhooksSoon": "Webhooks are coming soon",
-    "webhooksSoonBody": "Inbound HTTP triggers will land in a follow-up release. Tasks and watches cover scheduled and event-driven runs today.",
+    "noTaskMatches": "No tasks match this view. Clear the filters or search.",
+    "noWatchMatches": "No watches match this view. Clear the filters or search.",
+    "noRunMatches": "No runs match this view. Clear the filters or search.",
     "unknownSchedule": "unknown schedule",
-    "schedule": {
-      "cron": "cron · {{value}}",
-      "oneShot": "one-shot · {{value}}"
-    },
     "pageLabel": "page {{page}}",
-    "runtime": {
-      "running": "Running",
-      "paused": "Paused",
-      "idle": "Idle",
-      "enabled": "Enabled",
-      "disabled": "Disabled"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
       "runs": "Runs"
     },
     "detail": {
@@ -2648,7 +2880,7 @@
       "runtime": "Runtime",
       "lastError": "Last error",
       "type": "Type",
-      "definition": "Definition",
+      "triggeredBy": "Triggered by",
       "result": "Result",
       "error": "Error",
       "timing": "Timing",
@@ -2659,10 +2891,12 @@
       "openInAgents": "Open in Agents",
       "agentInherit": "Inherits default agent",
       "sessionNone": "No bound session",
+      "sessionDeleted": "Session deleted",
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
-      "effort": "effort {{value}}"
+      "effort": "effort {{value}}",
+      "waitingSince": "Waiting since"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",
@@ -2679,7 +2913,17 @@
       "disable": "Disable",
       "delete": "Delete",
       "deleteConfirmTask": "Delete \"{{name}}\"? It will stop running.",
-      "deleteConfirmWatch": "Delete \"{{name}}\"? The watch will stop immediately."
+      "deleteConfirmWatch": "Delete \"{{name}}\"? The watch will stop immediately.",
+      "modeOnce": "one-shot",
+      "modeForever": "continuous",
+      "processAlive": "process running",
+      "processDead": "process exited",
+      "runningFor": "running {{duration}}",
+      "waitingFor": "waiting {{duration}}",
+      "lastEvent": "last fired {{when}}",
+      "nextIn": "fires in {{duration}}",
+      "nextAt": "next {{when}}",
+      "lastRun": "last {{when}}"
     },
     "createDialog": {
       "title": "Talk to an agent to set up background work",
@@ -2695,11 +2939,55 @@
       "kindWatch": "Watch",
       "promptTask": "Help me create a scheduled task. What I want: [describe here, e.g. \"every weekday at 9:30am summarize yesterday's PR comments\"]. Once parameters look right, run vibe task add and bind it to this project.",
       "promptWatch": "Help me create a watch. I want to wait for: [describe here, e.g. \"CI workflow #1234 to finish\"]. Notify me when the condition is met. Once parameters look right, run vibe watch add."
+    },
+    "run": {
+      "definitionDeleted": "(deleted)"
+    },
+    "lifecycle": {
+      "running": "Running",
+      "waiting": "Waiting",
+      "paused": "Paused",
+      "finished": "Finished",
+      "normal": "Finished",
+      "timeout": "Timed out",
+      "error": "Failed",
+      "unknown": "Unknown"
+    },
+    "kind": {
+      "task": "Scheduled task",
+      "watch": "Watch"
+    },
+    "when": {
+      "today": "today {{time}}",
+      "tomorrow": "tomorrow {{time}}",
+      "yesterday": "yesterday {{time}}",
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}} ({{timezone}})"
+    },
+    "cron": {
+      "everyMinute": "every minute",
+      "everyMinutes": "every {{count}} min",
+      "daily": "every day at {{time}}",
+      "weekly": "{{days}} at {{time}}",
+      "weekday": {
+        "sun": "Sun",
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat"
+      },
+      "weekdaySeparator": ", "
     }
   },
   "chat": {
     "back": "Back",
     "untitled": "Untitled session",
+    "archived": {
+      "sendBlocked": "This session is archived and read-only.",
+      "editBlocked": "This session is archived and can no longer be changed."
+    },
     "selection": {
       "quote": "Quote",
       "askInNew": "Ask in a new session",
@@ -2709,6 +2997,9 @@
     "showPage": {
       "open": "Visualize",
       "backToChat": "Back to chat",
+      "launchMenu": "Open Show Page",
+      "newWindow": "New window",
+      "newLink": "New link",
       "annotate": {
         "toggle": "Annotate",
         "smart": "Smart",
@@ -2766,9 +3057,16 @@
       "scheduled": "Scheduled task",
       "watch": "Watch",
       "webhook": "Webhook",
+      "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
       "agentFallback": "agent"
+    },
+    "annotation": {
+      "titleUser": "User annotation",
+      "titleAgent": "Agent annotation",
+      "resolved": "Resolved",
+      "screenshot": "Screenshot"
     },
     "picker": {
       "agent": "Agent",
@@ -2791,6 +3089,7 @@
     "compose": {
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
+      "placeholderArchived": "This session is archived — read-only",
       "hint": "Enter to send",
       "send": "Send",
       "queueSend": "Send to queue",
@@ -2800,6 +3099,18 @@
       "voice": "Voice input",
       "stopRecording": "Stop recording",
       "cancelRecording": "Cancel recording",
+      "voiceRetry": "Retry transcription",
+      "voiceCopyTranscript": "Copy recovered transcript",
+      "voiceTranscriptCopied": "Recovered transcript copied",
+      "voiceDiscard": "Discard recording",
+      "voiceFailed": "Voice transcription failed. Your recording is available to retry.",
+      "voiceTimedOut": "Voice transcription timed out. Your recording is available to retry.",
+      "voiceUnavailable": "Voice transcription is temporarily unavailable.",
+      "voiceTooLarge": "This recording is too large to transcribe.",
+      "voiceEmpty": "No speech was detected in this recording.",
+      "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
+      "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
+      "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
       "removeAttachment": "Remove",
       "dropOverlay": "Drop files to attach"
     },
@@ -3129,6 +3440,7 @@
     },
     "request": {
       "provide": "provide",
+      "expired": "This session is archived — this request has expired.",
       "fulfilled": "provided",
       "title": "Agent needs a secret",
       "help": "Provide the value — it goes to the vault, never to the chat or model.",

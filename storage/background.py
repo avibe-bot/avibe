@@ -3,16 +3,22 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 
 from config import paths
+from storage.agent_session_rows import (
+    reserve_write_lock,
+    session_openable_in_chat,
+    unchanged_text,
+)
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
@@ -21,6 +27,7 @@ from storage.migrations import (
 )
 from storage.models import agent_runs, agent_sessions, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,28 @@ def _json_loads(value: Optional[str], default: Any) -> Any:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
+    """The instant a one-shot ``run_at`` names, in the task's own timezone.
+
+    A ``run_at`` with no UTC offset is not an instant — it is a wall-clock
+    reading, and something has to say which zone to read it in. The task
+    carries a ``timezone`` for exactly that, so that is the answer; resolving
+    it any other way makes when a task fires depend on the machine.
+
+    ``datetime.astimezone()`` is the other way, and it is the wrong one: on a
+    naive value it silently assumes the *host* zone first. The scheduler used
+    it while the payload used this rule, so the two disagreed by the offset
+    between host and task zone and the UI promised a fire time the scheduler
+    would not honour. One resolver, imported by both, is why that cannot come
+    back — the scheduler at ``core/scheduled_tasks.py::_build_trigger`` and
+    ``compute_next_run_at`` below are its two callers.
+    """
+
+    tz = ZoneInfo(timezone_name or "UTC")
+    instant = datetime.fromisoformat(run_at)
+    return instant.replace(tzinfo=tz) if instant.tzinfo is None else instant.astimezone(tz)
 
 
 def compute_next_run_at(
@@ -68,8 +97,7 @@ def compute_next_run_at(
         elif schedule_type == "at":
             if not run_at:
                 return None
-            instant = datetime.fromisoformat(run_at)
-            instant = instant.replace(tzinfo=tz) if instant.tzinfo is None else instant.astimezone(tz)
+            instant = resolve_run_at(run_at, timezone_name)
             if instant <= now:
                 # A one-shot whose time has already passed has no next run.
                 return None
@@ -93,14 +121,555 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "canceled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
-DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
+# What a task/watch is *doing*, which is not what ``enabled`` records.
+#
+# ``enabled`` is a switch: it says whether the scheduler may fire the row, and
+# nothing else. Reading it as a state made two different things look identical —
+# a one-shot watch that finished on its own and a watch the user paused both
+# store ``enabled = 0`` — and left the states users actually ask about
+# ("what is running right now?", "what is still waiting?") unnameable. These
+# four are derived per row from columns that already exist; no migration.
+DEFINITION_LIFECYCLE_STATES = ("running", "waiting", "paused", "finished")
+DEFINITION_STATUS_COUNTS = ("total",) + DEFINITION_LIFECYCLE_STATES
+# The status filters the API accepts, and which states each one selects. An
+# empty tuple means "no restriction". ``active`` is the default view: waiting and
+# running are one question ("is this thing still live?"), and the row itself says
+# which of the two it is, so it is a filter value without being a count key.
+DEFINITION_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
+    "all": (),
+    "active": ("waiting", "running"),
+    "running": ("running",),
+    "waiting": ("waiting",),
+    "paused": ("paused",),
+    "finished": ("finished",),
+}
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
+# run_definitions.definition_type -> the user-facing kind the UI routes on.
+# The column says "scheduled"; every surface calls that thing a task.
+_DEFINITION_KINDS = {"scheduled": "task", "watch": "watch"}
+_BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
+    "definition_name": None,
+    "definition_kind": None,
+    "definition_deleted": False,
+}
+# Where a definition's session binding hides when it has no ``session_id``: a
+# legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
+_DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+# The exit code a waiter that ran out of lifetime carries. Written by
+# ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
+# that ran out of time from one that failed.
+_TIMEOUT_EXIT_CODE = 124
+# The runs a definition's own executions are recorded as. A watch's supervisor
+# heartbeat is *also* an ``agent_runs`` row and is ``running`` for as long as the
+# waiter lives, so counting it as an execution would make every healthy waiter
+# read as "running" and leave "waiting" unreachable. Waiter liveness is a
+# separate field (``process_alive``), not a state.
+_WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+# SQLite caps how many parameters one statement may bind (999 on builds before
+# 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
+# every row in the store at once, so batch resolvers chunk their id lists: a few
+# queries on a large store instead of one that fails.
+#
+# The cap counts *bound parameters*, not values. A resolver that binds one
+# parameter per value can take 400 of them; one that matches on a three-column
+# tuple binds three, so 400 values would be 1200 parameters and the same "too
+# many SQL variables" error the batching exists to prevent. Callers declare
+# their cost via ``params_per_value`` and the chunk size follows from it.
+_MAX_BOUND_PARAMS = 400
+# Ids here are usually strings, but a resolver keyed on a composite (platform,
+# scope_type, native_id) batches tuples through the same helper.
+_BatchValue = TypeVar("_BatchValue")
+
+
+def _id_batches(values: Iterable[_BatchValue], *, params_per_value: int = 1) -> list[list[_BatchValue]]:
+    """De-duplicated, non-empty ids in chunks small enough to bind."""
+
+    size = max(1, _MAX_BOUND_PARAMS // max(1, params_per_value))
+    ids = [value for value in dict.fromkeys(values) if value]
+    return [ids[start : start + size] for start in range(0, len(ids), size)]
+
+
+class DefinitionWriteConflict(RuntimeError):
+    """A full-row definition write lost to a concurrent lifecycle/binding change.
+
+    Raised by the callers that OWN a user action (``vibe task update``,
+    ``vibe watch update``, pause/resume), never swallowed: the write did not
+    happen, so reporting the mutated in-memory task back to the user would claim
+    an edit the database refused.
+    """
+
+    def __init__(self, definition_id: str, *, definition_type: str = "definition") -> None:
+        super().__init__(
+            f"{definition_type} {definition_id} changed underneath this update "
+            "(its Session binding, enabled state, deletion or reclaim snapshot moved); "
+            "nothing was written"
+        )
+        self.definition_id = str(definition_id)
+        self.definition_type = str(definition_type)
+
+
+@dataclass(frozen=True)
+class DefinitionWriteExpectation:
+    """The definition state a FULL-ROW payload was derived from.
+
+    ``upsert_scheduled_task`` / ``upsert_watch`` write EVERY column of
+    ``run_definitions``, from a payload a caller built out of a read that happened
+    somewhere else entirely -- ``vibe task update`` reads the definition, resolves
+    Agents and Sessions, prompts for nothing, and only then writes the whole row
+    back. Between that read and this write, ``reclaim_bound_definitions`` (``/new``
+    or the archive dialog) can pause or soft-delete the very same row and stamp its
+    ``session_settings_snapshot`` on it. A write keyed on ``id`` alone then RESTORES
+    the pre-teardown ``session_id`` / ``enabled`` / ``deleted_at`` / metadata: the
+    reclaim's compare-and-set succeeded, the counters and the teardown ledger told
+    the user "1 task paused", and the row is enabled again and pointing at a session
+    that no longer exists.
+
+    So the write must re-assert the state it was decided from -- the same idiom the
+    session writers use (``storage.agent_session_rows.unchanged_text``), applied to
+    a payload whose read is one layer up instead of one statement up.
+
+    THE PREDICATE SET IS THE STATE TEARDOWN OWNS, and nothing else:
+
+    * ``session_id`` -- the binding the payload's fields were resolved against.
+    * ``enabled`` -- the pause half of a ``pause``-mode reclaim.
+    * ``deleted_at`` -- the soft-delete half of a ``delete``-mode reclaim, and the
+      one that lets a full-row write RESURRECT a removed task, since no in-memory
+      definition even carries the column (it is always written back as ``NULL``).
+    * the reclaim snapshot's ``captured_at`` -- the third reclaim shape: for an
+      ALREADY-paused definition the reclaim changes neither ``enabled`` nor
+      ``deleted_at``, it only refreshes ``session_settings_snapshot``. That
+      snapshot is what a later ``create_once`` rebind reads to carry the old
+      workdir / agent / model forward, so restoring the pre-teardown metadata sends
+      the task back on the wrong route (D3) with every other guard satisfied.
+
+    DELIBERATELY NOT ``updated_at``, and not the whole row. A row-version guard
+    would refuse every benign concurrent write -- a run result landing while the
+    user renames a task -- and turn a working edit into an error. What is guarded is
+    the lifecycle and binding state a teardown decides, which is exactly what a
+    stale full-row payload must not be allowed to undo.
+    """
+
+    session_id: Optional[str] = None
+    enabled: bool = True
+    deleted_at: Optional[str] = None
+    #: ``session_settings_snapshot.captured_at`` as read, ``None``/"" when the
+    #: definition carried no reclaim snapshot.
+    snapshot_captured_at: Optional[str] = None
+
+    @classmethod
+    def from_read(
+        cls,
+        *,
+        session_id: Any = None,
+        enabled: Any = True,
+        deleted_at: Any = None,
+        metadata: Any = None,
+    ) -> "DefinitionWriteExpectation":
+        """Build the expectation from the definition row/dataclass just read."""
+
+        return cls(
+            session_id=str(session_id) if session_id else None,
+            enabled=bool(enabled),
+            deleted_at=str(deleted_at) if deleted_at else None,
+            snapshot_captured_at=reclaim_snapshot_marker(metadata),
+        )
+
+
+def reclaim_snapshot_marker(metadata: Any) -> Optional[str]:
+    """``session_settings_snapshot.captured_at`` from definition metadata, if any.
+
+    Never raises: the marker is JSON on rows that predate it, so anything
+    unparseable reads as "this definition carries no snapshot", which is what the
+    SQL side of the guard also computes for a malformed blob.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY)
+    if not isinstance(snapshot, dict):
+        return None
+    captured_at = snapshot.get("captured_at")
+    return str(captured_at) if captured_at else None
+
+
+#: ``captured_at`` of the reclaim snapshot, read in SQL. Guarded by ``json_valid``
+#: because ``metadata_json`` is user-visible text on legacy rows: a bare
+#: ``json_extract`` over a malformed blob raises, which would turn "this row has no
+#: snapshot" into a failed write.
+_RECLAIM_SNAPSHOT_MARKER_SQL = case(
+    (
+        func.json_valid(run_definitions.c.metadata_json) == 1,
+        func.json_extract(
+            run_definitions.c.metadata_json,
+            f"$.{SESSION_SETTINGS_SNAPSHOT_KEY}.captured_at",
+        ),
+    ),
+    else_=None,
+)
+
+
+def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
+    """Predicates re-asserting the state a full-row payload was derived from.
+
+    Shares ``unchanged_text`` with the session writers rather than restating its
+    NULL handling: these are nullable TEXT columns and a bare ``col == value`` over
+    a NULL evaluates to NULL, not false, so without ``COALESCE`` the guard stops
+    guarding exactly the rows most likely to be raced on (an unbound definition, a
+    row with no snapshot). ``enabled`` is ``NOT NULL INTEGER`` and needs none.
+    """
+
+    return [
+        unchanged_text(run_definitions.c.session_id, expect.session_id),
+        run_definitions.c.enabled == (1 if expect.enabled else 0),
+        unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
+        unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+    ]
+
+
+def definition_lifecycle_expression(definition_type: str):
+    """The single declaration of a task/watch lifecycle state, as SQL.
+
+    The row select and the filter counts both read this expression, so a row can
+    never land in a bucket its own chip did not count. That is why it is SQL and
+    not Python: counts are a ``GROUP BY`` over the whole table while rows are one
+    page of it, and a Python twin of this rule would have to be kept in step by
+    hand — the same shape of drift ``_RunProjection`` exists to prevent.
+
+    Branch order is the priority: an execution in flight outranks everything,
+    then a definition that can never fire again, then the switch. ``finished``
+    has to outrank ``waiting`` because ``enabled`` is not a promise of a future
+    fire — re-enabling a one-shot that already fired flips the switch back on
+    without giving it anything left to do, and reading the switch first parked
+    such a row in the default Active view forever.
+
+    Both ``ended`` branches read a fact written by whatever ends the definition,
+    never a proxy for one: a watch retires when its supervisor says so, and a
+    one-shot when the clock passes the instant it names. A history column —
+    "it has run at least once" — looks like either and is neither.
+    """
+
+    in_flight = (
+        select(agent_runs.c.id)
+        .where(agent_runs.c.definition_id == run_definitions.c.id)
+        .where(
+            or_(
+                agent_runs.c.run_type.is_(None),
+                agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+            )
+        )
+        .where(agent_runs.c.status.in_([*_status_query_values("queued"), *_status_query_values("running")]))
+        .exists()
+    )
+    if definition_type == "watch":
+        # Retirement is persisted only by the supervisor branch that switches
+        # the watch off. Legacy rows have no marker and therefore read paused:
+        # their history cannot prove whether the old writer retired them or a
+        # user paused them after a cycle.
+        ended = and_(
+            run_definitions.c.enabled == 0,
+            run_definitions.c.retired_at.is_not(None),
+        )
+    else:
+        # A cron task cannot retire itself, so a disabled one is always someone
+        # having paused it. A one-shot is over when the instant it names has
+        # passed — not when it last ran. ``vibe task run`` executes an armed
+        # task early and records ``last_run_at`` without consuming the schedule,
+        # so reading history here retired a task that was still going to fire.
+        #
+        # This is the same question ``compute_next_run_at`` answers — it returns
+        # ``None`` exactly when the instant is behind us — so the state and the
+        # time printed beside it cannot contradict each other.
+        #
+        # ``datetime()`` normalises offset-carrying timestamps before comparing
+        # the scheduled instant with SQLite's current UTC clock.
+        ended = and_(
+            run_definitions.c.schedule_type == "at",
+            run_definitions.c.run_at.is_not(None),
+            func.datetime(run_definitions.c.run_at) <= func.datetime("now"),
+        )
+    return case(
+        (in_flight, "running"),
+        (ended, "finished"),
+        (run_definitions.c.enabled != 0, "waiting"),
+        else_="paused",
+    )
+
+
+def _successful_finished_definition_expression(definition_type: str, lifecycle: Any):
+    """Successful one-shot history hidden by the compact CLI lists.
+
+    This predicate is deliberately anchored to the canonical lifecycle
+    expression first. A queued execution therefore keeps a disabled definition
+    visible as ``running`` instead of letting historical completion fields hide
+    live work.
+    """
+
+    no_error = func.trim(func.coalesce(run_definitions.c.last_error, "")) == ""
+    if definition_type == "watch":
+        successful_one_shot = and_(
+            run_definitions.c.mode == "once",
+            run_definitions.c.last_finished_at.is_not(None),
+            or_(
+                run_definitions.c.last_exit_code.is_(None),
+                run_definitions.c.last_exit_code == 0,
+            ),
+            no_error,
+        )
+    else:
+        successful_one_shot = and_(
+            run_definitions.c.schedule_type == "at",
+            run_definitions.c.enabled == 0,
+            run_definitions.c.last_run_at.is_not(None),
+            no_error,
+        )
+    return and_(lifecycle == "finished", successful_one_shot)
+
+
+# One completed cycle's worth of state: when the row last ran, how that ending
+# went, and what it caught.
+DEFINITION_RETIREMENT_COLUMNS = (
+    "retired_at",
+    "last_finished_at",
+    "last_exit_code",
+    "last_error",
+)
+DEFINITION_CYCLE_COLUMNS = (
+    "retired_at",
+    "last_started_at",
+    "last_finished_at",
+    "last_event_at",
+    "last_exit_code",
+    "last_error",
+)
+
+
+def definition_resume_clear_columns(
+    definition_type: Optional[str], mode: Optional[str]
+) -> tuple[str, ...]:
+    """Which lifecycle fields switching this definition back on clears.
+
+    Retirement is state, not history: every resumed watch clears the finish,
+    exit, and error that described its previous retirement. A one-shot also
+    clears its prior start/event history because it begins a distinct cycle.
+
+    A ``forever`` watch keeps continuous history: "last fired 2h ago" is
+    precisely what its row exists to show, and a pause does not make it untrue.
+    Scheduled tasks keep all history because a fired one-shot has no future fire
+    to protect, and a cron task still needs to report its last run.
+
+    Lives here, next to the single UPDATE, because two doorways must agree on
+    it: the Harness UI writes through ``set_definition_enabled`` while the CLI
+    and supervisor write through ``core/watches.py``.
+    """
+
+    if definition_type != "watch":
+        return ()
+    return DEFINITION_RETIREMENT_COLUMNS if mode == "forever" else DEFINITION_CYCLE_COLUMNS
+
+
+def _row_lifecycle_state(row: Any) -> Optional[str]:
+    """The state the query resolved for this row, if the query selected it.
+
+    Every harness read path goes through ``_definitions_query`` and so carries
+    the column. Importers and other direct ``select(run_definitions)`` readers do
+    not, and get ``None`` — an absent state, which the UI renders as unknown
+    rather than as a wrong one.
+    """
+
+    try:
+        return row["lifecycle_state"]
+    except (KeyError, IndexError):
+        return None
+
+
+def definition_lifecycle_detail(
+    *,
+    lifecycle_state: Optional[str],
+    definition_type: Optional[str] = None,
+    last_run_at: Any = None,
+    last_exit_code: Any = None,
+    last_error: Any = None,
+) -> Optional[str]:
+    """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
+
+    Non-null only for ``finished``; the other three states are still in play and
+    have no ending to report yet. Python rather than SQL because it has exactly
+    one consumer — the row — and never a ``GROUP BY``: the filter groups by
+    state, and the row alone says which of the three endings it was.
+    """
+
+    if lifecycle_state != "finished":
+        return None
+    if definition_type == "scheduled" and last_run_at is None:
+        return None
+    if last_exit_code == _TIMEOUT_EXIT_CODE:
+        return "timeout"
+    if last_exit_code not in (None, 0):
+        return "error"
+    # Scheduled tasks never write an exit code, so the code alone would report
+    # every failed one as a normal ending; ``last_error`` is where their failure
+    # lands. Same pair ``vibe/cli.py`` already reads to call a watch clean.
+    if str(last_error or "").strip():
+        return "error"
+    return "normal"
+
+
+def definition_status_total(counts: dict[str, int], status: Optional[str]) -> int:
+    """How many rows a status filter selects, from the per-state counts.
+
+    The API's ``total`` used to be ``counts[status]``, which only worked while
+    every filter was also a count key. ``active`` spans two states, so the sum
+    is declared here — beside the filter table it sums — instead of being
+    re-derived by each caller.
+    """
+
+    states = DEFINITION_STATUS_FILTERS.get(status or "all")
+    if not states:
+        return int(counts.get("total", 0))
+    return sum(int(counts.get(state, 0)) for state in states)
+
+
+@dataclass(frozen=True)
+class _RunProjection:
+    """One place ``_enrich_runs`` writes resolved, user-visible text onto a run.
+
+    Two consumers have to agree on this list, and kept not agreeing: the
+    enrichment that *fills* a projected field, and the search predicate that has
+    to *find* what it filled in. Review caught the mismatch one field at a time
+    — first the definition name, then the session label — because the list only
+    existed as parallel code in two functions, so each fix closed one field and
+    left the next one open.
+
+    It exists once now. ``_enrich_runs`` and ``_run_search_predicates`` both
+    read it, so a projection added here is searchable by construction rather
+    than by remembering, and one added *without* coming through here fails
+    ``test_every_projected_label_is_searchable`` instead of costing a review
+    round.
+    """
+
+    source: str
+    """Which batch resolver fills it. Sites sharing a source resolve together in
+    one query — that is what keeps a page at a fixed number of round trips
+    however many sites there are."""
+
+    payload_key: Optional[str]
+    """Where the resolved summary lands. ``None`` merges it into the run row
+    itself; a key nests it under that name, and nests ``None`` when the run has
+    nothing to resolve there."""
+
+    id_field: str
+    id_column: Any
+    """The run column naming the row to resolve — payload name and SQL column,
+    which differ for the legacy key below."""
+
+    key_fields: tuple[str, ...] = ()
+    key_columns: tuple[str, ...] = ()
+    """Scope-key fallbacks in precedence order, consulted only when ``id_field``
+    resolves to nothing. Column names rather than columns: ``session_key`` is
+    stored as ``legacy_session_key``."""
+
+
+_RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
+    _RunProjection(
+        source="session",
+        payload_key=None,
+        id_field="session_id",
+        id_column="session_id",
+        key_fields=("session_key", "deliver_key"),
+        key_columns=("legacy_session_key", "deliver_key"),
+    ),
+    _RunProjection(
+        source="session",
+        payload_key="callback_session",
+        id_field="callback_session_id",
+        id_column="callback_session_id",
+    ),
+    # The run's 来源. Its payload field reads a *derived* id (agent-sourced runs
+    # only) while its SQL column is the raw ``source_actor`` — the projection's
+    # two-name design exists for exactly this.
+    _RunProjection(
+        source="session",
+        payload_key="source_session",
+        id_field="source_session_id",
+        id_column="source_actor",
+    ),
+    _RunProjection(
+        source="definition",
+        payload_key=None,
+        id_field="definition_id",
+        id_column="definition_id",
+    ),
+)
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
     "canceled": 1,
     "failed": 2,
 }
+# The closed set of terminal run statuses. Shared so guarded writers and reconcile
+# paths cannot drift apart (this file previously spelled the set inline).
+TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
+
+
+def _parse_iso_instant(value: Any) -> Optional[datetime]:
+    """Parse a stored ISO timestamp, or ``None`` if it is absent/unusable.
+
+    Callers deciding whether a row is stale must treat ``None`` as "not old enough".
+    A row we cannot date is a row we must not sweep.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        instant = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant
+
+
+@dataclass(frozen=True)
+class SweptRun:
+    """One run the staleness sweep terminalized, plus who it belonged to.
+
+    The identity fields are the sweep's report, not its repair: an honest DB row is
+    not enough if the session stays undispatchable, but the in-memory wedge is
+    released from the recorded lock owner (``ScheduledTaskService.
+    _release_leaked_session_locks``) rather than reconstructed from these fields —
+    a lock key is per-conversation, so freeing it from a swept run's identity could
+    free one a different live execution still holds. These fields exist so the
+    caller can log, notify, and test what was swept.
+    """
+
+    run_id: str
+    status: str
+    interrupt_reason: str
+    run_type: Optional[str] = None
+    task_id: Optional[str] = None
+    session_id: Optional[str] = None
+    session_key: Optional[str] = None
+
+
+#: ``metadata.last_skip_reason`` values written by the drain when it defers a queued
+#: run. The sweep requires this recorded evidence rather than re-deriving readiness, so
+#: a run deferred for a reason that still represents progress is never swept.
+#:
+#: Only ``transport_unavailable`` makes a row sweepable. ``session_busy`` is recorded
+#: precisely so it can OVERWRITE a stale ``transport_unavailable``: without it, a run
+#: that was once blocked on a dead transport and is now merely queued behind its own
+#: session's active turn would still look sweepable. Capacity skips are deliberately
+#: not recorded — the drain ``break``s at capacity without examining the remaining
+#: rows, and an unstamped row is never swept, which is the safe direction.
+SKIP_REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
+SKIP_REASON_SESSION_BUSY = "session_busy"
+
+#: ``metadata.interrupt_reason`` values the sweep writes. Kept beside the sweep so
+#: the query and the reason cannot drift.
+SWEEP_REASON_ORPHANED = "orphaned"
+SWEEP_REASON_TRANSPORT_UNAVAILABLE = "transport_unavailable"
+SWEEP_REASON_QUEUE_HOLD_EXPIRED = "queue_hold_expired"
 
 
 def normalize_run_status(status: Any) -> str:
@@ -161,6 +730,45 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
             logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
 
 
+def _publish_queue_updated(session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    try:
+        from core.inbox_events import (
+            QUEUE_UPDATED_EVENT,
+            bus,
+            is_controller_process,
+        )
+    except Exception:
+        logger.debug("failed to import queue event publisher", exc_info=True)
+        return
+    payload = {"session_id": normalized_session_id}
+    try:
+        bus.publish(QUEUE_UPDATED_EVENT, payload)
+        if bus.subscriber_count() == 0 and not is_controller_process():
+            try:
+                from vibe import internal_client
+
+                internal_client.publish_event_sync(
+                    QUEUE_UPDATED_EVENT,
+                    payload,
+                    timeout=1.5,
+                )
+            except Exception:
+                logger.debug(
+                    "failed to bridge queue.updated for %s",
+                    normalized_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.debug(
+            "failed to publish queue.updated for %s",
+            normalized_session_id,
+            exc_info=True,
+        )
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -215,12 +823,25 @@ def _defer_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> Non
 
 
 def _like_contains_pattern(value: str) -> str:
-    escaped = (
-        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
-        .replace("%", _LIKE_ESCAPE + "%")
-        .replace("_", _LIKE_ESCAPE + "_")
-    )
-    return f"%{escaped}%"
+    """A contains-match pattern that tolerates whatever whitespace the row shows.
+
+    Rows do not display stored text verbatim: a run title is the message's first
+    non-empty line with whitespace runs collapsed, and HTML collapses the rest
+    anyway. So the phrase a user reads — and types, or pastes — can differ from
+    the column by exactly its spacing, and a literal LIKE finds nothing.
+
+    Each whitespace run in the term becomes a wildcard, which makes the search
+    match what is on screen. A single-token term is unchanged.
+    """
+    def escape(part: str) -> str:
+        return (
+            part.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
+            .replace("%", _LIKE_ESCAPE + "%")
+            .replace("_", _LIKE_ESCAPE + "_")
+        )
+
+    parts = value.split() or [value]
+    return "%" + "%".join(escape(part) for part in parts) + "%"
 
 
 def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> dict[str, Any]:
@@ -349,6 +970,160 @@ def claim_queued_runs_for_workbench_in_connection(
             raise RuntimeError(f"failed to claim queued agent run {run_id}")
     _defer_run_ids_updated_from_connection(conn, normalized_run_ids)
     return normalized_run_ids
+
+
+def hold_running_agent_run_for_workbench_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    delivery_outcome: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Transfer a claimed Agent Run to the durable Workbench queue.
+
+    The caller persists the matching queued message in the same write
+    transaction. The queue row therefore cannot become flushable while the
+    scheduler still owns the Run as ``running``.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    metadata = _json_loads(row["metadata_json"], {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["workbench_queue_holds_run"] = True
+    if delivery_outcome is not None:
+        metadata["delivery_outcome"] = dict(delivery_outcome)
+    now = _utc_now_iso()
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.status.in_(_status_query_values("running")))
+        .where(agent_runs.c.cancel_requested == 0)
+        .values(
+            status="queued",
+            started_at=None,
+            updated_at=now,
+            metadata_json=_json_dumps(metadata),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
+
+
+def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
+    """Whether cancellation already owns a refused queue handoff."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs.c.status, agent_runs.c.cancel_requested)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    return bool(row["cancel_requested"]) or normalize_run_status(
+        row["status"]
+    ) == "canceled"
+
+
+def cancel_workbench_queued_agent_run_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+) -> bool:
+    """Cancel a Run only while the named Workbench queue still owns it.
+
+    Queue-row deletion and this transition share the caller's transaction. A
+    concurrent claim/settlement therefore either wins before this guard (and the
+    row is not removed) or loses after both cancellation and deletion commit.
+    Missing Run rows are stale queue input and may be removed.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return True
+    metadata = _json_loads(row["metadata_json"], {})
+    if (
+        normalize_run_status(row["status"]) != "queued"
+        or str(row["session_id"] or "").strip() != normalized_session_id
+        or not isinstance(metadata, dict)
+        or metadata.get("workbench_queue_holds_run") is not True
+    ):
+        return False
+    now = _utc_now_iso()
+    transition = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(agent_runs.c.status.in_(_status_query_values("queued")))
+        .where(agent_runs.c.metadata_json == row["metadata_json"])
+        .values(
+            status="canceled",
+            cancel_requested=1,
+            cancel_requested_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    if not transition.rowcount:
+        return False
+    updated = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().one()
+    _defer_run_rows_updated_from_connection(conn, [updated])
+    return True
+
+
+def record_agent_run_delivery_outcome_in_connection(
+    conn: Any,
+    run_id: str,
+    outcome: dict[str, Any],
+) -> bool:
+    """Merge the observed delivery transition without changing Run ownership."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+        .values(
+            updated_at=_utc_now_iso(),
+            metadata_json=func.json_set(
+                agent_runs.c.metadata_json,
+                "$.delivery_outcome",
+                func.json(_json_dumps(dict(outcome))),
+            ),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
 
 
 def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now: str) -> None:
@@ -500,6 +1275,68 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
     _defer_run_ids_updated_from_connection(conn, changed_ids)
 
 
+def upsert_definition_in_connection(
+    conn: Any,
+    values: dict[str, Any],
+    *,
+    expect: DefinitionWriteExpectation | None,
+    definition_type: str,
+) -> bool:
+    """The one full-row ``run_definitions`` write, guarded, in a CALLER'S transaction.
+
+    Separated from ``_upsert_definition`` so a guarded stamp and the durable effect it
+    authorises can be committed together (HFR-269). ``False`` means the write was
+    refused and the caller's transaction must not persist anything that depended on
+    it.
+    """
+
+    existing = conn.execute(
+        select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if not existing:
+        conn.execute(insert(run_definitions).values(**values))
+        return True
+    stmt = update(run_definitions).where(run_definitions.c.id == values["id"])
+    if expect is not None:
+        # RE-ASSERT what the payload was decided from. The read that produced it
+        # reserves nothing -- it happened in the caller, one layer and possibly many
+        # statements ago, and even the ``existing`` SELECT above takes no write lock
+        # (pysqlite emits no ``BEGIN`` for a bare SELECT), so the lock is first taken
+        # here.
+        stmt = stmt.where(*definition_state_unchanged(expect))
+    result = conn.execute(stmt.values(**values))
+    if result.rowcount:
+        return True
+    # LOST. Nothing was written, so nothing may be reported as written: the counters
+    # and the ledger a reclaim credited stay true, and the caller decides what to tell
+    # the user (``DefinitionWriteConflict`` for a user action, a ``False`` return for a
+    # best-effort runtime stamp).
+    logger.warning(
+        "Refused a stale full-row write for %s %s: its Session binding, enabled "
+        "state, deletion or reclaim snapshot changed after the payload was read",
+        definition_type,
+        values["id"],
+    )
+    return False
+
+
+def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
+    """Write one ``agent_runs`` outbox row in a CALLER'S transaction.
+
+    The event snapshot is deferred to the transaction, so subscribers are told about
+    a run only once the row they would read is committed.
+    """
+
+    existing = conn.execute(
+        select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+    else:
+        conn.execute(insert(agent_runs).values(**values))
+    _defer_run_ids_updated_from_connection(conn, [values["id"]])
+
+
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
@@ -522,16 +1359,12 @@ class SQLiteBackgroundTaskStore:
         return self._probe.has_external_write()
 
     def list_scheduled_tasks(self) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("scheduled").order_by(
+            run_definitions.c.created_at, run_definitions.c.id
+        )
         with self.engine.connect() as conn:
-            rows = list(
-                conn.execute(
-                    select(run_definitions)
-                    .where(run_definitions.c.definition_type == "scheduled")
-                    .where(run_definitions.c.deleted_at.is_(None))
-                    .order_by(run_definitions.c.created_at, run_definitions.c.id)
-                ).mappings()
-            )
-            return [self._enrich_task(self._scheduled_task_from_row(row), conn) for row in rows]
+            rows = [self._scheduled_task_from_row(row) for row in conn.execute(stmt).mappings()]
+            return self._enrich_definitions(rows, conn, definition_type="scheduled")
 
     def list_scheduled_tasks_page(
         self,
@@ -541,22 +1374,36 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
+        include_successful_finished: bool = True,
+        enabled_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled", status=status, query=query, session_id=session_id)
+        stmt = self._definitions_query(
+            "scheduled",
+            status=status,
+            query=query,
+            session_id=session_id,
+            include_successful_finished=include_successful_finished,
+        )
         activity = func.coalesce(
             run_definitions.c.last_run_at,
             run_definitions.c.updated_at,
             run_definitions.c.created_at,
             "",
         )
-        if newest_first:
+        if enabled_first:
+            # Offset pagination needs a persisted ordering key. Lifecycle can
+            # change when the clock crosses run_at between page requests.
+            enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
+            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+        elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
             stmt = stmt.order_by(activity, run_definitions.c.id)
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._enrich_task(self._scheduled_task_from_row(row), conn) for row in conn.execute(stmt).mappings()]
+            rows = [self._scheduled_task_from_row(row) for row in conn.execute(stmt).mappings()]
+            self._enrich_definitions(rows, conn, definition_type="scheduled")
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_scheduled_tasks(
@@ -565,26 +1412,29 @@ class SQLiteBackgroundTaskStore:
         return self._definition_counts("scheduled", query=query, session_id=session_id)
 
     def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
+        stmt = self._definitions_query("scheduled").where(run_definitions.c.id == definition_id).limit(1)
         with self.engine.connect() as conn:
-            row = conn.execute(
-                select(run_definitions)
-                .where(run_definitions.c.definition_type == "scheduled")
-                .where(run_definitions.c.id == definition_id)
-                .where(run_definitions.c.deleted_at.is_(None))
-                .limit(1)
-            ).mappings().first()
-            return self._enrich_task(self._scheduled_task_from_row(row), conn) if row else None
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            return self._enrich_definitions(
+                [self._scheduled_task_from_row(row)], conn, definition_type="scheduled"
+            )[0]
 
-    def upsert_scheduled_task(self, payload: dict[str, Any]) -> None:
-        values = self._scheduled_task_values(payload)
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+    def upsert_scheduled_task(
+        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+    ) -> bool:
+        """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
+
+        ``expect`` is the state the payload was derived from (see
+        ``DefinitionWriteExpectation``); pass it from every caller that read the
+        definition before building the payload, so a teardown committed in between
+        cannot be silently reverted.
+        """
+
+        return self._upsert_definition(
+            self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
+        )
 
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
@@ -604,11 +1454,37 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
+            if enabled:
+                # Resuming may start a new lifecycle, and the old one must stop
+                # deciding the row's state when it does. The rule needs to know
+                # what the row *is*, so read before writing — and do it here, at
+                # the single UPDATE every caller reaches, rather than asking each
+                # caller to remember. The Harness UI toggle skipping this is what
+                # made a resumed-then-paused watch vanish from its own list.
+                current = (
+                    conn.execute(
+                        select(
+                            run_definitions.c.definition_type,
+                            run_definitions.c.mode,
+                            run_definitions.c.enabled,
+                        )
+                        .where(run_definitions.c.id == definition_id)
+                        .where(run_definitions.c.deleted_at.is_(None))
+                    )
+                    .mappings()
+                    .first()
+                )
+                if current is not None and not current["enabled"]:
+                    clear_columns = definition_resume_clear_columns(
+                        current["definition_type"], current["mode"]
+                    )
+                    values.update(dict.fromkeys(clear_columns, None))
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
                 .where(run_definitions.c.deleted_at.is_(None))
-                .values(enabled=1 if enabled else 0, updated_at=_utc_now_iso())
+                .values(**values)
             )
             if definition_type is not None:
                 stmt = stmt.where(run_definitions.c.definition_type == definition_type)
@@ -616,16 +1492,12 @@ class SQLiteBackgroundTaskStore:
             return bool(result.rowcount)
 
     def list_watches(self) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("watch").order_by(
+            run_definitions.c.created_at, run_definitions.c.id
+        )
         with self.engine.connect() as conn:
-            rows = list(
-                conn.execute(
-                    select(run_definitions)
-                    .where(run_definitions.c.definition_type == "watch")
-                    .where(run_definitions.c.deleted_at.is_(None))
-                    .order_by(run_definitions.c.created_at, run_definitions.c.id)
-                ).mappings()
-            )
-            return [self._enrich_watch(self._watch_from_row(row), conn) for row in rows]
+            rows = [self._watch_from_row(row) for row in conn.execute(stmt).mappings()]
+            return self._enrich_definitions(rows, conn, definition_type="watch")
 
     def list_watches_page(
         self,
@@ -635,8 +1507,16 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
+        include_successful_finished: bool = True,
+        enabled_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("watch", status=status, query=query, session_id=session_id)
+        stmt = self._definitions_query(
+            "watch",
+            status=status,
+            query=query,
+            session_id=session_id,
+            include_successful_finished=include_successful_finished,
+        )
         activity = func.coalesce(
             run_definitions.c.last_event_at,
             run_definitions.c.last_started_at,
@@ -644,14 +1524,20 @@ class SQLiteBackgroundTaskStore:
             run_definitions.c.created_at,
             "",
         )
-        if newest_first:
+        if enabled_first:
+            # Runtime and execution state may change between pages; the stored
+            # switch keeps the list order stable while those facts are enriched.
+            enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
+            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+        elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
             stmt = stmt.order_by(activity, run_definitions.c.id)
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._enrich_watch(self._watch_from_row(row), conn) for row in conn.execute(stmt).mappings()]
+            rows = [self._watch_from_row(row) for row in conn.execute(stmt).mappings()]
+            self._enrich_definitions(rows, conn, definition_type="watch")
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_watches(
@@ -660,42 +1546,88 @@ class SQLiteBackgroundTaskStore:
         return self._definition_counts("watch", query=query, session_id=session_id)
 
     def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
+        stmt = self._definitions_query("watch").where(run_definitions.c.id == watch_id).limit(1)
         with self.engine.connect() as conn:
-            row = conn.execute(
-                select(run_definitions)
-                .where(run_definitions.c.definition_type == "watch")
-                .where(run_definitions.c.id == watch_id)
-                .where(run_definitions.c.deleted_at.is_(None))
-                .limit(1)
-            ).mappings().first()
-            return self._enrich_watch(self._watch_from_row(row), conn) if row else None
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            return self._enrich_definitions([self._watch_from_row(row)], conn, definition_type="watch")[0]
 
-    def upsert_watch(self, payload: dict[str, Any]) -> None:
-        values = self._watch_values(payload)
+    def upsert_watch(
+        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+    ) -> bool:
+        """Write a whole watch row. ``False`` means the write was REFUSED.
+
+        The twin of ``upsert_scheduled_task``: same table, same full-row shape, same
+        guard. Watches are reclaimed by the same ``reclaim_bound_definitions`` call,
+        so guarding only the task side would leave the identical hole open.
+        """
+
+        return self._upsert_definition(
+            self._watch_values(payload), expect=expect, definition_type="watch"
+        )
+
+    def _upsert_definition(
+        self,
+        values: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        definition_type: str,
+    ) -> bool:
+        """The one full-row ``run_definitions`` write, guarded once for both types."""
+
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+            return upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type=definition_type
+            )
+
+    def upsert_watch_with_queued_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        run_payload: dict[str, Any],
+    ) -> bool:
+        """A guarded watch stamp and the outbox row it authorises, ONE transaction.
+
+        HFR-269 -- the bug this method exists to remove. HFR-267 put the guarded stamp
+        BEFORE the enqueue, which is necessary and was not sufficient, because two
+        commits are not one decision:
+
+            self.store.mark_cycle_result(...)           # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)    # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap
+        between those two commits. The stamp is then accepted -- it won its
+        compare-and-set fairly, before the teardown -- and the hook is queued
+        afterwards anyway, against a definition the database has since paused or
+        soft-deleted. The guard refuses nothing because there is nothing left to
+        refuse: the ordering change moved the race window, it did not close it.
+
+        The inverse was the other half: an exception between the two commits left a
+        ``once``/terminal watch durably disabled with its completion hook LOST, so the
+        user is never told the watch finished and the definition cannot say why.
+
+        Both are the same defect -- the stamp and the effect it authorises were
+        separate transactions. Here they are one: the outbox row is written on the same
+        connection, after the guard, and a refusal or an exception rolls BOTH back.
+        ``False`` means nothing was written; the watch is untouched and no hook exists.
+        """
+
+        values = self._watch_values(payload)
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            if not upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type="watch"
+            ):
+                return False
+            enqueue_run_in_connection(conn, run_values)
+        return True
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
         values = self._run_values(payload)
-        row_to_publish = None
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(agent_runs).values(**values))
-            row_to_publish = dict(
-                conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
-            )
-        _publish_run_rows_updated([row_to_publish])
+        with run_update_event_transaction(self.engine) as conn:
+            enqueue_run_in_connection(conn, values)
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)
@@ -707,6 +1639,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -720,6 +1653,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -735,7 +1669,9 @@ class SQLiteBackgroundTaskStore:
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._run_from_row(row) for row in conn.execute(stmt).mappings()]
+            rows = self._enrich_runs(
+                [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
+            )
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_runs(
@@ -743,6 +1679,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -754,6 +1691,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -770,6 +1708,7 @@ class SQLiteBackgroundTaskStore:
         self,
         *,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -780,6 +1719,7 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         stmt = self._runs_query(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -800,11 +1740,35 @@ class SQLiteBackgroundTaskStore:
                 counts["all"] += value
         return counts
 
+    def list_run_types(self) -> list[str]:
+        """The run types actually present in the ledger, for the type selector.
+
+        The UI knows the types it has words for, but not the ones it does not:
+        ``webhook`` is written by the scheduler and preserved by the
+        compatibility importer, yet a hardcoded option list omits it, and search
+        deliberately skips ``run_type`` because it is a translated chip. Between
+        them a row was visible under All and unreachable by any filter.
+
+        Reading the distinct values closes that by construction. Unfiltered on
+        purpose — a facet that narrows to the current filter would delete the
+        option the user needs to switch to — and index-only over
+        ``ix_agent_runs_type_status_created``.
+        """
+        stmt = (
+            select(agent_runs.c.run_type)
+            .where(agent_runs.c.run_type.is_not(None))
+            .distinct()
+            .order_by(agent_runs.c.run_type)
+        )
+        with self.engine.connect() as conn:
+            return [value for (value,) in conn.execute(stmt).all() if value]
+
     def _runs_query(
         self,
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -825,6 +1789,15 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(agent_runs.c.status.in_(_status_query_values(status)))
         if run_type:
             stmt = stmt.where(agent_runs.c.run_type == run_type)
+        # Exclusion, not an include-list: the Runs tab hides watcher heartbeats by
+        # default, and a run type added later must still show up by default rather
+        # than silently vanish. Every count path takes the same argument so the
+        # status badges never disagree with the rows on screen.
+        excluded = [value for value in (exclude_run_type or []) if value]
+        if excluded:
+            stmt = stmt.where(
+                or_(agent_runs.c.run_type.is_(None), agent_runs.c.run_type.notin_(excluded))
+            )
         if agent_name:
             stmt = stmt.where(agent_runs.c.agent_name == agent_name)
         if agent_backend:
@@ -838,22 +1811,105 @@ class SQLiteBackgroundTaskStore:
         if created_before:
             stmt = stmt.where(agent_runs.c.created_at <= created_before)
         if query:
-            pattern = _like_contains_pattern(query)
-            stmt = stmt.where(
-                or_(
-                    agent_runs.c.id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.definition_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.agent_name.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.prompt.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.message.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.result_text.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.error.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stdout.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stderr.like(pattern, escape=_LIKE_ESCAPE),
-                )
-            )
+            stmt = stmt.where(or_(*self._run_search_predicates(_like_contains_pattern(query))))
         return stmt
+
+    @staticmethod
+    def _run_search_predicates(pattern: str) -> list[Any]:
+        """Everything the Runs search can match, in one place.
+
+        The rule: **a run is findable by every value its row displays.** The
+        list projects more than it stores (plan §3) — the originating task/watch
+        name and the resolved session labels are joins, not columns — and a list
+        that cannot find what it shows on screen is worse than no search at all.
+
+        The projected half is generated from ``_RUN_PROJECTIONS`` rather than
+        listed here, so it cannot fall behind the enrichment that produces it:
+        a new projection site is matched the moment it is declared. All of it is
+        semi-joins/EXISTS inside the one statement — no extra round trip, no
+        N+1 — and the count paths inherit it because every caller goes through
+        ``_runs_query``.
+
+        Deliberately *not* matched: values that are translated UI labels rather
+        than data — the run-type chip ("Agent run"), the status chip, and the
+        platform/scope-kind of a session. Each has its own selector, and a
+        search box that matched English label text would find nothing for a user
+        reading the UI in Chinese.
+        """
+        def like(column: Any) -> Any:
+            return column.like(pattern, escape=_LIKE_ESCAPE)
+
+        # The scope key an IM binding is stored under, rebuilt from the scope row
+        # so a resolved channel name can be matched back to the key naming it.
+        scope_key = scopes.c.platform + "::" + scopes.c.scope_type + "::" + scopes.c.native_id
+
+        def bound_to_named_scope(key_column: Any) -> Any:
+            """Runs whose scope key belongs to a scope whose display name matches.
+
+            Not equality: a threaded key appends "::thread::<id>", which is the
+            common shape, not the exception. Not a bare prefix either — Telegram
+            "-100123" is a prefix of "-1001234", so the "::" boundary has to be
+            part of the comparison or one channel's name finds another's runs.
+            """
+            return (
+                select(1)
+                .select_from(scopes)
+                .where(like(scopes.c.display_name))
+                .where(
+                    or_(
+                        key_column == scope_key,
+                        func.substr(key_column, 1, func.length(scope_key) + 2) == scope_key + "::",
+                    )
+                )
+                .correlate(agent_runs)
+                .exists()
+            )
+
+        # Ids of rows whose own user-visible text matches, per projection source.
+        # A workbench session shows its title; an IM one shows the channel's
+        # display name, falling back to the native id. Soft-deleted definitions
+        # match for the same reason _definition_summaries returns them — the run
+        # still displays the name.
+        matching_ids = {
+            "session": select(agent_sessions.c.id)
+            .select_from(SQLiteBackgroundTaskStore._session_scope_join())
+            .where(
+                or_(
+                    like(agent_sessions.c.title),
+                    like(scopes.c.display_name),
+                    like(scopes.c.native_id),
+                )
+            ),
+            "definition": select(run_definitions.c.id).where(like(run_definitions.c.name)),
+        }
+
+        predicates = [
+            # Text stored on the run itself.
+            like(agent_runs.c.id),
+            like(agent_runs.c.agent_name),
+            like(agent_runs.c.prompt),
+            like(agent_runs.c.message),
+            like(agent_runs.c.result_text),
+            like(agent_runs.c.error),
+            like(agent_runs.c.stdout),
+            like(agent_runs.c.stderr),
+        ]
+        for site in _RUN_PROJECTIONS:
+            # The raw id, so pasting one still works, and the projected text it
+            # resolves to. Both read ``id_column``: ``id_field`` is the payload
+            # name, which for a derived site is not a column at all.
+            predicates.append(like(agent_runs.c[site.id_column]))
+            projected_text = agent_runs.c[site.id_column].in_(matching_ids[site.source])
+            if site.payload_key == "source_session":
+                projected_text = and_(agent_runs.c.source_kind == "agent", projected_text)
+            predicates.append(projected_text)
+            for column in site.key_columns:
+                # An IM binding stores "<platform>::<kind>::<native_id>", so the
+                # raw match covers typing the platform or channel id, and the
+                # scope match covers the display name the row actually shows.
+                predicates.append(like(agent_runs.c[column]))
+                predicates.append(bound_to_named_scope(agent_runs.c[column]))
+        return predicates
 
     def _definitions_query(
         self,
@@ -862,12 +1918,16 @@ class SQLiteBackgroundTaskStore:
         status: Optional[str] = None,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        include_successful_finished: bool = True,
         columns: Any = None,
     ):
+        lifecycle = definition_lifecycle_expression(definition_type)
         if columns is not None:
             stmt = select(*columns) if isinstance(columns, tuple) else select(columns)
         else:
-            stmt = select(run_definitions)
+            # Every row carries its state, resolved by the same expression the
+            # counts group by.
+            stmt = select(run_definitions, lifecycle.label("lifecycle_state"))
         stmt = (
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
@@ -877,9 +1937,14 @@ class SQLiteBackgroundTaskStore:
         if session_id:
             stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
-            if status not in {"enabled", "disabled"}:
-                raise ValueError("status must be one of: all, enabled, disabled")
-            stmt = stmt.where(run_definitions.c.enabled == (1 if status == "enabled" else 0))
+            states = DEFINITION_STATUS_FILTERS.get(status)
+            if not states:
+                raise ValueError("status must be one of: " + ", ".join(DEFINITION_STATUS_FILTERS))
+            stmt = stmt.where(lifecycle.in_(states))
+        if not include_successful_finished:
+            stmt = stmt.where(
+                ~_successful_finished_definition_expression(definition_type, lifecycle)
+            )
         if query:
             pattern = _like_contains_pattern(query)
             fields = [
@@ -918,25 +1983,28 @@ class SQLiteBackgroundTaskStore:
         query: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> dict[str, int]:
+        lifecycle = definition_lifecycle_expression(definition_type)
         stmt = self._definitions_query(
             definition_type,
             query=query,
             session_id=session_id,
-            columns=(run_definitions.c.enabled, func.count()),
-        ).group_by(run_definitions.c.enabled)
+            columns=(lifecycle.label("lifecycle_state"), func.count()),
+        ).group_by(lifecycle)
         counts = {key: 0 for key in DEFINITION_STATUS_COUNTS}
         with self.engine.connect() as conn:
-            for enabled, count in conn.execute(stmt).all():
-                key = "enabled" if bool(enabled) else "disabled"
+            for state, count in conn.execute(stmt).all():
                 value = int(count or 0)
-                counts[key] += value
-                counts["all"] += value
+                if state in counts:
+                    counts[state] += value
+                counts["total"] += value
         return counts
 
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-            return self._run_from_row(row) if row else None
+            if row is None:
+                return None
+            return self._enrich_runs([self._run_from_row(row)], conn)[0]
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         """Return non-terminal Runs carrying a durable terminal intent."""
@@ -981,11 +2049,21 @@ class SQLiteBackgroundTaskStore:
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
+        queue_session_id = ""
         with self.engine.begin() as conn:
-            row = conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
+            # Cancellation and Workbench queue retirement are one ownership
+            # transition. Reserve the writer before reading so a concurrent
+            # claim cannot move the Run between the decision and its row delete.
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
             if not row:
                 return False
             status = normalize_run_status(row["status"])
+            metadata = _json_loads(row["metadata_json"], {})
             values: dict[str, Any] = {
                 "cancel_requested": 1,
                 "cancel_requested_at": now,
@@ -1003,7 +2081,22 @@ class SQLiteBackgroundTaskStore:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
                 )
+                if (
+                    status == "queued"
+                    and isinstance(metadata, dict)
+                    and metadata.get("workbench_queue_holds_run") is True
+                ):
+                    from storage import messages_service
+
+                    session_id = str(row["session_id"] or "").strip()
+                    if messages_service.delete_queued_agent_run(
+                        conn,
+                        session_id=session_id,
+                        run_id=run_id,
+                    ):
+                        queue_session_id = session_id
         _publish_run_rows_updated([row_to_publish])
+        _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:
@@ -1277,6 +2370,7 @@ class SQLiteBackgroundTaskStore:
             raise ValueError("output_id is required")
         recorded = False
         terminal_transition = False
+        text_backfilled = False
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
         with self.engine.begin() as conn:
@@ -1372,8 +2466,59 @@ class SQLiteBackgroundTaskStore:
                     .values(**terminal_values)
                 )
                 terminal_transition = bool(transition.rowcount)
+                if not terminal_transition:
+                    # The row was already terminal, so the guarded UPDATE above
+                    # matched nothing and ``result_text`` -- the one terminal
+                    # result callbacks read -- would stay empty forever. Harness
+                    # rows reach this state routinely: the scheduler settles a
+                    # scheduled/watch run at dispatch, long before the agent's
+                    # result is delivered. Backfill the text (and the error where
+                    # none was recorded) with its own emptiness guard so a real
+                    # terminal transition's values are never overwritten, and
+                    # leave ``status`` / ``completed_at`` alone so settlement
+                    # timing is unchanged.
+                    stored_status = normalize_run_status(row["status"])
+                    incoming_status = normalize_run_status(effective_terminal_status)
+                    # Backfill only when the stored outcome and the delivered
+                    # outcome AGREE. This repairs the case PR1 exists for -- a row
+                    # the scheduler settled at dispatch, whose text never landed
+                    # because the terminal UPDATE is scoped to queued|running --
+                    # and refuses every disagreement.
+                    #
+                    # An earlier revision enumerated which pairs were unsafe
+                    # (refuse cancellations; allow error only onto ``failed``).
+                    # Review found two contradictions that enumeration missed, in
+                    # both directions: a late failure landing on a ``succeeded``
+                    # row, then a late success body landing on a swept ``failed``
+                    # row. The second is the more instructive one -- the callback
+                    # would have reported "the report, actually fine" for a run
+                    # recorded as failed, because ``_build_callback_message``
+                    # prefers ``result_text`` over the failure fallback.
+                    #
+                    # Equality is used instead of a longer list because it is
+                    # total: it cannot miss a pair. A genuine outcome
+                    # disagreement means the stored status is wrong, and settling
+                    # the real terminal result is PR7's job -- PR1 must not paper
+                    # over it by writing text that contradicts the status.
+                    if stored_status == incoming_status:
+                        if terminal_result_text.strip():
+                            filled = conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == run_id)
+                                .where(func.coalesce(agent_runs.c.result_text, "") == "")
+                                .values(result_text=terminal_result_text, updated_at=now)
+                            )
+                            text_backfilled = bool(filled.rowcount)
+                        if effective_terminal_error is not None:
+                            filled_error = conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == run_id)
+                                .where(func.coalesce(agent_runs.c.error, "") == "")
+                                .values(error=str(effective_terminal_error), updated_at=now)
+                            )
+                            text_backfilled = text_backfilled or bool(filled_error.rowcount)
 
-            if payload_changed or terminal_transition:
+            if payload_changed or terminal_transition or text_backfilled:
                 row_to_publish = dict(
                     conn.execute(
                         select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -1386,8 +2531,91 @@ class SQLiteBackgroundTaskStore:
         return {
             "recorded": recorded,
             "terminal_transition": terminal_transition,
+            # True when an already-terminal row was given its missing terminal
+            # text/error. Distinct from ``terminal_transition`` on purpose: no
+            # status changed, so callers must not read it as a settlement.
+            "text_backfilled": text_backfilled,
             "run": run_payload,
         }
+
+    def settle_run_terminal(
+        self,
+        run_id: str,
+        *,
+        terminal_status: str,
+        error: Optional[str] = None,
+        result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        updated_at: Optional[str] = None,
+    ) -> Optional[str]:
+        """Terminalize a non-terminal run in one guarded write.
+
+        This is the settlement writer for a turn that ended WITHOUT the backend
+        emitting a terminal result (see ``docs/plans/agent-run-zombie-settlement.md``).
+        Unlike ``update_run_status`` — whose UPDATE has no status predicate and would
+        clobber a row another actor already settled — the UPDATE here is scoped to
+        ``queued|running``, so a concurrent ``vibe runs cancel`` that lands first wins
+        and this call becomes a no-op.
+
+        ``cancel_requested`` is read inside the same transaction: a run the user asked
+        to cancel settles ``canceled``, never ``failed``, without needing a second
+        write. Rows carrying a deferred terminal intent are left alone — the Activity
+        lifecycle owns those.
+
+        Returns the terminal status actually written, or ``None`` when nothing was
+        written (already terminal, deferred, or missing).
+        """
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        written_status: Optional[str] = None
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row or normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
+                return None
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                # The Activity lifecycle already owns this row's terminal state.
+                return None
+            status = normalize_run_status(terminal_status)
+            if row["cancel_requested"] and status == "failed":
+                status = "canceled"
+            values: dict[str, Any] = {
+                "status": status,
+                "completed_at": now,
+                "updated_at": now,
+            }
+            if error is not None:
+                values["error"] = str(error)
+            if result_text is not None:
+                values["result_text"] = str(result_text)
+            if metadata:
+                merged = _json_loads(row["metadata_json"], {})
+                if not isinstance(merged, dict):
+                    merged = {}
+                merged.update(metadata)
+                values["metadata_json"] = _json_dumps(merged)
+            transition = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued") + _status_query_values("running")
+                    )
+                )
+                .values(**values)
+            )
+            if transition.rowcount:
+                written_status = status
+                row_to_publish = dict(
+                    conn.execute(
+                        select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                    ).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return written_status
 
     def defer_run_terminal(
         self,
@@ -1406,11 +2634,7 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
-            if not row or normalize_run_status(row["status"]) in {
-                "succeeded",
-                "failed",
-                "canceled",
-            }:
+            if not row or normalize_run_status(row["status"]) in TERMINAL_RUN_STATUSES:
                 return False
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):
@@ -1538,28 +2762,6 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             return self._run_from_row(row) if row else None
 
-    def find_explicit_session_delivery(
-        self,
-        *,
-        parent_run_id: str,
-        session_id: str,
-    ) -> Optional[dict[str, Any]]:
-        """Return a child Agent Run explicitly delivered to the callback Session."""
-
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                select(agent_runs)
-                .where(agent_runs.c.run_type == "agent_run")
-                .where(agent_runs.c.source_kind == "agent")
-                .where(agent_runs.c.parent_run_id == parent_run_id)
-                .where(agent_runs.c.session_id == session_id)
-                .where(agent_runs.c.message.is_not(None))
-                .where(func.length(func.trim(agent_runs.c.message)) > 0)
-                .order_by(agent_runs.c.created_at, agent_runs.c.id)
-                .limit(1)
-            ).mappings().first()
-            return self._run_from_row(row) if row else None
-
     def recover_processing_runs(self) -> None:
         with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
@@ -1586,6 +2788,287 @@ class SQLiteBackgroundTaskStore:
                 )
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
             _defer_run_ids_updated_from_connection(conn, recovered_ids)
+
+    def record_run_skip_reason(self, run_id: str, *, reason: str, at: Optional[str] = None) -> bool:
+        """Record WHY the drain deferred a queued run — only when it changes.
+
+        The sweep must not guess why a row sat in ``queued``, so the drain records it.
+        The subtlety is that this write cannot be tick-triggered.
+        ``ScheduledTaskService._watch_store`` decides whether to drain from
+        ``maybe_reload()`` → ``SqliteInvalidationProbe.has_external_write()``, which
+        bumps on *any* write to the DB file — including ours. Stamping on every drain
+        pass would therefore self-sustain a write → reload → re-drain → write loop for
+        as long as a transport stayed down.
+
+        So the write is transition-triggered: if the stored reason already matches,
+        nothing is written and the probe stays quiet. A permanently unavailable
+        transport costs exactly one write, ever. ``last_skip_at`` consequently means
+        "when this reason started", which is more useful than a refreshed timestamp.
+
+        Deliberately NOT wrapped in ``run_update_event_transaction``: this is
+        diagnostic metadata, not a state change worth an SSE frame. ``updated_at`` is
+        left alone too — bumping it would make a stranded row look freshly touched and
+        would defeat the hold TTL, which reads exactly that column.
+
+        Returns ``True`` when a write actually happened.
+        """
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.metadata_json)
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
+            if not row or normalize_run_status(row["status"]) != "queued":
+                return False
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if metadata.get("last_skip_reason") == reason:
+                return False
+            metadata["last_skip_reason"] = reason
+            metadata["last_skip_at"] = at or _utc_now_iso()
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .values(metadata_json=_json_dumps(metadata))
+            )
+        return True
+
+    def _clear_transport_skip_evidence(self, run_ids: set[str]) -> int:
+        """Forget a ``transport_unavailable`` stamp whose outage has demonstrably ended.
+
+        Counterpart to :meth:`record_run_skip_reason`, with the same two properties
+        that keep it from feeding the drain loop: it is TRANSITION-triggered (after the
+        clear there is no reason left to match, so a still-deliverable row costs zero
+        writes on every later sweep), and it leaves ``updated_at`` alone so a queue hold
+        keeps aging from its own clock.
+
+        Scoped to the transport reason on purpose: another writer's reason is not ours
+        to erase, and a row re-stamped between the select and here is left as it is —
+        it will be reconsidered, with a fresh ``last_skip_at``, next sweep.
+        """
+
+        cleared = 0
+        with self.engine.begin() as conn:
+            for run_id in sorted(run_ids):
+                row = conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.metadata_json)
+                    .where(agent_runs.c.id == run_id)
+                    .limit(1)
+                ).mappings().first()
+                if not row or normalize_run_status(row["status"]) != "queued":
+                    continue
+                metadata = _json_loads(row["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    continue
+                if metadata.get("last_skip_reason") != SKIP_REASON_TRANSPORT_UNAVAILABLE:
+                    continue
+                metadata.pop("last_skip_reason", None)
+                metadata.pop("last_skip_at", None)
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(metadata_json=_json_dumps(metadata))
+                )
+                cleared += 1
+        if cleared:
+            logger.debug("Cleared recovered transport skip evidence on %s harness run(s)", cleared)
+        return cleared
+
+    def sweep_stale_runs(
+        self,
+        *,
+        owned_run_ids: set[str],
+        error_texts: dict[str, str],
+        deliverable_run_ids: Optional[set[str]] = None,
+        busy_session_ids: Optional[set[str]] = None,
+        now: Optional[str] = None,
+        orphan_grace_seconds: int = 0,
+        queued_ttl_seconds: int = 0,
+        hold_ttl_seconds: int = 0,
+    ) -> list[SweptRun]:
+        """Terminalize runs that provably have nothing left to settle them.
+
+        Three evidence-based classes (``docs/plans/agent-run-zombie-settlement.md``
+        §4.2). Each is disabled by passing ``0`` for its window:
+
+        - ``orphaned``: a ``running`` agent run with no live owner, older than
+          ``orphan_grace_seconds``. The grace period is what keeps a run that is
+          legitimately starting up from being swept.
+        - ``transport_unavailable``: a ``queued`` run whose recorded skip reason says
+          its transport is down, whose ``last_skip_at`` (when that reason started, not
+          when the run was enqueued) is older than ``queued_ttl_seconds``, AND which the
+          caller still cannot deliver. The reason is read off the row, never
+          re-derived, so a run deferred for capacity or a session lock — both of which
+          are progress — is never swept.
+        - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
+          has not been touched in ``hold_ttl_seconds``, in a session with no live turn.
+
+        ``owned_run_ids`` exempts a row from **every** class, not just ``orphaned``. A
+        coalesced workbench turn claims its secondary runs and deliberately leaves them
+        ``queued`` while the primary settles them, so a live owner has to outrank the
+        queue TTLs too — otherwise a turn that outlives ``hold_ttl_seconds`` would have
+        its own siblings failed underneath it, reintroducing the turn-duration timeout
+        this design does not have. It must be the union of every ownership source; the
+        caller is responsible for failing closed (passing "everything is owned", or not calling
+        at all) when it cannot enumerate owners. This method cannot tell an empty set
+        meaning "nothing is running" from one meaning "I could not look".
+
+        ``deliverable_run_ids`` is the same contract for the transport class, and it is
+        why the recorded reason alone is not enough. The drain stops at its concurrency
+        cap, so rows below the cut are never re-examined and keep an old
+        ``transport_unavailable`` stamp long after their platform reconnected. Without a
+        live second opinion the sweep would fail a run that is merely waiting for a free
+        slot. Every id listed here is exempt. A listed row also has its stale
+        ``transport_unavailable`` evidence CLEARED, so a later outage is aged from its
+        own start: capacity keeps the drain from re-stamping a row below its cut, so
+        without the clear a recovered-then-failed-again transport would be read as one
+        continuous outage and skip the whole configured reconnect window (Codex P2).
+
+        ``busy_session_ids`` is the same contract again, for the hold class: a run the
+        gate parked behind a live turn is NOT reported by ``owned_agent_run_ids`` (the
+        live turn only owns the ids of the run it is itself executing), so a legitimate
+        Workbench turn outliving ``hold_ttl_seconds`` would have its own queued follower
+        failed even though the gate would flush it on completion (Codex P2). The set is
+        session ids, not run ids, because that is the granularity the gate occupies.
+        ``None`` means "no exemptions", so a caller that cannot enumerate live turns
+        must fail closed by disabling the class (``hold_ttl_seconds=0``), exactly as it
+        does for deliverability.
+
+        Candidate selection is read-only; each row is then terminalized through
+        :meth:`settle_run_terminal`, so every write inherits the same guards — scoped
+        to ``queued|running``, ``cancel_requested`` honored, deferred/Activity-owned
+        rows left alone, ``metadata_json`` merged rather than replaced. A row someone
+        else settles between the select and the write is simply skipped.
+        """
+
+        now_iso = now or _utc_now_iso()
+        now_dt = _parse_iso_instant(now_iso) or datetime.now(timezone.utc)
+
+        def _older_than(value: Any, seconds: int) -> bool:
+            if seconds <= 0:
+                return False
+            instant = _parse_iso_instant(value)
+            if instant is None:
+                # Undateable row: never sweep it.
+                return False
+            return instant <= now_dt - timedelta(seconds=seconds)
+
+        with self.engine.begin() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_runs)
+                    .where(
+                        agent_runs.c.status.in_(
+                            _status_query_values("queued") + _status_query_values("running")
+                        )
+                    )
+                    .where(agent_runs.c.run_type != "watch_runtime")
+                ).mappings()
+            )
+
+        candidates: list[tuple[dict[str, Any], str]] = []
+        recovered_ids: set[str] = set()
+        for row in rows:
+            result_payload = _json_loads(row["result_payload_json"], {})
+            if isinstance(result_payload, dict) and result_payload.get("deferred_terminal_status"):
+                # The Activity lifecycle owns this row's terminal state.
+                continue
+            metadata = _json_loads(row["metadata_json"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            status = normalize_run_status(row["status"])
+            run_id = str(row["id"])
+            if run_id in owned_run_ids:
+                # A live owner outranks every TTL, whatever the row's status. This is
+                # NOT only about ``running`` rows: a coalesced workbench turn claims its
+                # secondary runs and deliberately leaves them ``queued`` with
+                # ``workbench_queue_holds_run`` while the primary settles them, and
+                # ``owned_agent_run_ids`` reports all of them as owned. Aging those out
+                # would fail live siblings mid-turn — a turn-duration timeout by the back
+                # door, which this design explicitly does not have.
+                continue
+            reason: Optional[str] = None
+            if status == "running":
+                # Restricted to ``agent_run`` on purpose: when ``scheduled``/``watch``
+                # rows settle is owned by a separate plan. Widen only alongside it.
+                if str(row["run_type"] or "") == "agent_run" and _older_than(
+                    row["started_at"] or row["created_at"], orphan_grace_seconds
+                ):
+                    reason = SWEEP_REASON_ORPHANED
+            elif status == "queued":
+                if (
+                    metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE
+                    and run_id in (deliverable_run_ids or set())
+                ):
+                    # The outage this row remembers is OVER. Retire the evidence now,
+                    # while we can still see both halves of it: the drain breaks at its
+                    # concurrency cap, so a row below the cut is never re-stamped, and a
+                    # stale ``last_skip_at`` would make the NEXT outage look like a
+                    # continuation of this one and skip its whole TTL (Codex P2).
+                    recovered_ids.add(run_id)
+                # Hold before transport: it is the more specific piece of evidence, and
+                # its TTL is deliberately the longest so an actively recovering queue
+                # survives.
+                if (
+                    metadata.get("workbench_queue_holds_run")
+                    # A live turn in this row's session is why it is parked. The gate
+                    # will flush it when that turn ends, and the turn does NOT report
+                    # this run as owned — it owns only the ids it is executing itself.
+                    and str(row["session_id"] or "") not in (busy_session_ids or set())
+                    and _older_than(row["updated_at"], hold_ttl_seconds)
+                ):
+                    reason = SWEEP_REASON_QUEUE_HOLD_EXPIRED
+                elif (
+                    metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE
+                    # Two independent facts, both required: the drain recorded that this
+                    # row's platform was down, AND the caller still cannot deliver it.
+                    # The stamp alone goes stale below the drain's concurrency cap.
+                    and run_id not in (deliverable_run_ids or set())
+                    # Age from when the transport problem STARTED, not from when the
+                    # run was enqueued. ``record_run_skip_reason`` is
+                    # transition-triggered, so ``last_skip_at`` is exactly that instant.
+                    # Using ``created_at`` would make a run that had already been
+                    # queued past the TTL for a healthy reason (capacity, a busy
+                    # session) sweepable the moment its transport blinked, skipping the
+                    # whole configured reconnect window. Absent or unparseable => never
+                    # swept: the reason and its timestamp are written together, so a
+                    # reason without one is evidence this writer did not produce.
+                    and _older_than(metadata.get("last_skip_at"), queued_ttl_seconds)
+                ):
+                    reason = SWEEP_REASON_TRANSPORT_UNAVAILABLE
+            if reason is not None:
+                candidates.append((dict(row), reason))
+
+        if recovered_ids:
+            self._clear_transport_skip_evidence(recovered_ids)
+
+        swept: list[SweptRun] = []
+        for row, reason in candidates:
+            run_id = str(row["id"])
+            written = self.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error=error_texts.get(reason),
+                metadata={"interrupt_reason": reason},
+                updated_at=now_iso,
+            )
+            if written is None:
+                # Settled by someone else in the meantime — nothing to report.
+                continue
+            logger.warning("Harness run %s swept as %s (%s)", run_id, written, reason)
+            swept.append(
+                SweptRun(
+                    run_id=run_id,
+                    status=written,
+                    interrupt_reason=reason,
+                    run_type=str(row["run_type"] or "") or None,
+                    task_id=str(row["definition_id"] or "") or None,
+                    session_id=str(row["session_id"] or "") or None,
+                    session_key=str(row["legacy_session_key"] or "") or None,
+                )
+            )
+        return swept
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}
@@ -1674,6 +3157,7 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": None,
             "last_finished_at": None,
+            "retired_at": None,
             "last_event_at": None,
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
@@ -1715,8 +3199,10 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": payload.get("last_started_at"),
             "last_finished_at": payload.get("last_finished_at"),
+            "retired_at": payload.get("retired_at"),
             "last_event_at": payload.get("last_event_at"),
             "last_run_at": None,
+            "last_run_id": None,
             "last_error": payload.get("last_error"),
             "last_exit_code": payload.get("last_exit_code"),
             "metadata_json": _json_dumps(payload.get("metadata") or {}),
@@ -1794,6 +3280,7 @@ class SQLiteBackgroundTaskStore:
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
             "metadata": _json_loads(row["metadata_json"], {}),
+            "lifecycle_state": _row_lifecycle_state(row),
         }
 
     @staticmethod
@@ -1823,10 +3310,12 @@ class SQLiteBackgroundTaskStore:
             "updated_at": row["updated_at"],
             "last_started_at": row["last_started_at"],
             "last_finished_at": row["last_finished_at"],
+            "retired_at": row["retired_at"],
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
             "metadata": _json_loads(row["metadata_json"], {}),
+            "lifecycle_state": _row_lifecycle_state(row),
         }
 
     @staticmethod
@@ -1841,6 +3330,14 @@ class SQLiteBackgroundTaskStore:
             "task_id": row["definition_id"],
             "source_kind": row["source_kind"],
             "source_actor": row["source_actor"],
+            # ``source_actor`` is polymorphic: a *session id* when another agent
+            # spawned this run, but a parent run id, a "vault:<request>" handle
+            # or an activity id for every other ``source_kind``. Narrowing it to
+            # the one case that names a session — the same guard the agent graph
+            # applies when it draws spawn edges — is what lets the projection
+            # below resolve it without trying to look up "vault:abc" as a
+            # session and reporting it deleted.
+            "source_session_id": row["source_actor"] if row["source_kind"] == "agent" else None,
             "parent_run_id": row["parent_run_id"],
             "agent_name": row["agent_name"],
             "agent_id": row["agent_id"],
@@ -1879,28 +3376,320 @@ class SQLiteBackgroundTaskStore:
             "ok": None if row["completed_at"] is None else normalize_run_status(row["status"]) == "succeeded",
         }
 
-    def _enrich_task(self, task: dict[str, Any], conn: Any) -> dict[str, Any]:
-        task.update(
-            self._session_summary(
-                conn, task.get("session_id"), task.get("session_key"), task.get("deliver_key")
-            )
-        )
-        task["next_run_at"] = compute_next_run_at(
-            enabled=bool(task.get("enabled")),
-            schedule_type=task.get("schedule_type"),
-            cron=task.get("cron"),
-            run_at=task.get("run_at"),
-            timezone_name=task.get("timezone"),
-        )
-        return task
+    def _enrich_definitions(
+        self, rows: list[dict[str, Any]], conn: Any, *, definition_type: str
+    ) -> list[dict[str, Any]]:
+        """Project a page of task/watch rows into the fields the Harness UI reads.
 
-    def _enrich_watch(self, watch: dict[str, Any], conn: Any) -> dict[str, Any]:
-        watch.update(
-            self._session_summary(
-                conn, watch.get("session_id"), watch.get("session_key"), watch.get("deliver_key")
-            )
+        The single chokepoint every list and get path goes through, so a field
+        cannot exist on one surface and be missing on another. Batched like
+        ``_enrich_runs``: a fixed number of round trips whatever the page size.
+        The per-row version this replaces was called from six sites and resolved
+        one row per query, which a 30-row page paid thirty times over — and the
+        unpaged list once per row in the whole store.
+
+        Beyond the stored columns it adds what the row actually shows: how a
+        finished row ended, when a waiting task fires next, since when it has
+        been waiting, and — for watches — whether the waiter process is still
+        alive. The last one is a fact about the *process*, deliberately not a
+        state: a waiter that died leaves a row that is still armed, and the
+        difference between those two is the whole point of showing it.
+        """
+
+        if not rows:
+            return rows
+        # One guard per lookup, not one around all of them. These are
+        # independent questions — who owns this row, where it is delivered, and
+        # whether its waiter is alive — and a single ``try`` made the first
+        # failure blank out the other two. That is how a lookup problem could
+        # silently take ``process_alive`` with it and leave every watch row
+        # saying "liveness unknown" for a reason nothing on screen named.
+        #
+        # ``warning``, not ``debug``: degrading to blanks is a visible loss of
+        # information, so it belongs in a log the operator actually reads.
+        def _lookup(what: str, fetch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return fetch()
+            except Exception:
+                logger.warning("harness definition enrichment failed: %s", what, exc_info=True)
+                return {}
+
+        summaries = _lookup(
+            "session summaries",
+            lambda: self._session_summaries(
+                conn, {value for row in rows if (value := row.get("session_id"))}
+            ),
         )
-        return watch
+        # Only rows with no id at all fall back to the legacy key / delivery
+        # target, exactly as _session_summary does: a named session that
+        # fails to resolve is deleted, not re-labelled as its channel.
+        key_summaries = _lookup(
+            "session keys",
+            lambda: self._key_summaries(
+                conn,
+                {
+                    value
+                    for row in rows
+                    if not row.get("session_id")
+                    for field in _DEFINITION_SESSION_KEY_FIELDS
+                    if (value := row.get(field))
+                },
+            ),
+        )
+        runtimes: dict[str, dict[str, Any]] = {}
+        started: dict[str, str] = {}
+        if definition_type == "watch":
+            runtimes = _lookup(
+                "watch runtimes",
+                lambda: self._watch_runtimes(conn, [row.get("id") for row in rows]),
+            )
+        if any(row.get("lifecycle_state") == "running" for row in rows):
+            started = _lookup(
+                "in-flight run starts",
+                lambda: self._in_flight_started_at(
+                    conn,
+                    [
+                        row.get("id")
+                        for row in rows
+                        if row.get("lifecycle_state") == "running"
+                    ],
+                ),
+            )
+        for row in rows:
+            session_id = row.get("session_id")
+            row.update(
+                self._pick_session_summary(
+                    summaries.get(session_id or ""),
+                    []
+                    if session_id
+                    else [key_summaries.get(row.get(field) or "") for field in _DEFINITION_SESSION_KEY_FIELDS],
+                )
+            )
+            state = row.get("lifecycle_state")
+            row["lifecycle_detail"] = definition_lifecycle_detail(
+                lifecycle_state=state,
+                definition_type=definition_type,
+                last_run_at=row.get("last_run_at"),
+                last_exit_code=row.get("last_exit_code"),
+                last_error=row.get("last_error"),
+            )
+            row["next_run_at"] = compute_next_run_at(
+                enabled=bool(row.get("enabled")),
+                schedule_type=row.get("schedule_type"),
+                cron=row.get("cron"),
+                run_at=row.get("run_at"),
+                timezone_name=row.get("timezone"),
+            )
+            # Only meaningful while waiting: a paused row's last start is history,
+            # not a wait anyone is still in.
+            row["waiting_since"] = row.get("last_started_at") if state == "waiting" else None
+            # And only meaningful while running — from the run that *is* running,
+            # never from ``last_started_at``. That column is the definition's last
+            # cycle, which for a watch that fired yesterday and started a fresh run
+            # a minute ago would render "running 1d". Null while the run is merely
+            # queued: it has not started, so no duration exists to print.
+            row["running_since"] = started.get(row.get("id") or "") if state == "running" else None
+            if definition_type == "watch":
+                runtime = runtimes.get(row.get("id") or "")
+                row["runtime"] = runtime or {}
+                # ``None``, not ``False``: no heartbeat row at all means we have
+                # never seen this waiter, which is not the same as having seen it
+                # exit — and the row must not claim a waiter is dead on the
+                # strength of never having looked.
+                row["process_alive"] = None if runtime is None else bool(runtime.get("running"))
+        return rows
+
+    @staticmethod
+    def _watch_runtimes(conn: Any, watch_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Each watch's supervisor heartbeat row, for many watches at once.
+
+        ``load_watch_runtime`` cannot serve this: it selects only *running*
+        heartbeats, which is what the supervisor wants (live waiters) but
+        collapses the two answers a row has to tell apart — a waiter that exited
+        and a waiter never seen. Absent from this result means the latter.
+        """
+
+        runtimes: dict[str, dict[str, Any]] = {}
+        for batch in _id_batches(watch_ids):
+            rows = conn.execute(
+                select(
+                    agent_runs.c.definition_id,
+                    agent_runs.c.status,
+                    agent_runs.c.pid,
+                    agent_runs.c.started_at,
+                    agent_runs.c.updated_at,
+                    agent_runs.c.metadata_json,
+                )
+                .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
+                .where(agent_runs.c.definition_id.in_(batch))
+            ).mappings()
+            for row in rows:
+                payload = _json_loads(row["metadata_json"], {})
+                runtime = {
+                    "pid": row["pid"],
+                    "started_at": row["started_at"],
+                    "updated_at": row["updated_at"],
+                    **(payload if isinstance(payload, dict) else {}),
+                }
+                # The heartbeat's metadata was written while the waiter was up and
+                # is never rewritten when it exits, so the row's own status — not
+                # the stored payload — is what says whether it is still alive.
+                runtime["running"] = normalize_run_status(row["status"]) == "running"
+                runtimes[row["definition_id"]] = runtime
+        return runtimes
+
+    @staticmethod
+    def _in_flight_started_at(conn: Any, definition_ids: Iterable[str]) -> dict[str, str]:
+        """When each definition's in-flight run started, for many at once.
+
+        Deliberately the *same* set of runs ``definition_lifecycle_expression``
+        tests for: same ``run_type`` exclusion, same statuses. A row is
+        ``running`` because one of these exists, so the duration it shows has to
+        come from one of these too — reading ``run_definitions.last_started_at``
+        instead would date the row's previous cycle and print a duration nothing
+        is actually spending.
+
+        Missing means the run has not started (a queued run has no
+        ``started_at``), which callers must render as no duration rather than as
+        a zero-length one.
+        """
+
+        started: dict[str, str] = {}
+        for batch in _id_batches(definition_ids):
+            rows = conn.execute(
+                select(agent_runs.c.definition_id, agent_runs.c.started_at)
+                .where(agent_runs.c.definition_id.in_(batch))
+                .where(
+                    or_(
+                        agent_runs.c.run_type.is_(None),
+                        agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                    )
+                )
+                .where(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("queued"), *_status_query_values("running")]
+                    )
+                )
+                .where(agent_runs.c.started_at.is_not(None))
+                # Concurrent runs against one definition are possible; the row
+                # asks how long *this* burst of work has been going, so the
+                # earliest start is the honest answer. Descending order plus the
+                # last-write-wins loop below leaves exactly that one.
+                .order_by(agent_runs.c.started_at.desc())
+            ).mappings()
+            for row in rows:
+                started[row["definition_id"]] = row["started_at"]
+        return started
+
+    def _enrich_runs(self, runs: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+        """Project a page of raw run rows into the fields the Harness UI reads.
+
+        Runs were the last harness payload rendered raw: the row headline was
+        the run id and the bound session was an unresolvable hash. This is the
+        single chokepoint that gives them the same resolved session summary
+        Tasks/Watches already get (``_session_summary`` semantics, so a
+        workbench session stays linkable and an IM session stays labelled),
+        plus the originating definition's name.
+
+        Batched by construction — three queries for the whole page regardless
+        of its size — because the list endpoint pages 30 rows at a time and a
+        per-row resolve would be 60+ round trips. Sites are grouped by source
+        rather than resolved one at a time, so adding a site to
+        ``_RUN_PROJECTIONS`` costs no extra round trip.
+        """
+        if not runs:
+            return runs
+        session_sites = [site for site in _RUN_PROJECTIONS if site.source == "session"]
+        definition_sites = [site for site in _RUN_PROJECTIONS if site.source == "definition"]
+        try:
+            summaries = self._session_summaries(
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in session_sites
+                    if (value := run.get(site.id_field))
+                },
+            )
+            # Only sites with no id at all fall back to the legacy key /
+            # delivery target, exactly as _session_summary does: a named session
+            # that fails to resolve is deleted, not re-labelled as its channel.
+            keys = {
+                value
+                for run in runs
+                for site in session_sites
+                if not run.get(site.id_field)
+                for field in site.key_fields
+                if (value := run.get(field))
+            }
+            key_summaries = self._key_summaries(conn, keys)
+            definitions = self._definition_summaries(
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in definition_sites
+                    if (value := run.get(site.id_field))
+                },
+            )
+            for run in runs:
+                for site in _RUN_PROJECTIONS:
+                    if site.source == "session":
+                        session_id = run.get(site.id_field)
+                        summary = self._pick_session_summary(
+                            summaries.get(session_id or ""),
+                            []
+                            if session_id
+                            else [key_summaries.get(run.get(field) or "") for field in site.key_fields],
+                        )
+                    else:
+                        summary = definitions.get(run.get(site.id_field) or "") or _BLANK_DEFINITION_SUMMARY
+                    if site.payload_key is None:
+                        run.update(summary)
+                    else:
+                        # A nested site says "there is nothing here" with None.
+                        # The all-null summary means the opposite — the row was
+                        # referenced and is gone — and the UI renders that
+                        # differently, so the two must not collapse.
+                        run[site.payload_key] = summary if run.get(site.id_field) else None
+        except Exception:
+            # Degrade to the shape the UI expects rather than a KeyError: every
+            # site still produces its field, just empty. Derived from the same
+            # table, so a new site cannot leave a hole only the error path hits.
+            logger.debug("harness run enrichment failed", exc_info=True)
+            blanks = {"session": self._blank_session_summary, "definition": lambda: _BLANK_DEFINITION_SUMMARY}
+            for run in runs:
+                for site in _RUN_PROJECTIONS:
+                    if site.payload_key is not None:
+                        run.setdefault(site.payload_key, None)
+                        continue
+                    for field, blank in blanks[site.source]().items():
+                        run.setdefault(field, blank)
+        return runs
+
+    @staticmethod
+    def _blank_session_summary() -> dict[str, Any]:
+        """The all-null summary: no session resolved. A run whose ``session_id``
+        is set but lands here names a session row that no longer exists, and the
+        UI says so instead of printing the bare id."""
+        return {
+            "session_title": None,
+            "session_platform": None,
+            "session_scope_kind": None,
+            "session_label": None,
+            "session_is_workbench": False,
+            "session_openable": False,
+        }
+
+    @staticmethod
+    def _pick_session_summary(
+        by_id: Optional[dict[str, Any]], by_key: list[Optional[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """``_session_summary``'s precedence, applied to pre-resolved lookups."""
+        for candidate in (by_id, *by_key):
+            if candidate:
+                return dict(candidate)
+        return SQLiteBackgroundTaskStore._blank_session_summary()
 
     @staticmethod
     def _session_summary(
@@ -1919,54 +3708,83 @@ class SQLiteBackgroundTaskStore:
         fallback for the platform + channel label. Key-based targets are never
         linkable (no concrete session to open). Best-effort: never raises into
         the harness list.
+
+        The key fallback applies only when there is no ``session_id`` at all. A
+        row that names a session is describing *that* session, and an id that no
+        longer resolves means it was deleted — one of the four states the UI
+        renders (plan §4.2). Falling through to the delivery key would relabel a
+        vanished session as a live IM channel, which matters because a
+        ``create_per_run`` execution stores both: its own fresh ``session_id``
+        and the definition's ``deliver_key``.
         """
-        summary: dict[str, Any] = {
-            "session_title": None,
-            "session_platform": None,
-            "session_scope_kind": None,
-            "session_label": None,
-            "session_is_workbench": False,
-        }
         try:
             if session_id:
                 row = conn.execute(
-                    select(
-                        agent_sessions.c.scope_id,
-                        agent_sessions.c.title,
-                        scopes.c.platform,
-                        scopes.c.scope_type,
-                        scopes.c.native_id,
-                        scopes.c.display_name,
-                    )
-                    .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
-                    )
-                    .where(agent_sessions.c.id == session_id)
-                    .limit(1)
+                    SQLiteBackgroundTaskStore._session_summary_query().where(
+                        agent_sessions.c.id == session_id
+                    ).limit(1)
                 ).mappings().first()
                 if row is not None:
-                    platform = (row["platform"] or "").strip()
-                    scope_type = (row["scope_type"] or "").strip()
-                    is_workbench = (
-                        row["scope_id"] is None
-                        or platform == "avibe"
-                        or scope_type == "project"
-                    )
-                    summary["session_platform"] = platform or None
-                    summary["session_scope_kind"] = scope_type or None
-                    summary["session_is_workbench"] = is_workbench
-                    summary["session_title"] = row["title"]
-                    summary["session_label"] = (
-                        row["title"] if is_workbench else (row["display_name"] or row["native_id"])
-                    )
-                    return summary
-            for key in (session_key, deliver_key):
-                resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
-                if resolved is not None:
-                    return resolved
+                    return SQLiteBackgroundTaskStore._summary_from_session_row(row)
+            else:
+                for key in (session_key, deliver_key):
+                    resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
+                    if resolved is not None:
+                        return resolved
         except Exception:
             logger.debug("harness session summary resolution failed", exc_info=True)
-        return summary
+        return SQLiteBackgroundTaskStore._blank_session_summary()
+
+    @staticmethod
+    def _session_scope_join():
+        """A session with its scope, outer-joined — a workbench session may have
+        no scope row at all. Shared so the summary projection and the search
+        predicate that has to find those same labels cannot drift apart."""
+        return agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+
+    @staticmethod
+    def _session_summary_query():
+        return select(
+            agent_sessions.c.id,
+            agent_sessions.c.scope_id,
+            agent_sessions.c.title,
+            scopes.c.platform,
+            scopes.c.scope_type,
+            scopes.c.native_id,
+            scopes.c.display_name,
+            scopes.c.native_type,
+        ).select_from(SQLiteBackgroundTaskStore._session_scope_join())
+
+    @staticmethod
+    def _summary_from_session_row(row: Any) -> dict[str, Any]:
+        platform = (row["platform"] or "").strip()
+        scope_type = (row["scope_type"] or "").strip()
+        # A presentation fact only — which icon and which label to render. It is
+        # deliberately *not* the link rule any more: see ``session_openable``.
+        is_workbench = row["scope_id"] is None or platform == "avibe" or scope_type == "project"
+        return {
+            "session_title": row["title"],
+            "session_platform": platform or None,
+            "session_scope_kind": scope_type or None,
+            "session_label": row["title"] if is_workbench else (row["display_name"] or row["native_id"]),
+            "session_is_workbench": is_workbench,
+            "session_openable": session_openable_in_chat(
+                session_id=row["id"], scope_native_type=row["native_type"]
+            ),
+        }
+
+    @staticmethod
+    def _session_summaries(conn: Any, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_session_summary``'s id branch for many ids at once. Ids with no
+        surviving session row are simply absent from the result."""
+        summaries: dict[str, dict[str, Any]] = {}
+        for batch in _id_batches(session_ids):
+            rows = conn.execute(
+                SQLiteBackgroundTaskStore._session_summary_query().where(agent_sessions.c.id.in_(batch))
+            ).mappings()
+            for row in rows:
+                summaries[row["id"]] = SQLiteBackgroundTaskStore._summary_from_session_row(row)
+        return summaries
 
     @staticmethod
     def _summary_from_session_key(conn: Any, key: Optional[str]) -> Optional[dict[str, Any]]:
@@ -1974,13 +3792,10 @@ class SQLiteBackgroundTaskStore:
         into a non-linkable session summary, resolving the channel display name.
         Shared by the legacy ``session_key`` and the ``create_per_run``
         ``deliver_key`` paths. Returns None when ``key`` is empty/malformed."""
-        if not key:
+        parts = SQLiteBackgroundTaskStore._parse_session_key(key)
+        if parts is None:
             return None
-        parts = key.split("::")
-        if len(parts) < 3 or not parts[0] or not parts[2]:
-            return None
-        platform, scope_type, native_id = parts[0], parts[1], parts[2]
-        label = native_id
+        platform, scope_type, native_id = parts
         drow = conn.execute(
             select(scopes.c.display_name)
             .where(scopes.c.platform == platform)
@@ -1988,14 +3803,95 @@ class SQLiteBackgroundTaskStore:
             .where(scopes.c.native_id == native_id)
             .limit(1)
         ).mappings().first()
-        if drow is not None and drow["display_name"]:
-            label = drow["display_name"]
+        display_name = drow["display_name"] if drow is not None else None
+        return SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_name)
+
+    @staticmethod
+    def _key_summaries(conn: Any, keys: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_summary_from_session_key`` for many keys in one query."""
+        parsed = {key: SQLiteBackgroundTaskStore._parse_session_key(key) for key in dict.fromkeys(keys)}
+        triples = {parts for parts in parsed.values() if parts is not None}
+        if not triples:
+            return {}
+        display_names: dict[tuple[str, str, str], Any] = {}
+        # Three bound parameters per triple, so the batches are a third the size
+        # of an id resolver's. An unpaged harness list on a store with a few
+        # hundred legacy-keyed rows is exactly the case that overflows.
+        for batch in _id_batches(triples, params_per_value=3):
+            rows = conn.execute(
+                select(scopes.c.platform, scopes.c.scope_type, scopes.c.native_id, scopes.c.display_name).where(
+                    or_(
+                        *(
+                            and_(
+                                scopes.c.platform == platform,
+                                scopes.c.scope_type == scope_type,
+                                scopes.c.native_id == native_id,
+                            )
+                            for platform, scope_type, native_id in batch
+                        )
+                    )
+                )
+            ).mappings()
+            for row in rows:
+                display_names[(row["platform"], row["scope_type"], row["native_id"])] = row["display_name"]
+        return {
+            key: SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_names.get(parts))
+            for key, parts in parsed.items()
+            if parts is not None
+        }
+
+    @staticmethod
+    def _parse_session_key(key: Optional[str]) -> Optional[tuple[str, str, str]]:
+        if not key:
+            return None
+        parts = key.split("::")
+        if len(parts) < 3 or not parts[0] or not parts[2]:
+            return None
+        return parts[0], parts[1], parts[2]
+
+    @staticmethod
+    def _summary_from_key_parts(
+        parts: tuple[str, str, str], display_name: Optional[str]
+    ) -> dict[str, Any]:
+        platform, scope_type, native_id = parts
         return {
             "session_title": None,
             "session_platform": platform,
             "session_scope_kind": scope_type,
-            "session_label": label,
+            "session_label": display_name or native_id,
             "session_is_workbench": False,
+            # A delivery key names a channel, not a session; there is no id to
+            # open even though the label reads like one.
+            "session_openable": False,
+        }
+
+    @staticmethod
+    def _definition_summaries(conn: Any, definition_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Name the task/watch a run came from, in one query.
+
+        Soft-deleted definitions are included on purpose: a run outlives the
+        definition that produced it, and "from 夜间巡检 (deleted)" is more
+        useful than an orphan id. ``definition_deleted`` lets the UI drop the
+        link instead of pointing at a row that is gone.
+        """
+        ids = [value for value in dict.fromkeys(definition_ids) if value]
+        if not ids:
+            return {}
+        rows = conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.name,
+                run_definitions.c.definition_type,
+                run_definitions.c.deleted_at,
+            ).where(run_definitions.c.id.in_(ids))
+        ).mappings()
+        return {
+            row["id"]: {
+                "definition_name": row["name"],
+                "definition_kind": _DEFINITION_KINDS.get(row["definition_type"]),
+                "definition_deleted": row["deleted_at"] is not None,
+            }
+            for row in rows
         }
 
     @staticmethod

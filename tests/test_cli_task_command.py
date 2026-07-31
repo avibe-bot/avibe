@@ -303,6 +303,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-session FORK_SESSION" in captured.out
     assert "--fork-self" in captured.out
     assert "--sync" in captured.out
+    assert "--send-now" in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--visible" in captured.out
@@ -312,6 +313,10 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --fork-self --message" in captured.out
+    assert "vibe agent run --session-id sesk8m4q2p7x --send-now --message" in captured.out
+    assert "vibe session queue list sesk8m4q2p7x" in captured.out
+    assert "vibe session queue remove sesk8m4q2p7x msg_queued123" in captured.out
+    assert "vibe session send-now sesk8m4q2p7x" in captured.out
     assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
     assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
     assert (
@@ -610,6 +615,7 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
+    assert "task" not in payload
     expected = {
         "kind": "caller_context",
         "caller": {
@@ -620,8 +626,8 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
             "native_session_id": "native-codex-1",
         },
     }
-    assert payload["task"]["metadata"]["created_by"] == expected
-    stored = cli.ScheduledTaskStore(store_path).get_task(payload["task"]["id"])
+    assert payload["definition"]["metadata"]["created_by"] == expected
+    stored = cli.ScheduledTaskStore(store_path).get_task(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
 
@@ -684,12 +690,12 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_policy"] == "create_per_run"
-    assert payload["task"]["deliver_key"] is None
-    assert payload["task"]["cwd"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
-    assert "session_workdir" not in payload["task"]["metadata"]
-    assert payload["task"]["agent_name"] == "project-agent"
+    assert payload["definition"]["session_policy"] == "create_per_run"
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["cwd"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
+    assert "session_workdir" not in payload["definition"]["metadata"]
+    assert payload["definition"]["agent_name"] == "project-agent"
 
 
 def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
@@ -717,7 +723,7 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
         result = cli.cmd_task_add(args)
 
     assert result == 0
-    task = json.loads(capsys.readouterr().out)["task"]
+    task = json.loads(capsys.readouterr().out)["definition"]
     assert task["session_policy"] == "create_per_run"
     assert task["session_id"] is None
     assert task["deliver_key"] is None
@@ -784,15 +790,15 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_policy"] == "create_once"
-    target = cli.resolve_session_id_target(payload["task"]["session_id"], db_path=db_path)
+    assert payload["definition"]["session_policy"] == "create_once"
+    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.session_key.session_scope == "avibe::project::proj-once-task"
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["task"]["cwd"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
-    assert "session_workdir" not in payload["task"]["metadata"]
+    assert payload["definition"]["cwd"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:
@@ -867,7 +873,7 @@ def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_pat
                 ).mappings()
             )
 
-    assert {payload["task"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
+    assert {payload["definition"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
     anchors = {row["session_anchor"] for row in rows}
     assert len(anchors) == 2
     assert all(anchor.startswith("avibe_proj-once-unique:definition_") for anchor in anchors)
@@ -916,8 +922,8 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_id"] == "sesCaller"
-    assert payload["task"]["session_policy"] == "existing"
+    assert payload["definition"]["session_id"] == "sesCaller"
+    assert payload["definition"]["session_policy"] == "existing"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
         "message": "Task target Session defaulted to this Agent Session.",
@@ -974,8 +980,7 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1005,15 +1010,14 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = [item["id"] for item in payload["tasks"]]
+    ids = [item["id"] for item in payload["definitions"]]
     assert done.id not in ids
     assert failed.id in ids
-    assert next(item for item in payload["tasks"] if item["id"] == failed.id)["state"] == "failed"
+    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1028,7 +1032,7 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    entry = payload["tasks"][0]
+    entry = payload["definitions"][0]
     assert entry["id"] == task.id
     assert entry["display_name"] == "Hourly summary"
     assert "prompt" not in entry
@@ -1040,7 +1044,7 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Paused after failure",
         session_key="slack::channel::C123",
@@ -1056,12 +1060,12 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
         assert cli.cmd_task_list(brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tasks"][0]["state"] == "paused"
-    assert payload["tasks"][0]["last_status"] == "failed"
+    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["last_status"] == "failed"
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(25):
         store.add_task(
             name=f"Task {index:02d}",
@@ -1077,7 +1081,8 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 20
+    assert "tasks" not in payload
+    assert len(payload["definitions"]) == 20
     assert payload["pagination"] == {
         "page": 1,
         "limit": 20,
@@ -1093,7 +1098,7 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(21):
         paused = store.add_task(
             name=f"Paused {index:02d}",
@@ -1117,8 +1122,8 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
         assert cli.cmd_task_list(brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tasks"][0]["id"] == active.id
-    assert payload["tasks"][0]["state"] == "active"
+    assert payload["definitions"][0]["id"] == active.id
+    assert payload["definitions"][0]["state"] == "active"
     assert payload["pagination"]["has_more"] is True
 
 
@@ -1127,7 +1132,7 @@ def test_task_list_cli_dispatches_pagination_flags(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(3):
         store.add_task(
             name=f"Task {index}",
@@ -1144,15 +1149,14 @@ def test_task_list_cli_dispatches_pagination_flags(
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
 
 
 def test_task_list_order_is_stable_across_cron_boundaries(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     later = store.add_task(
         name="Later run",
         session_key="slack::channel::C123",
@@ -1171,32 +1175,39 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     )
     later.created_at = "2026-04-01T00:00:00+00:00"
     earlier.created_at = "2026-04-01T00:00:01+00:00"
+    store.upsert_task(later)
+    store.upsert_task(earlier)
     first_next_runs = {
-        later.id: "2026-04-01T09:30:00+08:00",
-        earlier.id: "2026-04-01T01:00:00+00:00",
+        "UTC": "2026-04-01T09:30:00+08:00",
+        "Asia/Shanghai": "2026-04-01T01:00:00+00:00",
     }
-    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: first_next_runs[task.id])
+    monkeypatch.setattr(
+        "storage.background.compute_next_run_at",
+        lambda **kwargs: first_next_runs[str(kwargs["timezone_name"])],
+    )
 
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
 
-    first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+    first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
     second_next_runs = {
-        later.id: "2026-04-01T02:00:00+00:00",
-        earlier.id: "2026-04-01T10:00:00+00:00",
+        "UTC": "2026-04-01T02:00:00+00:00",
+        "Asia/Shanghai": "2026-04-01T10:00:00+00:00",
     }
-    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: second_next_runs[task.id])
+    monkeypatch.setattr(
+        "storage.background.compute_next_run_at",
+        lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
+    )
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
 
-    second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+    second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
     assert second_ids == first_ids == [later.id, earlier.id]
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1211,16 +1222,15 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["display_name"] == "Hourly summary"
-    assert payload["task"]["message_preview"] == "recurring summary prompt"
-    assert payload["task"]["next_run_at"] is not None
-    assert payload["task"]["state"] == "active"
-    assert payload["task"]["last_status"] == "never_run"
+    assert payload["definition"]["display_name"] == "Hourly summary"
+    assert payload["definition"]["message_preview"] == "recurring summary prompt"
+    assert payload["definition"]["next_run_at"] is not None
+    assert payload["definition"]["state"] == "active"
+    assert payload["definition"]["last_status"] == "never_run"
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     done = store.add_task(
         session_key="slack::channel::C123",
         prompt="one-shot",
@@ -1235,13 +1245,13 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = [item["id"] for item in payload["tasks"]]
+    ids = [item["id"] for item in payload["definitions"]]
     assert done.id in ids
     assert payload["pagination"]["has_more"] is False
 
 
 def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(3):
         done = store.add_task(
             session_key="slack::channel::C123",
@@ -1261,7 +1271,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
         "vibe task list --include-finished --page 2 --limit 2"
@@ -1339,10 +1349,106 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["id"] == task.id
-    assert payload["task"]["name"] == "Morning summary"
-    assert payload["task"]["cron"] == "*/30 * * * *"
-    assert payload["task"]["prompt"] == "updated"
+    assert payload["definition"]["id"] == task.id
+    assert payload["definition"]["name"] == "Morning summary"
+    assert payload["definition"]["cron"] == "*/30 * * * *"
+    assert payload["definition"]["prompt"] == "updated"
+
+
+def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
+    """HFR-255 — ``--agent X --clear-agent`` re-pinned today's default Agent.
+
+    THE DEFECT. The two flags mean opposite things, and unlike ``--name`` /
+    ``--clear-name`` the pair raised nothing. It also did not simply pick one:
+    ``--clear-agent`` won for ``agent_name`` (→ None), while the mere PRESENCE of
+    ``--agent`` set ``explicit_agent_requested``, which POPS the follow-the-session
+    marker. The definition therefore looked like "no Agent pinned, and not following
+    its Session", so the resolve below took the ``agent_name is None and
+    session_policy != 'existing'`` branch, resolved today's scope / default Agent, and
+    wrote it back as a HARD PIN — the exact regression the marker exists to prevent
+    (HFR-245), reachable in one command and with neither flag's meaning honoured.
+
+    THE FIX is the convention ``--name`` / ``--clear-name`` already sets: reject the
+    contradictory pair, because the user's intent is genuinely ambiguous (did they
+    mean to pin, or to unpin?). Asserted BOTH ways below, so the two pairs cannot
+    drift apart.
+
+    The stored definition must also be untouched: a rejected command may not have
+    written a pin on its way to failing.
+    """
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        # The Agent the bound Session runs as, and a DIFFERENT current default. The
+        # gap between them is what makes the re-pin observable at all.
+        agent_store.create(name="rebound", backend="codex")
+        successor = agent_store.create(name="successor", backend="claude")
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        name="digest",
+        session_key="slack::channel::C123",
+        session_policy="create_per_run",
+        agent_name=None,
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+    )
+
+    def _update(*argv: str) -> tuple[int, str]:
+        """Run the REAL command. Returns ``(exit code, raw stderr)``.
+
+        Stderr is returned unparsed on purpose: the pre-fix command SUCCEEDS and
+        writes nothing there, so parsing it eagerly would turn the interesting red
+        into a ``JSONDecodeError`` and hide which field was corrupted.
+        """
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, *argv])
+        cli_agent_store = cli.VibeAgentStore(db_path)
+        stderr = io.StringIO()
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+                patch("vibe.cli._task_store", return_value=store),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+                redirect_stderr(stderr),
+            ):
+                return cli.cmd_task_update(args), stderr.getvalue()
+        finally:
+            cli_agent_store.close()
+
+    result, stderr_text = _update("--agent", "rebound", "--clear-agent")
+
+    # The persisted definition first: this is the damage, and asserting it before the
+    # exit code keeps the red pointed at the regression rather than at the reporting.
+    stored = store.get_task(task.id)
+    assert stored is not None
+    assert stored.agent_name is None, (
+        f"the contradictory pair pinned agent_name={stored.agent_name!r} — today's "
+        f"default Agent ({successor.name!r}), which is neither the Agent that was "
+        "passed nor the cleared state that was asked for; every future fire now runs "
+        "as the wrong Agent"
+    )
+    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the contradictory pair dropped the follow-the-session state, so the bound "
+        "Session no longer governs the definition's Agent"
+    )
+    assert result == 1, (
+        "vibe task update accepted --agent together with --clear-agent; it honours "
+        "neither flag and re-pins the definition to today's default Agent instead"
+    )
+    assert json.loads(stderr_text)["code"] == "conflicting_agent_update", stderr_text
+
+    # The convention this mirrors, asserted so the two pairs cannot drift apart.
+    name_result, name_stderr = _update("--name", "renamed", "--clear-name")
+    assert name_result == 1
+    assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
 
 
 def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
@@ -1480,10 +1586,10 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["cwd"] == str(saved_cwd)
-    assert payload["task"]["metadata"]["session_workdir"] == str(saved_cwd)
+    assert payload["definition"]["cwd"] == str(saved_cwd)
+    assert payload["definition"]["metadata"]["session_workdir"] == str(saved_cwd)
     assert row["workdir"] == str(saved_cwd)
-    assert payload["task"]["session_id"] != "sesOld"
+    assert payload["definition"]["session_id"] != "sesOld"
 
 
 def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
@@ -1508,8 +1614,8 @@ def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, caps
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_id"] is None
-    assert payload["task"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["session_id"] is None
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
 
 
 def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -> None:
@@ -1534,9 +1640,9 @@ def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["id"] == task.id
-    assert payload["task"]["post_to"] is None
-    assert payload["task"]["deliver_key"] == "slack::channel::C999"
+    assert payload["definition"]["id"] == task.id
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] == "slack::channel::C999"
 
 
 def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1570,9 +1676,9 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["post_to"] is None
-    assert payload["task"]["deliver_key"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
 
 
 def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Path, capsys) -> None:
@@ -3006,7 +3112,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["task"]["agent_name"] == default_agent.name
+    assert payload["definition"]["agent_name"] == default_agent.name
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:
@@ -3056,3 +3162,149 @@ def test_task_hidden_aliases_still_parse() -> None:
 
     assert list_args.task_command == "ls"
     assert remove_args.task_command == "rm"
+
+
+def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """Run the shared teardown reclaim against the isolated state database.
+
+    The production callers are ``/new`` (``delete_agent_sessions``) and the archive
+    dialog; both reach this same helper, and it is the write a stale full-row
+    definition payload undoes.
+    """
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A Session row with settings worth snapshotting and no Agent to resolve.
+
+    ``agent_name`` is deliberately ``None``: ``vibe task update`` resolves the bound
+    Session's Agent through ``require_enabled``, and this test is about the write,
+    not about Agent resolution.
+    """
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+    """HFR-261 — ``vibe task update`` wrote the WHOLE row from a stale read.
+
+    THE PRODUCTION STORY. A task is pinned to Session S. The user renames it. While
+    the command is resolving Agents, Sessions and delivery targets, ``/new`` arrives
+    in that thread (or the archive dialog is confirmed) and
+    ``reclaim_bound_definitions`` pauses this very definition, stamps the pause
+    reason, and records the ``session_settings_snapshot`` a later ``create_once``
+    rebind needs.
+
+    THE DEFECT. ``upsert_scheduled_task`` writes EVERY column of
+    ``run_definitions``, keyed on ``id`` alone, from a payload built out of the
+    earlier read. So the rename restored ``enabled=1``, wiped ``last_error`` and
+    replaced the metadata with the pre-teardown copy: the reclaim's compare-and-set
+    had succeeded, its counters and the ``/new`` ledger had already told the user "1
+    task paused", and the definition was quietly running again against a session that
+    no longer exists.
+
+    A LOST WRITE MUST ALSO BE A VISIBLE FAILURE. The command previously printed the
+    renamed task and exited 0 — a claim about a row it did not write. It now exits 1
+    with ``definition_write_conflict``.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = cli.ScheduledTaskStore()
+    session_id = _create_bare_agent_session(workdir=tmp_path)
+    task = store.add_task(
+        name="Nightly summary",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="summarise the day",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        metadata={"origin": "cli"},
+    )
+
+    # The teardown, committed after the CLI's read of this definition and before its
+    # write. ``store`` is deliberately NOT reloaded: that stale mirror is exactly what
+    # production holds.
+    summary = _reclaim_bound_definitions_now(
+        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+    )
+    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
+        "meaningless"
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--name", "Renamed by the user"])
+    stderr = io.StringIO()
+    with (
+        redirect_stderr(stderr),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 1, (
+        "the command reported success for a write the database refused; the user is "
+        "shown a renamed task while the stored definition is whatever the teardown left"
+    )
+    payload = json.loads(stderr.getvalue())
+    assert payload["code"] == "definition_write_conflict"
+    assert payload["details"]["task_id"] == task.id
+
+    stored = cli.ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the stale full-row write re-enabled a definition the teardown paused; it now "
+        "fires forever against a session that no longer exists"
+    )
+    assert stored.last_error == "the bound agent session was cleared", (
+        f"the pause reason was overwritten with {stored.last_error!r}, so the user "
+        "cannot see why the task stopped"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata; that snapshot is what a later create_once rebind "
+        "reads, so the task would come back on the wrong workdir/agent/model"
+    )
+    assert stored.name == "Nightly summary", (
+        "the refused write partially landed — a lost compare-and-set must change "
+        "NOTHING, not just the guarded columns"
+    )
+    # HFR-271's rule: everything above reads a store this line built. The store the
+    # COMMAND used is still in scope and still holds the row it mutated before the
+    # refusal, so assert the two halves agree rather than only the durable one.
+    live = store.get_task(task.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the write was refused and the live store kept the mutation: it still serves "
+        f"name={None if live is None else live.name!r} "
+        f"enabled={None if live is None else live.enabled!r} while the row says "
+        f"name={stored.name!r} enabled={stored.enabled!r}"
+    )

@@ -35,6 +35,9 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_SEND_NOW,
+    BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
     parse_scope_id,
@@ -66,7 +69,12 @@ from vibe.upgrade import (
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
-from storage.background import compute_next_run_at, normalize_run_status
+from storage.background import (
+    DefinitionWriteConflict,
+    SQLiteBackgroundTaskStore,
+    compute_next_run_at,
+    normalize_run_status,
+)
 from storage.models import scope_settings, scopes
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -206,6 +214,33 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         if help_command:
             payload["help_command"] = help_command
     print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def _definition_conflict_cli_error(
+    exc: DefinitionWriteConflict,
+    *,
+    help_command: str,
+    details: dict | None = None,
+) -> TaskCliError:
+    """A refused full-row write, told to the user as a first-class command failure.
+
+    The store writes EVERY column of a definition, so an update built from a read
+    that a teardown has since invalidated is refused rather than applied (HFR-261).
+    That refusal has to reach the user with its own code: without it the command
+    would print the definition it *meant* to write and exit 0, while the stored row
+    still holds whatever ``/new`` or the archive dialog put there.
+    """
+
+    return TaskCliError(
+        str(exc),
+        code="definition_write_conflict",
+        hint=(
+            "A /new clear or a Session archive reclaimed this definition while the "
+            "update was being prepared. Re-read it and re-apply the change."
+        ),
+        help_command=help_command,
+        details=details or {"definition_id": exc.definition_id},
+    )
 
 
 def _cli_payload(kind: str, **fields) -> dict:
@@ -443,21 +478,21 @@ def _paginated_fields(page_result, *, command: list[str], include_next_command: 
 
 
 def _print_definition_list_payload(
-    items,
+    page_result,
     *,
-    items_key: str,
     payload_for_item,
     command: list[str],
-    page_request: PageRequest,
 ) -> None:
-    result = page_sequence(items, page_request)
-    item_payloads = [payload_for_item(item) for item in result.items]
-    payload = {
-        "definitions": item_payloads,
-        items_key: item_payloads,
-        **_paginated_fields(result, command=command),
-    }
-    _print_cli_payload("run_definitions", **payload)
+    item_payloads = [payload_for_item(item) for item in page_result.items]
+    _print_cli_payload(
+        "run_definitions",
+        definitions=item_payloads,
+        **_paginated_fields(page_result, command=command),
+    )
+
+
+def _print_definition_payload(definition, **fields) -> None:
+    _print_cli_payload("run_definition", definition=definition, **fields)
 
 
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
@@ -1241,6 +1276,10 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
+          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
+          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          Inspect queued work with: vibe session queue list <session-id>
+          Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -1265,6 +1304,10 @@ def _agent_run_examples_text() -> str:
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
+          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe session queue list sesk8m4q2p7x
+          vibe session queue remove sesk8m4q2p7x msg_queued123
+          vibe session send-now sesk8m4q2p7x
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -1681,11 +1724,19 @@ def _task_next_run_at(task) -> Optional[str]:
 
 
 def _task_schedule_summary(task) -> str:
-    if task.schedule_type == "cron":
-        return f"cron:{task.cron}" if task.cron else "cron"
-    if task.schedule_type == "at":
-        return f"at:{task.run_at}" if task.run_at else "at"
-    return task.schedule_type
+    if isinstance(task, Mapping):
+        schedule_type = str(task.get("schedule_type") or "")
+        cron = task.get("cron")
+        run_at = task.get("run_at")
+    else:
+        schedule_type = task.schedule_type
+        cron = task.cron
+        run_at = task.run_at
+    if schedule_type == "cron":
+        return f"cron:{cron}" if cron else "cron"
+    if schedule_type == "at":
+        return f"at:{run_at}" if run_at else "at"
+    return schedule_type
 
 
 def _task_payload(task, *, brief: bool = False):
@@ -1720,16 +1771,85 @@ def _task_payload(task, *, brief: bool = False):
     return payload
 
 
-def _sort_tasks_for_display(tasks):
-    # Offset pagination requires an order that does not change merely because
-    # wall-clock time crossed a cron boundary between page requests. Keep
-    # schedulable tasks ahead of paused/history rows without using next-run
-    # timestamps, which are time-dependent.
-    return sorted(tasks, key=lambda item: (item.enabled is False, item.created_at, item.id))
+_CANONICAL_DEFINITION_FIELDS = (
+    "lifecycle_state",
+    "lifecycle_detail",
+    "next_run_at",
+    "waiting_since",
+    "running_since",
+)
+
+
+def _task_projection_state(task: Mapping[str, object]) -> str:
+    """Compatibility ``state`` derived from the canonical lifecycle fields."""
+
+    lifecycle_state = task.get("lifecycle_state")
+    if lifecycle_state in {"waiting", "running"}:
+        return "active"
+    if lifecycle_state == "finished":
+        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+    if lifecycle_state == "paused":
+        return "paused"
+    return "unknown"
+
+
+def _task_projection_last_status(task: Mapping[str, object]) -> str:
+    """Historical compatibility field; never used to determine lifecycle."""
+
+    if task.get("last_run_at") and task.get("last_error"):
+        return "failed"
+    if task.get("last_run_at"):
+        return "succeeded"
+    return "never_run"
+
+
+def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False) -> dict:
+    prompt = str(task.get("prompt") or "")
+    name = task.get("name")
+    derived = {
+        "display_name": str(name) if name else _task_message_preview(prompt),
+        "message_preview": _task_message_preview(prompt),
+        "state": _task_projection_state(task),
+        "last_status": _task_projection_last_status(task),
+        "schedule_summary": _task_schedule_summary(task),
+    }
+    if brief:
+        payload = {
+            "id": task.get("id"),
+            "name": name,
+            "display_name": derived["display_name"],
+            "state": derived["state"],
+            "last_status": derived["last_status"],
+            "schedule_type": task.get("schedule_type"),
+            "schedule_summary": derived["schedule_summary"],
+            "session_id": task.get("session_id"),
+            "session_key": task.get("session_key"),
+            "agent_name": task.get("agent_name"),
+            "post_to": task.get("post_to"),
+            "deliver_key": task.get("deliver_key"),
+            "timezone": task.get("timezone"),
+            "enabled": task.get("enabled"),
+        }
+        payload.update({field: task.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        return payload
+    payload = dict(task)
+    payload.update(derived)
+    return payload
 
 
 def _task_store() -> ScheduledTaskStore:
     return ScheduledTaskStore()
+
+
+@contextlib.contextmanager
+def _definition_read_store():
+    """Own the canonical read projection store used by CLI list/show commands."""
+
+    store = SQLiteBackgroundTaskStore()
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 def _task_request_store() -> TaskExecutionStore:
@@ -1798,16 +1918,6 @@ def _is_failed_one_shot(task) -> bool:
         and not task.enabled
         and bool(task.last_run_at)
         and bool(task.last_error)
-    )
-
-
-def _is_finished_one_shot_watch(watch) -> bool:
-    return (
-        watch.mode == "once"
-        and not watch.enabled
-        and bool(watch.last_finished_at)
-        and not watch.last_error
-        and watch.last_exit_code in (None, 0)
     )
 
 
@@ -2544,6 +2654,61 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
     return payload
 
 
+def _watch_projection_state(watch: Mapping[str, object]) -> str:
+    """Compatibility ``state`` derived from canonical lifecycle and liveness."""
+
+    lifecycle_state = watch.get("lifecycle_state")
+    if lifecycle_state == "running":
+        return "running"
+    if lifecycle_state == "waiting":
+        if watch.get("process_alive") is True:
+            return "running"
+        return "armed" if watch.get("mode") == "forever" else "pending"
+    if lifecycle_state == "finished":
+        return "failed" if watch.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+    if lifecycle_state == "paused":
+        return "paused"
+    return "unknown"
+
+
+def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = False) -> dict:
+    shell_command = str(watch.get("shell_command") or "")
+    command = watch.get("command")
+    command_values = [str(value) for value in command] if isinstance(command, list) else []
+    command_preview = shell_command or shlex.join(command_values)
+    name = watch.get("name")
+    derived = {
+        "display_name": str(name) if name else _task_message_preview(command_preview, max_chars=120),
+        "command_preview": _task_message_preview(command_preview, max_chars=120),
+        "state": _watch_projection_state(watch),
+    }
+    if brief:
+        payload = {
+            "id": watch.get("id"),
+            "name": name,
+            "display_name": derived["display_name"],
+            "state": derived["state"],
+            "mode": watch.get("mode"),
+            "session_id": watch.get("session_id"),
+            "session_key": watch.get("session_key"),
+            "agent_name": watch.get("agent_name"),
+            "message_preview": _task_message_preview(
+                str(watch.get("message") or watch.get("prefix") or "")
+            ),
+            "timeout_seconds": watch.get("timeout_seconds"),
+            "lifetime_timeout_seconds": watch.get("lifetime_timeout_seconds"),
+            "enabled": watch.get("enabled"),
+            "last_event_at": watch.get("last_event_at"),
+            "last_error": watch.get("last_error"),
+            "process_alive": watch.get("process_alive"),
+        }
+        payload.update({field: watch.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        return payload
+    payload = dict(watch)
+    payload.update(derived)
+    return payload
+
+
 def _agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:
@@ -2822,16 +2987,11 @@ def cmd_task_add(args):
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
         payload_fields = {
-            "definition": task_payload,
-            "task": task_payload,
             "warnings": warnings,
         }
         if session_default_notice:
             payload_fields["session_default_notice"] = session_default_notice
-        _print_cli_payload(
-            "run_definition",
-            **payload_fields,
-        )
+        _print_definition_payload(task_payload, **payload_fields)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task add --help")
@@ -2844,27 +3004,26 @@ def cmd_task_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
-    store = _task_store()
-    tasks = store.list_tasks()
-    if not include_finished:
-        tasks = [task for task in tasks if not _is_completed_one_shot(task)]
-    tasks = _sort_tasks_for_display(tasks)
+    with _definition_read_store() as store:
+        page_result = store.list_scheduled_tasks_page(
+            page_request=page_request,
+            include_successful_finished=include_finished,
+            enabled_first=True,
+        )
     command = ["vibe", "task", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        tasks,
-        items_key="tasks",
-        payload_for_item=lambda task: _task_payload(task, brief=True),
+        page_result,
+        payload_for_item=lambda task: _task_projection_payload(task, brief=brief),
         command=command,
-        page_request=page_request,
     )
     return 0
 
 
 def cmd_task_show(task_id: str):
-    store = _task_store()
-    task = store.get_task(task_id)
+    with _definition_read_store() as store:
+        task = store.get_scheduled_task(task_id)
     if task is None:
         _print_task_error(
             TaskCliError(
@@ -2876,8 +3035,8 @@ def cmd_task_show(task_id: str):
             )
         )
         return 1
-    task_payload = _task_payload(task)
-    _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
+    task_payload = _task_projection_payload(task)
+    _print_definition_payload(task_payload)
     return 0
 
 
@@ -2896,9 +3055,22 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(task_id, enabled)
+    try:
+        updated = store.set_enabled(task_id, enabled)
+    except DefinitionWriteConflict as exc:
+        # Pause/resume is also a full-row write, so it is refused when a teardown
+        # changed the definition first. Reporting the switch as flipped would be a lie
+        # about a row this command did not write.
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task list",
+                details={"task_id": task_id},
+            )
+        )
+        return 1
     task_payload = _task_payload(updated)
-    _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
+    _print_definition_payload(task_payload)
     return 0
 
 
@@ -3010,12 +3182,41 @@ def cmd_task_update(args):
         else:
             name = task.name
 
+        # Rejected rather than silently resolved, exactly as ``--name`` /
+        # ``--clear-name`` above. The two flags mean opposite things and the pair had
+        # no single sensible reading: ``--clear-agent`` won for ``agent_name`` (→
+        # None) while the mere PRESENCE of ``--agent`` set
+        # ``explicit_agent_requested``, which POPS the follow-the-session marker. The
+        # definition then looked like "no Agent pinned and not following its
+        # Session", so the resolve below wrote today's scope / default Agent back as
+        # a hard pin — the exact regression the marker exists to prevent (HFR-245),
+        # reachable in one command.
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe task update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
             agent_name = _validate_agent_name_arg(args.agent)
         else:
             agent_name = task.agent_name
+
+        # "Follow the bound Session's Agent" is a durable state (set by a reset
+        # rebind, or by ``--clear-agent``), not merely a missing ``agent_name``.
+        # An explicit ``--agent`` is the user pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
 
         message_changed = any(
             getattr(args, name, None) is not None
@@ -3134,7 +3335,14 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future fire onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
@@ -3237,13 +3445,17 @@ def cmd_task_update(args):
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(updated)
-        _print_cli_payload(
-            "run_definition",
-            definition=task_payload,
-            task=task_payload,
-            warnings=warnings,
-        )
+        _print_definition_payload(task_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task update --help",
+                details={"task_id": getattr(args, "task_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
@@ -4379,6 +4591,18 @@ def cmd_agent_run(args):
             example_command="vibe agent run --agent default",
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
+        delivery_intent = (
+            AGENT_RUN_DELIVERY_SEND_NOW
+            if bool(getattr(args, "send_now", False))
+            else AGENT_RUN_DELIVERY_QUEUE
+        )
+        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+            raise TaskCliError(
+                "--send-now requires an existing Agent Session",
+                code="send_now_requires_existing_session",
+                hint="Pass --session-id <session-id>, or omit --send-now for a new or forked Session.",
+                help_command="vibe agent run --help",
+            )
         agent_name = (args.agent or "").strip()
         if session_policy in {"create", "none"} and not agent_name:
             raise TaskCliError(
@@ -4450,6 +4674,20 @@ def cmd_agent_run(args):
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
             target = resolve_session_id_target(session_id)
+            if (
+                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
+                and target.session_key.platform != "avibe"
+            ):
+                raise TaskCliError(
+                    "--send-now requires a Web/Workbench Agent Session",
+                    code="send_now_unsupported_target",
+                    hint="Omit --send-now to queue work for an IM-backed Session.",
+                    help_command="vibe agent run --help",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
                 agent_name=agent_name or None,
@@ -4543,6 +4781,7 @@ def cmd_agent_run(args):
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
             callback_active=run_async,
+            delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
@@ -4575,6 +4814,12 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
+        if delivery_intent != AGENT_RUN_DELIVERY_QUEUE:
+            # Keep the long-standing default-queue envelope byte-compatible.
+            # The explicit control intent is surfaced only when the caller opted
+            # into the new behavior.
+            payload["delivery_intent"] = delivery_intent
+            payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
             payload["forked_from_session_id"] = fork_result.fork.source_session_id
         if fork_result:
@@ -5029,6 +5274,228 @@ def cmd_session_get(args):
         session=_session_row(payload, brief=False),
         message=_session_get_hint(session_id),
         **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+    )
+    return 0
+
+
+def cmd_session_send_now(args):
+    """Apply Workbench's Session-level Send now transition without adding work."""
+
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+        target = resolve_session_id_target(session_id)
+        if target.session_key.platform != "avibe":
+            raise TaskCliError(
+                "send-now requires a Web/Workbench Agent Session",
+                code="send_now_unsupported_target",
+                hint="This Session uses an IM scope, whose active turn is not owned by Workbench.",
+                details={
+                    "session_id": session_id,
+                    "platform": target.session_key.platform,
+                },
+            )
+        controller_result = asyncio.run(internal_client.send_now(session_id))
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except internal_client.InternalServerUnavailable as exc:
+        _print_task_error(
+            TaskCliError(
+                "the live Session controller is unavailable",
+                code="internal_unavailable",
+                hint="Keep the queued messages intact and retry after the Avibe service is reachable.",
+                details={"session_id": session_id, "detail": str(exc)},
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session send-now --help")
+        return 1
+
+    raw_status_code = controller_result.get("status_code")
+    try:
+        status_code = int(raw_status_code)
+    except (TypeError, ValueError):
+        status_code = 500
+    body = controller_result.get("body")
+    result = dict(body) if isinstance(body, dict) else {}
+    if not 200 <= status_code < 300 or result.get("ok") is False:
+        code = str(result.get("code") or result.get("status") or "send_now_failed")
+        detail = str(result.get("detail") or result.get("message") or code)
+        _print_task_error(
+            TaskCliError(
+                detail,
+                code=code,
+                hint="The active turn and durable queue were left intact; retry or let the turn finish normally.",
+                details={
+                    "session_id": session_id,
+                    "controller_status_code": status_code,
+                    "controller_response": result,
+                },
+            ),
+            help_command="vibe session send-now --help",
+        )
+        return 1
+
+    _print_cli_payload(
+        "session_send_now",
+        session_id=session_id,
+        status=str(result.get("status") or "unknown"),
+        result=result,
+    )
+    return 0
+
+
+def _queued_agent_run_id(row: dict) -> str | None:
+    metadata = row.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    provenance = metadata.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    platform_specific = provenance.get("platform_specific")
+    if not isinstance(platform_specific, dict):
+        return None
+    if str(platform_specific.get("task_trigger_kind") or "").strip() != "agent_run":
+        return None
+    run_id = str(platform_specific.get("task_execution_id") or "").strip()
+    return run_id or None
+
+
+def _session_queue_row(row: dict, *, position: int) -> dict:
+    return {
+        "position": position,
+        "id": str(row.get("id") or ""),
+        "text": str(row.get("text") or ""),
+        "created_at": row.get("created_at"),
+        "author": row.get("author"),
+        "source": row.get("source"),
+        "run_id": _queued_agent_run_id(row),
+    }
+
+
+def cmd_session_queue_list(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        page_request = _page_request_from_args(
+            args,
+            help_command="vibe session queue list --help",
+        )
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue inspection requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
+            result = messages_service.list_queued_page(
+                conn,
+                session_id,
+                page_request=page_request,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue list --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue list --help")
+        return 1
+
+    _print_cli_payload(
+        "session_queue",
+        session_id=session_id,
+        queued=[
+            _session_queue_row(
+                row,
+                position=page_request.offset + index,
+            )
+            for index, row in enumerate(result.items, start=1)
+        ],
+        **_paginated_fields(
+            result,
+            command=["vibe", "session", "queue", "list", session_id],
+        ),
+    )
+    return 0
+
+
+def cmd_session_queue_remove(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.background import run_update_event_transaction
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    message_id = str(getattr(args, "message_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with run_update_event_transaction(engine) as conn:
+            sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue removal requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
+            removed = messages_service.remove_queued(
+                conn,
+                session_id,
+                message_id,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue remove --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue remove --help")
+        return 1
+
+    if removed:
+        _post_session_queue_updated_to_live_ui(session_id)
+    _print_cli_payload(
+        "session_queue_remove",
+        session_id=session_id,
+        message_id=message_id,
+        removed=removed,
+        status="removed" if removed else "not_found",
     )
     return 0
 
@@ -7989,16 +8456,11 @@ def cmd_watch_add(args):
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(watch, runtime_entry)
         payload_fields = {
-            "definition": watch_payload,
-            "watch": watch_payload,
             "warnings": warnings,
         }
         if session_default_notice:
             payload_fields["session_default_notice"] = session_default_notice
-        _print_cli_payload(
-            "run_definition",
-            **payload_fields,
-        )
+        _print_definition_payload(watch_payload, **payload_fields)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch add --help")
@@ -8011,28 +8473,26 @@ def cmd_watch_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
-    store = _watch_store()
-    runtime_state = _watch_runtime_store().load().get("watches", {})
-    watches = store.list_watches()
-    if not include_finished:
-        watches = [watch for watch in watches if not _is_finished_one_shot_watch(watch)]
-    watches.sort(key=lambda item: (item.enabled is False, item.created_at, item.id))
+    with _definition_read_store() as store:
+        page_result = store.list_watches_page(
+            page_request=page_request,
+            include_successful_finished=include_finished,
+            enabled_first=True,
+        )
     command = ["vibe", "watch", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        watches,
-        items_key="watches",
-        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=True),
+        page_result,
+        payload_for_item=lambda watch: _watch_projection_payload(watch, brief=brief),
         command=command,
-        page_request=page_request,
     )
     return 0
 
 
 def cmd_watch_show(watch_id: str):
-    store = _watch_store()
-    watch = store.get_watch(watch_id)
+    with _definition_read_store() as store:
+        watch = store.get_watch(watch_id)
     if watch is None:
         _print_task_error(
             TaskCliError(
@@ -8044,9 +8504,8 @@ def cmd_watch_show(watch_id: str):
             )
         )
         return 1
-    runtime_entry = _watch_runtime_store().load().get("watches", {}).get(watch.id)
-    watch_payload = _watch_payload(watch, runtime_entry)
-    _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
+    watch_payload = _watch_projection_payload(watch)
+    _print_definition_payload(watch_payload)
     return 0
 
 
@@ -8065,10 +8524,20 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(watch_id, enabled)
+    try:
+        updated = store.set_enabled(watch_id, enabled)
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch list",
+                details={"watch_id": watch_id},
+            )
+        )
+        return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
     watch_payload = _watch_payload(updated, runtime_entry)
-    _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
+    _print_definition_payload(watch_payload)
     return 0
 
 
@@ -8193,12 +8662,41 @@ def cmd_watch_update(args):
             message = prefix
         else:
             message = getattr(watch, "message", None) or watch.prefix
+        # Same three durable Agent-authority states ``vibe task update`` keeps, on the
+        # sibling definition command. Rejected rather than silently resolved, exactly
+        # as ``--name`` / ``--clear-name`` above: the two flags mean opposite things
+        # and the pair honours neither -- ``--clear-agent`` wins for ``agent_name``
+        # (-> None) while the mere PRESENCE of ``--agent`` POPS the
+        # follow-the-session marker, so the definition looks like "no Agent pinned and
+        # not following its Session" and the resolve below writes today's scope /
+        # default Agent back as a hard pin (HFR-255, HFR-256).
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe watch update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
             agent_name = _validate_agent_name_arg(args.agent)
         else:
             agent_name = watch.agent_name
+
+        # "Follow the bound Session's Agent" is a durable state (set by
+        # ``--clear-agent``, or by a reset rebind on a ``create_once`` definition),
+        # not merely a missing ``agent_name``. An explicit ``--agent`` is the user
+        # pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -8261,7 +8759,14 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future watch hook onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
@@ -8354,13 +8859,17 @@ def cmd_watch_update(args):
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(updated, runtime_entry)
-        _print_cli_payload(
-            "run_definition",
-            definition=watch_payload,
-            watch=watch_payload,
-            warnings=warnings,
-        )
+        _print_definition_payload(watch_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch update --help",
+                details={"watch_id": getattr(args, "watch_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1
@@ -10926,9 +11435,54 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=3) as response:
             parsed = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+    except TimeoutError:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    except urllib.error.HTTPError:
         return None
-    return parsed.get("event") if isinstance(parsed, dict) and parsed.get("ok") is True else None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+        return None
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("dispatch_pending") is True:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    return parsed.get("event") if parsed.get("ok") is True else None
+
+
+def _resolve_show_event_after_ambiguous_live_timeout(
+    session_id: str,
+    payload: dict,
+    *,
+    wait_seconds: float = 15.0,
+) -> dict | None:
+    """Wait for acceptance, then let the caller replay the same reservation."""
+    from core.show_session_events import ShowSessionEventStore
+    from storage import messages_service
+
+    event_id = payload.get("id")
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    deadline = time.monotonic() + wait_seconds
+    store = ShowSessionEventStore()
+    try:
+        while True:
+            event = store.get_event(session_id, event_id)
+            if event is None:
+                return None
+            message = event.get("message")
+            if (
+                isinstance(message, dict)
+                and message.get("type") != messages_service.PENDING_TYPE
+            ):
+                return event
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+    finally:
+        store.close()
 
 
 def _post_show_mark_to_live_ui(session_id: str, payload: dict) -> dict | None:
@@ -10946,6 +11500,26 @@ def _post_session_activity_to_live_ui(
     the DB in a separate process from the in-proc SSE broker, so without this the
     rename only shows after a page refresh. Silently no-ops when the UI isn't running
     or is unreachable — it must never affect the CLI command's own result."""
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {
+            "event": "session_updated",
+            "previous_scope_id": previous_scope_id,
+            "previous_visibility": previous_visibility,
+        },
+    )
+
+
+def _post_session_queue_updated_to_live_ui(session_id: str) -> None:
+    """Best-effort queue refresh for Web surfaces after an out-of-process CLI write."""
+
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {"event": "queue_updated"},
+    )
+
+
+def _post_session_cli_event_to_live_ui(session_id: str, payload: dict) -> None:
     from urllib.parse import quote
 
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
@@ -10959,12 +11533,7 @@ def _post_session_activity_to_live_ui(
     if not status.get("ui_pid") or not port:
         return
     url = f"http://{_ui_show_events_host(config)}:{int(port)}/api/sessions/{quote(session_id, safe='')}/cli-activity"
-    body = json.dumps(
-        {
-            "previous_scope_id": previous_scope_id,
-            "previous_visibility": previous_visibility,
-        }
-    ).encode("utf-8")
+    body = json.dumps(payload).encode("utf-8")
     http_request = urllib.request.Request(
         url,
         data=body,
@@ -11119,10 +11688,17 @@ def cmd_show_mark(args):
                 "body": body,
             },
         }
-        if args.anchor_selector:
-            payload["anchor"] = {"selector": args.anchor_selector}
-            if args.anchor_text:
-                payload["anchor"]["text"] = args.anchor_text
+        # Either flag alone is a valid invocation -- the parser advertises them
+        # independently -- and `--anchor-text` is the one the chat transcript reads
+        # to tell the user where a mark landed, so nesting it under the selector
+        # dropped exactly the copy that locates the mark for a human.
+        anchor = {
+            key: value
+            for key, value in (("selector", args.anchor_selector), ("text", args.anchor_text))
+            if value
+        }
+        if anchor:
+            payload["anchor"] = anchor
         event = _record_show_mark_event(session_id, payload, event_store)
         result = _show_page_result(
             page,
@@ -11356,10 +11932,9 @@ def cmd_show_unmark(args):
 
 def cmd_show_event(args):
     from core.show_pages import ShowPageStore
-    from core.show_session_events import ShowSessionEventStore
 
     page_store = ShowPageStore()
-    event_store = None
+    event_id_for_retry = None
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
@@ -11368,15 +11943,21 @@ def cmd_show_event(args):
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
+        event_id = payload.get("id")
+        payload["id"] = (
+            event_id.strip()
+            if isinstance(event_id, str) and event_id.strip()
+            else f"show_evt_{uuid4().hex[:16]}"
+        )
+        event_id_for_retry = payload["id"]
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
-            if args.dispatch:
-                from vibe.ui_server import record_local_show_event
+            # The local bridge handles both shapes: non-dispatch events are
+            # immediately visible, while any normalized dispatch:true event
+            # reserves and synchronously settles through the unified entry.
+            from vibe.ui_server import record_local_show_event
 
-                event = record_local_show_event(session_id, payload, dispatch_sync=True)
-            else:
-                event_store = ShowSessionEventStore()
-                event = event_store.append(session_id, payload)
+            event = record_local_show_event(session_id, payload)
         result = _show_page_result(
             page,
             message="Show event recorded.",
@@ -11398,12 +11979,15 @@ def cmd_show_event(args):
             print(f"  Message: {event.get('message_id') or 'none'}")
         return 0
     except Exception as exc:
+        if event_id_for_retry:
+            details = getattr(exc, "details", None)
+            retry_details = dict(details) if isinstance(details, dict) else {}
+            retry_details["event_id"] = event_id_for_retry
+            exc.details = retry_details
         _print_show_page_error(exc)
         return 1
     finally:
         page_store.close()
-        if event_store is not None:
-            event_store.close()
 
 
 def cmd_show_annotate(args):
@@ -12320,6 +12904,11 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument(
+        "--send-now",
+        action="store_true",
+        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+    )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
@@ -12405,17 +12994,21 @@ def build_parser():
 
     session_parser = subparsers.add_parser(
         "session",
-        help="List, inspect, and rename Agent sessions",
+        help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'update' renames a session's title. Archived sessions are soft-deleted "
-            "and never surfaced."
+            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'update' changes title, visibility, or scope. Archived sessions are "
+            "soft-deleted and never surfaced."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session --help",
         error_hint="Run one of the session subcommands below. Start with: vibe session list",
     )
-    session_subparsers = session_parser.add_subparsers(dest="session_command", metavar="{list,get,update}")
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_command",
+        metavar="{list,get,queue,send-now,update}",
+    )
     session_subparsers.required = True
     session_list_parser = session_subparsers.add_parser(
         "list",
@@ -12442,6 +13035,61 @@ def build_parser():
     )
     session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     _add_json_noop(session_get_parser)
+    session_send_now_parser = session_subparsers.add_parser(
+        "send-now",
+        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        description=(
+            "Apply the same Session-level Send now transition as Workbench without "
+            "adding another message. If the Session is busy, Avibe interrupts the "
+            "active turn and starts the durable FIFO queue head as a new turn. If "
+            "the Session is idle, Avibe starts the queue head directly."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session send-now --help",
+    )
+    session_send_now_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_json_noop(session_send_now_parser)
+    session_queue_parser = session_subparsers.add_parser(
+        "queue",
+        help="Inspect or remove queued Session messages",
+        description=(
+            "Inspect a Session's durable FIFO input queue or remove one queued "
+            "message by its stable ID. Queue removal never targets transcript "
+            "messages or reorders the remaining queue."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue --help",
+    )
+    session_queue_subparsers = session_queue_parser.add_subparsers(
+        dest="session_queue_command",
+        metavar="{list,remove}",
+    )
+    session_queue_subparsers.required = True
+    session_queue_list_parser = session_queue_subparsers.add_parser(
+        "list",
+        help="List a Session's queued messages in FIFO order",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue list --help",
+    )
+    session_queue_list_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_pagination_args(
+        session_queue_list_parser,
+        help_command="vibe session queue list --help",
+    )
+    _add_json_noop(session_queue_list_parser)
+    session_queue_remove_parser = session_queue_subparsers.add_parser(
+        "remove",
+        help="Remove one queued message by stable ID",
+        description=(
+            "Remove one message only when it is still queued in the named "
+            "Session. A stale or cross-Session ID returns removed=false."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue remove --help",
+    )
+    session_queue_remove_parser.add_argument("session_id", help="Target Agent Session ID")
+    session_queue_remove_parser.add_argument("message_id", help="Queued message ID")
+    _add_json_noop(session_queue_remove_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
         help="Update a session's title, visibility, or scope",
@@ -13591,6 +14239,14 @@ def main():
             sys.exit(cmd_session_list(args))
         if args.session_command == "get":
             sys.exit(cmd_session_get(args))
+        if args.session_command == "queue":
+            if args.session_queue_command == "list":
+                sys.exit(cmd_session_queue_list(args))
+            if args.session_queue_command == "remove":
+                sys.exit(cmd_session_queue_remove(args))
+            parser.error("session queue command is required")
+        if args.session_command == "send-now":
+            sys.exit(cmd_session_send_now(args))
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")

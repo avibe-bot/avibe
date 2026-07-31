@@ -52,6 +52,7 @@
     "enable": "启用",
     "disable": "禁用",
     "disabled": "已禁用",
+    "archived": "已归档",
     "default": "默认",
     "running": "运行中",
     "stopped": "已停止",
@@ -105,7 +106,12 @@
     "proxyUrl": "代理地址（可选）",
     "proxyUrlHint": "SOCKS5、SOCKS4、HTTP 或 HTTPS 代理。留空则回退到系统 SOCKS 代理探测，未配置时直连。",
     "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）",
-    "locked": "已锁定"
+    "duration": {
+      "seconds": "秒",
+      "minutes": "分",
+      "hours": "小时",
+      "days": "天"
+    }
   },
   "nav": {
     "dashboard": "控制台",
@@ -405,10 +411,10 @@
       "claudeBaseUrlReset": "恢复默认",
       "claudeSettingsConflictTitle": "旧的 Avibe Key 将被迁移",
       "claudeSettingsConflictBody": "保存会更新 {{path}} 里的 `{{var}}`，并清除旧的 Avibe 副本。",
-      "claudeInfoHint": "保存后会写入 Claude Code 的 `settings.json` env 配置。Claude 每次请求独立启动，无需重启 Avibe。",
-      "claudeSave": "保存 Claude 认证",
+      "claudeInfoHint": "保存会写入 Claude Code 的 `settings.json` env 配置，并刷新 Avibe 缓存的 Claude 会话。下一次请求会使用所选认证方式。",
+      "claudeSave": "保存并刷新 Claude",
       "claudeSaving": "保存中…",
-      "claudeSaveSuccess": "Claude 认证已保存",
+      "claudeSaveSuccess": "Claude 认证已保存，运行时已刷新",
       "claudeSaveFailed": "保存 Claude 认证失败",
       "claudeSavePartial": "API Key 已保存，但旧 Claude 账号凭据未清理干净：{{detail}}",
       "oauthAuthUrlLabel": "授权链接",
@@ -612,17 +618,32 @@
     "openSetup": "打开设置向导",
     "models": {
       "title": "模型",
-      "subtitle": "连一次来源，所有 Agent 统一供给；顺序即优先级，用完自动切换、恢复自动切回。",
+      "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
+      "status": {
+        "allHealthy": "全部正常",
+        "needsAction": "{{count}} 个模型需要处理",
+        "noIssues": "没有需要处理的模型"
+      },
       "statusPill": {
-        "ok": "一切正常 · {{count}} 个 Agent 已接入",
-        "degraded": "部分来源需留意 · {{count}} 个 Agent 已接入"
+        "ok": "一切正常 · {{count}} 个 Agent 已接入中枢",
+        "none": "还没有 Agent 接入中枢",
+        "engineDown": "模型服务未就绪 · 暂时无法供给",
+        "interrupted": "{{count}} 个 Agent 供给中断 · 需要处理",
+        "waiting": "{{count}} 个 Agent 正在等待来源恢复",
+        "needsAction": "{{source}} {{detail}}",
+        "cooldown": "{{source}} {{detail}} · 已自动切换，恢复后切回",
+        "andMore": "另有 {{count}} 个来源"
       },
       "sources": {
         "title": "来源",
-        "subtitle": "全局一份；拖动调整顺序 —— 顺序就是花钱顺序",
-        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。"
+        "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
+        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
+        "modelCount": "{{count}} 个型号",
+        "addModel": "添加型号",
+        "modelsEmpty": "还没有可供给的型号，请手动添加。",
+        "modelsEmptySubscription": "还没有发现可供给的型号。"
       },
       "source": {
         "nativeSupply": "原生供给",
@@ -631,21 +652,35 @@
         "customEndpoint": "自定义地址",
         "retryIn": "{{minutes}} 分后重试",
         "reorder": "拖动排序",
-        "oauthSignedOut": "CLI 订阅未登录",
-        "cooldown": {
-          "timeout": "连续超时"
-        }
+        "oauthSignedOut": "CLI 订阅未登录"
+      },
+      "current": "当前",
+      "order": {
+        "title": "来源顺序 · {{backend}}",
+        "subtitle": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。这里的顺序只影响 {{backend}}。",
+        "subtitleShort": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。只影响 {{backend}}。",
+        "groupEnabled": "启用 · {{count}} 个来源",
+        "groupDisabled": "未启用 · {{count}}",
+        "groupIneligible": "不适用 · {{count}}",
+        "customized": "已改为手动",
+        "restore": "恢复默认",
+        "enable": "启用",
+        "enableAria": "启用 {{name}}",
+        "disable": "取消启用",
+        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会失败。请从下方启用一个来源。",
+        "ineligibleUnknown": "不能供 {{backend}} 使用",
+        "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用"
       },
       "billing": {
         "monthly": "包月",
-        "metered": "按量",
-        "meteredWithSymbol": "按量 {{symbol}}"
+        "metered": "按量"
       },
       "state": {
-        "active": "使用中",
-        "standby": "备用",
-        "cooldown": "暂不可用",
-        "error": "不可用"
+        "active": "正常",
+        "standby": "正常",
+        "cooldown": "冷却中（自动恢复）",
+        "needs_action": "需要处理",
+        "error": "需要处理"
       },
       "usage": {
         "monthSpend": "本月 {{amount}}"
@@ -654,7 +689,7 @@
         "label": "供应："
       },
       "mode": {
-        "hub": "中枢 Hub",
+        "hub": "统一管理",
         "direct": "直连 Direct"
       },
       "errors": {
@@ -663,24 +698,92 @@
       "experimental": "实验",
       "agents": {
         "title": "Agent",
-        "subtitle": "每个 Agent 用什么模型、由谁供给",
+        "subtitle": "各自选用来源、各自排序；失败自动切到下一个",
         "backendSettings": "后端设置",
-        "modelMenu": "模型菜单",
         "connectHub": "接入中枢",
-        "menuComingSoon": "模型菜单即将上线（随下一个里程碑发布）",
         "modelCount": "{{count}} 个模型",
-        "multiSource": "多来源",
-        "multiSourceCustom": "多来源 · 含 {{count}} 个自定义",
-        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）",
-        "directNote": "仍在用 CLI 原生配置供给，未接入中枢"
+        "hubNoSupply": "已接入中枢 · 没有启用任何来源，下一个回合会失败",
+        "directNote": "仍在用 CLI 原生配置供给，未接入中枢",
+        "sourceOrder": "来源顺序",
+        "modelListCount": "{{count}} 个型号",
+        "enableManaged": "统一管理",
+        "emptyModels": "这个 Agent 还没有型号。",
+        "manageModels": "管理型号",
+        "menuKind": {
+          "fixed": "内置型号",
+          "open": "菜单开放"
+        },
+        "policy": {
+          "follow": "默认顺序",
+          "custom": "自定义"
+        },
+        "attribution": {
+          "interrupted": "{{names}} 供给中断",
+          "waiting": "{{names}} 正在等待来源恢复",
+          "unassigned": "{{models}} 暂无来源可供给"
+        }
+      },
+      "modelStatus": {
+        "ok": "正常",
+        "cooldown": "冷却中（自动恢复）",
+        "needsAction": "需要处理",
+        "checking": "正在确认",
+        "direct": "直连",
+        "noSource": "没有可用来源",
+        "blocked": "当前来源不可用",
+        "currentSwitched": "当前已自动换到 {{source}}",
+        "currentSource": "当前由 {{source}} 供给",
+        "source": "由 {{source}} 供给",
+        "unknown": "暂时无法确认",
+        "retry": "重试",
+        "runtime": "模型服务未就绪",
+        "runtimeAction": "去处理"
+      },
+      "emptySelection": {
+        "title": "尚未选择型号",
+        "body": "这个 Agent 现在没有当前型号，下一次运行前需要选择。",
+        "action": "选择型号"
+      },
+      "routes": {
+        "title": "供给方式",
+        "global": "跟随 {{backend}} 来源顺序",
+        "manual": "指定路由",
+        "liveSource": "当前由 {{source}} 供给 · {{model}}",
+        "globalPending": "正在恢复 {{backend}} 来源顺序…",
+        "globalActual": "按 {{backend}} 来源顺序，当前会由 {{source}} 供给。",
+        "globalUnavailable": "{{backend}} 来源顺序里暂时没有可用来源。",
+        "chooseTarget": "选择目标型号",
+        "searchPlaceholder": "搜索来源或型号",
+        "empty": "没有匹配的型号",
+        "availableCount": "{{count}} 个",
+        "manualBadge": "手动",
+        "addManual": "手动输入型号",
+        "multipleSources": "{{model}} · {{count}} 个来源可供给",
+        "orderDecidesSource": "实际来源由 {{backend}} 来源顺序决定",
+        "compatibility": "目标型号的思维链、缓存和工具语义可能与原型号不同。",
+        "openMenuGlobal": "开放型号按 {{backend}} 来源顺序供给，当前由 {{source}} 负责。",
+        "none": "暂无来源",
+        "expand": "展开供给方式"
+      },
+      "probe": {
+        "action": "试一下",
+        "running": "正在测试",
+        "nativeReady": "{{source}} 已就绪，可直接运行。",
+        "hubOk": "{{source}} 返回正常 · {{ms}} ms",
+        "failed": "{{source}} 未通过：{{detail}}",
+        "unknown": "来源未通过测试",
+        "error": "测试失败，请重试"
       },
       "recent": {
         "title": "最近切换",
         "viewAll": "查看全部",
         "collapse": "收起",
+        "loadMore": "加载更早的记录",
+        "loadingMore": "加载中…",
         "today": "今天",
         "yesterday": "昨天",
-        "empty": "暂无切换记录"
+        "empty": "暂无切换记录",
+        "deletedSource": "已删除"
       },
       "advanced": {
         "title": "高级",
@@ -731,11 +834,16 @@
           "xai": "xAI"
         }
       },
+      "field": {
+        "apiKeyPlaceholder": "sk-…",
+        "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
       "oauth": {
         "title": {
           "anthropic": "连接 Claude 订阅",
           "openai": "连接 ChatGPT 订阅",
-          "generic": "连接订阅"
+          "generic": "连接订阅",
+          "reauth": "重新登录「{{name}}」"
         },
         "starting": "正在准备…",
         "connected": "连接成功，已加入来源列表",
@@ -756,14 +864,14 @@
           "awaitingPaste": "等待授权 · {{time}} 后超时",
           "awaitingDevice": "等待完成 · 自动检测，无需回填",
           "verifying": "验证中…",
-          "success": "连接成功",
-          "finalizing": "正在创建来源…"
+          "success": "连接成功"
         },
         "error": {
           "start": "无法开始授权，请重试",
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建来源失败，请重试",
+          "finalizeReauth": "已重新登录，但这个来源还是不可用，请重试",
           "consent": "连接中枢托管订阅需先同意实验条款；请重新发起连接并在弹窗中开启「中枢托管」选项。"
         },
         "hubOption": {
@@ -787,20 +895,34 @@
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
         "connectFailed": "接入失败，请重试",
-        "refreshFailed": "刷新失败，请重试",
-        "connectedNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连"
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "supply": {
+        "degraded": "已接入中枢 · 有来源不可用，已自动切到下一个",
+        "waiting": "已接入中枢 · 来源都在冷却中，恢复前的回合会失败",
+        "interrupted": "已接入中枢 · 供给中断，下一个回合会失败",
+        "noSources": "已接入中枢 · 还没有启用任何来源，下一个回合会失败",
+        "nothingRunnable": "已接入中枢 · 已启用的来源当前都无法供给，下一个回合会失败"
+      },
+      "adoption": {
+        "enabled": "已自动加入 {{list}} 的来源顺序",
+        "entry": "{{name}}（第 {{position}} 位）",
+        "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
+        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用",
+        "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用"
       },
       "menus": {
         "done": "完成",
         "resetAll": "恢复全部默认",
         "saveFailed": "保存失败，请重试",
+        "enrolled": "已自动把「{{sources}}」加入 {{backend}} 的来源顺序，你选的模型才有来源可用",
         "mapping": {
           "title": "{{backend}} · 模型菜单",
-          "subtitle": "菜单固定：{{backend}} 只认这些内置 model ID；每个 ID 可改写为其他模型供给，只影响 {{backend}}。",
+          "subtitle": "{{backend}} 只认这些内置 model ID；每个 ID 可指定其他型号供给，只影响 {{backend}}。",
           "builtinCol": "内置 MODEL ID",
           "supplyCol": "实际供给",
-          "followNative": "跟随原生 · 按优先级供给",
-          "candidates": "来源按优先级 · {{sources}}",
+          "followNative": "跟随原生 · 按来源顺序供给",
+          "candidates": "来源顺序 · {{sources}}",
           "candidatesUnavailable": "暂无来源可供给此模型",
           "warning": "改写后思维链、缓存与工具语义与原生不完全等价",
           "resetRow": "恢复默认",
@@ -824,8 +946,8 @@
           }
         },
         "custom": {
-          "title": "添加自定义模型",
-          "subtitle": "补登来源清单里没有的模型，加入 OpenCode 菜单。",
+          "title": "手动添加型号",
+          "subtitle": "补登这个来源清单里没有的型号，可用于型号选择和指定路由。",
           "sourceLabel": "来源（它能供应这个模型）",
           "modelIdLabel": "模型 ID",
           "modelIdPlaceholder": "glm-5.2-air",
@@ -834,28 +956,28 @@
           "previewLabel": "OPENCODE 标识 · 自动生成",
           "previewEmpty": "填入模型 ID 后预览",
           "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
-          "add": "添加到菜单",
+          "add": "添加型号",
           "failed": "添加失败，请重试",
           "delete": "删除模型",
           "deleteConfirmTitle": "移除自定义模型？",
           "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
           "deleted": "已移除自定义模型",
           "deleteFailed": "移除失败，请重试",
-          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单/映射里取消后再删除。"
+          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单或指定路由里取消后再删除。"
         }
       },
       "supplyMode": {
         "title": "供给方式",
-        "currentHub": "当前：中枢 Hub",
+        "currentHub": "当前：统一管理",
         "currentDirect": "当前：直连 Direct",
-        "switchedHub": "已切换到中枢 Hub",
+        "switchedHub": "已切换到统一管理",
         "switchedDirect": "已切换到直连 Direct",
         "switchFailed": "切换失败，请重试",
         "hub": {
           "title": "中枢模式 · Hub",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、优先级、映射都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
+          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、来源顺序、指定路由都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
         },
         "direct": {
           "title": "直连模式 · Direct",
@@ -863,12 +985,11 @@
           "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
           "import": "导入中枢…"
         },
-        "switchedHubNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连",
-        "hubNoSupply": "已选中枢，但还没有可供给本后端的来源，当前仍走直连。去「模型」页添加或启用来源后即生效。"
+        "fixHint": "去「模型」页添加或启用来源即可恢复。"
       },
       "migration": {
         "title": "接入模型中枢",
-        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢，三个 Agent 共用一份来源和优先级。",
+        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢；导入后每个 Agent 各自选用来源、各自排序。",
         "empty": "没有检测到可迁移的原生配置。",
         "scanFailed": "扫描原生配置失败，请重试",
         "applyFailed": "导入失败，请重试",
@@ -898,6 +1019,8 @@
         "more": "更多操作",
         "rename": "重命名",
         "rediscover": "重新发现模型",
+        "reauth": "重新登录",
+        "replaceKey": "更换 API Key",
         "delete": "删除来源",
         "renameTitle": "重命名来源",
         "renameLabel": "显示名",
@@ -914,20 +1037,50 @@
         "deleteForceConfirm": "强制删除",
         "deleted": "已删除来源",
         "deleteFailed": "删除失败，请重试",
-        "priorityLabel": "优先级 {{position}}",
         "renameHint": "只改显示名，不动凭证",
         "rediscoverHint": "重新拉取这个来源能供给的模型",
-        "moveUp": "上移一位",
-        "moveUpHint": "更早被使用",
-        "moveUpHintAtTop": "已在第 1 位，不能再上移",
-        "moveDown": "下移一位",
-        "moveDownHint": "更晚被使用",
-        "moveDownHintAtBottom": "已在最后一位，不能再下移",
-        "deleteHint": "删除前会再确认一次"
+        "deleteHint": "删除前会再确认一次",
+        "reauthHint": "旧登录立即失效",
+        "replaceKeyHint": "填入新 Key，地址与显示名不变"
+      },
+      "repair": {
+        "reauth": "重新登录",
+        "replaceKey": "更换 Key",
+        "retest": "重试",
+        "reauthTitle": "重新登录「{{name}}」？",
+        "reauthBody": {
+          "immediate": "开始后旧的登录立即失效，用它登录的来源都会不可用。完成后只恢复这一个，其它的需要各自重新登录。",
+          "onFailure": "这次登录如果没成功，这个来源会需要处理，直到你重新登录。"
+        },
+        "reauthConfirm": "开始登录",
+        "replaceTitle": "更换「{{name}}」的 API Key",
+        "replaceBody": "填入新的 Key，其他设置不变。",
+        "replaceLabel": "新的 API Key",
+        "replaceSubmit": "更换",
+        "replacing": "更换中…",
+        "replaceFailed": "更换失败，请重试",
+        "forceTitle": "仍要更换？",
+        "forceConfirm": "强制更换",
+        "gapsTitle": "继续后这些 Agent 将没有来源可用：",
+        "gapsDone": "这些 Agent 现在没有来源可用：",
+        "gaps": "有 Agent 现在没有来源可用",
+        "repaired": "已恢复可用",
+        "refreshed": "已更新",
+        "unresolved": "仍然不可用",
+        "failed": "没能处理，请重试"
+      },
+      "dryRun": {
+        "action": "试跑一次",
+        "running": "试跑中…",
+        "ok": "{{name}} 可用 · {{ms}} ms",
+        "okNoLatency": "{{name}} 可用",
+        "failed": "{{name}} 没跑通 · {{detail}}",
+        "failedUnknown": "{{name}} 没跑通",
+        "error": "试跑没能进行，请重试"
       },
       "migrationBanner": {
         "title": "发现可导入中枢的原生配置",
-        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢，三个 Agent 共用一份来源和优先级。",
+        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢；导入后每个 Agent 各自选用来源、各自排序。",
         "import": "导入中枢",
         "dismiss": "忽略"
       }
@@ -978,6 +1131,46 @@
     "optimizeRoute": "优化线路",
     "optimizingRoute": "优化中...",
     "optimizeStarted": "第二条 Connector 正在评估更优线路"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
+      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
+      "consent_required": "需要先同意实验性中枢供给"
+    },
+    "oauth": {
+      "upstream_failed": "厂商没有完成这次登录，请重试",
+      "engine_unavailable": "中枢没有响应，请重试",
+      "submission_failed": "粘贴的内容没能提交，请重试",
+      "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
+      "binding_failed": "该账号已被另一来源使用",
+      "expired": "授权超时，请重新连接"
+    },
+    "probe": {
+      "native_cli_unavailable": "用不上 CLI 的登录",
+      "no_candidate": {
+        "waiting": "所有来源都在冷却",
+        "interrupted": "现在没有来源能提供这个模型"
+      }
+    },
+    "source": {
+      "cooldown": {
+        "network": "网络不通",
+        "timeout": "连续超时",
+        "rate_limited": "触发限流",
+        "quota_exhausted": "本周期额度用完",
+        "server_error": "上游服务异常"
+      },
+      "needs_action": {
+        "oauth_expired": "需要重新登录",
+        "balance_exhausted": "余额不足，需要充值",
+        "credential_revoked": "凭据已失效，需要重新填写",
+        "account_banned": "账号被限制使用"
+      },
+      "error": {
+        "unclassified": "未知错误，暂时不可用"
+      }
+    }
   },
   "accessBlocked": {
     "title": "无法在此地址打开控制台",
@@ -1405,6 +1598,7 @@
     },
     "search": {
       "roleYou": "你",
+      "includeArchived": "包含已归档",
       "roleAutomated": "自动触发",
       "roleAgent": "助手",
       "title": "搜索",
@@ -2326,6 +2520,28 @@
         "watch": "WATCH",
         "disabled": "已禁用"
       },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "schedule": "计划",
+        "nextRun": "下次运行",
+        "command": "命令",
+        "runtime": "运行时",
+        "running": "运行中",
+        "runningPid": "运行中 · pid {{pid}}",
+        "notRunning": "未运行",
+        "firedSessions": "触发的会话",
+        "noFiredSessions": "该窗口内未触发任何会话。",
+        "runsTitle": "最近运行",
+        "taskActiveLabel": "已启用",
+        "watchActiveLabel": "监视中",
+        "enabledToast": "已启用",
+        "disabledToast": "已禁用",
+        "openInHarness": "在 Harness 中打开",
+        "toggleFailed": "更新失败,请重试。"
+      },
       "search": {
         "placeholder": "查找会话或触发器…",
         "loading": "加载中…",
@@ -2339,7 +2555,8 @@
         "spawn": "启动",
         "trigger": "Task / Watch 触发",
         "background": "后台会话",
-        "callbackNote": "汇报关系只在详情面板"
+        "callbackNote": "汇报关系只在详情面板",
+        "showDisabled": "显示已禁用"
       },
       "status": {
         "active": "运行中",
@@ -2592,14 +2809,40 @@
   },
   "harness": {
     "title": "Harness",
-    "subtitle": "定时任务、Watch、Webhook 及其运行历史。",
-    "soon": "敬请期待",
+    "subtitle": "定时任务、Watch 及其运行历史。",
     "create": "创建",
     "searchPlaceholder": "搜索…",
+    "searchRunsPlaceholder": "搜索运行记录…",
     "statusFilter": {
       "all": "全部",
-      "enabled": "仅启用",
-      "disabled": "仅禁用"
+      "active": "进行中",
+      "waiting": "在等",
+      "running": "在跑",
+      "paused": "已暂停",
+      "finished": "已结束"
+    },
+    "runStatus": {
+      "all": "全部",
+      "queued": "排队中",
+      "running": "运行中",
+      "succeeded": "已成功",
+      "failed": "已失败",
+      "canceled": "已取消"
+    },
+    "runType": {
+      "agent_run": "Agent 运行",
+      "watch": "监听检查",
+      "scheduled": "定时任务",
+      "task_run": "任务运行",
+      "hook_send": "消息投递",
+      "webhook": "Webhook 触发",
+      "watch_runtime": "监听心跳",
+      "unknown": "运行"
+    },
+    "runTypeFilter": {
+      "label": "运行类型",
+      "default": "默认（隐藏心跳）",
+      "all": "全部类型"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2614,25 +2857,14 @@
     "emptyTasks": "暂无定时任务。让 Agent 帮你创建一个。",
     "emptyWatches": "没有正在运行的 Watch。让 Agent 帮你开启一个。",
     "emptyRuns": "暂无运行记录。任务或 Watch 触发后会出现在这里。",
-    "webhooksSoon": "Webhook 即将上线",
-    "webhooksSoonBody": "入站 HTTP 触发将在后续版本中落地。Tasks 和 Watches 已覆盖定时与事件驱动的运行。",
+    "noTaskMatches": "当前视图没有匹配的任务。请清除筛选或搜索。",
+    "noWatchMatches": "当前视图没有匹配的 Watch。请清除筛选或搜索。",
+    "noRunMatches": "当前视图没有匹配的运行记录。请清除筛选或搜索。",
     "unknownSchedule": "未知计划",
-    "schedule": {
-      "cron": "周期 · {{value}}",
-      "oneShot": "一次性 · {{value}}"
-    },
     "pageLabel": "第 {{page}} 页",
-    "runtime": {
-      "running": "运行中",
-      "paused": "已暂停",
-      "idle": "空闲",
-      "enabled": "已启用",
-      "disabled": "已禁用"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
       "runs": "Runs"
     },
     "detail": {
@@ -2648,7 +2880,7 @@
       "runtime": "运行时",
       "lastError": "上次错误",
       "type": "类型",
-      "definition": "定义",
+      "triggeredBy": "触发来源",
       "result": "结果",
       "error": "错误",
       "timing": "时间线",
@@ -2659,10 +2891,12 @@
       "openInAgents": "在 Agents 打开",
       "agentInherit": "继承默认 Agent",
       "sessionNone": "未绑定会话",
+      "sessionDeleted": "会话已删除",
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
-      "effort": "推理 {{value}}"
+      "effort": "推理 {{value}}",
+      "waitingSince": "开始等待"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",
@@ -2679,7 +2913,17 @@
       "disable": "禁用",
       "delete": "删除",
       "deleteConfirmTask": "确定要删除「{{name}}」吗?该任务将不再运行。",
-      "deleteConfirmWatch": "确定要删除「{{name}}」吗?Watch 会被立即停止。"
+      "deleteConfirmWatch": "确定要删除「{{name}}」吗?Watch 会被立即停止。",
+      "modeOnce": "一次性",
+      "modeForever": "持续",
+      "processAlive": "进程在跑",
+      "processDead": "进程已退出",
+      "runningFor": "已跑 {{duration}}",
+      "waitingFor": "已等 {{duration}}",
+      "lastEvent": "最近一次 {{when}}",
+      "nextIn": "还有 {{duration}}",
+      "nextAt": "下次 {{when}}",
+      "lastRun": "上次 {{when}}"
     },
     "createDialog": {
       "title": "和 Agent 对话来创建后台任务",
@@ -2695,11 +2939,55 @@
       "kindWatch": "等待器",
       "promptTask": "请帮我创建一个后台任务。我的需求是:[在这里描述,例如「每个工作日早上 9:30 总结昨天的 PR 评论」]。请确认参数后用 vibe task add 创建,并把任务挂到当前项目。",
       "promptWatch": "请帮我创建一个等待器(watch)。我希望监听:[在这里描述,例如「等 CI 工作流 #1234 跑完」]。条件满足后通知我。请确认参数后用 vibe watch add 创建。"
+    },
+    "run": {
+      "definitionDeleted": "（已删除）"
+    },
+    "lifecycle": {
+      "running": "运行中",
+      "waiting": "等待中",
+      "paused": "已暂停",
+      "finished": "已结束",
+      "normal": "正常结束",
+      "timeout": "已超时",
+      "error": "出错结束",
+      "unknown": "未知"
+    },
+    "kind": {
+      "task": "定时任务",
+      "watch": "Watch"
+    },
+    "when": {
+      "today": "今天 {{time}}",
+      "tomorrow": "明天 {{time}}",
+      "yesterday": "昨天 {{time}}",
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}}({{timezone}})"
+    },
+    "cron": {
+      "everyMinute": "每分钟",
+      "everyMinutes": "每 {{count}} 分钟",
+      "daily": "每天 {{time}}",
+      "weekly": "每周{{days}} {{time}}",
+      "weekday": {
+        "sun": "日",
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六"
+      },
+      "weekdaySeparator": "、"
     }
   },
   "chat": {
     "back": "返回",
     "untitled": "未命名会话",
+    "archived": {
+      "sendBlocked": "该会话已归档，无法发送消息。",
+      "editBlocked": "该会话已归档，无法再修改。"
+    },
     "selection": {
       "quote": "引用",
       "askInNew": "在新会话询问",
@@ -2709,6 +2997,9 @@
     "showPage": {
       "open": "可视化",
       "backToChat": "回聊天",
+      "launchMenu": "打开 Show Page",
+      "newWindow": "新窗口",
+      "newLink": "新链接",
       "annotate": {
         "toggle": "标注",
         "smart": "Smart",
@@ -2766,9 +3057,16 @@
       "scheduled": "定时任务",
       "watch": "Watch 监听",
       "webhook": "Webhook",
+      "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
       "agentFallback": "智能体"
+    },
+    "annotation": {
+      "titleUser": "用户批注",
+      "titleAgent": "Agent 批注",
+      "resolved": "已处理",
+      "screenshot": "截图"
     },
     "picker": {
       "agent": "Agent",
@@ -2791,6 +3089,7 @@
     "compose": {
       "placeholder": "输入消息…",
       "placeholderBusy": "Agent 处理中，输入将排队…",
+      "placeholderArchived": "会话已归档，仅可查看",
       "hint": "Enter 发送",
       "send": "发送",
       "queueSend": "排队发送",
@@ -2800,6 +3099,18 @@
       "voice": "语音输入",
       "stopRecording": "停止录音",
       "cancelRecording": "取消录音",
+      "voiceRetry": "重试转写",
+      "voiceCopyTranscript": "复制已恢复的文字",
+      "voiceTranscriptCopied": "已复制恢复的文字",
+      "voiceDiscard": "丢弃录音",
+      "voiceFailed": "语音转写失败，录音已保留，可以重试。",
+      "voiceTimedOut": "语音转写超时，录音已保留，可以重试。",
+      "voiceUnavailable": "语音转写暂时不可用。",
+      "voiceTooLarge": "这段录音太大，无法转写。",
+      "voiceEmpty": "这段录音中没有检测到语音。",
+      "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
+      "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
+      "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加"
     },
@@ -3129,6 +3440,7 @@
     },
     "request": {
       "provide": "填写",
+      "expired": "该会话已归档，此请求已失效。",
       "fulfilled": "已提供",
       "title": "Agent 需要一个密钥",
       "help": "提供这个值——它会进入保险库,绝不会进入聊天或模型。",

@@ -37,7 +37,7 @@ def _seed_scope(conn, native_id: str = "proj_test", display_name: str = "My Proj
     return scope_id
 
 
-def _seed_session(conn, scope_id, session_id, title=None, *, status="active") -> None:
+def _seed_session(conn, scope_id, session_id, title=None, *, status="active", visibility="foreground") -> None:
     now = messages_service._utc_now_iso()
     conn.execute(
         agent_sessions.insert().values(
@@ -49,6 +49,7 @@ def _seed_session(conn, scope_id, session_id, title=None, *, status="active") ->
             native_session_id="",
             title=title,
             status=status,
+            visibility=visibility,
             metadata_json="{}",
             created_at=now,
             updated_at=now,
@@ -178,6 +179,33 @@ def test_search_finds_harness_prompt_by_default(isolated_state):
     )
 
 
+def test_search_finds_annotation_by_default(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_annotation", "Show review")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_annotation",
+            "harness",
+            "The heading needs more contrast",
+            "2026-06-01T10:00:00Z",
+            msg_type=messages_service.ANNOTATION_TYPE,
+            source="harness",
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="contrast")
+
+    match = result["sessions"][0]["matches"][0]
+    assert (match["author"], match["source"], match["type"]) == (
+        "harness",
+        "harness",
+        messages_service.ANNOTATION_TYPE,
+    )
+
+
 def test_search_excludes_im_platform_rows(isolated_state):
     """A ``result`` row on a non-avibe (IM) platform is excluded for the default
     platform='avibe' search — search is Workbench-scoped."""
@@ -234,6 +262,93 @@ def test_search_excludes_archived_session(isolated_state):
 
     assert result["session_count"] == 1
     assert result["sessions"][0]["session_id"] == "ses_live"
+    # The default mode still reports the flag, always False.
+    assert all(s["archived"] is False for s in result["sessions"])
+
+
+def test_search_include_archived_returns_archived_session(isolated_state):
+    """``include_archived=True`` opts archived sessions back in and marks them.
+
+    Active groups keep ``archived: False`` so the client can style only the
+    archived ones; the flag is a pure additive read — nothing un-archives."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_live", "Live", status="active")
+        _seed_session(conn, scope_id, "ses_arch", "Archived", status="archived")
+        _insert_msg(conn, scope_id, "ses_live", "user", "deploy here", "2026-06-01T10:00:00Z")
+        _insert_msg(conn, scope_id, "ses_arch", "user", "deploy there", "2026-06-01T10:01:00Z")
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="deploy", include_archived=True)
+
+    assert result["session_count"] == 2
+    assert result["total"] == 2
+    # Newest match first: ses_arch (10:01) ranks ahead of ses_live (10:00).
+    assert {s["session_id"]: s["archived"] for s in result["sessions"]} == {
+        "ses_arch": True,
+        "ses_live": False,
+    }
+    # The archived session's row identity/snippet is fully populated, so a click
+    # can still deep-link into the read-only transcript.
+    archived = next(s for s in result["sessions"] if s["session_id"] == "ses_arch")
+    assert archived["title"] == "Archived"
+    assert archived["matches"][0]["snippet"]["match"] == "deploy"
+
+
+def test_search_include_archived_still_excludes_archived_project_scope(isolated_state):
+    """``include_archived`` lifts the SESSION filter only.
+
+    Project archive (``scope_settings.enabled = 0``) is reversible and has its own
+    restore flow, so its sessions stay out of search either way."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        live_scope = _seed_scope(conn, native_id="proj_live", display_name="Live Project")
+        _seed_session(conn, live_scope, "ses_live", "Live", status="active")
+        _insert_msg(conn, live_scope, "ses_live", "user", "deploy here", "2026-06-01T10:00:00Z")
+        arch_scope = _seed_scope(conn, native_id="proj_arch", display_name="Archived Project")
+        # Both an active and an archived session under the disabled scope.
+        _seed_session(conn, arch_scope, "ses_arch_proj", "Under Archived", status="active")
+        _insert_msg(conn, arch_scope, "ses_arch_proj", "user", "deploy there", "2026-06-01T10:01:00Z")
+        _seed_session(conn, arch_scope, "ses_arch_both", "Archived Under Archived", status="archived")
+        _insert_msg(conn, arch_scope, "ses_arch_both", "user", "deploy elsewhere", "2026-06-01T10:02:00Z")
+        now = messages_service._utc_now_iso()
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=arch_scope,
+                enabled=0,
+                settings_version=1,
+                settings_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="deploy", include_archived=True)
+
+    assert result["session_count"] == 1
+    assert result["sessions"][0]["session_id"] == "ses_live"
+
+
+def test_search_include_archived_still_excludes_background_visibility(isolated_state):
+    """Background sessions stay internal — ``include_archived`` does not reveal
+    them, archived or not."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_fg", "Foreground", status="archived", visibility="foreground")
+        _seed_session(conn, scope_id, "ses_bg", "Background", status="active", visibility="background")
+        _seed_session(conn, scope_id, "ses_bg_arch", "Background Archived", status="archived", visibility="background")
+        _insert_msg(conn, scope_id, "ses_fg", "user", "deploy one", "2026-06-01T10:00:00Z")
+        _insert_msg(conn, scope_id, "ses_bg", "user", "deploy two", "2026-06-01T10:01:00Z")
+        _insert_msg(conn, scope_id, "ses_bg_arch", "user", "deploy three", "2026-06-01T10:02:00Z")
+
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query="deploy", include_archived=True)
+
+    assert [s["session_id"] for s in result["sessions"]] == ["ses_fg"]
+    assert result["sessions"][0]["archived"] is True
 
 
 def test_search_excludes_archived_project_scope(isolated_state):
@@ -271,6 +386,7 @@ def test_search_excludes_archived_project_scope(isolated_state):
 
     assert result["session_count"] == 1
     assert result["sessions"][0]["session_id"] == "ses_live"
+    assert result["sessions"][0]["archived"] is False
 
 
 def test_search_treats_like_metachars_literally(isolated_state):

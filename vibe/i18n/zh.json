@@ -12,6 +12,13 @@
     "title": "复刻 {title}",
     "titleUntitled": "复刻"
   },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
+      "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。",
+      "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。"
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
@@ -30,6 +37,21 @@
       "messagesLabel": "已合并的 callback 消息：",
       "latestLabel": "后续又触发 {additional} 次后的最新 callback 消息：",
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
+    },
+    "run": {
+      "interrupted": {
+        "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
+        "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
+        "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
+        "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时被刷新，因此被中断，通常发生在刚保存 Agent 设置之后。这次 run 本身没有问题，请重新触发。",
+        "orphaned": "[Avibe Harness] 本次 run 一直标记为 running，但已经没有任何执行在推进它，通常是服务在它执行途中重启导致的。它此前已经发出的输出仍会保留在这次 run 上。如果这项工作仍需完成，请重新运行。",
+        "transportUnavailable": "[Avibe Harness] 本次 run 一直排队等待，因为它对应的聊天平台始终没有重新连接，消息也就无法送达。请在设置中检查该平台连接，然后重新触发。",
+        "queueHoldExpired": "[Avibe Harness] 本次 run 在所属 session 的 turn 队列后面排队过久，始终没有开始执行。请检查该 session 是否有卡住的 turn，然后重新触发这次 run。"
+      },
+      "fallbackResult": {
+        "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
+        "failed": "本次 run 在产出结果前失败，因此没有结果。"
+      }
     }
   },
   "common": {
@@ -81,6 +103,7 @@
     }
   },
   "error": {
+    "sessionArchived": "该会话已归档，无法再修改。",
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",
@@ -125,7 +148,8 @@
     "opencodeQuestionToolDisabled": "OpenCode 发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeQuestionToolDisabledRestored": "恢复中的 OpenCode 会话发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
-    "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}"
+    "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
+    "opencodeBackendError": "OpenCode 错误：{error}"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",
@@ -315,7 +339,10 @@
       "directMessage": "私信"
     },
     "new": {
-      "started": "已开启新的会话。你下一条消息会从全新对话开始。"
+      "started": "已开启新的会话。你下一条消息会从全新对话开始。",
+      "pausedReason": "绑定的 Agent 会话已被 /new 清除",
+      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
+      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
     },
     "clear": {
       "noSessions": "没有要清除的活动会话。\n会话状态已重置。",
@@ -369,6 +396,7 @@
       "claudeMethodFallback": "如果当前平台不支持按钮，请执行 `/setup claude claudeai` 或 `/setup claude console`。",
       "resetPrompt": "{backend} 看起来已经掉线了。请点击下面的按钮重新发起 OAuth 登录。",
       "resetPromptPlain": "{backend} 看起来已经掉线了。请发送 `/setup {backend}` 重新发起 OAuth 登录。",
+      "apiKeyRecoveryPrompt": "{backend} 拒绝了当前配置的 API Key。请在设置中检查 API Key 和 Base URL，保存后重试。",
       "manualFallback": "如果当前平台不支持按钮，请执行 `/setup {backend}`。",
       "codexInstructions": "Codex 登录修复已开始。\n\n1. 在浏览器打开这个地址：\n{url}\n\n2. 输入这个一次性验证码：\n`{code}`\n\nBot 会继续等待，并在登录完成后回消息确认。",
       "claudeInstructions": "Claude 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器回调页面会显示最终的 `authorizationCode#state`，请直接把它发回当前聊天。",
@@ -511,7 +539,7 @@
       "flow_not_found": "未找到授权流程。",
       "flow_expired": "授权流程已过期。",
       "discovery_failed": "无法验证或发现此来源。",
-      "invalid_priority_order": "优先级必须完整且不重复地包含所有来源。",
+      "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
       "mapping_target_unavailable": "所选模型无法用于此后端。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
       "engine_down": "本地模型中枢运行时不可用。",
@@ -528,7 +556,11 @@
       "switch": "{from_source}：{reason} -> 已切到 {to_source}",
       "cooldown": "{from_source}：{reason}，暂时冷却",
       "recover": "{to_source}：已恢复可用",
-      "status": "{from_source}：{reason}",
+      "skip": "{from_source}：{reason}，已跳过",
+      "mapping_applied": "{from_source} -> {model}：已应用模型映射",
+      "channel_switch": "{from_source}：供给通道已切换",
+      "needs_action": "{from_source}：{reason}，需要处理",
+      "supply_interrupted": "{model}：{reason}，模型供给已中断",
       "reason": {
         "quota_exhausted": "额度用完",
         "rate_limited": "请求受限",
@@ -536,8 +568,26 @@
         "network": "网络暂不可用",
         "recovery": "已恢复",
         "manual": "手动调整",
-        "mapping": "已应用模型映射"
+        "mapping": "已应用模型映射",
+        "credential_expired": "凭证已过期",
+        "credential_revoked": "凭证已撤销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账户不可用",
+        "permission_denied": "请求权限被拒绝",
+        "unclassified_error": "来源发生未分类错误",
+        "no_enabled_source": "没有已启用的来源",
+        "no_eligible_source": "没有适用的来源",
+        "model_unsupported": "没有来源支持此模型"
       }
+    },
+    "launch": {
+      "retry": "下一回合已自动换线，直接重试即可",
+      "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
+      "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
+      "native_cli_unavailable": "当前进程无法使用 CLI 登录",
+      "no_enabled_source": "模型 {model} 没有已启用的来源。请前往 Models 配置。",
+      "no_eligible_source": "模型 {model} 没有适用于 {backend} 的来源。请前往 Models 配置。",
+      "model_unsupported": "没有来源支持模型 {model}。请前往 Models 配置。"
     }
   },
   "remote_access": {

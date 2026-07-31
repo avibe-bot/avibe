@@ -14,18 +14,40 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import paths
-from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
+from core.backend_failure import is_backend_failure_notification
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
+from vibe.message_types import spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 # ``silent`` is the invisible completion marker (messages_service.SILENT_TYPE): a turn
 # that finished with no user-visible reply is still TERMINAL, so a fork created after
 # it must not trim/roll back the completed turn as if it were still running.
-TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error", "silent"}
-SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
+TERMINAL_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "terminal"
+}
+SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] in {"activity", "terminal"}
+}
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
+_CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_FORK_ANCHOR_TYPES = tuple(
+    dict.fromkeys(
+        (
+            *types_with("transcript"),
+            *(
+                message_type
+                for message_type in types_with("activityRole")
+                if message_type in TERMINAL_AGENT_OUTPUT_TYPES
+            ),
+        )
+    )
+)
 
 
 class SessionForkError(ValueError):
@@ -134,6 +156,7 @@ def reserve_forked_session(
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
+    from storage.session_reclaim import reconcile_explicit_overrides
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -239,6 +262,38 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
+            # The copied metadata carries the SOURCE session's explicit-override
+            # marker. Whether that claim is still TRUE depends on whether this fork
+            # copied the column or replaced it, and the two cases are opposites:
+            #
+            # - OMITTED (``model is None``): ``target_model`` above is
+            #   ``row["model"]`` -- the column is copied verbatim, so the source's
+            #   marker is a true claim about the value the fork now holds and must
+            #   be PRESERVED. Dropping it converts a fork of an explicit-null
+            #   session into an ordinary inherited-null one, and the next Agent
+            #   default change silently hands the fork settings the source had
+            #   deliberately pinned away.
+            # - SUPPLIED: the fork owns the setting. It is an explicit pin only
+            #   when the resolved value is empty (pin nothing); a concrete value
+            #   needs no marker, because dispatch reads a non-null column anyway.
+            #
+            # Only the supplied fields are reconciled. This is the inverse of the
+            # first version of this guard, which cleared exactly the copied fields.
+            resolved_forked_settings = {"model": target_model, "reasoning_effort": target_effort}
+            supplied_settings = [
+                name
+                for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+                if value is not None
+            ]
+            metadata = reconcile_explicit_overrides(
+                metadata,
+                cleared=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is not None
+                ],
+                explicit=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is None
+                ],
+            )
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,
@@ -434,10 +489,14 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         messages.c.type.in_(
                             [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
                         ),
-                        and_(
-                            messages.c.type == "notify",
-                            func.json_extract(messages.c.metadata_json, "$.event")
-                            == BACKEND_FAILURE_EVENT,
+                        *(
+                            and_(
+                                messages.c.type == message_type,
+                                func.json_extract(messages.c.metadata_json, "$.event").in_(
+                                    spec_for(message_type)["terminalWhenEvents"]
+                                ),
+                            )
+                            for message_type in _CONDITIONAL_TERMINAL_TYPES
                         ),
                     ),
                     after_anchor,
@@ -540,23 +599,19 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 
 
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
-    from sqlalchemy import func, or_, select
+    from sqlalchemy import select
 
-    from storage.messages_service import SILENT_TYPE, TRANSCRIPT_TYPES
     from storage.models import messages
 
     row = conn.execute(
         select(messages.c.id, messages.c.author, messages.c.type)
         .where(
             messages.c.session_id == source_session_id,
-            or_(
-                # Include the invisible ``silent`` completion marker so a turn that
-                # finished silently is the anchor (a terminal, NOT a running input),
-                # otherwise the anchor falls back to the input row and the fork treats
-                # the completed turn as still running and trims/rolls it back.
-                messages.c.type.in_([*TRANSCRIPT_TYPES, SILENT_TYPE]),
-                func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
-            ),
+            # Include the invisible ``silent`` completion marker so a turn that
+            # finished silently is the anchor (a terminal, NOT a running input),
+            # otherwise the anchor falls back to the input row and the fork treats
+            # the completed turn as still running and trims/rolls it back.
+            messages.c.type.in_(_FORK_ANCHOR_TYPES),
         )
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
         .limit(1)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from importlib import import_module
 import json
 import re
 import sqlite3
@@ -8,6 +9,10 @@ import threading
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.script import ScriptDirectory
+from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.schema import CreateIndex
 
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
@@ -17,15 +22,176 @@ from storage import migrations
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
+from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260724_0034"
+HEAD_REVISION = "20260727_0038"
+MESSAGE_PARTIAL_INDEX_PREDICATES = {
+    "ix_messages_inbox_activity": (
+        "session_id is not null and type not in "
+        "('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
+    ),
+    "ix_messages_inbox_agent_reply": (
+        "session_id is not null and type in ('result', 'notify', 'error')"
+    ),
+    "ix_messages_inbox_user_send": (
+        "session_id is not null and ((author = 'user' and type = 'user') "
+        "or (author = 'harness' and type = 'harness') "
+        "or (author = 'harness' and type = 'annotation'))"
+    ),
+}
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
     assert row is not None
     return str(row[0] or "")
+
+
+@pytest.mark.parametrize(
+    ("index_name", "expected_predicate"),
+    tuple(MESSAGE_PARTIAL_INDEX_PREDICATES.items()),
+)
+def test_message_partial_index_ddl_matches_catalog_contract(
+    index_name: str,
+    expected_predicate: str,
+) -> None:
+    index = next(index for index in metadata.tables["messages"].indexes if index.name == index_name)
+
+    catalog_predicate = build_partial_index_predicate(index_name)
+    ddl = str(CreateIndex(index).compile(dialect=sqlite_dialect()))
+
+    assert catalog_predicate == expected_predicate
+    assert ddl == (
+        f"CREATE INDEX {index_name} ON messages "
+        f"(platform, session_id, created_at desc, id desc) WHERE {expected_predicate}"
+    )
+
+
+def test_show_annotation_migration_predicate_matches_catalog() -> None:
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+
+    assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_user_send"
+    )
+
+
+class _Pre335Cursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        normalized = " ".join(str(sql).upper().split())
+        if " DROP COLUMN " in f" {normalized} ":
+            raise sqlite3.OperationalError("near \"DROP\": syntax error")
+        return super().execute(sql, parameters)
+
+
+class _Pre335Connection(sqlite3.Connection):
+    def cursor(self, factory=None):
+        return super().cursor(factory or _Pre335Cursor)
+
+
+def test_alembic_script_directory_has_exactly_one_head() -> None:
+    heads = ScriptDirectory.from_config(migrations.alembic_config()).get_heads()
+
+    assert len(heads) == 1
+    assert heads[0] == HEAD_REVISION
+
+
+def test_upgrade_keeps_historical_conflated_callback_rows_sent(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-30T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        def insert_run(
+            run_id: str,
+            *,
+            source_kind: str,
+            parent_run_id: str | None = None,
+            session_id: str | None = None,
+            callback_session_id: str | None = None,
+            callback_status: str | None = None,
+            callback_run_id: str | None = None,
+        ) -> None:
+            conn.execute(
+                """
+                insert into agent_runs (
+                    id, run_type, status, source_kind, parent_run_id, session_id,
+                    callback_session_id, callback_status, callback_error,
+                    callback_run_id, callback_completed_at, cancel_requested,
+                    created_at, completed_at, updated_at, metadata_json
+                ) values (
+                    ?, 'agent_run', 'succeeded', ?, ?, ?, ?, ?, 'legacy error',
+                    ?, ?, 0, ?, ?, ?, '{}'
+                )
+                """,
+                (
+                    run_id,
+                    source_kind,
+                    parent_run_id,
+                    session_id,
+                    callback_session_id,
+                    callback_status,
+                    callback_run_id,
+                    now if callback_status else None,
+                    now,
+                    now if callback_status else None,
+                    now,
+                ),
+            )
+
+        insert_run(
+            "historical_parent",
+            source_kind="agent",
+            callback_session_id="ses_caller",
+            callback_status="sent",
+            callback_run_id="directed_child",
+        )
+        insert_run(
+            "directed_child",
+            source_kind="agent",
+            parent_run_id="historical_parent",
+            session_id="ses_caller",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        parent = conn.execute(
+            """
+            select callback_status, callback_error, callback_run_id,
+                   callback_completed_at
+            from agent_runs
+            where id = 'historical_parent'
+            """
+        ).fetchone()
+        child = conn.execute(
+            """
+            select source_kind, parent_run_id, session_id
+            from agent_runs
+            where id = 'directed_child'
+            """
+        ).fetchone()
+        callback_count = conn.execute(
+            "select count(*) from agent_runs where source_kind = 'callback'"
+        ).fetchone()
+        version = conn.execute(
+            "select version_num from alembic_version"
+        ).fetchone()
+
+    assert parent == (
+        "sent",
+        "legacy error",
+        "directed_child",
+        now,
+    )
+    assert child == ("agent", "historical_parent", "ses_caller")
+    assert callback_count == (0,)
+    assert version == (HEAD_REVISION,)
 
 
 def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
@@ -134,6 +300,10 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "width_px" in media_columns  # 20260604_0015: zero-shift image box
         assert "height_px" in media_columns
         assert media_scope_not_null == 0  # standalone sessions can own uploads
+        show_event_columns = {
+            row[1]: row for row in conn.execute("pragma table_info(show_session_events)")
+        }
+        assert "dispatch_state" not in show_event_columns
         background_columns = {
             row[1]
             for row in conn.execute(
@@ -143,6 +313,389 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_show_dispatch_state_removal_migration_preserves_existing_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0036")
+    now = "2026-07-26T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        for message_id, author, message_type in (
+            ("msg_upgrade_accepted", "user", "pending"),
+            ("msg_upgrade_retryable", "user", "pending"),
+            ("msg_upgrade_visible", "user", "user"),
+            ("msg_upgrade_observed", "user", "user"),
+            ("msg_upgrade_chat", "user", "pending"),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, '{}', '{}', ?, ?)
+                """,
+                (message_id, author, message_type, now, now),
+            )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_legacy', 'ses_legacy', 'human.annotation.created',
+                'human', 'default', '{}', '{}', 'Legacy annotation', null,
+                '{"state":"in_flight","owner":"1:old"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_accepted', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}',
+                '{"dispatch":true}',
+                'Accepted annotation', 'msg_upgrade_accepted',
+                '{"state":"accepted"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_retryable', 'ses_upgrade',
+                'human.intent.submitted', 'human', 'default', '{}',
+                '{"dispatch":true}',
+                'Retryable intent', 'msg_upgrade_retryable',
+                '{"state":"failed"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_visible', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}',
+                '{"dispatch":true}',
+                'Visible annotation', 'msg_upgrade_visible',
+                '{"state":"failed"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_observed', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'Observed annotation', 'msg_upgrade_observed',
+                '{"state":"accepted"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.commit()
+
+    real_connect = sqlite3.connect
+
+    def legacy_connect(*args, **kwargs):
+        kwargs["factory"] = _Pre335Connection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", legacy_connect)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", legacy_connect)
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("pragma table_info(show_session_events)")
+        }
+        legacy = conn.execute(
+            "select id, transcript_text from show_session_events "
+            "where id = 'show_evt_legacy'"
+        ).fetchone()
+        upgraded_messages = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, author, type, source, author_name, author_id "
+                "from messages "
+                "where id in ("
+                "'msg_upgrade_accepted', "
+                "'msg_upgrade_retryable', "
+                "'msg_upgrade_visible', "
+                "'msg_upgrade_observed', "
+                "'msg_upgrade_chat'"
+                ")"
+            ).fetchall()
+        }
+        for message_id, message_type, event_id in (
+            ("msg_pending_show", "pending", "show_evt_pending"),
+            ("msg_accepted_show", "harness", "show_evt_accepted"),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, source, author_name, author_id,
+                    content_json,
+                    metadata_json, created_at, updated_at
+                ) values (
+                    ?, 'avibe', 'harness', ?, 'harness', 'show_annotation',
+                    ?, '{}', '{}', ?, ?
+                )
+                """,
+                (message_id, message_type, event_id, now, now),
+            )
+        for event_id, message_id in (
+            ("show_evt_pending", "msg_pending_show"),
+            ("show_evt_accepted", "msg_accepted_show"),
+        ):
+            conn.execute(
+                """
+                insert into show_session_events (
+                    id, session_id, event_type, actor, scope, anchor_json,
+                    payload_json, transcript_text, message_id, created_at
+                ) values (
+                    ?, 'ses_downgrade', 'human.annotation.created',
+                    'human', 'default', '{}', '{"dispatch":true}',
+                    'Downgrade annotation', ?, ?
+                )
+                """,
+                (event_id, message_id, now),
+            )
+        conn.commit()
+
+    assert "dispatch_state" not in columns
+    assert legacy == ("show_evt_legacy", "Legacy annotation")
+    assert upgraded_messages["msg_upgrade_accepted"] == (
+        "harness",
+        "harness",
+        "harness",
+        "show_annotation",
+        "show_evt_upgrade_accepted",
+    )
+    assert upgraded_messages["msg_upgrade_retryable"] == (
+        "harness",
+        "pending",
+        "harness",
+        "show_intent",
+        "show_evt_upgrade_retryable",
+    )
+    assert upgraded_messages["msg_upgrade_visible"] == (
+        "harness",
+        "harness",
+        "harness",
+        "show_annotation",
+        "show_evt_upgrade_visible",
+    )
+    assert upgraded_messages["msg_upgrade_observed"] == (
+        "user",
+        "user",
+        None,
+        None,
+        None,
+    )
+    assert upgraded_messages["msg_upgrade_chat"] == (
+        "user",
+        "pending",
+        None,
+        None,
+        None,
+    )
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0036")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded = dict(
+            conn.execute(
+                "select id, dispatch_state from show_session_events "
+                "where id in ('show_evt_legacy', 'show_evt_pending', 'show_evt_accepted')"
+            ).fetchall()
+        )
+        downgraded_messages = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, author, type, source, author_name, author_id "
+                "from messages "
+                "where id in ('msg_pending_show', 'msg_accepted_show')"
+            ).fetchall()
+        }
+
+    assert json.loads(downgraded["show_evt_legacy"]) == {"state": "accepted"}
+    assert json.loads(downgraded["show_evt_accepted"]) == {"state": "accepted"}
+    assert json.loads(downgraded["show_evt_pending"]) == {"state": "none"}
+    assert downgraded_messages["msg_pending_show"] == (
+        "user",
+        "pending",
+        None,
+        None,
+        None,
+    )
+    assert downgraded_messages["msg_accepted_show"] == (
+        "user",
+        "user",
+        None,
+        None,
+        None,
+    )
+
+
+def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0035")
+
+    with sqlite3.connect(db_path) as conn:
+        assert "retired_at" not in {
+            row[1] for row in conn.execute("pragma table_info(run_definitions)")
+        }
+        conn.execute(
+            """
+            insert into run_definitions (
+                id, definition_type, mode, enabled, last_finished_at,
+                created_at, updated_at, metadata_json
+            ) values (
+                'legacy-paused-watch', 'watch', 'forever', 0,
+                '2026-07-26T00:00:00+00:00',
+                '2026-07-26T00:00:00+00:00',
+                '2026-07-26T00:00:00+00:00', '{}'
+            )
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("pragma table_info(run_definitions)")
+        }
+        row = conn.execute(
+            "select last_finished_at, retired_at from run_definitions where id = ?",
+            ("legacy-paused-watch",),
+        ).fetchone()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert "retired_at" in columns
+    assert row == ("2026-07-26T00:00:00+00:00", None)
+    assert version == (HEAD_REVISION,)
+
+
+def test_show_annotation_migration_changes_only_the_user_send_index(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-27T00:00:00Z"
+    legacy_payloads = [
+        ("agent", "assistant", "assistant.mark.created")
+        for _ in range(5)
+    ]
+    legacy_payloads.extend(
+        [
+            ("agent", "assistant", "assistant.mark.updated"),
+            ("agent", "assistant", "assistant.mark.resolved"),
+        ]
+    )
+    legacy_payloads.extend(
+        ("harness", "harness", "human.annotation.created")
+        for _ in range(10)
+    )
+    legacy_payloads.extend(
+        ("user", "user", "human.annotation.created")
+        for _ in range(10)
+    )
+    assert len(legacy_payloads) == 27
+
+    with sqlite3.connect(db_path) as conn:
+        for index, (author, message_type, show_event_type) in enumerate(
+            legacy_payloads
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_text, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"legacy_message_{index:02d}",
+                    author,
+                    message_type,
+                    f"legacy text {index}",
+                    json.dumps({"ordinal": index}, separators=(",", ":")),
+                    json.dumps(
+                        {
+                            "source": "show_page",
+                            "show_event_type": show_event_type,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        original_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        original_index = _index_sql(conn, "ix_messages_inbox_user_send")
+
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+    assert original_index.endswith(migration.DOWNGRADE_USER_SEND_PREDICATE)
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        upgraded_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert upgraded_rows == original_rows
+    assert user_send_index.endswith(
+        MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"]
+    )
+    assert "(platform, session_id, created_at desc, id desc)" in user_send_index
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert downgraded_rows == original_rows
+    assert user_send_index.endswith(migration.DOWNGRADE_USER_SEND_PREDICATE)
+    assert "(platform, session_id, created_at desc, id desc)" in user_send_index
+    assert version == ("20260726_0037",)
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

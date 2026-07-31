@@ -282,10 +282,22 @@ task definition. Use `--sync` only when the terminal should wait for completion.
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
+
+`--send-now` is valid only with an existing `--session-id`. Avibe first
+persists the Agent Run in that Session's queue, then applies the same operation
+as Workbench's **Send now** control: interrupt the active turn through the
+shared Stop path and dispatch the FIFO queue head as a new turn. It does not
+inject input into the same backend-native turn or move the new message ahead of
+older queued work. If interruption is refused, the active turn keeps running
+and the Agent Run remains queued. The accepted command payload names the
+`delivery_intent`; `vibe runs show <run-id>` exposes the durable
+`metadata.delivery_outcome` (`interrupted`, `flushed`, `deferred`, or
+`stop_failed`) after the controller consumes it.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new
@@ -342,6 +354,15 @@ vibe watch remove <watch-id>
 include `pagination.next_command` when more rows exist. Successful one-shot
 definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.
+Task and watch commands use `definition` for one record and `definitions` for
+lists; they do not duplicate those records under command-specific aliases.
+Both list and show read the same Harness projection as the Workbench:
+`lifecycle_state`, `lifecycle_detail`, `next_run_at`, `waiting_since`, and
+`running_since`; watch rows also include `process_alive`. For watches,
+`process_alive: null` means no waiter runtime has ever been observed, while
+`false` means an observed waiter has exited. The older `state` and task
+`last_status` fields remain compatibility-only display fields and do not define
+the lifecycle.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,

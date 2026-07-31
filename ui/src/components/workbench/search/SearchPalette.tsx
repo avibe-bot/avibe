@@ -7,6 +7,7 @@ import { AlertCircle, Loader2, Search } from 'lucide-react';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
+import { Switch } from '../../ui/switch';
 import { AppSearchResultSection } from './AppSearchResults';
 import { SearchResultGroup } from './SearchResultGroup';
 import { useAppSearchResults, useOpenSearchApp } from './useAppSearch';
@@ -39,7 +40,11 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const { results, loading, error } = useMessageSearch(query);
+  // Opt-in only, and reset on every open (see onOpenAutoFocus) — the palette
+  // already resets the query there, and a sticky archived filter would quietly
+  // change what ⌘K returns by default.
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const { results, loading, error } = useMessageSearch(query, { includeArchived });
   const { results: appResults, loading: appsLoading } = useAppSearchResults(query, open);
   const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -136,6 +141,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             e.preventDefault();
             setQuery('');
             setSelectedKey(null);
+            setIncludeArchived(false);
             inputRef.current?.focus();
           }}
           aria-describedby={undefined}
@@ -214,6 +220,16 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             <FooterHint keyLabel="↑↓" label={t('workbench.search.kbdNavigate')} />
             <FooterHint keyLabel="↵" label={t('workbench.search.kbdOpen')} />
             <FooterHint keyLabel={t('workbench.search.kbdEsc')} label={t('workbench.search.kbdClose')} />
+            {/* Archived opt-in — off on every open; archived hits open read-only. */}
+            <label className="flex items-center gap-1.5 text-[11px] text-muted">
+              <Switch
+                checked={includeArchived}
+                onCheckedChange={setIncludeArchived}
+                label={t('workbench.search.includeArchived')}
+                size="sm"
+              />
+              {t('workbench.search.includeArchived')}
+            </label>
             <span className="flex-1" />
             <span className="truncate text-[11px] text-muted">{t('workbench.search.footerNote')}</span>
           </div>

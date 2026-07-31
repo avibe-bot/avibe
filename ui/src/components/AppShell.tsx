@@ -4,7 +4,7 @@ import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Ha
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
+import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -18,6 +18,7 @@ import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerContext';
 import { DockProvider } from '../context/DockContext';
+import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
@@ -276,6 +277,7 @@ export const AppShell: React.FC = () => {
   }, [location.pathname]);
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
+  const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
 
   if (location.pathname === '/setup') {
@@ -312,10 +314,8 @@ export const AppShell: React.FC = () => {
         { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
       ],
     },
-    // 模型 (Model Hub, L4): sits between 通讯平台 and 后端. Nav-gated until its
-    // backend dependencies land (MODEL_HUB_NAV_ENABLED); the route is always
-    // registered for direct access + review.
-    ...(MODEL_HUB_NAV_ENABLED
+    // 模型 (Model Hub, L4): the backend release capability is the only authority.
+    ...(modelHubEnabled
       ? [
           {
             to: '/admin/settings/models',
@@ -419,6 +419,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider>
     <DockProvider>
+    <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
@@ -649,6 +650,7 @@ export const AppShell: React.FC = () => {
           the sidebar launcher. */}
       <WindowLayer />
     </div>
+    </ShowPageDragProvider>
     </DockProvider>
     </WindowManagerProvider>
   );

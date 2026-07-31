@@ -8,7 +8,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Protocol
+from typing import Callable, Literal, Optional, Protocol
 
 from .adapter import OAuthFlowState
 
@@ -22,7 +22,10 @@ class OAuthFlowBinding:
     source_id: Optional[str]
     vendor: Optional[str]
     experimental_consent: bool = False
+    intent: Literal["create", "reauth"] = "create"
     completed: bool = False
+    recovered: bool | None = None
+    interrupted_pairs: tuple[dict[str, object], ...] = ()
 
 
 class OAuthAdapter(Protocol):
@@ -44,6 +47,16 @@ class NativeOAuthSourceStatus:
 
 
 class NativeOAuthAdapter(OAuthAdapter, Protocol):
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> OAuthFlowState: ...
+
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
 
 
@@ -55,6 +68,17 @@ class UnavailableNativeOAuthAdapter:
     """Fail closed until a native CLI OAuth integration is available."""
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+        raise NativeOAuthUnavailableError
+
+    async def start_reauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
+    ) -> OAuthFlowState:
         raise NativeOAuthUnavailableError
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
@@ -100,20 +124,30 @@ class OAuthFlowRegistry:
             source_id = value.get("source_id")
             vendor = value.get("vendor")
             experimental_consent = value.get("experimental_consent", False)
+            intent = value.get("intent", "create")
             completed = value.get("completed", False)
+            recovered = value.get("recovered")
+            interrupted_pairs = value.get("interrupted_pairs", [])
             if (
                 channel in {"native_cli", "hub"}
                 and (source_id is None or (isinstance(source_id, str) and source_id))
                 and (vendor is None or (isinstance(vendor, str) and vendor))
                 and isinstance(experimental_consent, bool)
+                and intent in {"create", "reauth"}
                 and isinstance(completed, bool)
+                and (recovered is None or isinstance(recovered, bool))
+                and isinstance(interrupted_pairs, list)
+                and all(isinstance(item, dict) for item in interrupted_pairs)
             ):
                 flows[flow_id] = OAuthFlowBinding(
-                    channel,
-                    source_id,
-                    vendor,
-                    experimental_consent,
-                    completed,
+                    channel=channel,
+                    source_id=source_id,
+                    vendor=vendor,
+                    experimental_consent=experimental_consent,
+                    intent=intent,
+                    completed=completed,
+                    recovered=recovered,
+                    interrupted_pairs=tuple(interrupted_pairs),
                 )
         return flows
 
@@ -127,7 +161,10 @@ class OAuthFlowRegistry:
                     "source_id": binding.source_id,
                     "vendor": binding.vendor,
                     "experimental_consent": binding.experimental_consent,
+                    "intent": binding.intent,
                     "completed": binding.completed,
+                    "recovered": binding.recovered,
+                    "interrupted_pairs": list(binding.interrupted_pairs),
                 }
                 for flow_id, binding in bounded.items()
             },
@@ -150,30 +187,46 @@ class OAuthFlowRegistry:
         vendor: str,
         *,
         experimental_consent: bool = False,
+        intent: Literal["create", "reauth"] = "create",
+        recovered: bool | None = None,
+        replace_flow_id: str | None = None,
     ) -> None:
         with self._lock:
             flows = self._read()
+            if replace_flow_id is not None:
+                flows.pop(replace_flow_id, None)
             flows.pop(flow_id, None)
             flows[flow_id] = OAuthFlowBinding(
-                channel,
-                source_id,
-                vendor,
-                experimental_consent,
+                channel=channel,
+                source_id=source_id,
+                vendor=vendor,
+                experimental_consent=experimental_consent,
+                intent=intent,
+                recovered=recovered,
             )
             self._write(flows)
 
-    def complete(self, flow_id: str) -> None:
+    def complete(
+        self,
+        flow_id: str,
+        *,
+        recovered: bool | None = None,
+        interrupted_pairs: list[dict[str, object]] | None = None,
+    ) -> None:
         with self._lock:
             flows = self._read()
             binding = flows.get(flow_id)
             if binding is None:
                 raise KeyError(flow_id)
             flows[flow_id] = OAuthFlowBinding(
-                binding.channel,
-                binding.source_id,
-                binding.vendor,
-                binding.experimental_consent,
-                True,
+                channel=binding.channel,
+                source_id=binding.source_id,
+                vendor=binding.vendor,
+                experimental_consent=binding.experimental_consent,
+                intent=binding.intent,
+                completed=True,
+                recovered=recovered,
+                interrupted_pairs=tuple(interrupted_pairs or ()),
             )
             self._write(flows)
 
@@ -184,6 +237,21 @@ class OAuthFlowRegistry:
     def binding(self, flow_id: str) -> OAuthFlowBinding | None:
         with self._lock:
             return self._read().get(flow_id)
+
+    def pending_reauth(
+        self,
+        source_id: str,
+    ) -> tuple[str, OAuthFlowBinding] | None:
+        with self._lock:
+            flows = self._read()
+            for flow_id, binding in reversed(tuple(flows.items())):
+                if (
+                    binding.source_id == source_id
+                    and binding.intent == "reauth"
+                    and not binding.completed
+                ):
+                    return flow_id, binding
+        return None
 
     def forget(self, flow_id: str) -> None:
         with self._lock:

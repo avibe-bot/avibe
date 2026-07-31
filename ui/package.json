@@ -8,9 +8,11 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "validate:imports": "node scripts/validate-out-of-tree-imports.mjs",
+    "build": "npm run validate:imports && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "test": "vitest run",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "validate:theme": "node scripts/validate-theme.mjs"
   },

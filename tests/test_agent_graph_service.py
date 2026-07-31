@@ -98,7 +98,7 @@ def _insert_session(conn, session_id, *, scope_id, backend="claude", title=None,
 def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent",
                 created=None, source_kind=None, source_actor=None, definition_id=None,
                 callback_session_id=None, callback_status=None, started=None, completed=None,
-                parent_run_id=None) -> None:
+                parent_run_id=None, callback_run_id=None) -> None:
     created = created or (NOW - timedelta(hours=1))
     conn.execute(
         agent_runs.insert().values(
@@ -128,7 +128,7 @@ def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent
             callback_session_id=callback_session_id,
             callback_status=callback_status,
             callback_error=None,
-            callback_run_id=None,
+            callback_run_id=callback_run_id,
             callback_completed_at=None,
             cancel_requested=0,
             cancel_requested_at=None,
@@ -354,11 +354,9 @@ def test_window_includes_recently_completed_run(isolated_state):
         engine.dispose()
 
 
-def test_callback_delivery_is_not_a_spawn(isolated_state):
-    # A delegated run spawns callee and routes a callback to caller; the callee's
-    # explicit callback-delivery run reports INTO the caller's session with
-    # parent_run_id = the delegated run. That report must NOT create a backwards
-    # spawn edge callee→caller (only the real spawn caller→callee + the callback).
+def test_callback_delivery_is_not_spawn_but_directed_child_is(isolated_state):
+    # A callback delivery has its own source_kind, while an agent-authored child
+    # aimed at the same target remains an independent delegation.
     engine = create_sqlite_engine()
     try:
         with engine.begin() as conn:
@@ -366,14 +364,24 @@ def test_callback_delivery_is_not_a_spawn(isolated_state):
             _insert_session(conn, "ses_callee", scope_id=None, backend="codex", title="Callee")
             _insert_run(conn, "run_deleg", session_id="ses_callee", source_kind="agent",
                         source_actor="ses_caller", callback_session_id="ses_caller",
-                        callback_status="sent", created=NOW - timedelta(minutes=30))
-            _insert_run(conn, "run_report", session_id="ses_caller", source_kind="agent",
+                        callback_status="sent", callback_run_id="run_callback",
+                        created=NOW - timedelta(minutes=30))
+            _insert_run(conn, "run_callback", session_id="ses_caller", source_kind="callback",
+                        source_actor="run_deleg", parent_run_id="run_deleg",
+                        created=NOW - timedelta(minutes=20))
+            _insert_run(conn, "run_directed", session_id="ses_caller", source_kind="agent",
                         source_actor="ses_callee", parent_run_id="run_deleg",
                         created=NOW - timedelta(minutes=10))
         payload = agent_graph.build_graph(live_agents=[], now=NOW, engine=engine)
-        assert _edge(payload, "spawn", "ses_caller", "ses_callee") is not None
-        assert _edge(payload, "spawn", "ses_callee", "ses_caller") is None
-        assert _edge(payload, "callback", "ses_callee", "ses_caller") is not None
+        forward = _edge(payload, "spawn", "ses_caller", "ses_callee")
+        directed = _edge(payload, "spawn", "ses_callee", "ses_caller")
+        callback = _edge(payload, "callback", "ses_callee", "ses_caller")
+        assert forward is not None
+        assert directed is not None
+        assert directed["run_count"] == 1
+        assert directed["last_run_id"] == "run_directed"
+        assert callback is not None
+        assert callback["last_run_id"] == "run_callback"
     finally:
         engine.dispose()
 

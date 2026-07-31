@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -46,16 +47,31 @@ from core.show_pages import (
     show_event_write_token,
     show_public_event_write_token,
 )
-from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
+from core.show_session_events import (
+    HUMAN_EVENT_TYPES,
+    ShowSessionEventError,
+    localized_show_event_error,
+    show_event_payload_session_mismatch,
+    show_event_requests_dispatch,
+)
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
+from vibe.message_types import types_with
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from vibe.ui_memory_routes import register_memory_routes
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_RESERVATION_TYPES = set(types_with("acceptedReservation"))
+
+
+class _ShowEventDispatchOutcome(str, Enum):
+    ACCEPTED = "accepted"
+    IN_FLIGHT = "in_flight"
+    FAILED = "failed"
+
 
 # Python's mimetypes map omits .webmanifest; register it so the PWA manifest is
 # served as a type browsers accept (an octet-stream manifest is rejected).
@@ -219,6 +235,71 @@ def _recover_stale_session_status(session_id: str) -> bool:
     if changed:
         broker.publish("session.status", {"session_id": session_id, "agent_status": "idle"})
     return changed
+
+
+def _recover_stale_pending_messages() -> dict[str, int]:
+    """Repair hidden ``pending`` send reservations left behind by UI interruption.
+
+    Ordinary Chat rows are made visible without redispatching. Harness-owned rows
+    stay ``pending`` because no startup queue drain owns them; their originating
+    event can retry the same reservation and start the turn. Rows whose session is
+    missing or archived are deleted.
+    """
+
+    from core.services import sessions as workbench_sessions_service
+    from storage import messages_service
+
+    summary = {"promoted": 0, "deleted": 0, "skipped": 0}
+    engine = _projects_engine()
+    try:
+        with engine.connect() as conn:
+            pending_rows = messages_service.list_recoverable_pending(conn)
+
+        for row in pending_rows:
+            session_id = str(row.get("session_id") or "").strip()
+            with engine.begin() as conn:
+                session = None
+                if session_id:
+                    try:
+                        session = workbench_sessions_service.get_session(conn, session_id)
+                    except LookupError:
+                        pass
+                if not session or session.get("status") == "archived":
+                    if messages_service.delete_pending(conn, str(row["id"])):
+                        summary["deleted"] += 1
+                    continue
+                target_type = messages_service.pending_message_target_type(
+                    row.get("author"),
+                    row.get("source"),
+                    row.get("author_name"),
+                )
+                if target_type in {
+                    messages_service.HARNESS_TYPE,
+                    messages_service.ANNOTATION_TYPE,
+                }:
+                    summary["skipped"] += 1
+                    continue
+                promoted = messages_service.promote_pending(
+                    conn,
+                    str(row["id"]),
+                    target_type,
+                )
+            if not promoted:
+                summary["skipped"] += 1
+                continue
+            settled = _load_session_message(session_id, str(row["id"]))
+            if settled is None or settled.get("type") != target_type:
+                summary["skipped"] += 1
+                continue
+            summary["promoted"] += 1
+            _publish_visible_input_message(
+                settled,
+                session_id=session_id,
+                scope_id=session.get("scope_id"),
+            )
+    finally:
+        engine.dispose()
+    return summary
 
 
 def _is_continuation_line(line: str, previous_message: str | None = None) -> bool:
@@ -2096,6 +2177,24 @@ def start_api_request_timer():
 
 
 @app.before_request
+def reject_disabled_model_hub_api():
+    """Keep the unreleased Model Hub REST surface dormant by default."""
+
+    from config.v2_config import is_model_hub_enabled
+    from core.handlers.model_hub.service import CONTRACT_VERSION
+
+    if request.path.startswith("/api/models/") and not is_model_hub_enabled():
+        return jsonify(
+            {
+                "ok": False,
+                "contract_version": CONTRACT_VERSION,
+                "error": "feature_disabled",
+            }
+        ), 404
+    return None
+
+
+@app.before_request
 def enforce_remote_access_cookie():
     config = _load_remote_access_config()
     if _remote_auth_exempt_before_host_validation():
@@ -3022,6 +3121,7 @@ def doctor_get():
 @app.route("/api/config", methods=["GET"])
 def config_get():
     from vibe import api
+    from config.v2_config import is_model_hub_enabled
     from core.services import settings as settings_service
 
     # On a truly fresh install no config file exists yet, but the setup
@@ -3032,6 +3132,7 @@ def config_get():
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
     payload = api.client_config_payload(config)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
     return jsonify(payload)
 
 
@@ -3048,13 +3149,18 @@ def _model_hub_service():
 
 
 def _model_hub_success(**payload):
-    return jsonify({"ok": True, "contract_version": 1, **payload})
+    from core.handlers.model_hub.service import CONTRACT_VERSION
+
+    return jsonify({"ok": True, "contract_version": CONTRACT_VERSION, **payload})
 
 
 def _model_hub_error(exc):
-    body = {"ok": False, "contract_version": 1, "error": exc.code}
+    from core.handlers.model_hub.service import CONTRACT_VERSION
+
+    body = {"ok": False, "contract_version": CONTRACT_VERSION, "error": exc.code}
     if exc.detail:
         body["detail"] = exc.detail
+    body.update(exc.data)
     return jsonify(body), exc.status
 
 
@@ -3082,8 +3188,8 @@ async def model_hub_sources_post():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().create_source(_model_hub_json_object())
-        return _model_hub_success(source=source), 201
+        result = await _model_hub_service().create_source(_model_hub_json_object())
+        return _model_hub_success(**result), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3095,6 +3201,34 @@ async def model_hub_sources_patch(source_id):
     try:
         source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
         return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>/credential", methods=["PUT"])
+async def model_hub_source_credential_put(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().replace_credential(
+            source_id,
+            _model_hub_json_object(),
+        )
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/sources/<source_id>/reauth", methods=["POST"])
+async def model_hub_source_reauth_post(source_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().reauth_source(
+            source_id,
+            _model_hub_json_object(),
+        )
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3122,36 +3256,36 @@ async def model_hub_sources_test(source_id):
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/priority", methods=["GET"])
-def model_hub_priority_get():
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        priority = _model_hub_service().priority()
-        return _model_hub_success(order=priority["order"])
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
-@app.route("/api/models/priority", methods=["PUT"])
-async def model_hub_priority_put():
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        priority = await _model_hub_service().set_priority(
-            _model_hub_json_object("invalid_priority_order").get("order")
-        )
-        return _model_hub_success(order=priority["order"])
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
 @app.route("/api/models/agents", methods=["GET"])
 def model_hub_agents_get():
     from core.handlers.model_hub import ModelHubError
 
     try:
         return _model_hub_success(agents=_model_hub_service().list_agents())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/sources", methods=["GET"])
+def model_hub_agent_sources_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(agent=_model_hub_service().get_agent_sources(backend))
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/sources", methods=["PUT"])
+async def model_hub_agent_sources_put(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().set_agent_sources(
+            backend,
+            _model_hub_json_object("invalid_source_order"),
+        )
+        return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3237,13 +3371,59 @@ def model_hub_events_get():
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/agents/<backend>/chain", methods=["GET"])
+def model_hub_agent_chain_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        if not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        chain = _model_hub_service().agent_chain(backend, model_id)
+        return _model_hub_success(chain=chain)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/probe", methods=["POST"])
+async def model_hub_agent_probe_post(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {"model"}:
+            raise ModelHubError("mapping_target_unavailable")
+        model_id = payload.get("model")
+        if model_id is not None and (
+            not isinstance(model_id, str) or not model_id.strip()
+        ):
+            raise ModelHubError("mapping_target_unavailable")
+        probe = await _model_hub_service().probe_agent(backend, model_id)
+        return _model_hub_success(probe=probe)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/turns/<turn_id>/provenance", methods=["GET"])
+def model_hub_turn_provenance_get(turn_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        provenance = _model_hub_service().get_turn_provenance(turn_id)
+        return _model_hub_success(provenance=provenance)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/oauth/start", methods=["POST"])
 async def model_hub_oauth_start():
     from core.handlers.model_hub import ModelHubError
 
     try:
         return _model_hub_success(
-            flow=await _model_hub_service().oauth_start(_model_hub_json_object("flow_not_found"))
+            **await _model_hub_service().oauth_start(_model_hub_json_object("flow_not_found"))
         )
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3254,7 +3434,7 @@ async def model_hub_oauth_status(flow_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(flow=await _model_hub_service().oauth_status(flow_id))
+        return _model_hub_success(**await _model_hub_service().oauth_status(flow_id))
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3265,7 +3445,7 @@ async def model_hub_oauth_submit():
 
     try:
         return _model_hub_success(
-            flow=await _model_hub_service().oauth_submit(
+            **await _model_hub_service().oauth_submit(
                 _model_hub_json_object("flow_not_found", status=404)
             )
         )
@@ -3872,17 +4052,36 @@ def vault_audit_get():
     return jsonify(api.get_vault_audit(secret_name=secret, limit=limit))
 
 
+def _coded_error_response(code: str, message: str, status: int, **extra: Any):
+    """THE error body for any route whose failure carries a machine-readable code.
+
+    Nested ``error`` object, because the Web UI's shared parser
+    (``selectApiErrorFields`` in ``ui/src/context/ApiContext.tsx``) reads ``data.error``
+    FIRST and treats a *string* ``error`` as the code itself. So the flat
+    ``{"error": "<sentence>", "code": "<code>"}`` shape silently DESTROYS the code:
+    callers get ``ApiError.code == "<sentence>"``, ``errors.<code>`` never resolves,
+    the sentence is rendered verbatim under every locale, and any client branch keyed
+    on the code (e.g. the archived-session convergence subscription) never fires.
+
+    The flat top-level ``code``/``message`` are kept alongside for the CLI and any
+    direct consumer that reads them. ``extra`` carries route-specific detail fields.
+
+    One builder rather than per-route dict literals so a new coded route inherits the
+    right shape; ``tests/test_ui_server_fastapi.py`` guards both directions (every
+    builder survives the parser, and no route hand-rolls the flat coded shape).
+    """
+    return (
+        jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message, **extra}),
+        status,
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
     status = 409 if code in {"not_public", "share_id_taken"} else 400
-    message = str(exc)
-    # Structured ``error`` so the Web UI's shared handler localizes via
-    # ``errors.<code>`` and falls back to the human message (not the raw code)
-    # for any code without an i18n key; top-level ``code``/``message`` stay for
-    # the CLI/any direct consumer.
-    return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
+    return _coded_error_response(code, str(exc), status)
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -4004,8 +4203,7 @@ def _dock_error_response(exc):
     # order is a 400. Structured ``error`` so the Web UI's shared handler can
     # localize via ``errors.<code>`` and fall back to the human message.
     status = 404 if code in {"show_page_not_found", "session_not_found"} else 400
-    message = str(exc)
-    return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
+    return _coded_error_response(code, str(exc), status)
 
 
 @app.route("/api/dock", methods=["GET"])
@@ -5419,11 +5617,11 @@ def backend_claude_auth_get():
 
 @app.route("/api/backend/claude/auth", methods=["POST"])
 def backend_claude_auth_post():
-    """Persist Claude auth into V2Config.
+    """Persist Claude auth and refresh cached Claude SDK sessions.
 
     Body: ``{auth_mode: 'oauth'|'api_key', api_key?: string, base_url?: string}``.
-    Claude relaunches per request, so no daemon restart is necessary —
-    the next user message picks up the new env injection automatically.
+    Secrets live in Claude Code's own settings; V2Config records the selected
+    mode, and the controller rolls its Claude runtime state after the write.
     """
     from vibe import api
 
@@ -6172,18 +6370,27 @@ def sessions_create():
 
 
 def _session_fork_error_response(err: Exception):
+    """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
+
+    ``session_archived`` here is the same terminal fact the PATCH route answers, so it
+    must reach the Web UI's shared archived-session convergence the same way: the flat
+    shape this used to emit fed the human sentence to callers as the code, which left
+    ``archivedConflictSessionId`` blind and every mutating control live after a
+    permanent refusal. See ``_coded_error_response`` — every code here needs the same
+    treatment, so the whole mapping goes through it rather than one patched branch.
+    """
     message = str(err)
     if "id not found" in message:
-        return jsonify({"error": message, "code": "session_not_found"}), 404
+        return _coded_error_response("session_not_found", message, 404)
     if "is archived" in message:
-        return jsonify({"error": message, "code": "session_archived"}), 409
+        return _coded_error_response("session_archived", message, 409)
     if "no native session id" in message:
-        return jsonify({"error": message, "code": "session_not_bound"}), 409
+        return _coded_error_response("session_not_bound", message, 409)
     if "backend cannot be forked" in message:
-        return jsonify({"error": message, "code": "session_backend_unsupported"}), 409
+        return _coded_error_response("session_backend_unsupported", message, 409)
     if "backend does not match" in message:
-        return jsonify({"error": message, "code": "session_backend_mismatch"}), 409
-    return jsonify({"error": message, "code": "session_fork_failed"}), 400
+        return _coded_error_response("session_backend_mismatch", message, 409)
+    return _coded_error_response("session_fork_failed", message, 400)
 
 
 async def _session_turn_state_for_fork(session_id: str) -> dict[str, bool]:
@@ -6249,7 +6456,9 @@ async def sessions_fork(session_id: str):
     except SessionForkError as err:
         return _session_fork_error_response(err)
     except LookupError as err:
-        return jsonify({"error": str(err), "code": "session_not_found"}), 404
+        # Same coded shape as the branch above: this is the same route answering the
+        # same ``session_not_found`` code from a different exception type.
+        return _coded_error_response("session_not_found", str(err), 404)
 
     broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
     return jsonify(session), 201
@@ -6349,7 +6558,6 @@ async def sessions_bootstrap(session_id: str):
             session_id=session_id,
             limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
-            include_metadata_sources=("show_page",),
             tail=True,
         )
         queued = messages_service.list_queued(conn, session_id)
@@ -6403,18 +6611,38 @@ async def sessions_bootstrap(session_id: str):
     )
 
 
+def _session_archived_response():
+    """Shared 409 payload for a write refused because the session is archived.
+
+    The shared ``_coded_error_response`` shape: the code MUST survive the Web UI's
+    parser or the read-only convergence never fires at all (see that builder for the
+    mechanism this refusal depends on).
+
+    The ``message`` comes from ``vibe/i18n`` (AGENTS.md §6) rather than an English
+    literal: direct API/CLI consumers read it verbatim, and a Web UI client without
+    the ``errors.session_archived`` key falls back to it too.
+    """
+    from core.services import sessions as workbench_sessions_service
+
+    return _coded_error_response("session_archived", workbench_sessions_service.session_archived_message(), 409)
+
+
 def _backend_locked_response(err):
-    """Shared 409 payload for a rejected cross-backend session change."""
-    return (
-        jsonify(
-            {
-                "error": str(err),
-                "code": "backend_locked",
-                "current_backend": err.current_backend,
-                "requested_backend": err.requested_backend,
-            }
-        ),
+    """Shared 409 payload for a rejected cross-backend session change.
+
+    Coded shape for the same reason as the archived 409, and specifically BECAUSE it
+    shares a route with it: ``sessions_update`` deliberately answers the terminal
+    ``session_archived`` ahead of this *retryable* ``backend_locked`` so a client can
+    tell a permanent refusal from one worth retrying — which it cannot do while either
+    code is being replaced by its own error sentence. The lock's detail fields stay
+    top-level, where their existing consumers read them.
+    """
+    return _coded_error_response(
+        "backend_locked",
+        str(err),
         409,
+        current_backend=err.current_backend,
+        requested_backend=err.requested_backend,
     )
 
 
@@ -6504,6 +6732,22 @@ async def sessions_update(session_id: str):
         return jsonify({"error": "no updatable fields supplied"}), 400
 
     engine = _projects_engine()
+    # Archive is TERMINAL, so it outranks every transient conflict below — most
+    # importantly the cross-backend lock preflight, which consults the controller
+    # and would answer a retryable ``backend_locked`` for an archived row whose
+    # in-flight turn is still unwinding: ``archive_session`` cannot cancel that turn
+    # inside its transaction, so the DELETE route commits the archive first and
+    # cancels best-effort afterwards (``_archive_cancel_turn``). A stale
+    # cross-backend PATCH landing in that window used to have its terminal state
+    # masked, leaving the client unable to recognize ``session_archived`` and
+    # converge. Short-circuit here so the archive conflict always wins.
+    #
+    # Same shared write-guard the messages POST uses. A MISSING session reads
+    # ``False``, so the 404s below are unchanged, and every non-archived PATCH pays
+    # only one indexed read and keeps its existing preflight ordering.
+    with engine.connect() as conn:
+        if workbench_sessions_service.is_session_archived(conn, session_id):
+            return _session_archived_response()
     should_check_backend_lock = "agent_backend" in updatable
     requested_backend = updatable.get("agent_backend")
     if "agent_name" in updatable and "agent_backend" not in updatable:
@@ -6554,6 +6798,12 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except workbench_sessions_service.SessionArchivedError:
+        # Archive is terminal — the read-only chat UI relies on this backstop. The
+        # short-circuit above already answers the common case; this catches a
+        # session archived BETWEEN that read and this write, and keeps the service
+        # guard authoritative rather than trusting the route's preflight.
+        return _session_archived_response()
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:
@@ -6587,6 +6837,10 @@ def sessions_cli_activity(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    if payload.get("event") == "queue_updated":
+        broker.publish("queue.updated", {"session_id": session_id})
+        return jsonify({"ok": True})
+
     previous_session = None
     if "previous_scope_id" in payload and "previous_visibility" in payload:
         previous_session = {
@@ -6721,9 +6975,7 @@ def sessions_messages_list(session_id: str):
         # persist intermediate assistant / tool_call rows (unified store) that we
         # keep OUT of the conversation view, but ``notify`` rows are kept: a
         # terminal notify (e.g. an agent run that failed and stopped without a
-        # result) marks the end of that turn and must stay visible. Show-Page
-        # transcript marks (metadata.source='show_page') are kept regardless of
-        # type.
+        # result) marks the end of that turn and must stay visible.
         result = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -6732,7 +6984,6 @@ def sessions_messages_list(session_id: str):
             around_id=around_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
-            include_metadata_sources=("show_page",),
             tail=tail,
         )
     return jsonify(result)
@@ -6784,14 +7035,18 @@ def search_messages_list():
     """Global message-content search across Workbench sessions, grouped by session.
 
     Substring (case-insensitive) search over ``content_text`` for ``platform
-    ='avibe'`` user prompts + agent ``result`` replies, excluding archived
-    sessions. ``q`` is the query, ``limit`` caps the matched-message scan. The
+    ='avibe'`` user prompts + agent ``result`` replies. Archived sessions are
+    excluded by default; ``include_archived=1`` opts them in, and each returned
+    session group carries ``archived`` so the client can mark and open them
+    read-only. Messages under an archived PROJECT stay excluded either way.
+    ``q`` is the query, ``limit`` caps the matched-message scan. The
     remote-access host guard + auth run in the global ``before_request`` hooks
     (same as the messages list), so this handler just delegates to the service.
     """
     from storage import messages_service
 
     query = request.args.get("q") or ""
+    include_archived = request.args.get("include_archived") in {"1", "true", "yes"}
     try:
         limit = int(request.args.get("limit") or 50)
     except (TypeError, ValueError):
@@ -6799,7 +7054,9 @@ def search_messages_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        result = messages_service.search_messages(conn, query=query, limit=limit)
+        result = messages_service.search_messages(
+            conn, query=query, limit=limit, include_archived=include_archived
+        )
     return jsonify(result)
 
 
@@ -7030,10 +7287,7 @@ def _show_page_icon_upload_error(code: str, message: str):
         "icon_too_large": 413,
         "invalid_icon_type": 415,
     }.get(code, 400)
-    return (
-        jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}),
-        status,
-    )
+    return _coded_error_response(code, message, status)
 
 
 @app.post("/api/show-pages/{session_id}/icon", include_in_schema=False)
@@ -7515,7 +7769,12 @@ async def asr_transcribe():
     import tempfile
     import uuid
 
-    from core.audio_asr import AudioAsrService
+    from core.audio_asr import (
+        AudioAsrEmptyTranscriptError,
+        AudioAsrService,
+        AudioAsrTimeoutError,
+        AudioAsrUnavailableError,
+    )
     from core.services import settings as settings_service
     from modules.im.base import FileAttachment
 
@@ -7532,7 +7791,7 @@ async def asr_transcribe():
     if not raw:
         return jsonify({"error": "empty audio"}), 400
     if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
+        return jsonify({"error": "file_too_large"}), 413
 
     name = (payload.get("name") or "voice.webm").strip() or "voice.webm"
     mime = (payload.get("mime") or "audio/webm").strip()
@@ -7545,13 +7804,30 @@ async def asr_transcribe():
     service = AudioAsrService(config)
     if not service.is_available():
         return jsonify({"error": "asr_unavailable"}), 400
+    audio_asr_config = getattr(config, "audio_asr", None)
+    max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+    if max_file_bytes is not None and len(raw) > max_file_bytes:
+        return jsonify({"error": "file_too_large"}), 413
 
     suffix = Path(name).suffix or ".webm"
     tmp_path = Path(tempfile.gettempdir()) / f"vibe_asr_{uuid.uuid4().hex[:8]}{suffix}"
     tmp_path.write_bytes(raw)
     try:
         attachment = FileAttachment(name=name, mimetype=mime, local_path=str(tmp_path), size=len(raw))
-        transcripts = await service.transcribe_attachments([attachment])
+        try:
+            transcripts = await service.transcribe_attachments(
+                [attachment],
+                raise_on_empty=True,
+                raise_on_timeout=True,
+                raise_on_unavailable=True,
+                timeout_seconds=120.0,
+            )
+        except AudioAsrEmptyTranscriptError:
+            return jsonify({"error": "transcription_empty"}), 422
+        except AudioAsrTimeoutError:
+            return jsonify({"error": "transcription_timeout"}), 504
+        except AudioAsrUnavailableError:
+            return jsonify({"error": "asr_unavailable"}), 503
     finally:
         try:
             tmp_path.unlink()
@@ -7560,6 +7836,116 @@ async def asr_transcribe():
     if not transcripts:
         return jsonify({"error": "transcription_failed"}), 502
     return jsonify({"text": transcripts[0].text})
+
+
+@app.route("/api/asr/telemetry", methods=["POST"])
+def asr_telemetry():
+    """Persist privacy-safe browser voice metrics in the normal service log."""
+    from vibe import __version__
+
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_payload"}), 400
+
+    event = payload.get("event")
+    if not isinstance(event, str) or event not in {
+        "segment_transcription",
+        "dictation_finalized",
+        "dictation_inserted",
+    }:
+        return jsonify({"error": "invalid_event"}), 400
+
+    enum_fields = {
+        "outcome": {
+            "success",
+            "fallback",
+            "cancelled",
+            "empty",
+            "failed",
+            "timeout",
+            "too_large",
+            "unavailable",
+        },
+        "path": {"cloud", "local"},
+        "providerStage": {"token", "upload", "refresh", "response", "finalization"},
+        "browserFamily": {"chrome", "firefox", "edge", "safari", "other", "unknown"},
+    }
+    outcome = payload.get("outcome")
+    if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
+        return jsonify({"error": "invalid_outcome"}), 400
+
+    sanitized: dict[str, Any] = {
+        "release": __version__,
+        "event": event,
+        "outcome": outcome,
+    }
+    dictation_id = payload.get("dictationId")
+    if dictation_id is not None:
+        if not isinstance(dictation_id, str) or not re.fullmatch(
+            r"[a-z0-9_-]{1,80}",
+            dictation_id,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "dictationId"}), 400
+        sanitized["dictationId"] = dictation_id
+
+    for key, allowed_values in enum_fields.items():
+        if key == "outcome" or key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, str) or value not in allowed_values:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    mime_type = payload.get("mimeType")
+    if mime_type is not None:
+        if not isinstance(mime_type, str) or not re.fullmatch(
+            r"(?:audio|video)/[a-z0-9][a-z0-9.+_-]{0,63}",
+            mime_type,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "mimeType"}), 400
+        sanitized["mimeType"] = mime_type.lower()
+
+    integer_fields = {
+        "sizeBytes",
+        "durationMs",
+        "elapsedMs",
+        "attemptCount",
+        "segmentCount",
+        "failedSegmentCount",
+        "backlogAtStop",
+        "totalDurationMs",
+        "stopToInsertionMs",
+    }
+    for key in integer_fields:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10**12:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    if "httpStatus" in payload:
+        http_status = payload["httpStatus"]
+        if (
+            not isinstance(http_status, int)
+            or isinstance(http_status, bool)
+            or not 100 <= http_status <= 599
+        ):
+            return jsonify({"error": "invalid_field", "field": "httpStatus"}), 400
+        sanitized["httpStatus"] = http_status
+
+    if "retry" in payload:
+        if not isinstance(payload["retry"], bool):
+            return jsonify({"error": "invalid_field", "field": "retry"}), 400
+        sanitized["retry"] = payload["retry"]
+
+    logger.info(
+        "voice_reliability %s",
+        json.dumps(sanitized, sort_keys=True, separators=(",", ":")),
+    )
+    return jsonify({"ok": True})
 
 
 @app.route("/api/asr/status", methods=["GET"])
@@ -7571,9 +7957,79 @@ def asr_status():
 
     try:
         config = settings_service.load_config()
-        return jsonify({"available": bool(AudioAsrService(config).is_available())})
+        audio_asr_config = getattr(config, "audio_asr", None)
+        max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+        if not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+            max_file_bytes = None
+        available = bool(AudioAsrService(config).is_available())
+        # Browser capture uses 16 kHz mono 16-bit PCM. Smaller limits would
+        # create sub-five-second segments and an impractical ASR request rate.
+        min_browser_wav_bytes = 44 + (16_000 * 2 * 5)
+        if max_file_bytes is not None and max_file_bytes < min_browser_wav_bytes:
+            available = False
+        return jsonify(
+            {
+                "available": available,
+                "max_file_bytes": max_file_bytes,
+            }
+        )
     except Exception:
-        return jsonify({"available": False})
+        return jsonify({"available": False, "max_file_bytes": None})
+
+
+def _publish_visible_input_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+) -> dict[str, Any]:
+    """Publish one already-visible input row through the shared fan-out."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    broker.publish("message.new", row)
+    broker.publish(
+        "session.activity",
+        {"session_id": session_id, "scope_id": scope_id, "event": activity_event},
+    )
+    try:
+        with _projects_engine().connect() as conn:
+            inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
+        if inbox_row is not None:
+            broker.publish("inbox.session.updated", inbox_row)
+    except Exception:
+        logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
+    return row
+
+
+def _promote_and_publish_pending_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+) -> dict[str, Any] | None:
+    """Settle one reserved row without publishing a stale or pending snapshot."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    with _projects_engine().begin() as conn:
+        promoted = messages_service.promote_pending(conn, row["id"], "user")
+    settled = _load_session_message(session_id, row["id"])
+    if settled is None:
+        return None
+    if settled.get("type") == messages_service.QUEUED_TYPE:
+        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
+        return settled
+    if promoted and settled.get("type") == "user":
+        return _publish_visible_input_message(
+            settled,
+            session_id=session_id,
+            scope_id=scope_id,
+            activity_event=activity_event,
+        )
+    return settled
 
 
 @app.route("/api/sessions/<session_id>/messages", methods=["POST"])
@@ -7595,7 +8051,6 @@ async def sessions_messages_create(session_id: str):
     from modules.im.message_facts import is_ordinary_workbench_text
     from storage import messages_service
     from vibe import internal_client
-    from vibe.sse_broker import broker
 
     payload = request.json or {}
     memory_user_id = _workbench_memory_user_id()
@@ -7617,7 +8072,7 @@ async def sessions_messages_create(session_id: str):
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
             if session.get("status") == "archived":
-                return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+                return _session_archived_response()
             # Idempotency: a stale or duplicate quick-reply submit (a second tab, or
             # one that missed the message.new event) must not start a second turn
             # for an already-answered group. The answer lives on the agent message.
@@ -7689,47 +8144,22 @@ async def sessions_messages_create(session_id: str):
             workbench_sessions_service.touch_session(conn, session_id)
         return row
 
-    def _promote_and_publish(row: dict) -> dict:
-        """Promote the reserved pending row to a transcript-visible ``user`` row
-        and fan it out (message.new + activity + inbox bump). Returns the row
-        with its type corrected. The agent-reply side rides the controller→
-        browser bridge, but the user row is persisted in this UI process so the
-        controller bus never sees it."""
-        with engine.begin() as conn:
-            promoted = messages_service.promote_pending(conn, row["id"], "user")
-        if not promoted:
-            # The row wasn't pending anymore: the controller already promoted it
-            # (e.g. enqueued as 'queued' via the busy-session path) before our
-            # dispatch call failed/returned. Don't publish a phantom 'user'
-            # transcript row alongside the still-queued item — nudge the queue view
-            # and report it as queued instead (Codex P2).
-            broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-            return {**row, "type": "queued"}
-        row = {**row, "type": "user"}
-        broker.publish("message.new", row)
-        broker.publish(
-            "session.activity",
-            {"session_id": session_id, "scope_id": session["scope_id"], "event": "user_message"},
-        )
-        try:
-            with engine.connect() as conn:
-                inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
-            if inbox_row is not None:
-                broker.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
-        return row
-
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
-        return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+        return _session_archived_response()
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.
     if not dispatch_text.strip() and not attachment_specs:
-        return jsonify(_promote_and_publish(message)), 201
+        return jsonify(
+            _promote_and_publish_pending_user_message(
+                message,
+                session_id=session_id,
+                scope_id=session["scope_id"],
+            )
+        ), 201
     # Session/page-scoped model (the web Chat): fire-and-forget the turn; the
     # reply arrives over ``message.new``. The controller atomically either lets
     # the turn start (we then promote the row to user) or — if a turn is already
@@ -7748,20 +8178,51 @@ async def sessions_messages_create(session_id: str):
     }
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
+    except internal_client.InternalServerTimeout as exc:
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **observed,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 504
     except internal_client.InternalServerUnavailable as exc:
-        # Couldn't reach the controller — promote + surface the row so the
-        # user still sees their message, plus the failure.
-        published = _promote_and_publish(message)
-        return jsonify({**published, "dispatch_error": "internal_unavailable", "detail": str(exc)}), 502
+        published = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **published,
+                "dispatch_error": "internal_unavailable",
+                "detail": str(exc),
+            }
+        ), 502
     except Exception as exc:
-        # The socket existed but the call failed another way (ReadTimeout, a
-        # non-JSON / 500 response, etc.). The row is still reserved as hidden
-        # ``pending`` and the draft was cleared, so WITHOUT this the user's text
-        # would vanish from both transcript and queue behind an error. Promote +
-        # publish it with the error, same as the unavailable branch (Codex P2).
-        logger.warning("dispatch_async call failed for session %s: %s", session_id, exc, exc_info=True)
-        published = _promote_and_publish(message)
-        return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": str(exc)}), 502
+        logger.warning(
+            "dispatch_async acceptance is unknown for session %s: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **observed,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 502
     status = result.get("status_code", 500)
     body = result.get("body") or {}
     # Quick-reply accepted (turn started OR queued) → record the choice on the
@@ -7771,18 +8232,44 @@ async def sessions_messages_create(session_id: str):
     if status == 202 and quick_reply_for:
         with engine.begin() as conn:
             messages_service.set_quick_reply_chosen(conn, session_id, quick_reply_for, dispatch_text)
+    if status == 202 and body.get("drained"):
+        # The row joined an idle pre-existing queue and was synchronously merged
+        # before acceptance returned. ``flush_queue`` already published the
+        # freshly ordered replacement; do not append the retired reservation.
+        return jsonify({"drained": True}), 202
     if status == 202 and body.get("queued"):
         # Enqueued behind a running turn: the controller already promoted the
         # row pending→queued, so it stays OUT of the transcript (no
         # message.new); show it above the composer via queue.updated.
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-        return jsonify({**message, "type": "queued", "queued": True}), 202
+        queued = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify({**queued, "queued": True}), 202
     if status == 202:
-        # Turn started — promote + publish the prompt.
-        return jsonify(_promote_and_publish(message)), 201
-    # Dispatch failed: still promote + show the row + the error.
-    published = _promote_and_publish(message)
-    return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": body}), 502
+        # Turn started: the caller owns the rendering transition, while the
+        # unified manager owns only the turn/queue decision.
+        settled = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            settled
+        ), 201
+    published = _promote_and_publish_pending_user_message(
+        message,
+        session_id=session_id,
+        scope_id=session["scope_id"],
+    ) or message
+    return jsonify(
+        {
+            **published,
+            "dispatch_error": "dispatch_failed",
+            "detail": body,
+        }
+    ), 502
 
 
 @app.route("/api/sessions/<session_id>/cancel", methods=["POST"])
@@ -7902,10 +8389,11 @@ def sessions_queue_list(session_id: str):
 def sessions_queue_remove(session_id: str, message_id: str):
     """Drop one queued message (the per-item delete in the queue strip)."""
     from storage import messages_service
+    from storage.background import run_update_event_transaction
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
-    with engine.begin() as conn:
+    with run_update_event_transaction(engine) as conn:
         removed = messages_service.remove_queued(conn, session_id, message_id)
     if removed:
         broker.publish("queue.updated", {"session_id": session_id})
@@ -8106,15 +8594,28 @@ def _harness_page_request(default_limit: int = 30):
 
 
 def _harness_status_filter() -> str:
+    """``?status=`` for tasks/watches, validated against the store's own filter
+    table so the route cannot accept a value the query would reject (or reject
+    one it would accept)."""
+    from storage.background import DEFINITION_STATUS_FILTERS
+
     status = request.args.get("status") or "all"
-    if status not in {"all", "enabled", "disabled"}:
-        raise ValueError("status must be one of: all, enabled, disabled")
+    if status not in DEFINITION_STATUS_FILTERS:
+        raise ValueError("status must be one of: " + ", ".join(DEFINITION_STATUS_FILTERS))
     return status
 
 
 def _harness_query_filter() -> str | None:
     query = (request.args.get("query") or "").strip()
     return query or None
+
+
+def _harness_exclude_run_type() -> list[str]:
+    """``?exclude_run_type=a,b`` — the one parsing site for the Runs tab's
+    "hide watcher heartbeats" default. An exclusion (rather than a hardcoded
+    include-list) keeps a future run type visible by default."""
+    raw = request.args.get("exclude_run_type") or ""
+    return [value for value in (part.strip() for part in raw.split(",")) if value]
 
 
 def _harness_session_filter() -> str | None:
@@ -8138,7 +8639,10 @@ def _harness_page_payload(page_result, *, items_key: str, counts: dict[str, int]
 
 
 def _harness_page_payload_for_status(page_result, *, items_key: str, counts: dict[str, int], status: str) -> dict[str, Any]:
-    total = int(counts.get(status or "all", 0))
+    # Tasks/watches only — runs build their payload from their own count call.
+    from storage.background import definition_status_total
+
+    total = definition_status_total(counts, status)
     return {
         items_key: page_result.items,
         "counts": counts,
@@ -8171,7 +8675,7 @@ def harness_tasks_list():
             {
                 "tasks": tasks,
                 "counts": counts,
-                "total": counts["all"],
+                "total": counts["total"],
                 "page": 1,
                 "limit": len(tasks),
                 "has_more": False,
@@ -8225,14 +8729,11 @@ def harness_watches_list():
         with _harness_store() as store:
             watches = store.list_watches()
             counts = store.count_watches()
-            runtime = store.load_watch_runtime().get("watches") or {}
-        for watch in watches:
-            watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
         return jsonify(
             {
                 "watches": watches,
                 "counts": counts,
-                "total": counts["all"],
+                "total": counts["total"],
                 "page": 1,
                 "limit": len(watches),
                 "has_more": False,
@@ -8254,9 +8755,6 @@ def harness_watches_list():
             newest_first=True,
         )
         counts = store.count_watches(query=query, session_id=session_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-    for watch in page_result.items:
-        watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
     return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
 
 
@@ -8271,9 +8769,6 @@ def harness_watch_patch(watch_id: str):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.set_definition_enabled(watch_id, enabled, definition_type="watch")
         watch = store.get_watch(watch_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-        if watch:
-            watch["runtime"] = runtime.get(watch_id) or {"running": False}
     return jsonify({"ok": True, "watch": watch})
 
 
@@ -8294,6 +8789,7 @@ def harness_runs_list():
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     status = request.args.get("status") or None
     run_type = request.args.get("run_type") or None
+    exclude_run_type = _harness_exclude_run_type()
     agent_name = request.args.get("agent_name") or None
     definition_id = request.args.get("definition_id") or None
     query = _harness_query_filter()
@@ -8302,6 +8798,7 @@ def harness_runs_list():
         page_result = store.list_runs_page(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
@@ -8311,20 +8808,26 @@ def harness_runs_list():
         total = store.count_runs(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
         counts = store.count_runs_by_status(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
+        # The types present in the ledger, so the selector can offer one the UI
+        # has no built-in name for instead of stranding those rows under All.
+        run_types = store.list_run_types()
     return jsonify(
         {
             "runs": page_result.items,
             "counts": counts,
+            "run_types": run_types,
             "total": total,
             "page": page_result.page,
             "limit": page_result.limit,
@@ -8383,9 +8886,6 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
-            runtime = store.load_watch_runtime().get("watches") or {}
-            for watch in page_result.items:
-                watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",
@@ -8395,11 +8895,13 @@ def harness_bootstrap():
         else:
             run_status = request.args.get("status") or None
             run_type = request.args.get("run_type") or None
+            exclude_run_type = _harness_exclude_run_type()
             agent_name = request.args.get("agent_name") or None
             definition_id = request.args.get("definition_id") or None
             page_result = store.list_runs_page(
                 status=run_status,
                 run_type=run_type,
+                exclude_run_type=exclude_run_type,
                 agent_name=agent_name,
                 definition_id=definition_id,
                 query=query,
@@ -8410,13 +8912,18 @@ def harness_bootstrap():
                 "runs": page_result.items,
                 "counts": store.count_runs_by_status(
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
                 ),
+                # Same facet as /api/harness/runs — the tab loads through
+                # whichever of the two the caller reached, so both must carry it.
+                "run_types": store.list_run_types(),
                 "total": store.count_runs(
                     status=run_status,
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
@@ -8930,7 +9437,7 @@ def _show_page_runtime_failure_response(
 
 def _show_session_event_error_response(exc: Exception):
     code = getattr(exc, "code", "show_session_event_failed")
-    status = 404 if code == "session_not_found" else 400
+    status = 404 if code == "session_not_found" else 409 if code == "event_id_conflict" else 400
     return jsonify({"ok": False, "code": code, "error": str(exc)}), status
 
 
@@ -9028,7 +9535,7 @@ def _show_me_response(author: dict[str, str] | None, *, write_token: str | None 
     return response
 
 
-def _show_event_response_from_payload(
+async def _show_event_response_from_payload(
     session_id: str,
     payload: dict[str, Any],
     *,
@@ -9050,15 +9557,55 @@ def _show_event_response_from_payload(
         )
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload, author=author)
+        event_payload = store.append(
+            session_id,
+            payload,
+            author=author,
+            reserve_dispatch=allow_dispatch,
+        )
     except Exception as exc:
         return _show_session_event_error_response(exc)
     finally:
         store.close()
 
     _publish_show_session_event(event_payload)
-    if allow_dispatch:
-        _dispatch_show_event_if_requested(event_payload)
+    if allow_dispatch and show_event_requests_dispatch(event_payload):
+        # The internal endpoint returns after SessionTurnManager has either
+        # started or queued the turn. Settle the pending transcript row before
+        # acknowledging the Show event so a successful POST cannot strand it.
+        dispatch_outcome = await _run_show_event_dispatch(event_payload)
+        if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+            return (
+                jsonify(
+                    {
+                        "ok": True,
+                        "dispatch_pending": True,
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                202,
+            )
+        if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
+            exc = _show_event_dispatch_error()
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": exc.code,
+                        "error": str(exc),
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                502,
+            )
     return (
         jsonify(
             {
@@ -9074,29 +9621,40 @@ def _show_event_response_from_payload(
     )
 
 
-def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
+def record_local_show_event(
+    session_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload)
+        event_payload = store.append(session_id, payload, reserve_dispatch=True)
     finally:
         store.close()
     _publish_show_session_event(event_payload)
-    if dispatch_sync and _show_event_requests_dispatch(event_payload):
-        try:
-            asyncio.run(_run_show_event_dispatch(event_payload))
-        except RuntimeError:
-            _dispatch_show_event_if_requested(event_payload)
-    else:
-        _dispatch_show_event_if_requested(event_payload)
+    if show_event_requests_dispatch(event_payload):
+        # The internal endpoint returns after the manager accepts or queues the
+        # turn, so local CLI callers can settle the reservation synchronously
+        # without waiting for the agent turn itself.
+        dispatch_outcome = asyncio.run(_run_show_event_dispatch(event_payload))
+        if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+            raise _show_event_dispatch_pending_error()
+        if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
+            raise _show_event_dispatch_error()
     return event_payload
 
 
 def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
+    from storage import messages_service
     from vibe.sse_broker import broker
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
-    if isinstance(message, dict):
+    if show_event_requests_dispatch(event_payload):
+        return
+    if (
+        isinstance(message, dict)
+        and message.get("type") in messages_service.TRANSCRIPT_TYPES
+    ):
         broker.publish("message.new", message)
     broker.publish(
         "session.activity",
@@ -9108,65 +9666,224 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
     )
 
 
-def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
-    if not _show_event_requests_dispatch(event_payload):
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        thread = threading.Thread(
-            target=lambda: asyncio.run(_run_show_event_dispatch(event_payload)),
-            name="show-event-dispatch",
-            daemon=True,
-        )
-        thread.start()
-        return
-    loop.create_task(_run_show_event_dispatch(event_payload))
-
-
-def _show_event_requests_dispatch(event_payload: dict[str, Any]) -> bool:
-    if event_payload.get("actor") != "human":
-        return False
-    if event_payload.get("type") not in {"human.intent.submitted", "human.annotation.created"}:
-        return False
-    payload = event_payload.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    return bool(payload.get("dispatch"))
-
-
-async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
+async def _run_show_event_dispatch(
+    event_payload: dict[str, Any],
+) -> _ShowEventDispatchOutcome:
+    from storage import messages_service
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
     scope_id = event_payload.get("scope_id")
-    transcript_text = event_payload.get("transcript_text")
-    if not isinstance(session_id, str) or not session_id or not isinstance(transcript_text, str) or not transcript_text.strip():
-        return
+    event_id = event_payload.get("id")
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(event_id, str)
+        or not event_id
+    ):
+        return _ShowEventDispatchOutcome.FAILED
+
+    message = event_payload.get("message")
+    if not isinstance(message, dict):
+        return _ShowEventDispatchOutcome.FAILED
+    message_type = message.get("type")
+    if message_type in _ACCEPTED_RESERVATION_TYPES:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    if message_type != messages_service.PENDING_TYPE:
+        return _ShowEventDispatchOutcome.FAILED
+
+    dispatch_text = _show_event_dispatch_text(event_payload)
+    if not dispatch_text.strip():
+        return _ShowEventDispatchOutcome.FAILED
+
     dispatch_payload = {
         "session_id": session_id,
-        "text": _show_event_dispatch_text(event_payload),
+        "text": dispatch_text,
         "scope_id": scope_id,
-        "user_message_id": event_payload.get("message_id"),
-        "message_id": event_payload.get("message_id"),
-        "platform": "avibe",
-        "channel_id": session_id,
+        "user_message_id": message["id"],
+        "show_event_id": event_id,
+        "files": [],
     }
+
     try:
-        async for event_name, data in internal_client.stream_dispatch(dispatch_payload):
-            _publish_show_dispatch_event(event_payload, event_name, data)
-    except internal_client.InternalServerUnavailable as exc:
-        _publish_show_dispatch_event(
-            event_payload,
-            "stream.error",
-            {"reason": "internal_server_unavailable", "detail": str(exc)},
+        result = await internal_client.dispatch_async(
+            dispatch_payload,
+            timeout=None,
         )
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("show event dispatch failed")
-        _publish_show_dispatch_event(event_payload, "stream.error", {"reason": "dispatch_failed", "detail": str(exc)})
+    # Only acceptance makes the reservation transcript-visible. A timed-out CLI
+    # uses that transition as its retry/dedupe signal.
+    except internal_client.InternalServerTimeout as exc:
+        logger.warning(
+            "show event dispatch still pending for session %s: %s",
+            session_id,
+            exc,
+        )
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+    except internal_client.InternalServerUnavailable as exc:
+        logger.warning(
+            "show event dispatch unavailable for session %s: %s",
+            session_id,
+            exc,
+        )
+        return _ShowEventDispatchOutcome.FAILED
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("show event dispatch acceptance is unknown")
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+
+    status = result.get("status_code", 500)
+    body = result.get("body") or {}
+    if status != 202:
+        logger.warning(
+            "show event dispatch failed for session %s: status=%s body=%s",
+            session_id,
+            status,
+            body,
+        )
+        return _ShowEventDispatchOutcome.FAILED
+    settled = _settle_show_event_message(event_payload)
+    if settled and settled.get("type") in _ACCEPTED_RESERVATION_TYPES:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    return _ShowEventDispatchOutcome.FAILED
+
+
+def _settle_show_event_message(
+    event_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    from core.show_session_events import ShowSessionEventStore
+    from sqlalchemy import select
+    from storage import messages_service
+    from storage.models import messages, show_session_events
+
+    session_id = event_payload.get("session_id")
+    event_id = event_payload.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(event_id, str) or not event_id:
+        return None
+
+    with _projects_engine().begin() as conn:
+        message_id = conn.execute(
+            select(messages.c.id)
+            .select_from(
+                show_session_events.join(
+                    messages,
+                    messages.c.id == show_session_events.c.message_id,
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+        ).scalar_one_or_none()
+        row = (
+            messages_service.get_message(
+                conn,
+                str(message_id),
+                session_id=session_id,
+            )
+            if message_id
+            else None
+        )
+        promoted = bool(
+            row
+            and messages_service.promote_pending(
+                conn,
+                str(row["id"]),
+                messages_service.pending_message_target_type(
+                    row.get("author"),
+                    row.get("source"),
+                    row.get("author_name"),
+                ),
+            )
+        )
+
+    store = ShowSessionEventStore()
+    try:
+        settled_event = store.get_event(session_id, event_id)
+    finally:
+        store.close()
+    if settled_event is None:
+        return None
+    message = settled_event.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    event_payload["message_id"] = message["id"]
+    event_payload["message"] = message
+    if promoted and message.get("type") in {
+        messages_service.HARNESS_TYPE,
+        messages_service.ANNOTATION_TYPE,
+    }:
+        _publish_visible_input_message(
+            message,
+            session_id=session_id,
+            scope_id=(
+                str(event_payload["scope_id"])
+                if isinstance(event_payload.get("scope_id"), str)
+                else None
+            ),
+            activity_event="show_event",
+        )
+    elif message.get("type") == messages_service.QUEUED_TYPE:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "queue.updated",
+            {
+                "session_id": session_id,
+                "scope_id": event_payload.get("scope_id"),
+            },
+        )
+    return message
+
+
+def _show_event_dispatch_error() -> ShowSessionEventError:
+    return localized_show_event_error("show_event_dispatch_failed")
+
+
+def _show_event_dispatch_pending_error() -> ShowSessionEventError:
+    return localized_show_event_error("show_event_dispatch_pending")
+
+
+def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | None:
+    from storage import messages_service
+
+    with _projects_engine().connect() as conn:
+        window = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=message_id,
+            limit=1,
+        )
+    return next(
+        (item for item in window["messages"] if item.get("id") == message_id),
+        None,
+    )
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
+    from storage import messages_service
+
+    message = event_payload.get("message")
+    if not isinstance(message, dict):
+        return ""
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    if messages_service.QUEUED_DISPATCH_TEXT_KEY in metadata:
+        return str(
+            metadata.get(messages_service.QUEUED_DISPATCH_TEXT_KEY) or ""
+        ).strip()
+
+    # Pre-upgrade reservations stored the machine prompt on the Show event.
+    # Current annotation rows must never replay their stripped display body.
+    content = message.get("content")
+    if isinstance(content, dict) and isinstance(content.get("annotation"), dict):
+        return ""
+    return _legacy_show_event_dispatch_text(event_payload)
+
+
+def _legacy_show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
     transcript_text = str(event_payload.get("transcript_text") or "").strip()
     if event_payload.get("type") != "human.annotation.created":
         return transcript_text
@@ -9189,21 +9906,6 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines)
-
-
-def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str, data: Any) -> None:
-    from vibe.sse_broker import broker
-
-    broker.publish(
-        "show.dispatch",
-        {
-            "show_event_id": event_payload.get("id"),
-            "session_id": event_payload.get("session_id"),
-            "scope_id": event_payload.get("scope_id"),
-            "event": event_name,
-            "data": data,
-        },
-    )
 
 
 def _show_event_response_payload(
@@ -9247,28 +9949,6 @@ def _show_event_response_payload(
                 public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
         public_event["payload"] = public_payload
     return public_event
-
-
-def _show_dispatch_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
-    if not public:
-        return event_payload
-    return {
-        key: _redact_public_dispatch_value(value)
-        for key, value in event_payload.items()
-        if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-    }
-
-
-def _redact_public_dispatch_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _redact_public_dispatch_value(nested)
-            for key, nested in value.items()
-            if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-        }
-    if isinstance(value, list):
-        return [_redact_public_dispatch_value(item) for item in value]
-    return value
 
 
 def _show_events_list_payload(
@@ -9358,8 +10038,6 @@ async def _show_events_stream(
                                 public_share_id=public_share_id,
                             ),
                         )
-                    elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
-                        yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
         except asyncio.CancelledError:
@@ -9415,7 +10093,7 @@ async def _show_events_response(
     if not _show_event_write_authorized(session_id):
         return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
 
-    return _show_event_response_from_payload(
+    return await _show_event_response_from_payload(
         session_id,
         _show_events_payload_from_request(),
         author=_show_request_author(),
@@ -9423,10 +10101,10 @@ async def _show_events_response(
 
 
 @app.route("/api/show/sessions/<session_id>/events", methods=["POST"])
-def show_session_events_create(session_id: str):
+async def show_session_events_create(session_id: str):
     if not _is_cli_show_event_request():
         return jsonify({"ok": False, "code": "forbidden"}), 403
-    return _show_event_response_from_payload(session_id, _show_events_payload_from_request())
+    return await _show_event_response_from_payload(session_id, _show_events_payload_from_request())
 
 
 @app.route("/api/show/sessions/<session_id>/prewarm", methods=["POST"])
@@ -10287,7 +10965,7 @@ async def serve_public_show_page(share_id, asset_path):
                     ),
                     400,
                 )
-            return _show_event_response_from_payload(
+            return await _show_event_response_from_payload(
                 page.session_id,
                 payload,
                 author=author,
@@ -10548,6 +11226,27 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
+async def _recover_stale_pending_messages_on_startup() -> None:
+    start = time.monotonic()
+    try:
+        summary = await asyncio.to_thread(_recover_stale_pending_messages)
+    except Exception:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.warning("Pending-message recovery raised after %sms", duration_ms, exc_info=True)
+        return
+    duration_ms = int((time.monotonic() - start) * 1000)
+    if any(summary.values()):
+        logger.info(
+            "Recovered stale pending messages in %sms: promoted=%s deleted=%s skipped=%s",
+            duration_ms,
+            summary["promoted"],
+            summary["deleted"],
+            summary["skipped"],
+        )
+    else:
+        logger.info("No stale pending messages to recover (%sms)", duration_ms)
+
+
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -10562,6 +11261,7 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
+app.add_event_handler("startup", _recover_stale_pending_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

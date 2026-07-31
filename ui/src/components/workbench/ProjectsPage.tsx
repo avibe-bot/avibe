@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Ellipsis,
+  EyeOff,
   FileText,
   Folder,
   FolderOpen,
@@ -25,8 +26,11 @@ import clsx from 'clsx';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
+import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -249,6 +253,8 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, onOpen }) => {
   const { t } = useTranslation();
+  const api = useApi();
+  const { showToast } = useToast();
   const { renameSession, setSessionPinned, archiveSession, forkSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -391,6 +397,21 @@ const MobileSessionRow: React.FC<{
               {t('workbench.sessionFork')}
             </MenuItem>
           )}
+          <MenuItem
+            icon={EyeOff}
+            onClick={() => {
+              setMenuOpen(false);
+              void hideSessionToBackground({
+                sessionId: session.id,
+                setSessionVisibility: api.setSessionVisibility,
+                showToast,
+                hiddenMessage: t('workbench.sessionHiddenToast'),
+                undoLabel: t('common.undo'),
+              });
+            }}
+          >
+            {t('workbench.sessionHideToBackground')}
+          </MenuItem>
           <MenuItem
             icon={Archive}
             danger

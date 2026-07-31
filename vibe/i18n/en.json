@@ -12,6 +12,13 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
+      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
+      "idConflict": "This Show event ID is already bound to different event contents."
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
@@ -30,6 +37,21 @@
       "messagesLabel": "Coalesced callback messages:",
       "latestLabel": "Latest callback message after {additional} additional trigger(s):",
       "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
+    },
+    "run": {
+      "interrupted": {
+        "noTerminalResult": "[Avibe Harness] This run ended without the Agent producing a result. The turn was released before the Agent replied, so no output was recorded. Check the Agent logs, then run it again if the work still needs doing.",
+        "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
+        "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes.",
+        "backendRefresh": "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed while the run was in flight, usually right after an Agent setting was saved. Nothing is wrong with the run itself — trigger it again.",
+        "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
+        "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
+        "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
+      },
+      "fallbackResult": {
+        "canceled": "The run was canceled before producing a result.",
+        "failed": "The run failed before producing a result."
+      }
     }
   },
   "common": {
@@ -81,6 +103,7 @@
     }
   },
   "error": {
+    "sessionArchived": "This session is archived and can no longer be changed.",
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
@@ -125,7 +148,8 @@
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
-    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}"
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
+    "opencodeBackendError": "OpenCode error: {error}"
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -238,7 +262,7 @@
       "mentionStatusOn": "Require @",
       "mentionStatusOff": "Don't require @",
       "requireMentionLarkNote": "Note: To receive non-mention messages in groups, the Feishu app needs the `im:message.group_msg` permission.",
-      "language": "Language / \u8bed\u8a00",
+      "language": "Language / 语言",
       "languageHint": "Changes the language for bot messages in Slack and the Web UI."
     },
     "cwd": {
@@ -315,12 +339,15 @@
       "directMessage": "Direct Message"
     },
     "new": {
-      "started": "Started a fresh session. Your next message will begin a new conversation."
+      "started": "Started a fresh session. Your next message will begin a new conversation.",
+      "pausedReason": "the bound agent session was cleared by /new",
+      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
+      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
     },
     "clear": {
       "noSessions": "No active sessions to clear.\nSession state has been reset.",
       "cleared": "Cleared active sessions for:\n{details}\nAll sessions reset.",
-      "sessionItem": "{agent} \u2192 {count} session(s)"
+      "sessionItem": "{agent} → {count} session(s)"
     },
     "cwd": {
       "current": "Current Working Directory:",
@@ -369,6 +396,7 @@
       "claudeMethodFallback": "Choose a Claude sign-in source with `/setup claude claudeai` or `/setup claude console`.",
       "resetPrompt": "{backend} looks logged out. Use the button below to restart OAuth setup.",
       "resetPromptPlain": "{backend} looks logged out. Run `/setup {backend}` to restart OAuth setup.",
+      "apiKeyRecoveryPrompt": "{backend} rejected the configured API key. Check the API key and Base URL in Settings, save them, and retry.",
       "manualFallback": "If inline buttons are unavailable, run `/setup {backend}`.",
       "codexInstructions": "Codex setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when login finishes.",
       "claudeInstructions": "Claude setup started.\n\nOpen this URL in your browser and finish the login flow:\n{url}\n\nWhen the browser callback page shows the final `authorizationCode#state` value, send it back directly in this chat.",
@@ -477,7 +505,7 @@
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
-    "zh": "\u4e2d\u6587"
+    "zh": "中文"
   },
   "telegram": {
     "commandMenu": {
@@ -511,7 +539,7 @@
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "discovery_failed": "Could not validate or discover this source.",
-      "invalid_priority_order": "Priority must include every source exactly once.",
+      "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mapping_target_unavailable": "The selected model is unavailable for this backend.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local Model Hub runtime is unavailable.",
@@ -528,7 +556,11 @@
       "switch": "{from_source}: {reason} -> switched to {to_source}",
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
-      "status": "{from_source}: {reason}",
+      "skip": "{from_source}: {reason}; skipped",
+      "mapping_applied": "{from_source} -> {model}: model mapping applied",
+      "channel_switch": "{from_source}: supply channel changed",
+      "needs_action": "{from_source}: {reason}; action required",
+      "supply_interrupted": "{model}: {reason}; model supply interrupted",
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
@@ -536,8 +568,26 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied"
+        "mapping": "model mapping applied",
+        "credential_expired": "credential expired",
+        "credential_revoked": "credential revoked",
+        "balance_exhausted": "balance exhausted",
+        "account_banned": "account unavailable",
+        "permission_denied": "request permission denied",
+        "unclassified_error": "unclassified source error",
+        "no_enabled_source": "no source is enabled",
+        "no_eligible_source": "no source is eligible",
+        "model_unsupported": "no source supports this model"
       }
+    },
+    "launch": {
+      "retry": "The next turn has already switched routes. Retry directly.",
+      "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
+      "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
+      "native_cli_unavailable": "CLI login is not available in this process",
+      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
+      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
+      "model_unsupported": "No source supports model {model}. Open Models to configure one."
     }
   },
   "remote_access": {

@@ -776,6 +776,10 @@ Preferred CLI shape:
 - delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
+- persist a new message and interrupt a busy existing Session to dispatch its FIFO queue head: `vibe agent run --session-id '<session-id>' --send-now --message '...'`
+- interrupt a busy existing Session and dispatch an already-queued head without adding a message: `vibe session send-now '<session-id>'`
+- inspect another Session's durable FIFO queue: `vibe session queue list '<session-id>'`
+- remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<session-id>' '<message-id>'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
@@ -793,6 +797,11 @@ Targeting and callbacks:
 - In an Avibe-injected Agent shell, commands that operate on this conversation default to the current Agent Session. Omit the target when the work should continue here.
 - Use `--session-id <id>` only when the command should operate on a different existing Agent Session.
 - When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings.
+- When coordinating another Workbench Session, decide whether its current turn should finish or be preempted from the work dependency, urgency, and cost of discarding in-flight work. An explicit user request is one signal, not a prerequisite.
+- Add `--send-now` when a newly persisted Agent Run should also trigger the Workbench Session-level Stop plus FIFO-head flush used by the Web UI. If older work is already queued, that older head runs first; the new message never leapfrogs it.
+- Use `vibe session send-now <session-id>` when a Workbench Session already has queued work and no new message should be added. This dispatches the existing FIFO head.
+- Both send-now forms require a Web/Workbench Session and start a new turn rather than promising backend-native same-turn steering. A refused interrupt leaves the active turn and durable queue intact.
+- Use `vibe session queue list <session-id>` before changing another Workbench Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <session-id> <message-id>`. Never guess a message ID or delete another row to simulate reordering.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
@@ -809,6 +818,7 @@ Operational guidance:
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
+- read task/watch records from `definition` for detail commands and `definitions` for list commands; command-specific duplicate aliases are not emitted
 - use `--include-finished` for paginated task/watch one-shot history
 - both list commands hide successful one-shot definitions by default while failures stay visible; use `--include-finished` and follow `pagination.next_command` for bounded history
 - use `vibe task show <id>`, `vibe watch show <id>`, or `vibe runs show <run-id>` to inspect stored fields and runtime state

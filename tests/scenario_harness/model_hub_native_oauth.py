@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from config.v2_config import ModelHubConfig
+from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
 from core.handlers.model_hub.adapter import OAuthFlowState
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
@@ -17,14 +17,23 @@ from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAd
 
 class MemoryStore:
     def __init__(self, *, experimental: bool = False):
-        self.config = ModelHubConfig.fresh()
+        self.config = ModelHubConfig(
+            agents={
+                backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+                for backend in ("claude", "codex", "opencode")
+            }
+        )
         self.config.subscription_hub_experimental = experimental
+        self.requested_models = {"claude": "claude-opus-4-6"}
 
     def load(self) -> ModelHubConfig:
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
         self.config = config
+
+    def requested_model(self, backend: str) -> str:
+        return self.requested_models.get(backend, "")
 
 
 class FakeAgentAuthService:
@@ -36,9 +45,18 @@ class FakeAgentAuthService:
         self.flows: dict[str, SimpleNamespace] = {}
         self.submissions: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
+        self.start_calls: list[tuple[str, bool]] = []
 
-    async def start_web_setup(self, backend: str, *, force_reset: bool = True):
-        assert force_reset is False
+    async def start_web_setup(
+        self,
+        backend: str,
+        *,
+        force_reset: bool = True,
+        on_irreversible_start=None,
+    ):
+        if force_reset and on_irreversible_start is not None:
+            on_irreversible_start()
+        self.start_calls.append((backend, force_reset))
         flow_id = f"web_{uuid.uuid4().hex[:8]}"
         flow = SimpleNamespace(
             flow_id=flow_id,

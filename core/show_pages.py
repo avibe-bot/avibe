@@ -1145,7 +1145,9 @@ def show_page_runtime_recovery_html(session_id: str) -> str:
         "Please repair this avibe Show Page. Open the Show Page workspace for session "
         f"{session_id}, read the local Show Page/runtime instructions, then replace src/App.tsx "
         "with a polished React page. Use the shadcn-style components from @/components/ui and "
-        "@avibe/show-ui. Do not edit index.html unless it is required. If the browser shows "
+        "Tailwind CSS v4. Keep the existing CSS imports and customize standard shadcn variables "
+        "such as --background, --foreground, --primary, --border, and --radius. Do not edit "
+        "index.html unless it is required. If the browser shows "
         "Ready to visualize, check src/App.tsx, src/main.tsx, src/styles.css, and the Vite/browser "
         "console for compile or runtime errors. Make the page responsive and verify it renders.\n\n"
         "Show Page history contract:\n"
@@ -1433,21 +1435,17 @@ createRoot(document.getElementById("root")!).render(
 
 
 def _default_app_tsx() -> str:
-    # Default app shell for a fresh Show Page (agent-editable). It wraps the routed
-    # page in the theme provider and a simple centered container. This file, the
-    # pages under src/pages/, and src/router.tsx are a starting point — restyle,
-    # add pages, or replace them. The runtime-owned app shell (index.html +
-    # src/main.tsx) is never edited to add a page.
-    return """import { ThemeProvider } from "@avibe/show-ui/theme"
-import { RouterView } from "./router"
+    # Default app shell for a fresh Show Page (agent-editable). Standard shadcn
+    # variables from styles.css are the theme authority, so no provider shadows
+    # an agent's CSS overrides. This file, the pages under src/pages/, and
+    # src/router.tsx are a starting point — restyle, add pages, or replace them.
+    return """import { RouterView } from "./router"
 
 export default function App() {
   return (
-    <ThemeProvider preset="zinc">
-      <main className="mx-auto min-h-screen max-w-3xl px-4 py-8">
-        <RouterView />
-      </main>
-    </ThemeProvider>
+    <main className="mx-auto min-h-screen max-w-3xl bg-background px-4 py-8 text-foreground">
+      <RouterView />
+    </main>
   )
 }
 """
@@ -1778,17 +1776,15 @@ def _default_styles_css() -> str:
     return """@import "tailwindcss";
 @import "@avibe/show-ui/theme.css";
 
-:root {
-  color-scheme: light;
-}
-
 /*
  * The default multi-page demo styles itself with Tailwind utility classes and the
- * @avibe/show-ui shadcn components, so this entry only needs the two imports above
+ * built-in shadcn components, so this entry only needs the two imports above
  * (keep them first) plus a small base. Add global CSS here as the app grows.
  */
 body {
   margin: 0;
+  background: var(--background);
+  color: var(--foreground);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 """

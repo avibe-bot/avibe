@@ -21,7 +21,8 @@ Graph semantics (all from existing columns):
 - **Spawn edge** (caller → callee): runs with ``source_kind='agent'`` and
   ``source_actor`` set, aggregated per (caller session, callee session).
 - **Callback edge** (callee → report target): runs with ``callback_session_id``
-  set; status from ``callback_status``.
+  set; status from ``callback_status``. Its delivery child has
+  ``source_kind='callback'`` and never suppresses an agent-authored spawn.
 - **Trigger edge** (definition → carrying session): runs with
   ``run_type in ('scheduled','watch')`` grouped by ``definition_id``.
 
@@ -37,6 +38,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from storage.agent_session_rows import session_openable_in_chat
 from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
@@ -486,26 +488,13 @@ def _build_edges(
         prev = _parse_iso(existing)
         return prev is None or prev < cand
 
-    # Callback target per run id — an explicit callback-delivery run
-    # (source_kind='agent', parent_run_id → the delegated run) reports INTO the
-    # delegated run's callback session. Such a report row must NOT be counted as
-    # a spawn (it would draw a misleading callee→caller edge and make the caller
-    # look "started by" the callee). Detect it: the run's session equals its
-    # parent run's callback target.
-    callback_target_by_run: dict[str, str] = {}
-    for runs in runs_by_session.values():
-        for run in runs:
-            if run.get("callback_session_id"):
-                callback_target_by_run[run["id"]] = run["callback_session_id"]
-
     for session_id, runs in runs_by_session.items():
         for run in runs:
             created = run.get("created_at")
-            parent = run.get("parent_run_id")
-            is_callback_delivery = bool(parent) and callback_target_by_run.get(parent) == session_id
-            # spawn: caller (source_actor) → this session (excluding callback-
-            # delivery reports, which run in the caller's session by design)
-            if run.get("source_kind") == "agent" and run.get("source_actor") and not is_callback_delivery:
+            # Callback deliveries use source_kind='callback'. Every agent child
+            # remains independent delegation, even when it targets the parent
+            # run's callback session.
+            if run.get("source_kind") == "agent" and run.get("source_actor"):
                 key = (run["source_actor"], session_id)
                 agg = spawn.setdefault(key, {"run_count": 0, "last_run_id": None, "last_at": None})
                 agg["run_count"] += 1
@@ -651,9 +640,9 @@ def _build_nodes(
             "scope_label": scope_label,
             "platform": platform,
             "workdir": row.get("workdir"),
-            # Every persisted session is openable in chat EXCEPT the internal
-            # private-agent-run pseudo-scope sessions (M1 retires those).
-            "openable_in_chat": not is_private_run,
+            "openable_in_chat": session_openable_in_chat(
+                session_id=session_id, scope_native_type=row.get("scope_native_type")
+            ),
             "created_at": _iso_z(row.get("created_at")),
             "last_active_at": _iso_z(row.get("last_active_at")),
             "elapsed_seconds": (live or {}).get("elapsed_seconds") if is_live else None,

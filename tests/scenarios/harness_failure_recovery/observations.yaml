@@ -63,3 +63,201 @@ observations:
       A user queue row preserved by explicit Stop can precede a held Agent Run
       row. Startup recovery must not call the generic FIFO flush until the
       eligible held Agent Run segment itself is at the queue head.
+  - id: HFR-OBS-008
+    date: 2026-07-25
+    source: code-path trace of dispatch_turn and its callers
+    result: confirmed
+    detail: >-
+      A turn sink can be released without ever emitting a terminal result -
+      a blank harness message, or a refusal because the Session already has a
+      streaming turn. dispatch_turn returned success in both cases, so
+      _execute_agent_run reported nothing and the Run stayed running forever.
+      The refusal path returns before any sink exists, so the sink itself
+      cannot carry the reason; the outcome has to be reported by the caller.
+  - id: HFR-OBS-009
+    date: 2026-07-25
+    source: code-path trace of the two ownership lanes
+    result: confirmed
+    detail: >-
+      A running Run is owned by either the drain lane
+      (ScheduledTaskService._inflight_executions) or the turn lane
+      (SessionTurnManager in_flight plus active_turn_sinks), and neither can
+      observe the other. Nothing periodically reconciles rows whose owner
+      disappeared inside a live process, and queued rows never age at all, so
+      a Run stranded by a transport that never reconnected waits with no
+      user-visible explanation and keeps its Session slot.
+  - id: HFR-OBS-010
+    date: 2026-07-25
+    source: code-path trace of SqliteInvalidationProbe.has_external_write
+    result: confirmed
+    detail: >-
+      The store tick's reload gate bumps on any write to the database file,
+      including the service's own. Recording staleness evidence on every skip
+      iteration would therefore become a self-feeding write to reload to
+      re-drain loop for as long as a transport stayed down, plus one
+      runs.updated event per cycle. The evidence stamp must be written only
+      when the recorded reason changes, and must not bump updated_at.
+  - id: HFR-OBS-011
+    date: 2026-07-25
+    source: deterministic startup-recovery fault injection
+    result: confirmed
+    detail: >-
+      recover_processing_runs requeues every running row at service
+      construction, so a restart retries its in-flight Runs rather than
+      leaving them for the sweep. The swept orphan class is therefore about
+      owners lost within a live process, and any staged running fixture must
+      be written after the service is constructed or recovery flips it to
+      queued first.
+  - id: HFR-OBS-012
+    date: 2026-07-25
+    source: review of _drain_requests capacity break against the sweep's evidence read
+    result: confirmed
+    detail: >-
+      The drain breaks at _MAX_CONCURRENT_EXECUTIONS without examining the
+      remaining queue, so rows below the cut keep whatever skip reason they
+      last carried. A transport_unavailable stamp therefore survives long
+      after the platform reconnected, and sweeping on the stamp alone would
+      fail a Run that is merely waiting for a free slot. The transport class
+      needs a live second opinion (deliverable_run_ids) in addition to the
+      recorded reason, and must disable itself when that opinion is
+      unavailable.
+  - id: HFR-OBS-013
+    date: 2026-07-25
+    source: review of the stop-versus-terminal-result ordering in _stream_chunk
+    result: confirmed
+    detail: >-
+      An acknowledged stop stamps settled_by in memory and releases the waiter
+      immediately, while the Run row is only written later when
+      _execute_agent_run reads the stamp back. A terminal result arriving in
+      that window overwrote the reason, so the guarded canceled settlement was
+      skipped and the outcome depended on which coroutine resumed first. The
+      reason the user was already shown must win; the row's terminal status
+      stays first-writer-wins.
+  - id: HFR-OBS-014
+    date: 2026-07-25
+    source: review of the transport TTL clock against a long-queued Run
+    result: confirmed
+    detail: >-
+      A Run can sit in queued far longer than the transport TTL for reasons that
+      are progress, such as capacity or a busy Session. Aging the transport class
+      from created_at therefore made such a Run sweepable on the first tick after
+      its transport blinked, consuming none of the configured reconnect window.
+      The TTL is a reconnect window, so it must be measured from last_skip_at,
+      the instant the transport reason started, which the transition-triggered
+      skip stamp already records.
+  - id: HFR-OBS-015
+    date: 2026-07-25
+    source: review of owned_agent_run_ids against the workbench queue-hold TTL
+    result: confirmed
+    detail: >-
+      A coalesced Workbench turn claims its secondary Runs and deliberately
+      leaves them queued with workbench_queue_holds_run while the primary
+      settles them, and owned_agent_run_ids reports every one of those ids as
+      actively owned. Ownership therefore cannot be a running-only exemption:
+      a hold TTL that ignored it would fail live sibling Runs as soon as the
+      turn outran the TTL, reintroducing a turn-duration timeout by the back
+      door. A live owner outranks every staleness class, whatever the row
+      status, so the check belongs at the top of the candidate loop rather than
+      duplicated per branch.
+  - id: HFR-OBS-016
+    date: 2026-07-25
+    source: review of the avibe gate hand-off against the two settlement lanes
+    result: confirmed
+    detail: >-
+      An avibe-targeted execution hands its prompt to the Session turn gate and
+      returns from _execute_agent_run with complete_on_return false while the
+      turn is still live, so the drain lane deliberately keeps its hands off the
+      row. Only the turn lane can settle it, but the turn lane called the thin
+      dispatch_turn wrapper that discards settled_by, so a turn released without
+      a terminal result left the Run running forever until the sweep grace
+      expired. Whichever lane owns the row must read the settlement vocabulary,
+      not just the error, and settle through the same guarded first-writer-wins
+      writer so racing an honest terminal result is safe in both directions.
+  - id: HFR-OBS-017
+    date: 2026-07-25
+    source: review of a swept queue hold against the persisted Workbench queue
+    result: confirmed
+    detail: >-
+      Terminalizing an agent_runs row is not the whole reclamation: a queue-hold
+      Run also owns a persisted queued messages segment keyed by
+      agent_run:<run_id>. recover_persisted_agent_run_queue ignores references
+      whose Run is no longer queued, so after the sweep expired the hold the
+      Session still displayed stale pending input until an unrelated send forced
+      a flush. The sweep must retire each expired Run's own queue segment,
+      scoped by that run id so it can never touch a live sibling's row, and
+      publish queue.updated so the surface reflects the reclamation immediately.
+  - id: HFR-OBS-018
+    date: 2026-07-25
+    source: review of the turn-lane CancelledError handler against release_for_backend_refresh
+    result: confirmed
+    detail: >-
+      A cancelled turn task carries no cause. release_for_backend_refresh cancels
+      in-flight turns whenever an agents.* save triggers the required rolling
+      backend reconciliation, so reading every CancelledError as a user Stop made
+      a Run killed by routine configuration work settle canceled with the
+      user-stop explanation: the callback told the user they stopped a Run they
+      never touched, and failure accounting saw deliberate intent instead of an
+      infrastructure fault. The canceller is the only party that knows why, so the
+      cause has to be recorded on the Turn before task.cancel() and read back when
+      the turn is popped. The default reading of a bare cancellation stays stopped,
+      because a plain Stop and send-now are the paths that legitimately have no
+      more specific reason.
+  - id: HFR-OBS-019
+    date: 2026-07-25
+    source: review of both settlement lanes against the Claude Activity delivery-failure emit
+    result: confirmed
+    detail: >-
+      "The turn ended" is not "the Run ended". _settle_activity_turn_after_delivery_failure
+      closes its origin turn with a silent terminal result carrying
+      completes_run=False, because the REQUEUED Activity keeps the Run and retries
+      it. That emit still mutates the turn lifecycle, so the release ran through
+      mark_turn_complete, whose own default reason is the no-dispatch case: both
+      lanes then read no_terminal_result and failed a live Activity-owned Run,
+      firing its terminal callback before the retry ever ran. The release site is
+      the only party that knows whether it also owns the Run, so it must supply the
+      reason, and both lanes must allow-list the settlements that genuinely mean no
+      result is coming (SETTLEMENTS_WITHOUT_RESULT) rather than treating everything
+      except terminal_result as a zombie -- otherwise the next "turn ended, run
+      lives on" reason repeats the same failure.
+  - id: HFR-OBS-020
+    result: confirmed
+    detail: >-
+      Staleness evidence is a point-in-time fact, and the sweep is the only party
+      that sees both halves of its lifetime. A queued row stamped
+      transport_unavailable at t0 stays stamped after transport recovers, because
+      re-stamping is transition-triggered and a drain that never reaches the row
+      (at concurrency capacity) rewrites nothing; deliverability then exempts it,
+      so nobody retires the stamp. When transport drops again at t2 > t0 + TTL, the
+      second outage is aged from the FIRST one and is swept with zero reconnect
+      window. Retiring the evidence at the moment deliverability proves the outage
+      is over restores the invariant that a TTL measures one continuous outage.
+      The same shape holds for the hold class: owned_agent_run_ids() reports only
+      the ids a live turn is executing, never the followers the gate parked behind
+      it, so a turn legitimately longer than harness_run_hold_ttl_seconds had its
+      own queued successor failed. Live facts the sweep cannot derive must be
+      supplied by the caller at the granularity the truth lives at -- sessions for
+      the gate, run ids for ownership and deliverability -- and a caller that
+      cannot enumerate them must fail closed by disabling the class rather than
+      guessing.
+  - id: HFR-OBS-021
+    result: confirmed
+    detail: >-
+      A synthetic terminal result is not evidence of a result. Every backend answers
+      an acknowledged stop with an empty silent ``result`` so the dot settles and the
+      SSE waiter closes through the one outbound chokepoint, and all three sent it
+      with the terminal-turn default (completes_run=True). The dispatcher therefore
+      recorded that empty body as the run's ``succeeded`` terminal BEFORE the stop's
+      own guarded write, so first-writer-wins reported every normally-stopped run as
+      a success and left the ``stopped`` -> ``canceled`` mapping reachable only when
+      the backend could not emit at all (stop_failed, stale release, IM /stop). The
+      earlier design accepted this race as benign because either outcome is "true of
+      a run the user stopped"; that was wrong, because the ordering is not a race at
+      all -- SessionTurnManager.cancel awaits the interrupt (which emits) and only
+      then cancels the task, so the losing branch was the ONLY branch. Correcting it
+      means the stop output declaring what it is: completes_turn=True so the turn
+      still ends, completes_run=False so an empty body never becomes a terminal
+      status, and an explicit settled_by so "I do not settle the run" is not confused
+      with the Activity case where somebody else genuinely owns the row. Where an
+      identical emit is copied across backends, the guard has to be cross-backend too
+      -- one behavior test pins one backend and lets the other two regress.
+

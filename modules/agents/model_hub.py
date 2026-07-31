@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,15 +17,26 @@ from config import paths
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import EventAgent, EventReason
-from core.handlers.model_hub.identifiers import opencode_provider_id, parse_opencode_model_id
+from core.handlers.model_hub.identifiers import parse_opencode_model_id
+from core.handlers.model_hub.resolver import (
+    BackendName,
+    ModelHubTurnResolution,
+    normalize_opencode_requested_model,
+    resolve_model_hub_turn,
+    source_after_cooldown_recovery,
+    source_eligible_for_backend,
+)
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from vibe.i18n import t as i18n_t
 
 
-BackendName = Literal["claude", "codex", "opencode"]
 LaunchChannel = Literal["direct", "native_cli", "hub"]
+TurnMode = Literal["direct", "hub"]
 
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
+_CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
 _CONTEXT_FAILURE_RECORDED_ATTR = "_vibe_model_hub_failure_recorded"
 _NATIVE_QUOTA_RE = re.compile(
     r"(?:quota|usage|credit|billing).{0,32}(?:exhaust|exceed|limit|deplet|insufficient)|"
@@ -38,6 +50,18 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
+_SOURCE_DETAIL_EVENT_REASONS = {
+    "models.source.cooldown.quota_exhausted": "quota_exhausted",
+    "models.source.cooldown.rate_limited": "rate_limited",
+    "models.source.cooldown.server_error": "server_error",
+    "models.source.cooldown.network": "network",
+    "models.source.cooldown.timeout": "network",
+    "models.source.needs_action.oauth_expired": "credential_expired",
+    "models.source.needs_action.credential_revoked": "credential_revoked",
+    "models.source.needs_action.balance_exhausted": "balance_exhausted",
+    "models.source.needs_action.account_banned": "account_banned",
+    "models.source.error.unclassified": "unclassified_error",
+}
 
 
 @dataclass(frozen=True)
@@ -80,9 +104,26 @@ class OpenCodeOverlay:
 def bind_launch(context: Any, launch: ModelHubLaunch) -> None:
     try:
         setattr(context, _CONTEXT_LAUNCH_ATTR, launch)
+        setattr(
+            context,
+            _CONTEXT_MODE_ATTR,
+            "direct" if launch.channel == "direct" else "hub",
+        )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False)
     except (AttributeError, TypeError):
         return
+
+
+def bind_turn_mode(context: Any, mode: TurnMode) -> None:
+    try:
+        setattr(context, _CONTEXT_MODE_ATTR, mode)
+    except (AttributeError, TypeError):
+        return
+
+
+def turn_mode_for_context(context: Any) -> TurnMode | None:
+    value = getattr(context, _CONTEXT_MODE_ATTR, None)
+    return value if value in {"direct", "hub"} else None
 
 
 def launch_for_context(context: Any) -> ModelHubLaunch | None:
@@ -144,11 +185,29 @@ async def resolve_model_hub_launch(
     controller: Any,
     backend: BackendName,
     requested_model: str,
+    *,
+    process_scope: Optional[str] = None,
 ) -> ModelHubLaunch:
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
     if callable(resolver):
-        return await resolver(backend, requested_model)
+        manager = getattr(controller, "session_turns", None)
+        turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
+        turn_id = turn_lookup() if callable(turn_lookup) else None
+        try:
+            return await resolver(
+                backend,
+                requested_model,
+                process_scope=process_scope,
+                turn_id=turn_id,
+            )
+        except ModelHubError as exc:
+            raise _localized_launch_error(
+                controller,
+                backend,
+                requested_model,
+                exc,
+            ) from None
     return ModelHubLaunch(
         backend=backend,
         channel="direct",
@@ -166,8 +225,72 @@ async def resolve_opencode_overlay_launch(
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve_opencode_overlay_launch", None)
     if overlay is not None and callable(resolver):
-        return await resolver(overlay, requested_model)
+        try:
+            return await resolver(overlay, requested_model)
+        except ModelHubError as exc:
+            raise _localized_launch_error(
+                controller,
+                "opencode",
+                requested_model,
+                exc,
+            ) from None
     return await resolve_model_hub_launch(controller, "opencode", requested_model)
+
+
+def _localized_launch_error(
+    controller: Any,
+    backend: BackendName,
+    requested_model: str,
+    error: ModelHubError,
+) -> ModelHubError:
+    failure = error.data
+    if not isinstance(failure, dict):
+        return error
+    language = str(
+        getattr(getattr(controller, "config", None), "language", "en")
+        or "en"
+    )
+    key = str(failure.get("copy_key") or "interrupted")
+    raw_blockers = failure.get("blockers")
+    if isinstance(raw_blockers, list):
+        rendered_blockers = []
+        for blocker in raw_blockers:
+            if not isinstance(blocker, Mapping):
+                continue
+            source = str(blocker.get("source") or "")
+            detail_key = str(blocker.get("detail_key") or "")
+            blocker_reason = str(blocker.get("reason") or "")
+            if blocker_reason == "native_cli_unavailable":
+                detail = i18n_t(
+                    "modelHub.launch.native_cli_unavailable",
+                    language,
+                )
+            else:
+                reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
+                detail = (
+                    i18n_t(f"modelHub.events.reason.{reason}", language)
+                    if reason is not None
+                    else str(blocker.get("status") or "")
+                )
+            rendered_blockers.append(f"{source}: {detail}")
+        blockers = ", ".join(rendered_blockers)
+    else:
+        blockers = str(raw_blockers or "")
+    return ModelHubError(
+        error.code,
+        status=error.status,
+        detail=i18n_t(
+            f"modelHub.launch.{key}",
+            language,
+            model=failure.get("model") or requested_model,
+            backend=backend,
+            source=failure.get("source") or "",
+            retry_at=failure.get("retry_at") or "",
+            blockers=blockers,
+        ),
+        supply_state=error.supply_state,
+        data=error.data,
+    )
 
 
 def build_claude_hub_env(
@@ -265,7 +388,12 @@ class ModelHubRuntimeRouter:
         self.overlay_path = overlay_path or paths.get_runtime_dir() / "model-hub" / "opencode-overlay.json"
         self._uses_default_native_cli_ready = native_cli_ready is None
         self.native_cli_ready = native_cli_ready or self._default_native_cli_ready
+        self.service.native_source_ready = self._native_source_ready
         self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
+        self._last_supply_state: dict[
+            tuple[BackendName, str],
+            tuple[str, Optional[EventReason]],
+        ] = {}
 
     @staticmethod
     def _default_native_cli_ready(
@@ -273,6 +401,14 @@ class ModelHubRuntimeRouter:
         *,
         verified_oauth: bool = False,
     ) -> bool:
+        runtime_config = getattr(load_config_or_default().agents, backend)
+        cli_path = str(getattr(runtime_config, "cli_path", "") or "").strip()
+        if (
+            not bool(getattr(runtime_config, "enabled", False))
+            or not cli_path
+            or shutil.which(os.path.expanduser(cli_path)) is None
+        ):
+            return False
         if backend == "claude":
             from vibe.claude_config import read_claude_settings_env
 
@@ -321,36 +457,54 @@ class ModelHubRuntimeRouter:
             verified_oauth=backend == "codex" and source.state.status == "active",
         )
 
-    @staticmethod
-    def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
-        return launch.backend, launch.target_model
-
-    @staticmethod
-    def _is_bootstrap_unconfigured(
+    def _unavailable_native_source_ids(
+        self,
         config: ModelHubConfig,
         backend: BackendName,
-        requested_model: str = "",
-    ) -> bool:
-        agent = config.agents[backend]
-        if backend == "opencode":
-            return agent.menu is None or not agent.menu.checked
-
-        explicit_mapping = any(
-            mapping.enabled and mapping.builtin_id == requested_model
-            for mapping in agent.mappings
+    ) -> frozenset[str]:
+        return frozenset(
+            source.id
+            for source in config.sources
+            if source.supply_channel == "native_cli"
+            and source_eligible_for_backend(source, backend)
+            and not self._native_source_ready(
+                backend,
+                source_after_cooldown_recovery(source, self.service.now()),
+            )
         )
-        if explicit_mapping:
-            return False
-        target_model = ModelHubRuntimeRouter._target_model(config, backend, requested_model)
-        for source in config.sources:
-            if not any(model.id == target_model for model in source.models):
-                continue
-            if source.supply_channel == "hub":
-                return False
-            sanctioned_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
-            if source.kind == "subscription" and sanctioned_backend == backend:
-                return False
-        return True
+
+    async def _resolve_turn(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        requested_model: str,
+        *,
+        supply_channel: Literal["hub"] | None = None,
+    ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
+        resolution = resolve_model_hub_turn(
+            config,
+            backend,
+            requested_model,
+            now=self.service.now(),
+            unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
+            supply_channel=supply_channel,
+        )
+        if not resolution.recoverable_source_ids:
+            return config, resolution
+        await self.service._recover_resolution_sources(resolution)
+        config = self.service.store.load()
+        return config, resolve_model_hub_turn(
+            config,
+            backend,
+            requested_model,
+            now=self.service.now(),
+            unavailable_source_ids=self._unavailable_native_source_ids(config, backend),
+            supply_channel=supply_channel,
+        )
+
+    @staticmethod
+    def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
+        return launch.backend, launch.requested_model
 
     @staticmethod
     def _direct_launch(backend: BackendName, requested_model: str) -> ModelHubLaunch:
@@ -360,18 +514,6 @@ class ModelHubRuntimeRouter:
             requested_model=requested_model,
             target_model=requested_model,
             runtime_model=requested_model,
-        )
-
-    @staticmethod
-    def _target_model(config: ModelHubConfig, backend: BackendName, requested_model: str) -> str:
-        agent = config.agents[backend]
-        return next(
-            (
-                mapping.target_model_id
-                for mapping in agent.mappings
-                if mapping.enabled and mapping.builtin_id == requested_model
-            ),
-            requested_model,
         )
 
     async def _source_prefix(self, source_id: str) -> str:
@@ -392,9 +534,27 @@ class ModelHubRuntimeRouter:
                 return prefix
         raise ModelHubError("engine_down", status=503)
 
-    async def _gateway_credentials(self, backend: BackendName) -> tuple[str, str]:
+    async def _gateway_credentials(
+        self,
+        backend: BackendName,
+        *,
+        process_scope: Optional[str],
+        turn_id: Optional[str],
+        requested_model_id: Optional[str] = None,
+        resolved_model_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        via_mapping: bool = False,
+    ) -> tuple[str, str]:
         if self.turn_gateway is not None:
-            return await self.turn_gateway.endpoint(backend)
+            return await self.turn_gateway.endpoint(
+                backend,
+                process_scope=process_scope,
+                turn_id=turn_id,
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                source_id=source_id,
+                via_mapping=via_mapping,
+            )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
         if status.listen_port is None:
@@ -421,7 +581,7 @@ class ModelHubRuntimeRouter:
         route_events = [
             event
             for event in self.service.events.list(limit=100)
-            if event.get("agent") == current.backend and event.get("model_id") == current.target_model
+            if event.get("agent") == current.backend and event.get("model_id") == current.requested_model
         ]
         pending_source: ModelHubSourceConfig | None = None
         pending_reason: EventReason | None = None
@@ -452,6 +612,12 @@ class ModelHubRuntimeRouter:
                 if event.get("kind") == "cooldown":
                     source = self._source_for_id(config, event.get("from_source"))
                 elif event.get("kind") in {"switch", "channel_switch"}:
+                    if event.get("kind") == "channel_switch" and event.get("to_source") is None:
+                        previous = self._direct_launch(
+                            current.backend,
+                            current.requested_model,
+                        )
+                        break
                     source = self._source_for_id(config, event.get("to_source"))
                 else:
                     continue
@@ -467,9 +633,14 @@ class ModelHubRuntimeRouter:
                     break
         return previous, pending_source, pending_reason
 
-    def _emit_transition(self, current: ModelHubLaunch, config: ModelHubConfig) -> None:
+    def _emit_transition(
+        self,
+        current: ModelHubLaunch,
+        config: ModelHubConfig,
+    ) -> None:
         previous, failed_source, failed_reason = self._transition_context(current, config)
-        self._last_launch[self._route_key(current)] = current
+        route_key = self._route_key(current)
+        self._last_launch[route_key] = current
         current_source = self._source_for_id(config, current.source_id)
         if (
             failed_source is not None
@@ -479,44 +650,233 @@ class ModelHubRuntimeRouter:
         ):
             self.service._emit_switch(
                 agent=cast(EventAgent, current.backend),
-                model_id=current.target_model,
+                model_id=current.requested_model,
                 failed_source=failed_source,
                 failed_reason=failed_reason,
                 source=current_source,
             )
-        if previous is None or previous.channel == current.channel:
+        if previous is None:
+            return
+        if previous.channel == current.channel:
+            return
+        if "direct" in {previous.channel, current.channel}:
             return
         if {previous.channel, current.channel} != {"native_cli", "hub"}:
+            return
+        if (
+            previous.source_id is None
+            or current.source_id is None
+            or previous.source_id != current.source_id
+        ):
             return
         reason = failed_reason or ("recovery" if current.channel == "native_cli" else "manual")
         self.service._record_event(
             agent=cast(EventAgent, current.backend),
             kind="channel_switch",
-            model_id=current.target_model,
+            model_id=current.requested_model,
             reason=reason,
             from_source=previous.source_id,
-            to_source=current.source_id,
+            to_source=previous.source_id,
+            from_label=current_source.display_name,
+            to_label=current_source.display_name,
             now=self.service.now(),
         )
 
-    async def resolve(self, backend: BackendName, requested_model: str) -> ModelHubLaunch:
+    @staticmethod
+    def _supply_interruption_reason(
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> EventReason:
+        order = config.effective_source_order(resolution.backend)
+        sources_by_id = {source.id: source for source in config.sources}
+        enabled_sources = [
+            sources_by_id[source_id]
+            for source_id in order
+            if source_id in sources_by_id
+        ]
+        if not enabled_sources:
+            if config.sources and not any(
+                source_eligible_for_backend(source, resolution.backend)
+                for source in config.sources
+            ):
+                return "no_eligible_source"
+            return "no_enabled_source"
+        if not any(
+            source_eligible_for_backend(source, resolution.backend)
+            for source in enabled_sources
+        ):
+            return "no_eligible_source"
+        return "model_unsupported"
+
+    @staticmethod
+    def _launch_failure(
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> dict[str, Any]:
+        model = resolution.requested_model or resolution.target_model
+        if resolution.supply_status == "waiting":
+            cooling = [
+                source
+                for source in resolution.matching_sources
+                if source.state.status == "cooldown" and source.state.retry_at
+            ]
+            recovery = min(
+                (source.state.retry_at or "" for source in cooling),
+                default="",
+            )
+            return {
+                "copy_key": "waiting",
+                "model": model,
+                "source": ", ".join(source.display_name for source in cooling),
+                "retry_at": recovery,
+            }
+        if resolution.matching_sources:
+            candidate_ids = {
+                source.id for source in resolution.candidates
+            }
+            blockers = [
+                {
+                    "source": source.display_name,
+                    "status": source.state.status,
+                    "detail_key": source.state.detail_key,
+                    "reason": (
+                        "native_cli_unavailable"
+                        if source.supply_channel == "native_cli"
+                        and source.state.status in {"active", "standby"}
+                        and source.id not in candidate_ids
+                        else None
+                    ),
+                }
+                for source in resolution.matching_sources
+            ]
+            return {
+                "copy_key": "interrupted",
+                "model": model,
+                "blockers": blockers,
+            }
+        reason = ModelHubRuntimeRouter._supply_interruption_reason(config, resolution)
+        return {
+            "copy_key": reason,
+            "model": model,
+        }
+
+    def _no_candidate_error(
+        self,
+        *,
+        backend: BackendName,
+        requested_model: str,
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+        process_scope: Optional[str],
+        turn_id: Optional[str],
+    ) -> ModelHubError:
+        supply_state = (
+            "waiting"
+            if resolution.supply_status == "waiting"
+            else "interrupted"
+        )
+        normalized_scope = (
+            str(process_scope or "").strip()
+            or f"{backend}:untracked"
+        )
+        if self.turn_gateway is not None:
+            self.turn_gateway.correlation.mark_no_candidate(
+                backend=backend,
+                process_scope=normalized_scope,
+                turn_id=turn_id,
+                requested_model_id=requested_model,
+                supply_state=supply_state,
+            )
+        if not resolution.matching_sources:
+            reason = self._supply_interruption_reason(config, resolution)
+            supply_key = (backend, requested_model)
+            current_state = ("interrupted", reason)
+            if self._last_supply_state.get(supply_key) != current_state:
+                self.service._record_event(
+                    agent=cast(EventAgent, backend),
+                    kind="supply_interrupted",
+                    model_id=requested_model,
+                    reason=reason,
+                    now=self.service.now(),
+                )
+                self._last_supply_state[supply_key] = current_state
+        return ModelHubError(
+            "mapping_target_unavailable",
+            status=409,
+            supply_state=supply_state,
+            data=self._launch_failure(
+                config,
+                resolution,
+            ),
+        )
+
+    def settle_turn(
+        self,
+        turn_id: str,
+        *,
+        settled_by: Optional[str],
+        ts: str,
+        mode: Optional[Literal["direct", "hub"]] = None,
+    ) -> None:
+        try:
+            if mode is not None:
+                self.service.note_turn_mode(turn_id, mode)
+        finally:
+            if self.turn_gateway is not None:
+                self.turn_gateway.correlation.settle(
+                    turn_id,
+                    settled_by=settled_by,
+                    ts=ts,
+                )
+
+    def retire_process_scope(
+        self,
+        backend: BackendName,
+        process_scope: str,
+        *,
+        terminal_turn_id: Optional[str] = None,
+    ) -> None:
+        if self.turn_gateway is not None:
+            self.turn_gateway.correlation.retire_scope(
+                backend,
+                process_scope,
+                terminal_turn_id=terminal_turn_id,
+            )
+
+    def turn_mode(self, backend: BackendName) -> TurnMode:
+        return cast(TurnMode, self.service.store.load().agents[backend].mode)
+
+    async def resolve(
+        self,
+        backend: BackendName,
+        requested_model: str,
+        *,
+        process_scope: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
-        agent = config.agents[backend]
-        if agent.mode == "direct":
+        config, resolution = await self._resolve_turn(
+            config,
+            backend,
+            requested_model,
+        )
+        if resolution.channel == "direct":
             launch = self._direct_launch(backend, requested_model)
             self._emit_transition(launch, config)
             return launch
-        # Fresh installs seed Hub mode before setup/migration has configured
-        # every backend/model route. Preserve native launch only for an
-        # unconfigured route; explicitly configured Hub routes remain fail-closed.
-        if self._is_bootstrap_unconfigured(config, backend, requested_model):
-            return self._direct_launch(backend, requested_model)
-        if not requested_model:
-            raise ModelHubError("mapping_target_unavailable", status=409)
+        if resolution.source is None:
+            raise self._no_candidate_error(
+                backend=backend,
+                requested_model=requested_model,
+                config=config,
+                resolution=resolution,
+                process_scope=process_scope,
+                turn_id=turn_id,
+            )
 
-        target_model = self._target_model(config, backend, requested_model)
-        if target_model != requested_model:
+        target_model = resolution.target_model
+        if resolution.mapping_applied:
             self.service._record_event(
                 agent=cast(EventAgent, backend),
                 kind="mapping_applied",
@@ -525,28 +885,8 @@ class ModelHubRuntimeRouter:
                 from_label=requested_model,
                 now=self.service.now(),
             )
-        provider: str | None = None
-        if backend == "opencode":
-            try:
-                provider, target_model = parse_opencode_model_id(target_model)
-            except ValueError:
-                raise ModelHubError("mapping_target_unavailable", status=409) from None
-            if agent.menu is None or f"{provider}/{target_model}" not in agent.menu.checked:
-                raise ModelHubError("mapping_target_unavailable", status=409)
-        candidates = await self.service._resolution_candidates(backend, target_model, provider=provider)
-        if not candidates:
-            raise ModelHubError("mapping_target_unavailable", status=409)
-        source = next(
-            (
-                candidate
-                for candidate in candidates
-                if candidate.supply_channel != "native_cli"
-                or self._native_source_ready(backend, candidate)
-            ),
-            None,
-        )
-        if source is None:
-            raise ModelHubError("mapping_target_unavailable", status=409)
+        source = resolution.source
+        self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():
                 try:
@@ -562,8 +902,26 @@ class ModelHubRuntimeRouter:
                 runtime_model=target_model,
                 source_id=source.id,
             )
+            if self.turn_gateway is not None:
+                self.turn_gateway.correlation.begin_native_attempt(
+                    backend=backend,
+                    process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
+                    turn_id=turn_id,
+                    requested_model_id=requested_model,
+                    source_id=source.id,
+                    resolved_model_id=target_model,
+                    via_mapping=resolution.mapping_applied,
+                )
         else:
-            gateway_base_url, gateway_token = await self._gateway_credentials(backend)
+            gateway_base_url, gateway_token = await self._gateway_credentials(
+                backend,
+                process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
+                turn_id=turn_id,
+                requested_model_id=requested_model,
+                resolved_model_id=target_model,
+                source_id=source.id,
+                via_mapping=resolution.mapping_applied,
+            )
             runtime_model = target_model
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
@@ -593,6 +951,22 @@ class ModelHubRuntimeRouter:
             None,
         )
         if launch is None:
+            config = self.service.store.load()
+            config, resolution = await self._resolve_turn(
+                config,
+                "opencode",
+                requested_model,
+                supply_channel="hub",
+            )
+            if resolution.source is None:
+                raise self._no_candidate_error(
+                    backend="opencode",
+                    requested_model=requested_model,
+                    config=config,
+                    resolution=resolution,
+                    process_scope="opencode:shared-server",
+                    turn_id=None,
+                )
             raise ModelHubError("mapping_target_unavailable", status=409)
         config = self.service.store.load()
         self._emit_transition(launch, config)
@@ -608,10 +982,19 @@ class ModelHubRuntimeRouter:
         launch = launch_for_context(context)
         if launch is None or launch.channel not in {"native_cli", "hub"} or not launch.source_id:
             return False
-        if launch.channel == "hub" and self.turn_gateway is not None:
-            return False
         if getattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, False):
             return False
+        if launch.channel == "hub" and self.turn_gateway is not None:
+            turn_id = str(
+                (getattr(context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
+            setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
+            return False
+        decision: ResolutionDecision | None
         if _NATIVE_QUOTA_RE.search(diagnostic):
             decision = ResolutionDecision("fallback", reason="quota_exhausted", cooldown_seconds=300)
         elif _NATIVE_RATE_RE.search(diagnostic):
@@ -621,6 +1004,23 @@ class ModelHubRuntimeRouter:
         elif _NETWORK_ERROR_RE.search(diagnostic):
             decision = ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
         else:
+            decision = None
+        if launch.channel == "native_cli" and self.turn_gateway is not None:
+            turn_id = str(
+                (getattr(context, "platform_specific", None) or {}).get(
+                    "turn_token"
+                )
+                or ""
+            ).strip()
+            self.turn_gateway.correlation.fail_native_attempt(
+                turn_id,
+                reason=(
+                    decision.reason
+                    if decision is not None and decision.reason is not None
+                    else "unclassified_error"
+                ),
+            )
+        if decision is None:
             return False
         config = self.service.store.load()
         source = next((item for item in config.sources if item.id == launch.source_id), None)
@@ -630,7 +1030,7 @@ class ModelHubRuntimeRouter:
             source,
             decision,
             agent=cast(EventAgent, launch.backend),
-            model_id=launch.target_model,
+            model_id=launch.requested_model,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
         return True
@@ -640,32 +1040,31 @@ class ModelHubRuntimeRouter:
         agent = config.agents["opencode"]
         if agent.mode == "direct":
             return None
-        if self._is_bootstrap_unconfigured(config, "opencode"):
-            return None
         checked = tuple(agent.menu.checked if agent.menu else ())
         if not checked:
-            raise ModelHubError("mapping_target_unavailable", status=409)
+            return None
 
-        gateway_base_url, gateway_token = await self._gateway_credentials("opencode")
+        gateway_base_url, gateway_token = await self._gateway_credentials(
+            "opencode",
+            process_scope="opencode:shared-server",
+            turn_id=None,
+        )
         providers: dict[str, dict[str, Any]] = {}
         projected_identifiers: list[str] = []
         available_identifiers: list[str] = []
         launches: list[ModelHubLaunch] = []
-        sources_by_id = {source.id: source for source in config.sources}
         for identifier in dict.fromkeys(checked):
             try:
                 provider_id, model_id = parse_opencode_model_id(identifier)
             except ValueError:
                 raise ModelHubError("mapping_target_unavailable", status=409) from None
-            candidates = await self.service._resolution_candidates(
+            config, resolution = await self._resolve_turn(
+                config,
                 "opencode",
-                model_id,
-                provider=provider_id,
+                identifier,
+                supply_channel="hub",
             )
-            available_source = next(
-                (candidate for candidate in candidates if candidate.supply_channel == "hub"),
-                None,
-            )
+            available_source = resolution.source
             source = available_source
             if source is None:
                 # Keep a cooling/error route's public identifier stable in the
@@ -674,11 +1073,8 @@ class ModelHubRuntimeRouter:
                 source = next(
                     (
                         candidate
-                        for source_id in config.priority_order
-                        if (candidate := sources_by_id.get(source_id)) is not None
-                        and candidate.supply_channel == "hub"
-                        and opencode_provider_id(candidate.vendor) == provider_id
-                        and any(model.id == model_id for model in candidate.models)
+                        for candidate in resolution.matching_sources
+                        if candidate.supply_channel == "hub"
                     ),
                     None,
                 )
@@ -778,9 +1174,10 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
         if not overlay.available_identifiers:
             raise ModelHubError("mapping_target_unavailable", status=409)
         return overlay.available_identifiers[0]
-    if candidate in overlay.checked_identifiers:
-        return candidate
-    matches = [identifier for identifier in overlay.checked_identifiers if identifier.endswith(f"/{candidate}")]
-    if len(matches) == 1:
-        return matches[0]
+    normalized = normalize_opencode_requested_model(
+        candidate,
+        overlay.checked_identifiers,
+    )
+    if normalized is not None:
+        return normalized
     raise ModelHubError("mapping_target_unavailable", status=409)

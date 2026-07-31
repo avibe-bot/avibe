@@ -17,12 +17,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
-from storage.models import agent_runs, agent_sessions, messages, scope_settings, scopes
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    messages,
+    scope_settings,
+    scopes,
+)
+from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
+from vibe.message_types import types_with, types_without
 
 
 def _utc_now_iso() -> str:
@@ -76,6 +84,34 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
+_SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+
+
+def _queued_agent_run_id(row: dict[str, Any]) -> str:
+    native_message_id = str(row.get("native_message_id") or "").strip()
+    if native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX):
+        return native_message_id[len(_AGENT_RUN_NATIVE_PREFIX):]
+    try:
+        metadata = json.loads(row.get("metadata_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    provenance = (
+        metadata.get(_SCHEDULED_PROVENANCE_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    platform_specific = (
+        provenance.get("platform_specific")
+        if isinstance(provenance, dict)
+        else None
+    )
+    if (
+        not isinstance(platform_specific, dict)
+        or str(platform_specific.get("task_trigger_kind") or "").strip()
+        != "agent_run"
+    ):
+        return ""
+    return str(platform_specific.get("task_execution_id") or "").strip()
 
 
 def _attach_agent_run_provenance(
@@ -224,19 +260,27 @@ def search_messages(
     platform: str = "avibe",
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
-    replies — all land on a message the chat actually renders, so a clicked result
-    is always jumpable). Archived sessions are excluded, as are messages under an
-    archived PROJECT — ``projects_service.archive_project`` disables a project by setting
-    ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
-    disabled state is the authoritative "archived project" signal here. A scope
-    with no ``scope_settings`` row is treated as enabled (legacy / folder-less
-    projects never got one). ``limit`` caps the number of
+    replies + Show annotations — all land on a message the chat
+    actually renders, so a clicked result is always jumpable). Archived SESSIONS
+    are excluded unless ``include_archived=True`` opts them in (archive is
+    terminal, so those transcripts are read-only — the flag only makes them
+    findable). Messages under an archived PROJECT are excluded
+    UNCONDITIONALLY, independent of ``include_archived``:
+    ``projects_service.archive_project``
+    disables a project by setting ``scope_settings.enabled = 0`` (its sessions
+    stay ``active``), so the scope's disabled state is the authoritative
+    "archived project" signal here, and project archive is reversible through its
+    own restore flow rather than through search. A scope with no
+    ``scope_settings`` row is
+    treated as enabled (legacy / folder-less projects never got one). ``limit``
+    caps the number of
     MATCHED messages scanned (newest first), so it bounds total work; the matches
     are then grouped into sessions. The snippet is built in Python (see
     :func:`build_snippet`) so the client renders ``match`` with a highlight and
@@ -244,7 +288,9 @@ def search_messages(
 
     Returns ``{"sessions": [...], "total": <#matches>, "session_count": <#sessions>}``
     where each session is ``{session_id, title, project_id, project_name,
-    matches: [{id, author, source, type, created_at, snippet}]}``. Sessions are
+    archived, matches: [{id, author, source, type, created_at, snippet}]}``.
+    ``archived`` is always present and is ``False`` for every group in the
+    default (opt-out) mode. Sessions are
     ordered by their most-recent match; matches are newest-first within a session.
     An empty / whitespace query short-circuits to an empty result.
     """
@@ -253,8 +299,11 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
+    type_list = list(types if types is not None else types_with("searchable"))
     effective_limit = min(max(int(limit), 1), 200)
+    # Applied in place below so the default (opt-out) statement keeps exactly the
+    # predicates — and the predicate order — it had before the flag existed.
+    archived_session_filters = () if include_archived else (agent_sessions.c.status != "archived",)
 
     stmt = (
         select(
@@ -266,6 +315,7 @@ def search_messages(
             messages.c.content_text,
             messages.c.created_at,
             agent_sessions.c.title,
+            agent_sessions.c.status,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
         )
@@ -278,8 +328,9 @@ def search_messages(
         .where(messages.c.type.in_(type_list))
         .where(messages.c.content_text.is_not(None))
         .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
-        # Archived sessions are soft-deleted — never surface their messages.
-        .where(agent_sessions.c.status != "archived")
+        # Archived sessions are soft-deleted — never surface their messages
+        # unless the caller explicitly opted in via ``include_archived``.
+        .where(*archived_session_filters)
         .where(agent_sessions.c.visibility == "foreground")
         # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
         # sessions stay active), so exclude a disabled scope's messages too. A
@@ -305,6 +356,7 @@ def search_messages(
                 "title": row["title"],
                 "project_id": row["project_id"],
                 "project_name": row["project_name"],
+                "archived": row["status"] == "archived",
                 "matches": [],
             }
             grouped[session_id] = bucket
@@ -391,6 +443,21 @@ def append(
     return _row_to_payload(payload)
 
 
+def get_message(
+    conn: Connection,
+    message_id: str,
+    *,
+    session_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Load one message by id, optionally requiring its owning session."""
+
+    query = select(messages).where(messages.c.id == message_id)
+    if session_id is not None:
+        query = query.where(messages.c.session_id == session_id)
+    row = conn.execute(query).mappings().first()
+    return _row_to_payload(dict(row)) if row else None
+
+
 def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
     """True when a platform/native message id has already been recorded."""
     platform = str(platform or "").strip()
@@ -472,20 +539,13 @@ def list_session_messages(
     around_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
-    include_metadata_sources: Iterable[str] = (),
     tail: bool = False,
 ) -> dict[str, Any]:
     """Return messages for one session in chronological order with cursor pagination.
 
     ``types`` optionally restricts the rows to a set of message types. The chat
-    transcript passes ``('user', 'result')`` so the intermediate ``assistant`` /
-    ``tool_call`` / ``notify`` rows — now persisted for avibe sessions too — stay
-    out of the conversation view (they're the process log, not the dialogue).
-
-    ``include_metadata_sources`` keeps rows whose ``metadata.source`` matches even
-    when their type is filtered out — the chat transcript passes ``('show_page',)``
-    so Show-Page transcript marks (written with ``author='agent'`` → ``type
-    ='assistant'``) stay visible alongside the user/result dialogue.
+    transcript passes :data:`TRANSCRIPT_TYPES` so intermediate process-log rows
+    stay out of the conversation view.
 
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
@@ -506,15 +566,8 @@ def list_session_messages(
     """
 
     query = select(messages).where(messages.c.session_id == session_id)
-    metadata_sources = list(include_metadata_sources)
     if types is not None:
-        type_filter = messages.c.type.in_(list(types))
-        if metadata_sources:
-            query = query.where(
-                or_(type_filter, func.json_extract(messages.c.metadata_json, "$.source").in_(metadata_sources))
-            )
-        else:
-            query = query.where(type_filter)
+        query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
     if around_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
@@ -655,19 +708,20 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 # --- Send-while-busy queue + per-session draft -----------------------------
 # Both reuse the ``messages`` table via dedicated ``type`` values so no extra
 # table is needed (the queue is ephemeral operational state, not conversation):
-#   type='queued' — a message the user sent while a turn was in flight; flushed
-#                   (merged, in order) into one dispatch when the turn ends.
+#   type='queued' — input sent while a turn was in flight; flushed (merged, in
+#                   order) into one dispatch when the turn ends.
 #   type='draft'  — the user's unsent compose text for a session; one row per
 #                   session, persisted so switching sessions/devices keeps it.
-# Both carry author='user'; the transcript (user/result/notify), inbox and
-# unread queries are all type-filtered, so neither leaks into the conversation.
+# The transcript, inbox, and unread queries are type-filtered, so neither leaks
+# into the conversation.
 
 QUEUED_TYPE = "queued"
 DRAFT_TYPE = "draft"
-# A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
+QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
+# A reserved-but-not-yet-accepted input row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
 # transcript, the queue AND the inbox until the controller decides whether the
-# turn started (→ promote to 'user') or must be queued (→ promote to 'queued').
+# turn started (→ promote by origin) or must be queued (→ promote to 'queued').
 # This stops another tab from briefly seeing the row as a sent prompt during the
 # dispatch window (Codex P2).
 PENDING_TYPE = "pending"
@@ -684,22 +738,25 @@ HARNESS_DEDUPE_TYPE = "harness_dedupe"
 # in NON_CONVERSATION_TYPES below so it never bumps the inbox activity clock / last
 # author. Never delivered to IM (avibe-persistence only).
 SILENT_TYPE = "silent"
+ANNOTATION_TYPE = "annotation"
 # Types that must never count as inbox conversation activity: the ephemeral user rows
 # above plus the invisible agent silent-completion marker.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE, SILENT_TYPE)
+NON_CONVERSATION_TYPES = types_without("inboxActivity")
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
 # gate, so what a page loads and what it receives over the stream are identical.
 # Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
 # (which isn't persisted at all). Harness-triggered prompts have their own type
-# so they cannot be mistaken for human input. ``show_page`` transcript marks are
-# kept via a metadata-source
-# override in the fetch even though their row type is ``assistant``. ``error`` is a
-# terminal FAILED result (turned the dot red): shown in the conversation like any
-# terminal message, but the unread queries below stay ``result``-only so a failure
-# is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
+# so they cannot be mistaken for human input. Show Page annotations in either
+# direction share one explicit transcript type. ``error`` is a terminal FAILED
+# result (turned the dot red): shown in the conversation like any terminal
+# message, but the unread queries below stay ``result``-only so a failure is not
+# counted as an unread agent reply.
+TRANSCRIPT_TYPES = types_with("transcript")
+_INBOX_PREVIEW_TYPES = types_with("inboxPreview")
+_INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
+_UNREAD_TYPES = types_with("unread")
 
 
 def enqueue_queued(
@@ -726,12 +783,51 @@ def enqueue_queued(
     )
 
 
-def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
-    """Pending queued messages for a session, oldest first."""
-    query = (
+def _queued_query(session_id: str):
+    return (
         select(messages)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
+        .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+    )
+
+
+def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+    """Pending queued messages for a session, oldest first."""
+    query = _queued_query(session_id)
+    return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+
+
+def list_queued_page(
+    conn: Connection,
+    session_id: str,
+    *,
+    page_request: PageRequest,
+) -> PageResult[dict[str, Any]]:
+    """One bounded FIFO page for Agent-facing Session queue inspection."""
+
+    query = (
+        _queued_query(session_id)
+        .limit(page_request.limit + 1)
+        .offset(page_request.offset)
+    )
+    rows = [
+        _row_to_payload(dict(row))
+        for row in conn.execute(query).mappings().all()
+    ]
+    return page_result_from_limit_plus_one(rows, page_request)
+
+
+def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:
+    """Every pending input reservation considered by startup cleanup.
+
+    The caller deletes rows whose sessions are gone and decides which live-session
+    origins are safe to make visible without replaying their work.
+    """
+
+    query = (
+        select(messages)
+        .where(messages.c.type == PENDING_TYPE)
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
@@ -792,6 +888,45 @@ def delete_queued(conn: Connection, ids: list[str]) -> None:
     conn.execute(delete(messages).where(messages.c.id.in_(ids)))
 
 
+def delete_queued_agent_run(
+    conn: Connection,
+    *,
+    session_id: str,
+    run_id: str,
+) -> int:
+    """Retire the exact queued row owned by a canceled Workbench Agent Run."""
+
+    normalized_session_id = str(session_id or "").strip()
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_session_id or not normalized_run_id:
+        return 0
+    rows = list(
+        conn.execute(
+            select(
+                messages.c.id,
+                messages.c.native_message_id,
+                messages.c.metadata_json,
+            )
+            .where(messages.c.session_id == normalized_session_id)
+            .where(messages.c.type == QUEUED_TYPE)
+        ).mappings()
+    )
+    row_ids = [
+        str(row["id"])
+        for row in rows
+        if _queued_agent_run_id(dict(row)) == normalized_run_id
+    ]
+    if not row_ids:
+        return 0
+    result = conn.execute(
+        delete(messages)
+        .where(messages.c.id.in_(row_ids))
+        .where(messages.c.session_id == normalized_session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+    )
+    return result.rowcount or 0
+
+
 def clear_queued(conn: Connection, session_id: str) -> int:
     """Drop ALL send-while-busy queued rows for a session. Used by archive so no
     queued prompt can later be flushed into a now-terminal session (on natural
@@ -806,11 +941,7 @@ def clear_queued(conn: Connection, session_id: str) -> int:
 
 
 def clear_pending(conn: Connection, session_id: str) -> int:
-    """Drop ALL ``pending`` send reservations for a session. Used by archive: a
-    send that reserved its row just before the archive committed must not later
-    be promoted into a visible message / accepted turn for a now-terminal session
-    — once the row is gone, ``promote_pending`` no-ops on the in-flight send.
-    Returns the number removed."""
+    """Drop unsettled transcript reservations for a session."""
     result = conn.execute(
         delete(messages)
         .where(messages.c.session_id == session_id)
@@ -819,32 +950,97 @@ def clear_pending(conn: Connection, session_id: str) -> int:
     return result.rowcount or 0
 
 
-def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Promote a reserved ``pending`` row to its decided type — ``user`` once the
-    turn is accepted, or ``queued`` when a turn is already running. The row is
-    persisted as ``pending`` BEFORE dispatch (reserving its (created_at, id) for
-    correct ordering) and stays hidden until this promotes it, so no other tab
-    can briefly see it as a sent prompt during the dispatch window. Returns True
-    if a pending row was promoted.
-    """
+def delete_pending(conn: Connection, message_id: str) -> bool:
+    """Delete one reserved pending row by id. Returns True when removed."""
+
     result = conn.execute(
-        update(messages)
+        delete(messages)
         .where(messages.c.id == message_id)
         .where(messages.c.type == PENDING_TYPE)
-        .values(type=to_type)
     )
     return bool(result.rowcount)
 
 
+def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
+    """Advance one reservation and discard its prompt only when delivered."""
+
+    values: dict[str, Any] = {"type": to_type}
+    if to_type != QUEUED_TYPE:
+        values["metadata_json"] = case(
+            (
+                func.json_valid(messages.c.metadata_json) == 1,
+                func.json_remove(
+                    messages.c.metadata_json,
+                    f"$.{QUEUED_DISPATCH_TEXT_KEY}",
+                ),
+            ),
+            else_=messages.c.metadata_json,
+        )
+    result = conn.execute(
+        update(messages)
+        .where(messages.c.id == message_id)
+        .where(messages.c.type == PENDING_TYPE)
+        .values(**values)
+    )
+    return bool(result.rowcount)
+
+
+def pending_message_target_type(
+    author: Optional[str],
+    source: Optional[str],
+    author_name: Optional[str],
+) -> str:
+    """Resolve an accepted input reservation to its transcript-visible type."""
+    if (
+        author == HARNESS_TYPE
+        and source == HARNESS_TYPE
+        and author_name == "show_annotation"
+    ):
+        return ANNOTATION_TYPE
+    if HARNESS_TYPE in {author, source}:
+        return HARNESS_TYPE
+    return "user"
+
+
 def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
-    """Delete one queued message, scoped to its session so a stale / cross-session
-    id can't drop another chat's queued row. Returns True if a row was removed."""
+    """Delete one queued message and cancel any Agent Run it durably owns.
+
+    The Session/type predicates keep stale and cross-Session ids inert. An
+    Agent-Run-backed row may be removed only while that Run is still queued and
+    explicitly held by Workbench; its cancellation and the row deletion commit
+    together in the caller's transaction.
+    """
+    row = conn.execute(
+        select(messages.c.native_message_id, messages.c.metadata_json)
+        .where(messages.c.id == message_id)
+        .where(messages.c.session_id == session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    run_id = _queued_agent_run_id(dict(row))
+    if run_id:
+        from storage.background import (
+            cancel_workbench_queued_agent_run_in_connection,
+        )
+
+        if not cancel_workbench_queued_agent_run_in_connection(
+            conn,
+            run_id,
+            session_id=session_id,
+        ):
+            return False
     result = conn.execute(
         delete(messages)
         .where(messages.c.id == message_id)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
     )
+    if run_id and not result.rowcount:
+        raise RuntimeError(
+            "queued Agent Run cancellation succeeded but its message deletion was refused"
+        )
     return bool(result.rowcount)
 
 
@@ -913,7 +1109,7 @@ def unread_counts(
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         # Don't let an archived session's unread results inflate its scope badge
         # (keep null-session rows, which aren't attributable to any session).
@@ -955,7 +1151,7 @@ def unread_counts_by_session(
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
@@ -1053,15 +1249,14 @@ def list_inbox_sessions(
     # materialization as history grows.
     last_activity_at = _latest_message_value("created_at", conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
-    preview_id = _latest_message_value("id", types=("result", "notify", "error"))
-    preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
+    preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value("created_at", types=_INBOX_PREVIEW_TYPES)
     # The awaiting/replied calc must count the INVISIBLE ``silent`` completion marker
     # as a reply too (a reply-less turn is still answered) — otherwise a silently
     # completed turn keeps the sidebar showing "awaiting the agent". The PREVIEW text
     # stays the last VISIBLE reply, so ``silent`` is included here but NOT in preview_*.
-    _terminal_types = ("result", "notify", "error", SILENT_TYPE)
-    last_terminal_id = _latest_message_value("id", types=_terminal_types)
-    last_terminal_at = _latest_message_value("created_at", types=_terminal_types)
+    last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_at = _latest_message_value("created_at", types=_INBOX_SETTLES_REPLY_TYPES)
     last_input_at = _latest_message_value(
         "created_at", conversation_only=True, input_turn_only=True
     )
@@ -1073,7 +1268,7 @@ def list_inbox_sessions(
         select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
         .where(m.c.session_id.is_not(None))
         .where(m.c.author == "agent")
-        .where(m.c.type == "result")
+        .where(m.c.type.in_(_UNREAD_TYPES))
         .where(m.c.read_at.is_(None))
         .group_by(m.c.session_id)
     )

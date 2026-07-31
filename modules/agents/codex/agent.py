@@ -18,7 +18,14 @@ from config.v2_config import (
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
-from core.message_output import terminal_output_for
+from core.message_output import stop_output_for, terminal_output_for
+from core.services.agent_steering import (
+    ActiveSteerTarget,
+    SteerOutcome,
+    SteerRequest,
+    SteerResult,
+    result as steer_result,
+)
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -44,6 +51,9 @@ if TYPE_CHECKING:
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
 _CODEX_DEFAULT_PROVIDER_ID = "openai"
+_CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
+    (_CODEX_MODEL_HUB_PROVIDER_ID,)
+)
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 
 
@@ -184,6 +194,7 @@ class CodexAgent(BaseAgent):
                         self.controller,
                         "codex",
                         requested_model or "",
+                        process_scope=request.working_path,
                     )
                     bind_launch(request.context, launch)
                     await self._interrupt_active_turn_before_runtime_change(request, launch)
@@ -308,6 +319,118 @@ class CodexAgent(BaseAgent):
                 # fallback timeout (Codex P2).
                 self._event_handler._release_stream_turn(request.context)
 
+    def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
+        active_request = target.agent_request
+        if active_request is None:
+            return None
+        return self._turn_registry.get_active_turn(active_request.base_session_id)
+
+    async def steer_active_turn(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        active_request = target.agent_request
+        if active_request is None:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_primary_request", backend=self.name)
+
+        base_session_id = active_request.base_session_id
+        turn_id = self._turn_registry.get_active_turn(base_session_id)
+        if not turn_id or turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
+
+        thread_id = self._session_mgr.get_thread_id(base_session_id)
+        cwd = self._session_mgr.get_cwd(base_session_id) or active_request.working_path
+        transport = self._transports.get(cwd)
+        if not thread_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_native_thread", backend=self.name)
+        if transport is None or not transport.is_initialized:
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+
+        try:
+            response = await transport.send_request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": request.expected_native_turn_id,
+                    "input": [{"type": "text", "text": request.text}],
+                },
+            )
+        except RuntimeError as exc:
+            diagnostic = str(exc)
+            lowered = diagnostic.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "no active turn to steer",
+                    "thread not found",
+                    "expected turn",
+                    "expectedturnid",
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.NOT_ACTIVE,
+                    reason="native_turn_mismatch",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            if "activeturnnotsteerable" in lowered or "not steerable" in lowered:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="native_turn_not_steerable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            return steer_result(
+                SteerOutcome.REFUSED,
+                reason="backend_refused",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except ConnectionError as exc:
+            diagnostic = str(exc)
+            if diagnostic in {
+                "Codex app-server transport is not available",
+                "Codex app-server stdin is not available",
+            }:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="runtime_unavailable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except TimeoutError as exc:
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        self._touch_transport_activity(cwd)
+        response_turn_id = str(response.get("turnId") or "").strip()
+        if response_turn_id != request.expected_native_turn_id:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="untrusted_acknowledgement",
+                backend=self.name,
+                response_turn_id=response_turn_id,
+            )
+        return steer_result(
+            SteerOutcome.ACCEPTED,
+            backend=self.name,
+            thread_id=thread_id,
+            turn_id=response_turn_id,
+        )
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         """Gracefully interrupt the active turn."""
         thread_id = self._session_mgr.get_thread_id(request.base_session_id)
@@ -336,12 +459,15 @@ class CodexAgent(BaseAgent):
             # bubble. The user already knows they stopped it (avibe shows the dot go
             # idle; IM shows the ack reaction removed above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
+            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
+            # out of the run's terminal state so the stop settles it ``canceled``
+            # instead of ``succeeded`` — see its docstring.
             await self.controller.emit_agent_message(
                 request.context,
                 "result",
                 "",
                 level="silent",
-                output=terminal_output_for(request),
+                output=stop_output_for(request),
             )
             logger.info("Codex turn %s interrupted via /stop", turn_id)
             return True
@@ -400,9 +526,12 @@ class CodexAgent(BaseAgent):
                 )
             except Exception:
                 logger.warning("Failed to release Workbench turns during Codex refresh", exc_info=True)
-        transports = list(self._transports.values())
+        transport_items = list(self._transports.items())
+        transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
+        for cwd, _ in transport_items:
+            self._retire_model_hub_process_scope(cwd)
 
         for transport in transports:
             try:
@@ -454,6 +583,7 @@ class CodexAgent(BaseAgent):
 
         self._transports.pop(working_path, None)
         self._transport_last_activity.pop(working_path, None)
+        self._retire_model_hub_process_scope(working_path)
         self._session_mgr.invalidate_thread(base_session_id)
         self._turn_registry.clear_session(base_session_id)
         self._clear_thread_developer_instructions(base_session_id)
@@ -467,10 +597,13 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
-        transports = list(self._transports.values())
+        transport_items = list(self._transports.items())
+        transports = [transport for _, transport in transport_items]
         self._transports.clear()
         self._transport_last_activity.clear()
         self._transport_locks.clear()
+        for cwd, _ in transport_items:
+            self._retire_model_hub_process_scope(cwd)
 
         for transport in transports:
             try:
@@ -564,6 +697,7 @@ class CodexAgent(BaseAgent):
                 self._transports.pop(cwd, None)
                 self._transport_last_activity.pop(cwd, None)
                 self._cwd_inodes().pop(cwd, None)
+                self._retire_model_hub_process_scope(cwd)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
                     # A force-evicted stuck-active turn never emitted a terminal
@@ -582,6 +716,13 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    def _retire_model_hub_process_scope(self, cwd: str) -> None:
+        controller = getattr(self, "controller", None)
+        router = getattr(controller, "model_hub_runtime", None)
+        retire = getattr(router, "retire_process_scope", None)
+        if callable(retire):
+            retire("codex", cwd)
 
     async def _settle_stuck_active_request(self, base_session_id: str) -> None:
         """Settle a turn we are about to force-reap.
@@ -744,6 +885,9 @@ class CodexAgent(BaseAgent):
             async with self._transport_locks[cwd]:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
+                desired_fingerprint = launch.fingerprint if launch is not None else "direct"
+                existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
+                runtime_changed = existing_fingerprint != desired_fingerprint
                 if existing and existing.is_initialized:
                     # Reuse only while the directory the app-server was spawned in
                     # is still the SAME directory (#561): after a delete (+ possible
@@ -751,8 +895,6 @@ class CodexAgent(BaseAgent):
                     # thread/start fails. Untracked legacy entries reuse as before.
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                    desired_fingerprint = launch.fingerprint if launch is not None else "direct"
-                    runtime_changed = getattr(existing, "runtime_fingerprint", "direct") != desired_fingerprint
                     if not stale_cwd and not runtime_changed:
                         self._touch_transport_activity(cwd)
                         return existing
@@ -773,6 +915,12 @@ class CodexAgent(BaseAgent):
                     # Stop stale transport if any
                     if existing:
                         await existing.stop()
+                        if (
+                            runtime_changed
+                            and desired_fingerprint == "direct"
+                            and existing_fingerprint.startswith("hub:")
+                        ):
+                            self._retire_model_hub_process_scope(cwd)
                         # The new app-server process won't know about threads/turns
                         # from the old process. Invalidate only sessions bound to
                         # this cwd so healthy sessions on other cwds are unaffected.
@@ -1188,7 +1336,12 @@ class CodexAgent(BaseAgent):
                     resume_params,
                     request,
                 )
-                model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
+                model_provider = await self._resolve_resume_model_provider_override(
+                    transport,
+                    request,
+                    persisted,
+                    rebind_same_provider=True,
+                )
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
                 resp = await transport.send_request(
@@ -1254,15 +1407,17 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         request: AgentRequest,
         thread_id: str,
+        *,
+        rebind_same_provider: bool = False,
     ) -> Optional[str]:
         """Return a provider override only when a persisted thread is stale.
 
         Codex preserves a thread's latest model / reasoning effort on resume
         unless the client sends a model/provider override. Vibe Remote only
-        needs to override the provider after the user changes Codex auth mode
-        between Vibe Remote-managed OAuth/API-key providers, so inspect the
-        stored thread first and leave normal resumes on Codex's persisted
-        fallback path.
+        overrides transitions between managed providers. A persisted thread's
+        first resume in a fresh app-server also rebinds Avibe-managed same-id
+        providers, because OAuth and API-key/custom-base-URL configurations
+        deliberately reuse ``openai-managed``.
         """
         current_provider = await self._read_effective_model_provider(transport, request)
         if not current_provider:
@@ -1289,6 +1444,8 @@ class CodexAgent(BaseAgent):
 
         stored_provider = stored_provider.strip()
         if stored_provider == current_provider:
+            if rebind_same_provider and current_provider in _CODEX_REBINDABLE_SAME_ID_PROVIDERS:
+                return current_provider
             return None
         if not self._is_managed_provider_transition(stored_provider, current_provider):
             return None

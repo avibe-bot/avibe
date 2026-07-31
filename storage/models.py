@@ -17,6 +17,8 @@ from sqlalchemy import (
     text,
 )
 
+from vibe.message_types import build_partial_index_predicate
+
 metadata = MetaData()
 
 state_meta = Table(
@@ -131,6 +133,12 @@ agent_sessions = Table(
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     Column("last_active_at", String, nullable=True),
+    # A thread is ONE session per (scope, anchor). The invariant shipped in the
+    # Alembic revision only (20260601_0011), while ``SQLiteSessionsService.__init__``
+    # calls ``metadata.create_all`` — so any DB born from models-only, including
+    # tests, silently lacked it and could not reproduce the production collision.
+    # Index name matches the revision's so the two agree on one object.
+    Index("uq_agent_sessions_scope_anchor", "scope_id", "session_anchor", unique=True),
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
@@ -201,6 +209,7 @@ run_definitions = Table(
     Column("updated_at", String, nullable=False),
     Column("last_started_at", String, nullable=True),
     Column("last_finished_at", String, nullable=True),
+    Column("retired_at", String, nullable=True),
     Column("last_event_at", String, nullable=True),
     Column("last_run_at", String, nullable=True),
     Column("last_error", Text, nullable=True),
@@ -381,9 +390,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text(
-            "session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
-        ),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_activity")),
     ),
     Index(
         "ix_messages_inbox_agent_reply",
@@ -391,7 +398,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and type in ('result', 'notify', 'error')"),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_agent_reply")),
     ),
     Index(
         "ix_messages_inbox_user_send",
@@ -399,10 +406,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text(
-            "session_id is not null and ((author = 'user' and type = 'user') "
-            "or (author = 'harness' and type = 'harness'))"
-        ),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_user_send")),
     ),
     Index("ix_messages_scope_created", "scope_id", "created_at"),
     Index("ix_messages_scope_unread", "scope_id", "read_at"),
