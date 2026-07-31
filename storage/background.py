@@ -1155,6 +1155,7 @@ def _owed_failure_notice_for_transition(
     run_id: str,
     *,
     status: Any,
+    source_kind: Any,
     metadata: dict[str, Any],
     now: str,
 ) -> Optional[dict[str, Any]]:
@@ -1171,6 +1172,11 @@ def _owed_failure_notice_for_transition(
     """
 
     if normalize_run_status(status) != "failed":
+        return None
+    if str(source_kind or "").strip() == "callback":
+        # A callback child is the parent's primary delivery attempt. Its failure
+        # releases the parent's already-durable fallback; a second child-owned
+        # notice would report the delivery mechanism and duplicate the real failure.
         return None
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
@@ -1236,6 +1242,7 @@ def _merge_owed_failure_notice(
     *,
     run_id: str,
     status: Any,
+    source_kind: Any,
     row_metadata_json: Any,
     extra_metadata: Optional[dict[str, Any]] = None,
     now: str,
@@ -1290,6 +1297,7 @@ def _merge_owed_failure_notice(
     notice = _owed_failure_notice_for_transition(
         run_id,
         status=status,
+        source_kind=source_kind,
         metadata=merged,
         now=now,
     )
@@ -1594,6 +1602,7 @@ def _coalesced_terminal_write(
         values,
         run_id=run_id,
         status=values["status"],
+        source_kind=row["source_kind"],
         row_metadata_json=row["metadata_json"],
         now=now,
     )
@@ -3354,6 +3363,7 @@ class SQLiteBackgroundTaskStore:
                         terminal_values,
                         run_id=run_id,
                         status=status,
+                        source_kind=terminal_row["source_kind"],
                         row_metadata_json=terminal_row["metadata_json"],
                         now=now,
                     )
@@ -3536,6 +3546,7 @@ class SQLiteBackgroundTaskStore:
                     values,
                     run_id=run_id,
                     status=status,
+                    source_kind=row["source_kind"],
                     row_metadata_json=row["metadata_json"],
                     extra_metadata=metadata or None,
                     now=now,
@@ -3683,6 +3694,7 @@ class SQLiteBackgroundTaskStore:
                     values,
                     run_id=run_id,
                     status=status,
+                    source_kind=row["source_kind"],
                     row_metadata_json=row["metadata_json"],
                     now=now,
                 )

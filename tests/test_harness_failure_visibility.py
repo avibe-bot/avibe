@@ -5940,10 +5940,10 @@ def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -
     """Owed by the plan (corrected 2026-07-29): the fallback exists the moment the
     primary path dies.
 
-    Same transition as the companion test, but the callback delivery FAILED — the
-    reason the ``owed_failure_notice`` stamp stayed unconditional. The notice must
-    become deliverable and walk the ordinary retry protocol, not stay shielded
-    behind a callback that will never land.
+    Same transition as the companion test, but the callback delivery FAILED. The
+    parent's unconditional fallback must become deliverable and walk the ordinary
+    retry protocol, while the callback child never stamps a second notice for the
+    delivery mechanism itself.
 
     The control is a binding-change notice riding a run whose callback is still
     ``pending``: it reports a fact (the pinned session was replaced) the callback's
@@ -5964,13 +5964,18 @@ def test_owed_notice_takes_over_when_the_callback_dead_letters(tmp_path: Path) -
     sqlite.update_callback_status(
         "run-cb-dead", status="sent", callback_run_id=dead_callback.id
     )
-    sqlite.update_run_status(
+    claimed_callback = requests.claim(dead_callback.id)
+    assert claimed_callback is not None
+    failed_callback = sqlite.record_run_output(
         dead_callback.id,
-        status="failed",
+        output_id="terminal",
+        text="callback delivery failed",
+        terminal_status="failed",
         updated_at="2026-07-27T00:00:01+00:00",
-        completed_at="2026-07-27T00:00:01+00:00",
         error="callback delivery failed",
     )
+    assert failed_callback["terminal_transition"]
+    assert sqlite.owed_failure_notice(dead_callback.id) is None
 
     _task(sqlite, "task-cb-binding", deliver_key="slack::channel::C2")
     _callback_run(sqlite, "run-cb-binding", "task-cb-binding", status="pending")
