@@ -123,6 +123,7 @@ async def _activate(manager: SessionTurnManager, *, text: str = "primary") -> tu
     assert admitted.turn_id
     turn_id = admitted.turn_id
     context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = "runtime-token"
     manager._active_identity = lambda backend, session_id, logical_id: (
         logical_id,
         "native-t1",
@@ -370,10 +371,10 @@ def test_p0_terminal_and_restart_claim_successor_once_after_terminal(managers) -
             if row["id"] == admitted.delivery_id
         )
         assert successor_id not in starts
-        await asyncio.gather(
-            manager.terminalize_turn(turn_id),
-            restarted.recover_durable_delivery_state(),
-        )
+        await restarted.recover_durable_delivery_state()
+        terminal_resume = restarted.on_native_terminal(context, outcome="terminal")
+        assert terminal_resume is not None
+        await terminal_resume
         holder.cancel()
         await asyncio.gather(holder, return_exceptions=True)
         return successor_id
@@ -381,6 +382,11 @@ def test_p0_terminal_and_restart_claim_successor_once_after_terminal(managers) -
     successor_id = asyncio.run(run())
     assert starts.count(successor_id) == 1
     assert manager.controller.command_handler.handle_stop.await_count == 1
+    assert asyncio.run(restarted.terminalize_turn(successor_id))
+    successor_delivery = next(
+        row for row in _delivery_rows(engine) if row["successor_turn_id"] == successor_id
+    )
+    assert successor_delivery["state"] == "completed"
 
 
 def test_two_idle_p3_admissions_leave_one_fifo_loser(managers) -> None:
@@ -552,7 +558,7 @@ def test_definitive_context_failure_requeues_without_quarantining(managers) -> N
 
 
 def test_empty_p0_unknown_receipt_completes_only_on_exact_terminal_proof(managers) -> None:
-    manager, _other, engine, _engine_b, _starts = managers
+    manager, _other, engine, _engine_b, starts = managers
 
     async def run():
         turn_id, context = await _activate(manager)
@@ -562,6 +568,11 @@ def test_empty_p0_unknown_receipt_completes_only_on_exact_terminal_proof(manager
             context=context,
             logical_turn_id=turn_id,
         )
+        queued = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="leave queued"),
+            context=_context(),
+        )
+        assert queued.state == "queued"
         manager.controller.command_handler.handle_stop = AsyncMock(return_value=False)
         delivery = await manager.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p0"),
@@ -571,14 +582,36 @@ def test_empty_p0_unknown_receipt_completes_only_on_exact_terminal_proof(manager
         before = next(row for row in _delivery_rows(engine) if row["id"] == delivery.delivery_id)
         assert before["message_id"] is None
         assert before["state"] == "reconciling"
-        assert await manager.terminalize_turn(turn_id)
+        assert manager.on_native_terminal(context, outcome="terminal") is None
         holder.cancel()
         await asyncio.gather(holder, return_exceptions=True)
-        return delivery
+        return delivery, queued, turn_id
 
-    delivery = asyncio.run(run())
+    delivery, queued, turn_id = asyncio.run(run())
     after = next(row for row in _delivery_rows(engine) if row["id"] == delivery.delivery_id)
+    queued_after = next(row for row in _delivery_rows(engine) if row["id"] == queued.delivery_id)
     assert after["state"] == "completed"
+    assert queued_after["state"] == "queued"
+    assert starts == [turn_id]
+
+
+def test_legacy_queue_drain_excludes_durable_owned_messages(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="durable only"),
+            context=_context(),
+        )
+    )
+    assert queued.state == "queued"
+    assert asyncio.run(manager.terminalize_turn(turn_id))
+
+    assert not asyncio.run(manager.flush_queue("ses_fsm"))
+    row = next(item for item in _delivery_rows(engine) if item["id"] == queued.delivery_id)
+    assert row["state"] == "queued"
+    assert asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+    assert len(starts) == 2
 
 
 def test_concurrent_p0_successors_claim_one_owner_and_retain_the_other(managers) -> None:

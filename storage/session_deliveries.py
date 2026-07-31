@@ -76,6 +76,19 @@ def fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | None:
     )
 
 
+def queued_message_ids(conn: Connection, session_id: str) -> set[str]:
+    return {
+        str(value)
+        for value in conn.execute(
+            select(session_deliveries.c.message_id)
+            .where(session_deliveries.c.session_id == session_id)
+            .where(session_deliveries.c.state == "queued")
+            .where(session_deliveries.c.message_id.is_not(None))
+        ).scalars()
+        if value
+    }
+
+
 def insert_turn(
     conn: Connection,
     *,
@@ -273,19 +286,45 @@ def terminalize_and_claim_successor(
     """Terminalize exactly ``turn_id`` and claim its P0 successor atomically."""
 
     turn = get_turn(conn, turn_id)
+    owned = list(
+        conn.execute(
+            select(session_deliveries)
+            .where(
+                (session_deliveries.c.target_turn_id == turn_id)
+                | (session_deliveries.c.successor_turn_id == turn_id)
+            )
+            .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
+        ).mappings()
+    )
+    preserve_queue = any(
+        row["priority"] == "p0"
+        and row["message_id"] is None
+        and row["state"] in {"interrupting", "waiting_terminal", "reconciling", "completed"}
+        for row in owned
+    )
+    existing_successor = next(
+        (
+            str(row["successor_turn_id"])
+            for row in owned
+            if row["successor_turn_id"] and row["state"] == "starting"
+        ),
+        None,
+    )
     if turn is None:
         return {
             "changed": False,
             "successor_turn_id": None,
             "delivery_id": None,
             "requeued_delivery_ids": [],
+            "preserve_queue": preserve_queue,
         }
     if turn["state"] == "terminal":
         return {
             "changed": False,
-            "successor_turn_id": None,
+            "successor_turn_id": existing_successor,
             "delivery_id": None,
             "requeued_delivery_ids": [],
+            "preserve_queue": preserve_queue,
         }
     if turn["state"] not in TURN_OWNER_STATES:
         return {
@@ -293,6 +332,7 @@ def terminalize_and_claim_successor(
             "successor_turn_id": None,
             "delivery_id": None,
             "requeued_delivery_ids": [],
+            "preserve_queue": preserve_queue,
         }
 
     terminal = cas_turn(
@@ -312,15 +352,8 @@ def terminalize_and_claim_successor(
             "successor_turn_id": None,
             "delivery_id": None,
             "requeued_delivery_ids": [],
+            "preserve_queue": preserve_queue,
         }
-
-    owned = list(
-        conn.execute(
-            select(session_deliveries)
-            .where(session_deliveries.c.target_turn_id == turn_id)
-            .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
-        ).mappings()
-    )
     claimed_successor: str | None = None
     claimed_delivery: str | None = None
     requeued_deliveries: list[str] = []
@@ -403,6 +436,7 @@ def terminalize_and_claim_successor(
         "successor_turn_id": claimed_successor,
         "delivery_id": claimed_delivery,
         "requeued_delivery_ids": requeued_deliveries,
+        "preserve_queue": preserve_queue,
     }
 
 

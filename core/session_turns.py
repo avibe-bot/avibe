@@ -827,6 +827,9 @@ class SessionTurnManager:
             return conn.dialect.has_table(
                 conn,
                 "session_turns",
+            ) and conn.dialect.has_table(
+                conn,
+                "session_deliveries",
             ) and conn.dialect.has_table(conn, "agent_sessions")
 
     def is_in_flight(self, session_id: Optional[str]) -> bool:
@@ -1832,6 +1835,7 @@ class SessionTurnManager:
                 "successor_turn_id": None,
                 "delivery_id": None,
                 "requeued_delivery_ids": [],
+                "preserve_queue": False,
             }
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -1898,27 +1902,52 @@ class SessionTurnManager:
                 native_turn_id=native_turn_id,
             )
 
-    def on_native_terminal(self, context: "MessageContext", *, outcome: str) -> None:
+    async def _resume_after_native_terminal(
+        self,
+        session_id: str,
+        logical_turn_id: str,
+    ) -> None:
+        try:
+            current = self.in_flight.get(session_id)
+            if current is not None and current.logical_turn_id == logical_turn_id:
+                await asyncio.gather(current.task, return_exceptions=True)
+            await self._resume_post_terminal(session_id)
+        except Exception:
+            logger.exception(
+                "failed to resume durable Session after native terminal: %s",
+                session_id,
+            )
+
+    def on_native_terminal(
+        self,
+        context: "MessageContext",
+        *,
+        outcome: str,
+    ) -> asyncio.Task[None] | None:
         payload = getattr(context, "platform_specific", None) or {}
         logical_turn_id = str(payload.get("turn_token") or "").strip()
         runtime_turn_id = str(payload.get("agent_runtime_turn_token") or "").strip()
         if not logical_turn_id:
-            return
+            return None
         if not self._durable_schema_available():
-            return
+            return None
+        session_id: str | None = None
+        changed = False
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, logical_turn_id)
             if turn is None or turn["state"] not in delivery_store.TURN_OWNER_STATES:
-                return
+                return None
             expected_runtime_id = str(turn.get("runtime_turn_id") or "").strip()
             if expected_runtime_id and runtime_turn_id != expected_runtime_id:
-                return
+                return None
+            session_id = str(turn["session_id"])
             result = delivery_store.terminalize_and_claim_successor(
                 conn,
                 logical_turn_id,
                 outcome=outcome,
             )
+            changed = bool(result.get("changed"))
             delivery_id = str(result.get("delivery_id") or "")
             if delivery_id:
                 delivery = delivery_store.get_delivery(conn, delivery_id)
@@ -1938,6 +1967,17 @@ class SessionTurnManager:
                     state="queued",
                 ):
                     raise RuntimeError("native terminal deferred P0 projection lost ownership")
+        successor_id = str(result.get("successor_turn_id") or "")
+        current = self.in_flight.get(session_id) if session_id else None
+        should_resume = bool(successor_id) or (
+            current is None and not bool(result.get("preserve_queue"))
+        )
+        if changed and session_id and should_resume:
+            return asyncio.create_task(
+                self._resume_after_native_terminal(session_id, logical_turn_id),
+                name=f"durable-terminal-resume:{session_id}",
+            )
+        return None
 
     async def recover_durable_delivery_state(self, session_id: str | None = None) -> list[str]:
         """Restore evidence, reconcile exact identities, then project status."""
@@ -2036,6 +2076,15 @@ class SessionTurnManager:
             return
         if owner is None:
             await self.drain_delivery_queue(session_id)
+
+    async def _resume_post_terminal(self, session_id: str) -> None:
+        with self._sqlite_engine().connect() as conn:
+            owner = delivery_store.active_turn(conn, session_id)
+        if owner is not None:
+            await self._resume_durable_session(session_id)
+            return
+        if not await self.flush_queue(session_id):
+            await self._resume_durable_session(session_id)
 
     async def submit(
         self,
@@ -2258,6 +2307,7 @@ class SessionTurnManager:
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
                 if isinstance(session_id, str):
+                    durable_terminal_result: dict[str, Any] = {}
                     # The turn is over — the agent emitted its terminal result, the
                     # user stopped it, or dispatch raised before any backend turn.
                     # NO turn-duration timeout: the slot is freed only by a real
@@ -2286,7 +2336,10 @@ class SessionTurnManager:
                     self._settle_model_hub_turn(context, settled_by)
                     if logical_turn_id and durable_turn_registered:
                         if cancelled:
-                            self._terminalize_durable_turn(logical_turn_id, "canceled")
+                            durable_terminal_result = self._terminalize_durable_turn(
+                                logical_turn_id,
+                                "canceled",
+                            )
                         elif settled_by is not None:
                             # A released waiter is positive evidence that this
                             # logical Turn no longer owns native work. This also
@@ -2294,7 +2347,10 @@ class SessionTurnManager:
                             # pre-dispatch sink claim. Process loss before such
                             # evidence leaves the durable starting owner intact
                             # for startup reconciliation instead.
-                            self._terminalize_durable_turn(logical_turn_id, "completed")
+                            durable_terminal_result = self._terminalize_durable_turn(
+                                logical_turn_id,
+                                "completed",
+                            )
                         elif failed:
                             with self._sqlite_engine().begin() as conn:
                                 reserve_write_lock(conn)
@@ -2337,8 +2393,13 @@ class SessionTurnManager:
                     if should_flush and backend in self._draining_backends:
                         self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
                     elif should_flush:
-                        await self.flush_queue(session_id)
-                    if durable_turn_registered:
+                        if durable_turn_registered:
+                            await self._resume_post_terminal(session_id)
+                        else:
+                            await self.flush_queue(session_id)
+                    elif durable_turn_registered and durable_terminal_result.get(
+                        "successor_turn_id"
+                    ):
                         await self._resume_durable_session(session_id)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
@@ -2411,6 +2472,12 @@ class SessionTurnManager:
         try:
             with run_update_event_transaction(engine) as conn:
                 rows = messages_service.list_queued(conn, session_id)
+                durable_message_ids = (
+                    delivery_store.queued_message_ids(conn, session_id)
+                    if conn.dialect.has_table(conn, "session_deliveries")
+                    else set()
+                )
+                rows = [row for row in rows if str(row.get("id") or "") not in durable_message_ids]
                 if not rows:
                     return False
                 if _scheduled_provenance(rows[0]) is not None:
