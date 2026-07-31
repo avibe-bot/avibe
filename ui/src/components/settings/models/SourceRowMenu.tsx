@@ -1,8 +1,7 @@
 // Per-row lifecycle actions for the 来源 list (design.pen 「产品改造 V6 01」): an
 // overflow menu that stays out of the way (hidden until row hover / focus on
 // desktop) and exposes the contracted source mutations the list otherwise
-// couldn't reach — rename (PATCH), re-discover (POST /test, hub sources only),
-// and delete (DELETE, with the only-supplier guard escalating to a forced
+// couldn't reach — rename (PATCH) and delete (DELETE, with the only-supplier guard escalating to a forced
 // delete). Presentation lives in SourceRow; this owns the actions + their
 // dialogs so the row stays declarative.
 //
@@ -80,17 +79,20 @@ const MenuAction: React.FC<{
 
 export const SourceRowMenu: React.FC<{
   source: Source;
-  /** Re-fetch sources + agents after any successful mutation. */
+  /** Re-fetch sources + agents after a rename or delete. */
   onChanged: () => void;
+  onRefresh: (source: Source) => void;
+  refreshing: boolean;
+  refreshDisabled: boolean;
   /**
    * Raise a remedy that needs a dialog + a server flow to the page, which
    * outlives this row: a re-auth replaces the source's models and a key
    * replacement re-discovers them, so both trigger the refetch that unmounts
-   * whatever hosted the dialog. `retest` is handled here because it needs no
-   * dialog at all.
+   * whatever hosted the dialog. `retest` delegates to the page-owned refresh
+   * operation so the row action and the inventory button share one lifetime.
    */
   onRepair?: (source: Source, kind: RaisedRepair) => void;
-}> = ({ source, onChanged, onRepair }) => {
+}> = ({ source, onChanged, onRefresh, refreshing, refreshDisabled, onRepair }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const isMobile = useIsMobile();
@@ -108,7 +110,6 @@ export const SourceRowMenu: React.FC<{
   // confirm has to name the Agents, and re-deriving them from the loaded list
   // would answer a question the guard already answered.
   const [gaps, setGaps] = React.useState<SupplyGap[]>([]);
-  const [testing, setTesting] = React.useState(false);
 
   // Re-armed on mount, not only cleared on unmount: a cleanup-only guard is
   // one-way, so StrictMode's mount → cleanup → mount would leave every 测试
@@ -120,10 +121,6 @@ export const SourceRowMenu: React.FC<{
       aliveRef.current = false;
     };
   }, []);
-
-  // Re-discovery only applies to hub sources; native_cli subscriptions are
-  // rejected server-side, so we don't offer the action for them.
-  const canRediscover = source.supply_channel === 'hub';
 
   const openRename = () => {
     setMenuOpen(false);
@@ -148,30 +145,6 @@ export const SourceRowMenu: React.FC<{
       if (aliveRef.current) showToast(t('settings.models.sourceActions.renameFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setRenaming(false);
-    }
-  };
-
-  const rediscover = async () => {
-    setMenuOpen(false);
-    if (testing) return;
-    setTesting(true);
-    try {
-      const count = await modelsApi.testSource(source.id);
-      if (!aliveRef.current) return;
-      onChanged();
-      showToast(t('settings.models.sourceActions.rediscovered', { count }) as string, 'success');
-    } catch {
-      if (!aliveRef.current) return;
-      // A failed test is NOT read-only: `test_source` persists the source as
-      // error/unclassified and only then raises `discovery_failed`. Refreshing on
-      // success alone would leave the row showing the cause it had before the
-      // server replaced it — and for the inline repair, the remedy that cause
-      // implied. Re-read either way; the toast reports the attempt, the row
-      // reports the state.
-      onChanged();
-      showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
-    } finally {
-      if (aliveRef.current) setTesting(false);
     }
   };
 
@@ -205,8 +178,8 @@ export const SourceRowMenu: React.FC<{
       }
       if (aliveRef.current) {
         setDeleteOpen(false);
-        // Same rule as `rediscover` above, for the same reason: a failed DELETE is
-        // not read-only either. The supply guard is the one refusal that provably
+        // A failed DELETE is not necessarily read-only. The supply guard is the
+        // one refusal that provably
         // wrote nothing — `delete_source` raises it off a CLONED config, before
         // `_commit_synced` — and it left through the branch above. Everything that
         // reaches here got past that commit or died inside it: a response lost on
@@ -230,7 +203,7 @@ export const SourceRowMenu: React.FC<{
   const runRepair = (kind: RepairKind) => {
     setMenuOpen(false);
     if (kind === 'retest') {
-      void rediscover();
+      onRefresh(source);
       return;
     }
     onRepair?.(source, kind);
@@ -261,10 +234,10 @@ export const SourceRowMenu: React.FC<{
           // Composed rather than a per-kind string: the label already says what
           // happens, and every row on the page repeats it.
           aria-label={`${t(REPAIR_LABEL_KEY[inlineRemedy])} · ${source.display_name}`}
-          disabled={testing}
+          disabled={refreshDisabled}
           onClick={() => runRepair(inlineRemedy)}
         >
-          {testing && inlineRemedy === 'retest' ? (
+          {refreshing && inlineRemedy === 'retest' ? (
             <RefreshCw className="size-3 animate-spin" />
           ) : (
             <RemedyIcon className="size-3" />
@@ -313,7 +286,7 @@ export const SourceRowMenu: React.FC<{
             )}
           >
             <span className="flex size-9 items-center justify-center rounded-[10px] border border-border bg-surface/60 transition-colors group-hover/more:bg-surface-2 group-hover/more:text-foreground sm:size-8 sm:border-transparent sm:bg-transparent">
-              {testing ? <RefreshCw className="size-4 animate-spin" /> : <MoreHorizontal className="size-4" />}
+              <MoreHorizontal className="size-4" />
             </span>
           </button>
         }
@@ -324,14 +297,6 @@ export const SourceRowMenu: React.FC<{
           description={hint('renameHint')}
           onClick={openRename}
         />
-        {canRediscover && (
-          <MenuAction
-            Icon={RefreshCw}
-            label={t('settings.models.sourceActions.rediscover') as string}
-            description={hint('rediscoverHint')}
-            onClick={() => void rediscover()}
-          />
-        )}
         {/* Elective credential maintenance — available on a HEALTHY source too
             (api.md gives both routes an elective form, guard included), which is
             why these read the per-route predicates rather than `repairAction`.

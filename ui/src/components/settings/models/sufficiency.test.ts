@@ -28,6 +28,7 @@ const source = (id: string, status: SourceStatus): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state: { status, ...(status === 'cooldown' ? { retry_at: '2030-01-01T00:00:00Z' } : {}) } as SourceState,
+  last_discovered_at: null,
   models: [],
 });
 

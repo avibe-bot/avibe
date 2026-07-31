@@ -2,7 +2,7 @@
 // be exercised directly: which request may land, what speaks for a row when no
 // read does, how long a write counts as outstanding, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
-import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
+import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState, Source } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
 /**
@@ -89,6 +89,11 @@ export const agentsWithEcho = (
   agents: readonly AgentSupply[],
   echoed: AgentSupply,
 ): AgentSupply[] => agents.map((agent) => (agent.backend === echoed.backend ? echoed : agent));
+
+/** Takes one source mutation echo into the already-loaded inventory without
+ *  letting that single-row response answer which other rows exist. */
+export const sourcesWithEcho = (sources: readonly Source[], echoed: Source): Source[] =>
+  sources.map((source) => (source.id === echoed.id ? echoed : source));
 
 // ── A write that outlives the drawer that issued it ────────────────────────
 /**

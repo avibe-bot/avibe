@@ -44,7 +44,7 @@ const SINGULAR_VERB =
  *
  * `{{count}} model(s)` passes on purpose: it is correct at every count, and it is
  * what the rest of this subtree already writes (`migration.applied`,
- * `sourceActions.rediscovered`, `migrationBanner.body`).
+ * `sourceActions.refreshed`, `migrationBanner.body`).
  */
 const PLURAL_NOUN = /\{\{count\}\}\s+(?:more\s+)?[a-z]+s\b/i;
 

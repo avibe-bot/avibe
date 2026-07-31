@@ -636,6 +636,8 @@
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
         "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
         "modelCount": "{{count}} model(s)",
+        "lastDiscovery": "Last fetched {{time}}",
+        "neverDiscovered": "Not fetched yet",
         "addModel": "Add model",
         "modelsEmpty": "No supplied models yet. Add one manually.",
         "modelsEmptySubscription": "No supplied models were discovered."
@@ -1012,7 +1014,8 @@
       "sourceActions": {
         "more": "More actions",
         "rename": "Rename",
-        "rediscover": "Re-discover models",
+        "refresh": "Refresh models",
+        "refreshing": "Refreshing models",
         "reauth": "Sign in again",
         "replaceKey": "Replace API key",
         "delete": "Delete source",
@@ -1021,8 +1024,8 @@
         "renamePlaceholder": "e.g. Production key",
         "renamed": "Renamed",
         "renameFailed": "Couldn't rename, please retry",
-        "rediscovered": "Re-discovered {{count}} model(s)",
-        "rediscoverFailed": "Couldn't re-discover, please retry",
+        "refreshed": "Updated {{count}} model(s)",
+        "refreshFailed": "Couldn't fetch the latest models. The last successful list is still shown.",
         "deleteTitle": "Delete source?",
         "deleteBody": "This removes “{{name}}” from the Hub and revokes its credential. This can't be undone.",
         "deleteConfirm": "Delete",
@@ -1032,7 +1035,6 @@
         "deleted": "Source deleted",
         "deleteFailed": "Couldn't delete, please retry",
         "renameHint": "Changes the display name only — the credential is untouched",
-        "rediscoverHint": "Re-fetch the models this source can supply",
         "deleteHint": "You'll be asked to confirm first",
         "reauthHint": "The old sign-in stops working right away",
         "replaceKeyHint": "Enter a new key — the endpoint and name stay"

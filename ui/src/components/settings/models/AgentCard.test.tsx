@@ -28,6 +28,7 @@ const source = (id: string, name: string): Source => ({
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active', retry_at: null, detail_key: null },
+  last_discovered_at: null,
   models: [{ id: 'claude-opus-4-6', provenance: 'discovered' }],
 });
 

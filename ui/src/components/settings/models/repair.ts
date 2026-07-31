@@ -50,7 +50,7 @@ export const canReauth = (source: Source): boolean => source.kind === 'subscript
 export const canReplaceKey = (source: Source): boolean =>
   source.kind === 'api_key' && source.supply_channel === 'hub' && Boolean(source.credential_ref);
 
-/** `POST …/test` is the contract's ONE recovery endpoint (「v3 does not add a
+/** `POST …/refresh` is the contract's ONE recovery endpoint (「v3 does not add a
  *  second 'recover' endpoint」) and rejects native sources, which have nothing to
  *  re-discover. */
 export const canRetest = (source: Source): boolean => source.supply_channel === 'hub';
@@ -99,7 +99,7 @@ export function repairAction(source: Source): RepairKind | null {
     return null;
   }
   if (canRetest(source)) return 'retest';
-  // Native has no recovery test — `test_source` refuses `native_cli` outright — so
+  // Native has no recovery refresh — `refresh_source` refuses `native_cli` outright — so
   // rules 1 and 2 together leave a stopped native row with no tap at all, its
   // remedy surviving only in the overflow menu. Rule 3 covers the one cause where
   // signing in again is the answer rather than a guess, and the cause matters

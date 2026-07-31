@@ -103,8 +103,8 @@ class ModelHubRemoteService:
     async def delete_source(self, source_id: str, *, force: bool = False) -> None:
         await _rpc("delete_source", {"source_id": source_id, "force": force})
 
-    async def test_source(self, source_id: str) -> tuple[dict, int]:
-        result = await _rpc("test_source", {"source_id": source_id})
+    async def refresh_source(self, source_id: str) -> tuple[dict, int]:
+        result = await _rpc("refresh_source", {"source_id": source_id})
         return result["source"], result["discovered"]
 
     def list_agents(self) -> list[dict]:
