@@ -2416,6 +2416,148 @@ def test_agent_run_settles_failed_when_sink_released_without_terminal_result(
     assert settled["metadata"]["interrupt_reason"] == "no_terminal_result"
 
 
+async def _await_cancelled(task: "asyncio.Task[Any]") -> None:
+    """Await a task we just cancelled, absorbing only ITS cancellation.
+
+    The awaiter is not the cancelled party here, so swallowing the error is
+    honest — it is the cancelled task's terminal state arriving, not our own
+    cancellation being ignored.
+    """
+
+    with suppress(asyncio.CancelledError):
+        await task
+    # ``_on_execution_done`` is a done callback, i.e. ``call_soon``: without one
+    # more loop pass the ownership maps still hold the finished execution.
+    await asyncio.sleep(0)
+
+
+def test_cancelling_an_inflight_execution_terminalizes_and_frees_the_session_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-100: a cancelled execution must settle its run, not requeue it.
+
+    Cancellation is how every run-blind teardown reaches a live execution —
+    eviction, shutdown, a supervisor reclaiming the session. Requeueing the
+    claim answers the wrong question: the RUN was interrupted and nothing will
+    ever write its terminal row, so the queue entry comes back while the
+    ``agent_runs`` row it belongs to is left mid-flight and the user is told
+    nothing. Terminalize the run instead, and free the session lock so the next
+    execution can take the session.
+
+    No cause was recorded by the canceller here (an external cancellation this
+    process did not originate), so the settlement contract's generic default
+    applies: ``interrupted`` — an infrastructure fault, hence ``failed``, and
+    never the more specific ``evicted``.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="a turn that is interrupted mid-flight",
+        agent_name="codex",
+    )
+
+    turn_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _hang(_controller, _context, _message) -> None:
+        turn_started.set()
+        await never_finishes.wait()
+
+    controller = _SettlementControllerDouble(on_turn=_hang)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    lock_key = "key:slack::channel::C123"
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        assert lock_key in service._inflight_sessions
+        assert service._session_lock_owners.get(lock_key) == request.id
+
+        execution.cancel()
+        await _await_cancelled(execution)
+
+    asyncio.run(_exercise())
+
+    claimed = request_store.get_run(request.id)
+    assert claimed is not None
+    # The session slot must be free, and free of any owner entry pointing at a
+    # dead execution — a leaked owner reads to the sweep as live work.
+    assert request.id not in service._inflight_executions
+    assert lock_key not in service._inflight_sessions
+    assert service._session_lock_owners == {}
+    # The run itself is the half that is missing today: cancellation requeues
+    # the claim and leaves the row non-terminal.
+    assert claimed["status"] == "failed"
+    assert claimed["completed_at"] is not None
+    assert claimed["error"]
+    assert claimed["metadata"]["interrupt_reason"] == "interrupted"
+
+
+def test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-101: a restart must not silently re-send the prompt of an interrupted run.
+
+    ``stop()`` cancels every in-flight execution, and the cancellation handler
+    requeues the claim, so the same prompt is dispatched again on the next
+    start — the duplicate-prompt regression, with the first attempt's row still
+    reading as unfinished work. The service restarting around a run is a named
+    settlement cause (``restarted``): the interrupted run is terminalized and
+    nothing is left queued for re-dispatch.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message="deploy the release notes",
+        agent_name="codex",
+    )
+
+    turn_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def _hang(_controller, _context, _message) -> None:
+        turn_started.set()
+        await never_finishes.wait()
+
+    controller = _SettlementControllerDouble(on_turn=_hang)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    service.scheduler = _StubScheduler()
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        assert service._inflight_executions.get(request.id) is not None
+        await asyncio.wait_for(turn_started.wait(), timeout=5)
+        await asyncio.wait_for(service.stop(), timeout=5)
+
+    asyncio.run(_exercise())
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["completed_at"] is not None
+    assert settled["error"]
+    assert settled["metadata"]["interrupt_reason"] == "restarted"
+    # ...and the claim is not waiting to fire the same prompt a second time.
+    assert request.id not in {pending.id for pending in request_store.list_pending()}
+
+
 def test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it(
     tmp_path: Path,
     monkeypatch,
