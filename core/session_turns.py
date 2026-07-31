@@ -1666,7 +1666,34 @@ class SessionTurnManager:
             or turn.logical_turn_id != logical_turn_id
             or turn.task.done()
         ):
-            return {"state": "reconciling", "reason": "runtime_owner_unavailable"}
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                delivery = delivery_store.get_delivery(conn, delivery_id)
+                if delivery is None:
+                    return {"state": "reconciling", "reason": "delivery_missing"}
+                if delivery["state"] == "interrupting":
+                    saved = delivery_store.cas_delivery(
+                        conn,
+                        delivery_id,
+                        expected_version=int(delivery["version"]),
+                        expected_states=("interrupting",),
+                        values={
+                            "state": "reconciling",
+                            "receipt_outcome": "unknown",
+                            "receipt_body_json": json.dumps(
+                                {"reason": "runtime_owner_unavailable"},
+                                sort_keys=True,
+                            ),
+                        },
+                    )
+                    if saved is None:
+                        return {"state": "reconciling", "reason": "receipt_cas_lost"}
+                return {
+                    "state": str(delivery.get("state") or "reconciling")
+                    if delivery["state"] != "interrupting"
+                    else "reconciling",
+                    "reason": "runtime_owner_unavailable",
+                }
         if turn.context.platform_specific is None:
             turn.context.platform_specific = {}
         turn.context.platform_specific["suppress_stop_no_active_notice"] = True

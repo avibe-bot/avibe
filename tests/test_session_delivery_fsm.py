@@ -522,6 +522,22 @@ def test_restart_reconciles_unrecorded_p0_interrupt_without_retry(managers) -> N
     restarted.controller.command_handler.handle_stop.assert_not_awaited()
 
 
+def test_missing_runtime_owner_persists_p0_reconciliation(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0"),
+            context=_context(),
+        )
+    )
+    row = next(item for item in _delivery_rows(engine) if item["id"] == result.delivery_id)
+    assert result.state == "reconciling"
+    assert row["state"] == "reconciling"
+    assert row["receipt_outcome"] == "unknown"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+
 def test_p1_during_unbound_start_reconciles_without_steer_or_fallback(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     admitted = asyncio.run(
