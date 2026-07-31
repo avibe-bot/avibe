@@ -309,6 +309,51 @@ def test_adapter_error_persists_reconciliation_without_retry(managers) -> None:
     manager._steer.assert_awaited_once()
 
 
+def test_accepted_steer_after_target_terminal_completes_attachment(managers) -> None:
+    manager, terminal_manager, engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, _ = await _activate(manager)
+        manager._active_identity = lambda _backend, _session, logical: (
+            logical,
+            "native-t1",
+        )
+        adapter_entered = asyncio.Event()
+        release_adapter = asyncio.Event()
+
+        async def accepted(_backend, _request):
+            adapter_entered.set()
+            await release_adapter.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accepted
+        pending = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p1",
+                    content="accepted before terminal",
+                ),
+                context=_context(),
+            )
+        )
+        await adapter_entered.wait()
+        assert await terminal_manager.terminalize_turn(turn_id)
+        release_adapter.set()
+        return turn_id, await pending
+
+    turn_id, result = asyncio.run(run())
+    row = next(
+        item
+        for item in _delivery_rows(engine)
+        if item["id"] == result.delivery_id
+    )
+    assert result.state == "completed"
+    assert result.turn_id == turn_id
+    assert row["state"] == "completed"
+    assert row["receipt_outcome"] == "accepted"
+
+
 def test_p1_steers_through_persisted_turn_backend(managers) -> None:
     manager, _restarted, _engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(manager))

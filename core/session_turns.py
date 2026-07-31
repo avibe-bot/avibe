@@ -1517,12 +1517,21 @@ class SessionTurnManager:
                     return DeliveryResult(delivery_id, None, "reconciling", reason="missing_delivery")
                 message_id = str(delivery.get("message_id") or "") or None
                 if outcome is SteerOutcome.ACCEPTED:
+                    target = delivery_store.get_turn(
+                        conn,
+                        str(delivery.get("target_turn_id") or ""),
+                    )
+                    accepted_state = (
+                        "completed"
+                        if target is not None and target["state"] == "terminal"
+                        else "attached"
+                    )
                     saved = delivery_store.record_steer_receipt(
                         conn,
                         delivery_id,
                         expected_version=int(delivery["version"]),
                         outcome="accepted",
-                        state="attached",
+                        state=accepted_state,
                         body=body,
                     )
                     if saved is None:
@@ -1534,7 +1543,7 @@ class SessionTurnManager:
                     return DeliveryResult(
                         delivery_id,
                         message_id,
-                        "attached",
+                        accepted_state,
                         str(delivery.get("target_turn_id") or "") or None,
                     )
                 if outcome is SteerOutcome.UNKNOWN:
