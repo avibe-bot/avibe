@@ -99,6 +99,17 @@ def normalize_agent_name(name: str) -> str:
     return normalized
 
 
+def _normalized_agent_reference_names(reference_names: Iterable[str]) -> frozenset[str]:
+    return frozenset(normalize_agent_name(name) for name in reference_names)
+
+
+def _matches_agent_reference(value: Any, reference_names: frozenset[str]) -> bool:
+    try:
+        return normalize_agent_name(value) in reference_names
+    except ValueError:
+        return False
+
+
 def _validated_public_agent_name(name: str) -> tuple[str, str]:
     raw_name = str(name or "").strip()
     if raw_name.startswith("_"):
@@ -146,7 +157,7 @@ def _rewrite_scope_agent_name(
         return raw or "{}", False
     changed = False
     for key in ("agent_name", "agent"):
-        if routing.get(key) in reference_names:
+        if _matches_agent_reference(routing.get(key), reference_names):
             routing[key] = new_name
             changed = True
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
@@ -176,7 +187,9 @@ def _rewrite_definition_agent_name(
         return raw or "{}", False
     changed = direct_binding_changed
     snapshot = payload.get("session_settings_snapshot")
-    if isinstance(snapshot, dict) and snapshot.get("agent_name") in reference_names:
+    if isinstance(snapshot, dict) and _matches_agent_reference(
+        snapshot.get("agent_name"), reference_names
+    ):
         snapshot["agent_name"] = new_name
         changed = True
     if not changed:
@@ -207,11 +220,13 @@ def _rewrite_queued_agent_provenance(
 
     changed = False
     for key in ("vibe_agent_name", "scheduled_target_agent_name"):
-        if spec.get(key) in reference_names:
+        if _matches_agent_reference(spec.get(key), reference_names):
             spec[key] = new_name
             changed = True
     target = spec.get("agent_session_target")
-    if isinstance(target, dict) and target.get("agent_name") in reference_names:
+    if isinstance(target, dict) and _matches_agent_reference(
+        target.get("agent_name"), reference_names
+    ):
         target["agent_name"] = new_name
         changed = True
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
@@ -734,28 +749,25 @@ class VibeAgentStore:
 
     @staticmethod
     def _reference_counts(conn: Any, reference_names: frozenset[str]) -> dict[str, int]:
+        reference_names = _normalized_agent_reference_names(reference_names)
+        scope_names = conn.execute(
+            select(scope_settings.c.agent_name).where(scope_settings.c.agent_name.is_not(None))
+        ).scalars()
+        session_names = conn.execute(
+            select(agent_sessions.c.agent_name).where(agent_sessions.c.agent_name.is_not(None))
+        ).scalars()
+        definition_names = conn.execute(
+            select(run_definitions.c.agent_name)
+            .where(run_definitions.c.agent_name.is_not(None))
+            .where(run_definitions.c.deleted_at.is_(None))
+        ).scalars()
         return {
-            "scopes": int(
-                conn.execute(
-                    select(func.count())
-                    .select_from(scope_settings)
-                    .where(scope_settings.c.agent_name.in_(reference_names))
-                ).scalar_one()
+            "scopes": sum(_matches_agent_reference(name, reference_names) for name in scope_names),
+            "sessions": sum(
+                _matches_agent_reference(name, reference_names) for name in session_names
             ),
-            "sessions": int(
-                conn.execute(
-                    select(func.count())
-                    .select_from(agent_sessions)
-                    .where(agent_sessions.c.agent_name.in_(reference_names))
-                ).scalar_one()
-            ),
-            "definitions": int(
-                conn.execute(
-                    select(func.count())
-                    .select_from(run_definitions)
-                    .where(run_definitions.c.agent_name.in_(reference_names))
-                    .where(run_definitions.c.deleted_at.is_(None))
-                ).scalar_one()
+            "definitions": sum(
+                _matches_agent_reference(name, reference_names) for name in definition_names
             ),
         }
 
@@ -767,17 +779,38 @@ class VibeAgentStore:
         new_name: str,
         revision: str,
     ) -> None:
-        conn.execute(
-            agent_sessions.update()
-            .where(agent_sessions.c.agent_name.in_(reference_names))
-            .values(agent_name=new_name)
-        )
-        conn.execute(
-            agent_runs.update()
-            .where(agent_runs.c.agent_name.in_(reference_names))
-            .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
-            .values(agent_name=new_name)
-        )
+        reference_names = _normalized_agent_reference_names(reference_names)
+        session_ids = [
+            row["id"]
+            for row in conn.execute(
+                select(agent_sessions.c.id, agent_sessions.c.agent_name).where(
+                    agent_sessions.c.agent_name.is_not(None)
+                )
+            ).mappings()
+            if _matches_agent_reference(row["agent_name"], reference_names)
+        ]
+        if session_ids:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id.in_(session_ids))
+                .values(agent_name=new_name)
+            )
+
+        run_ids = [
+            row["id"]
+            for row in conn.execute(
+                select(agent_runs.c.id, agent_runs.c.agent_name)
+                .where(agent_runs.c.agent_name.is_not(None))
+                .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
+            ).mappings()
+            if _matches_agent_reference(row["agent_name"], reference_names)
+        ]
+        if run_ids:
+            conn.execute(
+                agent_runs.update()
+                .where(agent_runs.c.id.in_(run_ids))
+                .values(agent_name=new_name)
+            )
 
         queued_rows = conn.execute(
             select(messages.c.id, messages.c.metadata_json).where(messages.c.type == "queued")
@@ -798,7 +831,7 @@ class VibeAgentStore:
         ).mappings().all()
         for row in scope_rows:
             values: dict[str, Any] = {}
-            if row["agent_name"] in reference_names:
+            if _matches_agent_reference(row["agent_name"], reference_names):
                 values["agent_name"] = new_name
             settings, changed = _rewrite_scope_agent_name(
                 row["settings_json"], reference_names, new_name
@@ -817,7 +850,7 @@ class VibeAgentStore:
         ).mappings().all()
         for row in definition_rows:
             values = {}
-            direct_binding_changed = row["agent_name"] in reference_names
+            direct_binding_changed = _matches_agent_reference(row["agent_name"], reference_names)
             if direct_binding_changed:
                 values["agent_name"] = new_name
             metadata, changed = _rewrite_definition_agent_name(

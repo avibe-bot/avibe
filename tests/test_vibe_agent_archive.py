@@ -609,11 +609,15 @@ def test_archive_rolls_back_when_default_has_no_replacement(tmp_path) -> None:
         store.close()
 
 
-def test_archive_moves_references_that_use_the_normalized_agent_alias(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "stored_name",
+    ("project-manager", "PROJECT-MANAGER", "Project Manager", "Project.Manager"),
+)
+def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: str) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
         original = store.create(name="Project Manager", backend="claude")
-        _seed_references(store, original.normalized_name)
+        _seed_references(store, stored_name)
 
         result = store.archive(original.name)
 
@@ -629,6 +633,9 @@ def test_archive_moves_references_that_use_the_normalized_agent_alias(tmp_path) 
                     agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
                 )
             ).scalars().all()
+            queued_metadata = conn.execute(
+                select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+            ).scalar_one()
         assert scope["agent_name"] == result.archived_name
         assert json.loads(scope["settings_json"])["routing"] == {
             "agent_name": result.archived_name,
@@ -641,6 +648,10 @@ def test_archive_moves_references_that_use_the_normalized_agent_alias(tmp_path) 
             for row in definitions
         } == {result.archived_name}
         assert set(live_runs) == {result.archived_name}
+        queued_spec = json.loads(queued_metadata)["scheduled_provenance"]["platform_specific"]
+        assert queued_spec["vibe_agent_name"] == result.archived_name
+        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
+        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
     finally:
         store.close()
 
