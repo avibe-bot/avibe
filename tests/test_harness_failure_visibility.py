@@ -6100,10 +6100,12 @@ def test_owed_notice_takes_over_when_callback_success_has_no_delivery_receipt(
     assert sqlite.owed_failure_notice("run-cb-no-receipt")["state"] == "sent"
 
 
+@pytest.mark.parametrize("session_teardown", ["none", "archived", "deleted"])
 def test_callback_native_im_delivery_id_prevents_duplicate_failure_notice(
     tmp_path: Path,
+    session_teardown: str,
 ) -> None:
-    """A real IM send remains delivered if transcript persistence fails afterwards."""
+    """A real IM send stays delivered after transcript or local-session loss."""
 
     import core.scheduled_tasks as scheduled_tasks
 
@@ -6136,6 +6138,22 @@ def test_callback_native_im_delivery_id_prevents_duplicate_failure_notice(
         terminal_status="succeeded",
     )
     assert recorded["terminal_transition"]
+
+    from storage.models import agent_sessions
+
+    with sqlite.engine.begin() as conn:
+        if session_teardown == "archived":
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == "ses-callback-target")
+                .values(status="archived")
+            )
+        elif session_teardown == "deleted":
+            conn.execute(
+                agent_sessions.delete().where(
+                    agent_sessions.c.id == "ses-callback-target"
+                )
+            )
     assert sqlite.run_callback_state("run-cb-native-receipt") == "sent"
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)

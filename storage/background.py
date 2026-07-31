@@ -3081,15 +3081,16 @@ class SQLiteBackgroundTaskStore:
         notice decision keyed on the stale copy would defer a row whose blocker is
         already resolved, or worse, deliver beside a callback that just landed.
         A parent marked ``sent`` only proves that ``_drain_callbacks`` enqueued the
-        callback child. The user has the callback only after that child succeeds,
-        records delivery evidence, and targets a Session admitted by the Inbox. A
-        persisted result row is evidence for every platform; a recorded native send id
-        is also evidence for real IM conversations because those ids are returned only
-        after transport delivery. Workbench ids are synthetic and never qualify on
+        callback child. The user has the callback only after that child succeeds and
+        records delivery evidence. A persisted result row is evidence only while its
+        target Session is admitted by the Inbox; a recorded native send id for a real
+        IM conversation is transport evidence in its own right because it is returned
+        only after delivery. Archiving or deleting the local Session afterwards cannot
+        revoke that completed send. Workbench ids are synthetic and never qualify on
         their own, while a receipt in suppressed background history proves persistence,
         not visibility. This read joins the child and target Session and projects the
         state the notice lane actually needs: queued/running is pending, succeeded with
-        visible delivery evidence is sent, and every other terminal outcome releases
+        effective delivery evidence is sent, and every other terminal outcome releases
         the notice as failed. All three lookups are primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
@@ -3160,12 +3161,14 @@ class SQLiteBackgroundTaskStore:
             and isinstance(message_ids, list)
             and any(str(message_id or "").strip() for message_id in message_ids)
         )
-        has_delivery_receipt = bool(row[4]) or has_native_im_receipt
         target_is_visible = (
             str(row[5] or "").strip() != "archived"
             and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
         )
-        if child_status == "succeeded" and has_delivery_receipt and target_is_visible:
+        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
+        if child_status == "succeeded" and (
+            has_native_im_receipt or has_visible_persisted_receipt
+        ):
             return "sent"
         return "failed"
 
