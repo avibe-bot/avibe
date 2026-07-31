@@ -4096,6 +4096,20 @@ def _settings_conflict_response(exc):
     )
 
 
+def _scope_agent_unavailable_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.scopeAgentUnavailable"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang, agent=exc.agent_name),
+        400,
+        hint=t(f"{key}.hint", lang),
+        details={"agent_name": exc.agent_name},
+    )
+
+
 def _project_agent_conflict_response(exc):
     from core.services import settings as settings_service
 
@@ -5054,7 +5068,7 @@ def settings_post():
     except StaleScopeAgentBindingError as exc:
         return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
-        return _coded_error_response("agent_unavailable", str(exc), 400)
+        return _scope_agent_unavailable_response(exc)
 
 
 @app.post("/api/settings/thread", include_in_schema=False)
@@ -5070,7 +5084,7 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
         except StaleScopeAgentBindingError as exc:
             return _settings_conflict_response(exc)
         except ScopeAgentUnavailableError as exc:
-            return _coded_error_response("agent_unavailable", str(exc), 400)
+            return _scope_agent_unavailable_response(exc)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -9089,7 +9103,7 @@ def users_post():
     except StaleScopeAgentBindingError as exc:
         return _settings_conflict_response(exc)
     except ScopeAgentUnavailableError as exc:
-        return _coded_error_response("agent_unavailable", str(exc), 400)
+        return _scope_agent_unavailable_response(exc)
 
 
 @app.route("/api/users/<user_id>/admin", methods=["POST"])

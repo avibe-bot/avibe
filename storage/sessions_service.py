@@ -87,12 +87,27 @@ def _require_agent_reference_identity(
     if not cleaned_id:
         raise ValueError("an Agent identity is required for this session reference")
     row = conn.execute(
-        select(agents.c.id, agents.c.name, agents.c.backend)
+        select(
+            agents.c.id,
+            agents.c.name,
+            agents.c.backend,
+            agents.c.enabled,
+            agents.c.archived_at,
+            agents.c.metadata_json,
+        )
         .where(agents.c.id == cleaned_id)
         .limit(1)
     ).mappings().first()
     if row is None:
         raise ValueError(f"agent reference '{cleaned_id}' no longer exists")
+    from core.vibe_agents import agent_reference_is_usable
+
+    if not agent_reference_is_usable(
+        enabled=bool(row["enabled"]),
+        archived_at=row["archived_at"],
+        metadata=_json_loads(row["metadata_json"], {}),
+    ):
+        raise ValueError(f"agent reference '{row['name']}' is disabled")
     return {
         "id": str(row["id"]),
         "name": str(row["name"]),

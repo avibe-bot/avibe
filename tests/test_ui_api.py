@@ -2729,6 +2729,7 @@ def test_telegram_topic_settings_api_and_discovery_payload(tmp_path, monkeypatch
         assert saved["ok"] is True
         assert settings["threads"]["-1001"]["42"]["require_mention"] is False
         assert settings["threads"]["-1001"]["42"]["require_bind"] is True
+        assert settings["threads"]["-1001"]["42"]["expected_agent_name"] == "reviewer"
         group = next(channel for channel in chats["channels"] if channel["id"] == "-1001")
         assert group["topics"][0]["name"] == "Releases"
         assert group["topics"][0]["configured"] is True

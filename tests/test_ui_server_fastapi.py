@@ -160,6 +160,50 @@ def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(mo
         }
 
 
+def test_scope_settings_routes_localize_unavailable_agent_errors(monkeypatch):
+    from core.services import settings as settings_service
+    from storage.settings_service import ScopeAgentUnavailableError
+    from vibe import api
+
+    def unavailable(*_args, **_kwargs):
+        raise ScopeAgentUnavailableError(agent_name="pm")
+
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+    monkeypatch.setattr(api, "save_settings", unavailable)
+    monkeypatch.setattr(api, "save_thread_settings", unavailable)
+    monkeypatch.setattr(api, "save_users", unavailable)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    responses = (
+        client.post("/api/settings", json={"platform": "slack"}, headers=headers),
+        client.post(
+            "/api/settings/thread",
+            json={"platform": "telegram", "channel_id": "C1", "thread_id": "T1", "settings": {}},
+            headers=headers,
+        ),
+        client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+    )
+
+    for response in responses:
+        assert response.status_code == 400
+        assert response.get_json() == {
+            "ok": False,
+            "code": "agent_unavailable",
+            "message": "Agent `pm` 无法用于此路由。",
+            "error": {
+                "code": "agent_unavailable",
+                "message": "Agent `pm` 无法用于此路由。",
+            },
+            "hint": "请选择一个已启用的 Agent 后重新保存。",
+            "details": {"agent_name": "pm"},
+        }
+
+
 def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     from vibe import runtime
 

@@ -165,6 +165,10 @@
       "message": "Agent routing changed while these settings were open.",
       "hint": "Reload the settings and apply your change again."
     },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this route.",
+      "hint": "Choose an enabled Agent and apply the setting again."
+    },
     "projectAgentConflict": {
       "message": "The project's Agent changed while Project Settings was open.",
       "hint": "Reload Project Settings and apply your change again."

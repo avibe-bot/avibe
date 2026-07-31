@@ -557,6 +557,65 @@ def test_existing_reference_writes_canonicalize_by_stable_agent_id(
         agent_store.close()
 
 
+@pytest.mark.parametrize("write_kind", ["scheduled", "watch", "run", "session"])
+def test_existing_reference_writes_reject_an_ordinary_disabled_agent(
+    tmp_path, write_kind: str
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        disabled = agent_store.create(name="paused", backend="claude", enabled=False)
+
+        with pytest.raises(ValueError, match="agent reference 'paused' is disabled"):
+            if write_kind == "scheduled":
+                background.upsert_scheduled_task(
+                    {
+                        "id": "scheduled_disabled_reference",
+                        "agent_name": disabled.name,
+                        "prompt": "continue",
+                        "schedule_type": "at",
+                        "run_at": NOW,
+                        "timezone": "UTC",
+                    },
+                    expected_reference_agent_id=disabled.id,
+                )
+            elif write_kind == "watch":
+                background.upsert_watch(
+                    {
+                        "id": "watch_disabled_reference",
+                        "agent_name": disabled.name,
+                        "command": ["true"],
+                        "mode": "once",
+                    },
+                    expected_reference_agent_id=disabled.id,
+                )
+            elif write_kind == "run":
+                background.enqueue_run(
+                    {
+                        "id": "run_disabled_reference",
+                        "agent_name": disabled.name,
+                        "request_type": "agent_run",
+                        "status": "queued",
+                        "message": "continue",
+                    },
+                    expected_reference_agent_id=disabled.id,
+                )
+            else:
+                sessions.reserve_standalone_agent_session(
+                    agent_backend=disabled.backend,
+                    session_anchor="disabled-reference",
+                    agent_id=disabled.id,
+                    agent_name=disabled.name,
+                    expected_reference_agent_id=disabled.id,
+                )
+    finally:
+        sessions.close()
+        background.close()
+        agent_store.close()
+
+
 def test_claim_refresh_normalizes_a_legacy_run_name_before_pinning_identity(tmp_path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = VibeAgentStore(db_path)

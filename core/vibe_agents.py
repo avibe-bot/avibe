@@ -8,7 +8,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 from uuid import uuid4
 
 import yaml
@@ -330,6 +330,25 @@ def archived_agent_original_name(agent: VibeAgent) -> Optional[str]:
     return original_name or None
 
 
+def agent_reference_is_usable(
+    *,
+    enabled: bool,
+    archived_at: Optional[str],
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether an Agent may back an existing durable reference."""
+
+    if enabled:
+        return True
+    archive_metadata = (metadata or {}).get(AGENT_ARCHIVE_METADATA_KEY)
+    archived_was_enabled = (
+        archive_metadata.get("was_enabled", True)
+        if isinstance(archive_metadata, dict)
+        else True
+    )
+    return archived_at is not None and bool(archived_was_enabled)
+
+
 @dataclass(frozen=True)
 class AgentImportCandidate:
     name: str
@@ -459,13 +478,11 @@ class VibeAgentStore:
 
     @staticmethod
     def _require_reference_agent(agent: VibeAgent) -> VibeAgent:
-        archive_metadata = agent.metadata.get(AGENT_ARCHIVE_METADATA_KEY)
-        archived_was_enabled = (
-            archive_metadata.get("was_enabled", True)
-            if isinstance(archive_metadata, dict)
-            else True
-        )
-        if not agent.enabled and (agent.archived_at is None or not archived_was_enabled):
+        if not agent_reference_is_usable(
+            enabled=agent.enabled,
+            archived_at=agent.archived_at,
+            metadata=agent.metadata,
+        ):
             raise AgentUnavailableError(
                 f"agent '{agent.name}' is disabled", agent_name=agent.name, reason="disabled"
             )

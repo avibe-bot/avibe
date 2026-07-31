@@ -165,6 +165,10 @@
       "message": "这些设置打开后，Agent 路由已发生变化。",
       "hint": "请重新加载设置后再次修改。"
     },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此路由。",
+      "hint": "请选择一个已启用的 Agent 后重新保存。"
+    },
     "projectAgentConflict": {
       "message": "项目设置打开后，该项目的 Agent 已发生变化。",
       "hint": "请重新加载项目设置后再次修改。"

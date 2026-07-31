@@ -571,6 +571,50 @@ def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: 
         agents_store.close()
 
 
+def test_client_binding_expectation_survives_server_reload_before_scope_save(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    initial = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    reloaded = None
+    try:
+        original = agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
+        initial.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name=original.name)),
+            platform="slack",
+        )
+
+        archived = agent_store.archive(original.name)
+        assert archived is not None
+        replacement = agent_store.create(name="pm", backend="codex")
+        reloaded = SettingsStore(settings_path)
+        stale_form = ChannelSettings(
+            enabled=True,
+            custom_cwd="/saved-after-reload",
+            routing=RoutingSettings(agent_name="pm"),
+            _agent_name_at_load="pm",
+        )
+
+        reloaded.set_channels_for_platform("slack", {"C1": stale_form})
+        reloaded.save()
+
+        assert stale_form.routing.agent_name == archived.archived_name
+        with agent_store.engine.connect() as conn:
+            stored = conn.execute(
+                select(scope_settings.c.agent_name, scope_settings.c.workdir).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).one()
+        assert stored == (archived.archived_name, "/saved-after-reload")
+        assert stored.agent_name != replacement.name
+    finally:
+        if reloaded is not None:
+            reloaded.close()
+        initial.close()
+        agent_store.close()
+
+
 def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)
@@ -594,7 +638,7 @@ def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_p
             existing.custom_cwd = "/preserved"
             reloaded.save()
 
-            with pytest.raises(ScopeAgentUnavailableError, match="Agent is unavailable"):
+            with pytest.raises(ScopeAgentUnavailableError) as unavailable:
                 reloaded.update_channel(
                     "C2",
                     ChannelSettings(
@@ -603,6 +647,8 @@ def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_p
                     ),
                     platform="slack",
                 )
+            assert unavailable.value.code == "agent_unavailable"
+            assert unavailable.value.agent_name == archived.archived_name
             assert reloaded.find_channel("C2", platform="slack") is None
         finally:
             reloaded.close()

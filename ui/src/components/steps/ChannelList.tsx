@@ -52,6 +52,7 @@ interface ChannelListProps {
 }
 
 export interface ChannelConfig {
+  expected_agent_name?: string | null;
   enabled: boolean;
   show_message_types: string[];
   custom_cwd: string;

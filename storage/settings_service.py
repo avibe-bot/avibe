@@ -45,7 +45,11 @@ class StaleScopeAgentBindingError(ValueError):
 
 
 class ScopeAgentUnavailableError(ValueError):
-    pass
+    code = "agent_unavailable"
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = agent_name
 
 
 class SQLiteSettingsService:
@@ -275,7 +279,7 @@ class SQLiteSettingsService:
         try:
             normalized_name = normalize_agent_name(agent_name)
         except ValueError as exc:
-            raise ScopeAgentUnavailableError(f"Agent is unavailable: {agent_name}") from exc
+            raise ScopeAgentUnavailableError(agent_name=agent_name) from exc
         available = conn.execute(
             select(agents.c.name)
             .where(agents.c.normalized_name == normalized_name)
@@ -284,7 +288,7 @@ class SQLiteSettingsService:
             .limit(1)
         ).scalar_one_or_none()
         if available is None:
-            raise ScopeAgentUnavailableError(f"Agent is unavailable: {agent_name}")
+            raise ScopeAgentUnavailableError(agent_name=agent_name)
         return str(available)
 
     def _upsert_scope_settings(self, conn: Connection, *, scope_id: str, **values: Any) -> None:

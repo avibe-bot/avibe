@@ -34,6 +34,7 @@ from config.v2_settings import (
     GuildSettings,
     UserSettings,
     RoutingSettings,
+    _UNSET_AGENT_BINDING,
     normalize_show_message_types,
     _parse_routing,
     _routing_to_dict,
@@ -4249,6 +4250,9 @@ def save_settings(payload: dict) -> dict:
                 routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
                 require_mention=channel_payload.get("require_mention"),
                 require_bind=channel_payload.get("require_bind"),
+                _agent_name_at_load=channel_payload.get(
+                    "expected_agent_name", _UNSET_AGENT_BINDING
+                ),
             )
         store.set_channels_for_platform(platform, channels)
     if "guilds" in payload or "guild_allowlist" in payload:
@@ -4294,6 +4298,9 @@ def save_thread_settings(payload: dict) -> dict:
         routing=routing,
         require_mention=require_mention,
         require_bind=settings_payload.get("require_bind", base.require_bind),
+        _agent_name_at_load=settings_payload.get(
+            "expected_agent_name", _UNSET_AGENT_BINDING
+        ),
     )
     store.update_thread(channel_id, thread_id, settings, platform=platform)
     return {
@@ -5045,7 +5052,15 @@ def _scope_settings_payload(settings: ChannelSettings, platform: str) -> dict:
         "require_mention": settings.require_mention,
         "require_bind": settings.require_bind,
         "routing": routing_to_compat_dict(settings.routing),
+        "expected_agent_name": _agent_binding_expectation(settings),
     }
+
+
+def _agent_binding_expectation(settings: ChannelSettings | UserSettings) -> Optional[str]:
+    expected_agent_name = settings._agent_name_at_load
+    if expected_agent_name is _UNSET_AGENT_BINDING:
+        return settings.routing.agent_name
+    return expected_agent_name
 
 
 def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
@@ -5084,6 +5099,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
             "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
+            "expected_agent_name": _agent_binding_expectation(u),
         }
     for bc in store.settings.bind_codes:
         payload["bind_codes"].append(
@@ -11036,6 +11052,7 @@ def get_users(platform: Optional[str] = None) -> dict:
             "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
+            "expected_agent_name": _agent_binding_expectation(u),
         }
     return {"ok": True, "users": users}
 
@@ -11061,6 +11078,7 @@ def save_users(payload: dict) -> dict:
             routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
             dm_chat_id=existing.dm_chat_id if existing else "",
             pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
+            _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
         )
 
     # Merge instead of replace: update existing users and add new ones,

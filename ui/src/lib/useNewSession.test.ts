@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { VibeAgentBrief, WorkbenchProject } from '../context/ApiContext';
-import { isProjectDefaultAgentAvailable } from './useNewSession';
+import { isProjectDefaultAgentAvailable, projectDefaultAgentRoute } from './useNewSession';
 
 const project = (agentName: string): WorkbenchProject =>
   ({
@@ -46,5 +46,27 @@ describe('isProjectDefaultAgentAvailable', () => {
   it('rejects disabled or archived catalog entries', () => {
     expect(isProjectDefaultAgentAvailable(project('pm'), [agent({ enabled: false })])).toBe(false);
     expect(isProjectDefaultAgentAvailable(project('pm'), [agent({ archived: true })])).toBe(false);
+  });
+});
+
+describe('projectDefaultAgentRoute', () => {
+  it('pins the project Agent by stable ID for session creation', () => {
+    const target = project('pm');
+    target.default_agent = {
+      agent_backend: 'claude',
+      agent_id: 'agent-original',
+      agent_name: 'pm',
+      agent_variant: 'claude',
+      model: 'claude-opus-5',
+      reasoning_effort: 'high',
+    };
+
+    expect(projectDefaultAgentRoute(target, [agent({ id: 'agent-replacement' })])).toEqual({
+      agent_name: 'pm',
+      agent_id: 'agent-original',
+      agent_variant: 'claude',
+      model: 'claude-opus-5',
+      reasoning_effort: 'high',
+    });
   });
 });

@@ -220,8 +220,8 @@ class ChannelSettings:
     # Per-channel require_bind gate: None/False=off (any channel member), True=only
     # process messages from bound users; unbound senders are silently ignored.
     require_bind: Optional[bool] = None
-    # Internal optimistic-concurrency token. It is populated from SQLite and
-    # deliberately omitted from API payloads and persisted settings JSON.
+    # Internal optimistic-concurrency token. The API mirrors it as
+    # ``expected_agent_name`` while persisted settings JSON omits it.
     _agent_name_at_load: object = field(default=_UNSET_AGENT_BINDING, repr=False, compare=False)
 
 
@@ -834,6 +834,9 @@ class SettingsStore:
 
     @staticmethod
     def _carry_agent_binding_expectation(previous: object, current: object) -> None:
+        current_expected = getattr(current, "_agent_name_at_load", _UNSET_AGENT_BINDING)
+        if current_expected is not _UNSET_AGENT_BINDING:
+            return
         if previous is None:
             setattr(current, "_agent_name_at_load", None)
             return

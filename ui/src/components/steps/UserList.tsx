@@ -26,6 +26,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 
 interface UserConfig {
+  expected_agent_name?: string | null;
   display_name: string;
   is_admin: boolean;
   bound_at: string;

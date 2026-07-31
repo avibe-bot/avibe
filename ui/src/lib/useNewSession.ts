@@ -63,6 +63,23 @@ export function isProjectDefaultAgentAvailable(
   );
 }
 
+export function projectDefaultAgentRoute(
+  project: WorkbenchProject | null,
+  agents: VibeAgentBrief[],
+): AgentRouteSelection {
+  if (!isProjectDefaultAgentAvailable(project, agents)) return {};
+  const def = project?.default_agent;
+  return def
+    ? {
+        agent_name: def.agent_name,
+        agent_id: def.agent_id,
+        agent_variant: def.agent_variant,
+        model: def.model,
+        reasoning_effort: def.reasoning_effort,
+      }
+    : {};
+}
+
 const sortByRecent = (list: WorkbenchProject[]) =>
   list
     .slice()
@@ -140,18 +157,10 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // on the project for durable history, but the enabled catalog intentionally
   // excludes it, so a new chat falls back to the live global default.
   const projectDefaultAvailable = isProjectDefaultAgentAvailable(target, agents);
-  const projectDefaultRoute = useMemo<AgentRouteSelection>(() => {
-    if (!projectDefaultAvailable) return {};
-    const def = target?.default_agent;
-    return def
-      ? {
-          agent_name: def.agent_name,
-          agent_variant: def.agent_variant,
-          model: def.model,
-          reasoning_effort: def.reasoning_effort,
-        }
-      : {};
-  }, [projectDefaultAvailable, target?.default_agent]);
+  const projectDefaultRoute = useMemo<AgentRouteSelection>(
+    () => projectDefaultAgentRoute(target, agents),
+    [target, agents],
+  );
 
   // The GLOBAL default Agent resolved to a concrete route, looked up from the
   // agents list by name. The picker needs a concrete route to render the model
