@@ -33,7 +33,12 @@ describe('resultFooterParts', () => {
   });
 
   it('recognizes legacy duration and token footer shapes', () => {
-    for (const footer of ['✅ ⏱️ 0s', '⚠️ ⏱️ 2m 4s · 🪙 240k tok', '❌ 🪙 12.3k tokens']) {
+    for (const footer of [
+      '✅ ⏱️ 0s',
+      '⚠️ ⏱️ 2m 4s · 🪙 240k tok',
+      '❌ 🪙 12.3k tok',
+      '✅ 🪙 1.4M tok',
+    ]) {
       expect(resultFooterParts(message(`Answer\n\n${footer}`))).toEqual({ body: 'Answer', footer });
     }
   });
@@ -46,6 +51,12 @@ describe('resultFooterParts', () => {
   it('does not move authored text or non-Agent result content', () => {
     const text = 'Answer\n\n✅ Looks good';
     expect(resultFooterParts(message(text))).toEqual({ body: text, footer: null });
+    const coinText = 'Answer\n\n✅ 🪙 deployment complete';
+    expect(resultFooterParts(message(coinText))).toEqual({ body: coinText, footer: null });
+    expect(resultFooterParts(message('✅ 🪙 deployment complete'))).toEqual({
+      body: '✅ 🪙 deployment complete',
+      footer: null,
+    });
     expect(resultFooterParts(message(text, {}, { author: 'user', type: 'user' }))).toEqual({
       body: text,
       footer: null,

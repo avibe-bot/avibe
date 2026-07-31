@@ -1,6 +1,7 @@
 import type { WorkbenchMessage } from '@/context/ApiContext';
 
-const LEGACY_RESULT_FOOTER_RE = /^(?:✅|⚠️|❌) (?:⏱️ (?:\d+m )?\d+s(?: · 🪙 [^\r\n]+)?|🪙 [^\r\n]+)$/u;
+const LEGACY_RESULT_FOOTER_RE =
+  /^(?:✅|⚠️|❌) (?:⏱️ (?:\d+m )?\d+s(?: · 🪙 \d+(?:\.\d+)?[kM]? tok)?|🪙 \d+(?:\.\d+)?[kM]? tok)$/u;
 
 export type ResultFooterParts = {
   body: string;
