@@ -453,6 +453,7 @@ session_deliveries = Table(
     Column("id", String, primary_key=True),
     Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
     Column("message_id", String, ForeignKey("messages.id", ondelete="RESTRICT"), nullable=True),
+    Column("dispatch_text", Text, nullable=True),
     Column("priority", String, nullable=False),
     Column("state", String, nullable=False),
     Column("target_turn_id", String, ForeignKey("session_turns.id", ondelete="RESTRICT"), nullable=True),

@@ -164,6 +164,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     }.issubset(turn_columns)
     assert {
         "message_id",
+        "dispatch_text",
         "priority",
         "target_turn_id",
         "successor_turn_id",

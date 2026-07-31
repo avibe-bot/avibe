@@ -61,6 +61,7 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("session_id", sa.String(), nullable=False),
         sa.Column("message_id", sa.String(), nullable=True),
+        sa.Column("dispatch_text", sa.Text(), nullable=True),
         sa.Column("priority", sa.String(), nullable=False),
         sa.Column("state", sa.String(), nullable=False),
         sa.Column("target_turn_id", sa.String(), nullable=True),

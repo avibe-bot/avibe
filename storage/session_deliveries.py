@@ -127,6 +127,7 @@ def insert_delivery(
     delivery_id: str,
     session_id: str,
     message_id: str | None,
+    dispatch_text: str | None = None,
     priority: str,
     state: str,
     target_turn_id: str | None = None,
@@ -142,6 +143,7 @@ def insert_delivery(
         "id": delivery_id,
         "session_id": session_id,
         "message_id": message_id,
+        "dispatch_text": dispatch_text,
         "priority": priority,
         "state": state,
         "target_turn_id": target_turn_id,
@@ -299,7 +301,8 @@ def terminalize_and_claim_successor(
     preserve_queue = any(
         row["priority"] == "p0"
         and row["message_id"] is None
-        and row["state"] in {"interrupting", "waiting_terminal", "reconciling", "completed"}
+        and row["state"]
+        in {"interrupt_pending", "interrupting", "waiting_terminal", "reconciling", "completed"}
         for row in owned
     )
     existing_successor = next(
@@ -360,7 +363,12 @@ def terminalize_and_claim_successor(
     for raw in owned:
         delivery = dict(raw)
         successor_id = str(delivery.get("successor_turn_id") or "").strip()
-        if successor_id and delivery["state"] in {"interrupting", "waiting_terminal", "reconciling"}:
+        if successor_id and delivery["state"] in {
+            "interrupt_pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
             successor = get_turn(conn, successor_id)
             if successor is None or successor["state"] != "pending":
                 continue
@@ -387,7 +395,6 @@ def terminalize_and_claim_successor(
                         "state": "queued",
                         "target_turn_id": None,
                         "successor_turn_id": None,
-                        "receipt_outcome": "deferred_successor",
                     },
                 )
                 if queued is None:
@@ -403,12 +410,15 @@ def terminalize_and_claim_successor(
             )
             if started is None:
                 continue
+            advance_values: dict[str, Any] = {"state": "starting"}
+            if delivery.get("receipt_outcome") is None:
+                advance_values["receipt_outcome"] = outcome
             advanced = cas_delivery(
                 conn,
                 str(delivery["id"]),
                 expected_version=int(delivery["version"]),
                 expected_states=(str(delivery["state"]),),
-                values={"state": "starting", "receipt_outcome": outcome},
+                values=advance_values,
             )
             if advanced is None:
                 raise RuntimeError("successor Turn claimed without its delivery owner")
@@ -418,15 +428,19 @@ def terminalize_and_claim_successor(
         if delivery["state"] in {
             "starting",
             "attached",
+            "interrupt_pending",
             "interrupting",
             "waiting_terminal",
         } or (delivery["state"] == "reconciling" and delivery["priority"] == "p0"):
+            completion_values: dict[str, Any] = {"state": "completed"}
+            if delivery.get("receipt_outcome") is None:
+                completion_values["receipt_outcome"] = outcome
             completed = cas_delivery(
                 conn,
                 str(delivery["id"]),
                 expected_version=int(delivery["version"]),
                 expected_states=(str(delivery["state"]),),
-                values={"state": "completed", "receipt_outcome": outcome},
+                values=completion_values,
             )
             if completed is None:
                 raise RuntimeError("terminal Turn did not settle its delivery owner")
@@ -494,7 +508,9 @@ def recovery_turns(conn: Connection, session_id: str | None = None) -> list[dict
 
 def unsettled_attempts(conn: Connection, session_id: str | None = None) -> list[dict[str, Any]]:
     query = select(session_deliveries).where(
-        session_deliveries.c.state.in_(("steering", "reconciling", "interrupting", "waiting_terminal"))
+        session_deliveries.c.state.in_(
+            ("steering", "reconciling", "interrupt_pending", "interrupting", "waiting_terminal")
+        )
     )
     if session_id:
         query = query.where(session_deliveries.c.session_id == session_id)
@@ -510,6 +526,25 @@ def session_ids_with_live_turns(conn: Connection) -> set[str]:
         ).scalars()
         if value
     }
+
+
+def session_ids_with_turn_history(conn: Connection) -> set[str]:
+    return {
+        str(value)
+        for value in conn.execute(select(session_turns.c.session_id).distinct()).scalars()
+        if value
+    }
+
+
+def pending_interrupt_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:
+    return _one(
+        conn,
+        select(session_deliveries)
+        .where(session_deliveries.c.target_turn_id == turn_id)
+        .where(session_deliveries.c.state == "interrupt_pending")
+        .order_by(session_deliveries.c.created_at, session_deliveries.c.id)
+        .limit(1),
+    )
 
 
 def delivery_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:

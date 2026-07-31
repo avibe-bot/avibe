@@ -11,8 +11,9 @@ import pytest
 from sqlalchemy import select
 
 from core.services.agent_steering import SteerOutcome, result as steer_result
-from core.session_turns import DeliveryRequest, SessionTurnManager, Turn
+from core.session_turns import DeliveryRequest, DeliveryResult, SessionTurnManager, Turn
 from modules.im import MessageContext
+from storage import messages_service
 from storage import session_deliveries as delivery_store
 from storage.db import create_sqlite_engine
 from storage.models import agent_sessions, messages, metadata, session_deliveries, session_turns
@@ -1030,13 +1031,27 @@ def test_empty_p0_natural_terminal_race_preserves_fifo_queue(
     manager._interrupt_durable_turn = delayed_interrupt
 
     async def run():
+        active_context = _context()
         active = await manager.deliver(
             DeliveryRequest(
                 session_id="ses_fsm",
                 priority="p3",
                 content="active",
             ),
-            context=_context(),
+            context=active_context,
+        )
+        manager._active_identity = lambda _backend, _session, logical: (
+            logical,
+            "native-active",
+        )
+        assert (
+            manager.on_native_start(
+                active_context,
+                backend="codex",
+                runtime_key="runtime-active",
+                runtime_turn_id="runtime-turn-active",
+            )
+            is None
         )
         queued = await manager.deliver(
             DeliveryRequest(
@@ -1186,3 +1201,324 @@ def test_session_delete_cascades_owners_and_preserves_message(managers) -> None:
     assert delivery is None
     assert message["session_id"] is None
     assert message["content_text"] == "preserve immutable content"
+
+
+def test_existing_message_replays_persisted_dispatch_text_after_p1_fallback(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    dispatched: list[str] = []
+
+    async def capture_run(_session_id, _context_value, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._run = capture_run
+    with engine.begin() as conn:
+        message = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="transcript projection",
+        )
+
+    async def run() -> DeliveryResult:
+        turn_id, _context_value = await _activate(manager)
+        dispatched.clear()
+        manager._steer = AsyncMock(
+            return_value=steer_result(SteerOutcome.REFUSED, reason="not_steerable")
+        )
+        delivery = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                message_id=str(message["id"]),
+                content="attachment-enriched dispatch text",
+            ),
+            context=_context(),
+        )
+        assert delivery.state == "queued"
+        assert manager._terminalize_durable_turn(turn_id, "completed")["changed"]
+        assert await manager.drain_delivery_queue("ses_fsm")
+        return delivery
+
+    delivery = asyncio.run(run())
+    with engine.connect() as conn:
+        owner = delivery_store.get_delivery(conn, str(delivery.delivery_id))
+        immutable = messages_service.get_message(
+            conn,
+            str(message["id"]),
+            session_id="ses_fsm",
+        )
+    assert dispatched == ["attachment-enriched dispatch text"]
+    assert owner is not None
+    assert owner["dispatch_text"] == "attachment-enriched dispatch text"
+    assert immutable is not None
+    assert immutable["text"] == "transcript projection"
+
+
+def test_terminal_completion_preserves_accepted_steer_receipt(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run():
+        turn_id, _context_value = await _activate(manager)
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+        delivery = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="attach once",
+            ),
+            context=_context(),
+        )
+        assert delivery.state == "attached"
+        assert manager._terminalize_durable_turn(turn_id, "completed")["changed"]
+        return delivery, turn_id
+
+    delivery, turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        owner = delivery_store.get_delivery(conn, str(delivery.delivery_id))
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert owner is not None
+    assert owner["state"] == "completed"
+    assert owner["receipt_outcome"] == "accepted"
+    assert turn is not None
+    assert turn["terminal_outcome"] == "completed"
+
+
+def test_status_projection_leaves_ownerless_restored_runtime_running(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_status="running")
+        )
+
+    manager.project_durable_agent_status()
+    with engine.connect() as conn:
+        ownerless = conn.execute(
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
+        ).scalar_one()
+    assert ownerless == "running"
+
+    with engine.begin() as conn:
+        delivery_store.insert_turn(
+            conn,
+            turn_id="trn_terminal_history",
+            session_id="ses_fsm",
+            state="terminal",
+            backend="opencode",
+        )
+    manager.project_durable_agent_status()
+    with engine.connect() as conn:
+        projected = conn.execute(
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
+        ).scalar_one()
+    assert projected == "idle"
+
+
+def test_restored_terminal_result_resumes_durable_fifo(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+
+    async def run():
+        turn_id, context = await _activate(manager)
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="resume after restored terminal",
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        manager.is_active_emit = lambda _context_value: True
+        manager.on_terminal_result(context, is_error=False)
+        for _ in range(4):
+            await asyncio.sleep(0)
+        return queued, turn_id
+
+    queued, turn_id = asyncio.run(run())
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, turn_id)
+        resumed = delivery_store.get_delivery(conn, str(queued.delivery_id))
+    assert terminal is not None
+    assert terminal["state"] == "terminal"
+    assert resumed is not None
+    assert resumed["state"] == "starting"
+    assert len(starts) == 2
+
+
+def test_p0_latches_until_starting_turn_binds_native_identity(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def hold_start(_turn_id, *, context=None):
+        return False
+
+    manager._start_persisted_turn = hold_start
+
+    async def run():
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="starting"),
+            context=_context(),
+        )
+        assert admitted.turn_id
+        p0 = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="replacement"),
+            context=_context(),
+        )
+        assert p0.state == "interrupt_pending"
+        manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+        context = _context()
+        context.platform_specific["turn_token"] = str(admitted.turn_id)
+        context.platform_specific["agent_runtime_turn_token"] = "runtime-token"
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=str(admitted.turn_id),
+        )
+        manager._active_identity = lambda _backend, _session, logical: (
+            logical,
+            "native-started",
+        )
+        interrupt = manager.on_native_start(
+            context,
+            backend="codex",
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-token",
+        )
+        assert interrupt is not None
+        await interrupt
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return p0
+
+    p0 = asyncio.run(run())
+    with engine.connect() as conn:
+        owner = delivery_store.get_delivery(conn, str(p0.delivery_id))
+    assert owner is not None
+    assert owner["state"] == "waiting_terminal"
+    assert owner["receipt_outcome"] == "accepted"
+    manager.controller.command_handler.handle_stop.assert_awaited_once()
+
+
+def test_pending_p0_claims_successor_when_old_start_proves_prewrite_failure(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    start = manager._start_persisted_turn
+
+    async def hold_start(_turn_id, *, context=None):
+        return False
+
+    manager._start_persisted_turn = hold_start
+
+    async def admit():
+        old = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="old"),
+            context=_context(),
+        )
+        replacement = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="replacement"),
+            context=_context(),
+        )
+        return old, replacement
+
+    old, replacement = asyncio.run(admit())
+    assert old.turn_id
+    assert replacement.state == "interrupt_pending"
+    manager._start_persisted_turn = start
+    build_context = manager._build_context
+    calls = 0
+
+    def fail_old_start_once(session_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LookupError("old Turn routing unavailable")
+        return build_context(session_id)
+
+    dispatched: list[str] = []
+
+    async def capture_run(_session_id, _context_value, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._build_context = fail_old_start_once
+    manager._run = capture_run
+    assert not asyncio.run(manager._start_persisted_turn(str(old.turn_id)))
+
+    with engine.connect() as conn:
+        old_turn = delivery_store.get_turn(conn, str(old.turn_id))
+        owner = delivery_store.get_delivery(conn, str(replacement.delivery_id))
+        successor = delivery_store.get_turn(
+            conn,
+            str((owner or {}).get("successor_turn_id") or ""),
+        )
+    assert old_turn is not None
+    assert old_turn["state"] == "terminal"
+    assert old_turn["terminal_outcome"] == "pre_write_failure"
+    assert owner is not None
+    assert owner["state"] == "starting"
+    assert successor is not None
+    assert successor["state"] == "starting"
+    assert dispatched == ["replacement"]
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+
+def test_restart_consumes_pending_p0_after_native_evidence_rebind(managers) -> None:
+    manager, restored, engine, _engine_b, _starts = managers
+
+    async def hold_start(_turn_id, *, context=None):
+        return False
+
+    manager._start_persisted_turn = hold_start
+
+    async def admit():
+        old = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="old"),
+            context=_context(),
+        )
+        pending = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="replacement"),
+            context=_context(),
+        )
+        return old, pending
+
+    old, pending = asyncio.run(admit())
+    assert old.turn_id
+    assert pending.state == "interrupt_pending"
+
+    async def recover():
+        context = _context()
+        context.platform_specific["turn_token"] = str(old.turn_id)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        restored.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=str(old.turn_id),
+        )
+        restored._active_identity = lambda _backend, _session, logical: (
+            logical,
+            "native-restored",
+        )
+        await restored.recover_durable_delivery_state("ses_fsm")
+        await restored.recover_durable_delivery_state("ses_fsm")
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+
+    asyncio.run(recover())
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(old.turn_id))
+        owner = delivery_store.get_delivery(conn, str(pending.delivery_id))
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["native_turn_id"] == "native-restored"
+    assert owner is not None
+    assert owner["state"] == "waiting_terminal"
+    assert owner["receipt_outcome"] == "accepted"
+    restored.controller.command_handler.handle_stop.assert_awaited_once()
