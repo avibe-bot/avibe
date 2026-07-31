@@ -204,11 +204,16 @@ class MessageHandler(BaseHandler):
                 else self._get_settings_manager(context).get_channel_routing(settings_key)
             )
             requested_vibe_agent = platform_payload.get("vibe_agent_name")
+            requested_vibe_agent_id = platform_payload.get("vibe_agent_id")
             session_target = platform_payload.get("agent_session_target")
+            if not requested_vibe_agent_id and isinstance(session_target, dict):
+                requested_vibe_agent_id = session_target.get("agent_id")
             if not requested_vibe_agent and isinstance(session_target, dict):
                 requested_vibe_agent = session_target.get("agent_name")
             if not requested_vibe_agent:
                 requested_vibe_agent = resolved_target.get("agent_name")
+            if not requested_vibe_agent_id:
+                requested_vibe_agent_id = resolved_target.get("agent_id")
             session_agent_backend = (
                 str(session_target["agent_backend"])
                 if isinstance(session_target, dict) and session_target.get("agent_backend")
@@ -251,12 +256,14 @@ class MessageHandler(BaseHandler):
                     context.platform_specific = platform_payload
             resolve_vibe_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
             vibe_agent = None
-            if requested_vibe_agent and callable(resolve_vibe_agent):
-                vibe_agent = resolve_vibe_agent(
-                    context,
-                    override_agent_name=requested_vibe_agent,
-                    required=False,
-                )
+            if (requested_vibe_agent_id or requested_vibe_agent) and callable(resolve_vibe_agent):
+                resolve_kwargs = {
+                    "override_agent_name": requested_vibe_agent,
+                    "required": False,
+                }
+                if requested_vibe_agent_id:
+                    resolve_kwargs["override_agent_id"] = requested_vibe_agent_id
+                vibe_agent = resolve_vibe_agent(context, **resolve_kwargs)
             elif callable(resolve_vibe_agent) and not session_agent_backend:
                 vibe_agent = resolve_vibe_agent(context, required=False)
             if vibe_agent:

@@ -36,6 +36,7 @@ export type AgentGraphNode = {
   session_id: string;
   title: string | null;
   agent_name: string | null;
+  agent_display_name?: string | null;
   agent_backend: string | null;
   model: string | null;
   reasoning_effort: string | null;

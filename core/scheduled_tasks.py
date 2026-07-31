@@ -1170,7 +1170,13 @@ class ScheduledTaskStore:
             metadata=task.metadata,
         )
 
-    def _write_task(self, task: ScheduledTask, expect: DefinitionWriteExpectation) -> bool:
+    def _write_task(
+        self,
+        task: ScheduledTask,
+        expect: DefinitionWriteExpectation,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+    ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
         On refusal the in-memory mirror is reloaded, so the store never keeps serving
@@ -1186,7 +1192,11 @@ class ScheduledTaskStore:
             if self._sqlite is None:
                 self._save()
                 return True
-            landed = self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect)
+            landed = self._sqlite.upsert_scheduled_task(
+                task.to_dict(),
+                expect=expect,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+            )
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
@@ -1219,7 +1229,12 @@ class ScheduledTaskStore:
             self._signature = None
             self._reload_required = True
 
-    def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
+    def upsert_task(
+        self,
+        task: ScheduledTask,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+    ) -> ScheduledTask:
         """Create or adopt a whole task row (unguarded: the payload is not a re-read).
 
         The mirror rolls back with the write here too (HFR-275, the watch store's twin).
@@ -1235,7 +1250,10 @@ class ScheduledTaskStore:
             if self._sqlite is not None:
                 # No ``expect``: this is the create/adopt entry point (``add_task``),
                 # where the payload is not derived from a stored row.
-                self._sqlite.upsert_scheduled_task(task.to_dict())
+                self._sqlite.upsert_scheduled_task(
+                    task.to_dict(),
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                )
                 return task
             self._save()
         except Exception:
@@ -1260,6 +1278,7 @@ class ScheduledTaskStore:
         run_at: Optional[str] = None,
         timezone_name: str,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -1278,7 +1297,10 @@ class ScheduledTaskStore:
             timezone=timezone_name,
             metadata=dict(metadata or {}),
         )
-        return self.upsert_task(task)
+        return self.upsert_task(
+            task,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+        )
 
     def remove_task(self, task_id: str) -> bool:
         """Delete a task; the mirror rolls back with the delete (HFR-275).
@@ -1333,6 +1355,7 @@ class ScheduledTaskStore:
         cwd: Optional[str] = None,
         update_cwd: bool = False,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
@@ -1358,7 +1381,11 @@ class ScheduledTaskStore:
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
-        if not self._write_task(task, expect):
+        if not self._write_task(
+            task,
+            expect,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+        ):
             # The edit did NOT land, and its payload would have restored the Session
             # binding, enabled state and reclaim snapshot the teardown just changed.
             # Raising is the contract: ``cmd_task_update`` prints an error and exits
@@ -1554,9 +1581,17 @@ class TaskExecutionStore:
         payload["updated_at"] = request.created_at
         return payload
 
-    def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+    def enqueue(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+    ) -> TaskExecutionRequest:
         if self._sqlite is not None:
-            self._sqlite.enqueue_run(self.queued_run_payload(request))
+            self._sqlite.enqueue_run(
+                self.queued_run_payload(request),
+                expected_enabled_agent_id=expected_enabled_agent_id,
+            )
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1737,6 +1772,7 @@ class TaskExecutionStore:
         callback_active: bool = True,
         delivery_intent: str = AGENT_RUN_DELIVERY_QUEUE,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         if not (message or "").strip():
             # Refuse at the door: a blank prompt never reaches an agent backend
@@ -1769,7 +1805,8 @@ class TaskExecutionStore:
                 reasoning_effort=reasoning_effort,
                 session_policy=session_policy,
                 metadata=run_metadata,
-            )
+            ),
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
     def list_pending(self) -> list[TaskExecutionRequest]:
@@ -2290,10 +2327,11 @@ class TaskExecutionStore:
 
         if self._sqlite is None:
             return request
-        payload = self._sqlite.get_run(request.id)
+        payload = self._sqlite.refresh_run_agent_reference(request.id)
         if payload is None:
             return request
         request.agent_name = payload.get("agent_name")
+        request.agent_id = payload.get("agent_id")
         return request
 
     def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
@@ -4885,10 +4923,16 @@ class ScheduledTaskService:
                 task_id = task.id
                 session_key = task.session_key
                 session_id = task.session_id
+                task_agent_id = (
+                    request.agent_id
+                    if task.agent_name and task.agent_name == request.agent_name
+                    else None
+                )
                 result = await self._execute_task(
                     task,
                     execution_id=request.id,
                     disable_one_shot=request.source_kind == "scheduler",
+                    agent_id=task_agent_id,
                 )
                 error = result.error
                 session_key = result.session_key
@@ -4900,6 +4944,7 @@ class ScheduledTaskService:
                 if request.session_policy == "create_per_run":
                     session_id = self._reserve_runtime_session(
                         agent_name=request.agent_name,
+                        agent_id=request.agent_id,
                         deliver_key=request.deliver_key,
                         metadata=request.metadata,
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
@@ -4917,6 +4962,7 @@ class ScheduledTaskService:
                     task_id=task_id,
                     trigger_kind=request.request_type if request.request_type != "hook_send" else "hook",
                     agent_name=request.agent_name,
+                    **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
             elif request.request_type == "agent_run":
                 message = _agent_run_message_for_request(request)
@@ -4936,6 +4982,7 @@ class ScheduledTaskService:
                     message=message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
+                    **({"agent_id": request.agent_id} if request.agent_id else {}),
                     metadata={
                         **(request.metadata or {}),
                         "source_kind": request.source_kind,
@@ -5076,6 +5123,7 @@ class ScheduledTaskService:
         *,
         execution_id: str,
         disable_one_shot: bool,
+        agent_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         error: Optional[str] = None
         failure_code: Optional[str] = None
@@ -5092,6 +5140,7 @@ class ScheduledTaskService:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
                     agent_name=task.agent_name,
+                    agent_id=agent_id,
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     workdir=task.cwd,
@@ -5107,6 +5156,7 @@ class ScheduledTaskService:
                 task_id=task.id,
                 trigger_kind="scheduled",
                 agent_name=task.agent_name,
+                **({"agent_id": agent_id} if agent_id else {}),
             )
         except asyncio.CancelledError:
             self.reconcile_jobs()
@@ -5139,6 +5189,11 @@ class ScheduledTaskService:
                         task_id=task.id,
                         trigger_kind="scheduled",
                         agent_name=task.agent_name,
+                        **(
+                            {"agent_id": agent_id}
+                            if agent_id and task.agent_name
+                            else {}
+                        ),
                     )
                 except asyncio.CancelledError:
                     self.reconcile_jobs()
@@ -5204,6 +5259,7 @@ class ScheduledTaskService:
         execution_id: str,
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> AgentRunExecutionResult:
         """Execute one direct Agent Run and wait for the real terminal result.
@@ -5238,6 +5294,7 @@ class ScheduledTaskService:
             trigger_kind="agent_run",
             session_id=session_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             target_info=target_info,
             metadata=metadata,
         )
@@ -5952,6 +6009,7 @@ class ScheduledTaskService:
         self,
         *,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         deliver_key: Optional[str],
         metadata: Optional[dict[str, Any]] = None,
         workdir: Optional[str] = None,
@@ -6009,9 +6067,18 @@ class ScheduledTaskService:
         ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(config_paths.get_state_dir()))
         agent_store = VibeAgentStore()
         try:
-            scope_target = self._resolve_scope_agent_target(scope_id) if scope_id and not agent_name else _ScopeAgentTarget(None)
+            scope_target = (
+                self._resolve_scope_agent_target(scope_id)
+                if scope_id and not agent_name and not agent_id
+                else _ScopeAgentTarget(None)
+            )
             resolved_agent_name = agent_name or scope_target.agent_name
-            agent = agent_store.require_reference(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
+            if agent_id:
+                agent = agent_store.require_reference_by_id(agent_id)
+            elif resolved_agent_name:
+                agent = agent_store.require_reference(resolved_agent_name)
+            else:
+                agent = agent_store.get_default_agent()
         finally:
             agent_store.close()
         if agent is None:
@@ -6417,6 +6484,7 @@ class ScheduledTaskService:
         trigger_kind: str,
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Optional[str]:
         target_info = resolve_session_id_target(session_id) if session_id else None
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
@@ -6433,6 +6501,7 @@ class ScheduledTaskService:
             trigger_kind=trigger_kind,
             session_id=session_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             target_info=target_info,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
@@ -6471,6 +6540,7 @@ class ScheduledTaskService:
         trigger_kind: str = "scheduled",
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         target_info: Optional[ResolvedSessionIdTarget] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> MessageContext:
@@ -6535,6 +6605,7 @@ class ScheduledTaskService:
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
                 "vibe_agent_name": agent_name,
+                "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),

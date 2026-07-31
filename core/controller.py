@@ -1261,12 +1261,15 @@ class Controller:
         4. AgentService.default_agent / first registered backend compatibility fallback
         """
         target = self._agent_run_target_payload(context)
+        payload = context.platform_specific or {}
+        target_agent_id = payload.get("vibe_agent_id") or (target.get("agent_id") if target else None)
         target_agent_name = target.get("agent_name") if target else None
         target_backend = target.get("agent_backend") if target else None
-        if target_agent_name:
+        if target_agent_id or target_agent_name:
             vibe_agent = self.resolve_vibe_agent_for_context(
                 context,
-                override_agent_name=str(target_agent_name),
+                override_agent_id=str(target_agent_id) if target_agent_id else None,
+                override_agent_name=str(target_agent_name) if target_agent_name else None,
                 required=False,
             )
             if vibe_agent:
@@ -1293,6 +1296,7 @@ class Controller:
         self,
         context: MessageContext,
         *,
+        override_agent_id: Optional[str] = None,
         override_agent_name: Optional[str] = None,
         required: bool = True,
     ) -> Optional[VibeAgent]:
@@ -1307,7 +1311,10 @@ class Controller:
         agent_name = override_agent_name or (target.get("agent_name") if target else None) or (
             routing.agent_name if routing else None
         )
+        agent_id = override_agent_id or (target.get("agent_id") if target else None)
         try:
+            if agent_id:
+                return self.vibe_agent_store.require_reference_by_id(str(agent_id))
             if agent_name:
                 return self.vibe_agent_store.require_reference(agent_name)
             default_agent = self.vibe_agent_store.get_default_agent()
@@ -1319,7 +1326,11 @@ class Controller:
         except Exception as exc:
             if required:
                 raise
-            logger.warning("Scope references Vibe Agent '%s' but it cannot be resolved: %s", agent_name or "default", exc)
+            logger.warning(
+                "Scope references Vibe Agent '%s' but it cannot be resolved: %s",
+                agent_id or agent_name or "default",
+                exc,
+            )
             return None
 
     @staticmethod

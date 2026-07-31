@@ -763,7 +763,7 @@ export const UserList: React.FC = () => {
               const displayName = displayNameForUser(u);
               const metaPrefix = userConfig.enabled
                 ? selectedAgent
-                  ? `${selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
+                  ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
                   : `${backendLabel(effectiveBackend)}${backendModel ? `/${backendModel}` : ''}`
                 : t('userList.disabled', { defaultValue: 'Disabled' });
 

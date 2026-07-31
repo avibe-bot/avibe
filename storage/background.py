@@ -43,7 +43,7 @@ from storage.migrations import (
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agent_runs, agent_sessions, messages, run_definitions, scopes
+from storage.models import agents, agent_runs, agent_sessions, messages, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import (
@@ -69,6 +69,30 @@ def _json_loads(value: Optional[str], default: Any) -> Any:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _require_enabled_agent_identity(
+    conn: Any,
+    *,
+    agent_name: Optional[str],
+    expected_agent_id: Optional[str],
+) -> None:
+    """Validate one direct Agent selection inside its durable write transaction."""
+
+    name = str(agent_name or "").strip()
+    agent_id = str(expected_agent_id or "").strip()
+    if not name or not agent_id:
+        raise ValueError("an enabled Agent identity is required for this write")
+    row = conn.execute(
+        select(agents.c.id)
+        .where(agents.c.id == agent_id)
+        .where(agents.c.name == name)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+        .limit(1)
+    ).first()
+    if row is None:
+        raise ValueError(f"agent '{name}' was archived, disabled, renamed, or replaced before the write")
 
 
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
@@ -2255,7 +2279,11 @@ class SQLiteBackgroundTaskStore:
             )[0]
 
     def upsert_scheduled_task(
-        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -2266,7 +2294,10 @@ class SQLiteBackgroundTaskStore:
         """
 
         return self._upsert_definition(
-            self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
+            self._scheduled_task_values(payload),
+            expect=expect,
+            definition_type="scheduled task",
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
     def upsert_scheduled_task_with_binding_notice(
@@ -2412,7 +2443,11 @@ class SQLiteBackgroundTaskStore:
             return self._enrich_definitions([self._watch_from_row(row)], conn, definition_type="watch")[0]
 
     def upsert_watch(
-        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole watch row. ``False`` means the write was REFUSED.
 
@@ -2422,7 +2457,10 @@ class SQLiteBackgroundTaskStore:
         """
 
         return self._upsert_definition(
-            self._watch_values(payload), expect=expect, definition_type="watch"
+            self._watch_values(payload),
+            expect=expect,
+            definition_type="watch",
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
     def _upsert_definition(
@@ -2431,10 +2469,18 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None,
         definition_type: str,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> bool:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
         with self.engine.begin() as conn:
+            if expected_enabled_agent_id is not None:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_name=values.get("agent_name"),
+                    expected_agent_id=expected_enabled_agent_id,
+                )
             return upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type=definition_type
             )
@@ -2482,10 +2528,70 @@ class SQLiteBackgroundTaskStore:
             enqueue_run_in_connection(conn, run_values)
         return True
 
-    def enqueue_run(self, payload: dict[str, Any]) -> None:
+    def enqueue_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+    ) -> None:
         values = self._run_values(payload)
         with run_update_event_transaction(self.engine) as conn:
+            if expected_enabled_agent_id is not None:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_name=values.get("agent_name"),
+                    expected_agent_id=expected_enabled_agent_id,
+                )
             enqueue_run_in_connection(conn, values)
+
+    def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:
+        """Pin a claimed run to an Agent id while serialized with archive/rename."""
+
+        cleaned_run_id = str(run_id or "").strip()
+        if not cleaned_run_id:
+            return None
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            run = conn.execute(
+                select(agent_runs.c.agent_id, agent_runs.c.agent_name)
+                .where(agent_runs.c.id == cleaned_run_id)
+                .limit(1)
+            ).mappings().first()
+            if run is None:
+                return None
+            agent_id = str(run["agent_id"] or "").strip()
+            agent_name = str(run["agent_name"] or "").strip()
+            agent = None
+            if agent_id:
+                agent = conn.execute(
+                    select(agents.c.id, agents.c.name)
+                    .where(agents.c.id == agent_id)
+                    .limit(1)
+                ).mappings().first()
+            elif agent_name:
+                agent = conn.execute(
+                    select(agents.c.id, agents.c.name)
+                    .where(
+                        or_(
+                            agents.c.name == agent_name,
+                            agents.c.normalized_name == agent_name,
+                        )
+                    )
+                    .limit(1)
+                ).mappings().first()
+            if agent is None:
+                return {"agent_id": agent_id or None, "agent_name": agent_name or None}
+            canonical_id = str(agent["id"])
+            canonical_name = str(agent["name"])
+            if canonical_id != agent_id or canonical_name != agent_name:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == cleaned_run_id)
+                    .values(agent_id=canonical_id, agent_name=canonical_name)
+                )
+                _defer_run_ids_updated_from_connection(conn, [cleaned_run_id])
+            return {"agent_id": canonical_id, "agent_name": canonical_name}
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)

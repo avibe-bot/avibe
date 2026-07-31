@@ -54,6 +54,30 @@ SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 logger = logging.getLogger(__name__)
 
 
+def _require_enabled_agent_identity(
+    conn: Connection,
+    *,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> None:
+    cleaned_id = str(agent_id or "").strip()
+    cleaned_name = str(agent_name or "").strip()
+    if not cleaned_id or not cleaned_name:
+        raise ValueError("an enabled Agent identity is required for this session")
+    row = conn.execute(
+        select(agents.c.id)
+        .where(agents.c.id == cleaned_id)
+        .where(agents.c.name == cleaned_name)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+        .limit(1)
+    ).first()
+    if row is None:
+        raise ValueError(
+            f"agent '{cleaned_name}' was archived, disabled, renamed, or replaced before session creation"
+        )
+
+
 def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> bool:
     """Return True iff a row's ``native_session_id`` should be written now.
 
@@ -196,10 +220,18 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "foreground",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
@@ -233,11 +265,19 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "background",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:

@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.services import agent_graph
+from core.vibe_agents import VibeAgentStore
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
@@ -146,6 +147,38 @@ def _insert_run(conn, run_id, *, session_id, status="succeeded", run_type="agent
             metadata_json="{}",
         )
     )
+
+
+def test_graph_projects_archived_agent_display_name(isolated_state) -> None:
+    store = VibeAgentStore()
+    try:
+        original = store.create(name="pm", backend="claude")
+        archived = store.archive(original.name)
+        assert archived is not None
+        with store.engine.begin() as conn:
+            _insert_session(conn, "ses_archived_agent", scope_id=None)
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == "ses_archived_agent")
+                .values(
+                    agent_id=original.id,
+                    agent_name=archived.archived_name,
+                )
+            )
+            _insert_run(
+                conn,
+                "run_archived_agent",
+                session_id="ses_archived_agent",
+                created=NOW - timedelta(minutes=5),
+            )
+
+        payload = agent_graph.build_graph(live_agents=[], now=NOW, engine=store.engine)
+
+        node = _nodes_by_id(payload)["ses_archived_agent"]
+        assert node["agent_name"] == archived.archived_name
+        assert node["agent_display_name"] == "pm"
+    finally:
+        store.close()
 
 
 def _insert_definition(conn, definition_id, *, definition_type="scheduled",

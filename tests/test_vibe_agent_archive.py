@@ -12,8 +12,13 @@ from core.vibe_agents import (
     VibeAgentStore,
     normalize_agent_name,
 )
-from storage.background import DefinitionWriteExpectation, definition_state_unchanged
+from storage.background import (
+    DefinitionWriteExpectation,
+    SQLiteBackgroundTaskStore,
+    definition_state_unchanged,
+)
 from storage.models import agent_runs, agent_sessions, agents, run_definitions, scope_settings, scopes
+from storage.sessions_service import SQLiteSessionsService
 
 
 NOW = "2026-07-31T14:00:00+00:00"
@@ -36,6 +41,33 @@ def _race_archive_at_agent_read(
     def _archive_on_read(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
         normalized = " ".join(statement.split())
         if state["fired"] or "FROM agents WHERE agents.normalized_name" not in normalized:
+            return
+        state["fired"] = 1
+        try:
+            competitor.archive("pm")
+        except OperationalError as exc:
+            state["refused"].append(str(exc))
+        else:
+            state["committed"] = 1
+
+    return state
+
+
+def _race_archive_at_identity_read(primary_engine, competitor: VibeAgentStore) -> dict[str, object]:
+    state: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+    @event.listens_for(competitor.engine, "checkout")
+    def _no_wait(dbapi_connection, *_args) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout = 0")
+        cursor.close()
+
+    @event.listens_for(primary_engine, "after_cursor_execute")
+    def _archive_on_identity_read(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if state["fired"] or "FROM agents" not in normalized or "agents.id =" not in normalized:
             return
         state["fired"] = 1
         try:
@@ -255,6 +287,124 @@ def test_default_selection_holds_the_write_lock_before_agent_validation(tmp_path
         primary.close()
 
 
+@pytest.mark.parametrize("write_kind", ["scheduled", "watch", "run"])
+def test_direct_definition_and_run_assignments_validate_under_the_write_lock(
+    tmp_path, write_kind: str
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    competitor = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="claude")
+        race = _race_archive_at_identity_read(background.engine, competitor)
+        common = {
+            "id": f"{write_kind}_direct",
+            "agent_name": agent.name,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+
+        if write_kind == "scheduled":
+            background.upsert_scheduled_task(
+                {
+                    **common,
+                    "prompt": "continue",
+                    "schedule_type": "at",
+                    "run_at": NOW,
+                    "timezone": "UTC",
+                },
+                expected_enabled_agent_id=agent.id,
+            )
+        elif write_kind == "watch":
+            background.upsert_watch(
+                {
+                    **common,
+                    "command": ["true"],
+                    "mode": "once",
+                },
+                expected_enabled_agent_id=agent.id,
+            )
+        else:
+            background.enqueue_run(
+                {
+                    **common,
+                    "agent_id": agent.id,
+                    "request_type": "agent_run",
+                    "status": "queued",
+                    "message": "continue",
+                },
+                expected_enabled_agent_id=agent.id,
+            )
+
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+        assert agent_store.require_enabled(agent.name).id == agent.id
+    finally:
+        background.close()
+        competitor.close()
+        agent_store.close()
+
+
+def test_direct_session_assignment_validates_under_the_write_lock(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    competitor = VibeAgentStore(db_path)
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="claude")
+        race = _race_archive_at_identity_read(sessions.engine, competitor)
+
+        session_id = sessions.reserve_standalone_agent_session(
+            agent_backend=agent.backend,
+            session_anchor="direct-agent-run",
+            agent_id=agent.id,
+            agent_name=agent.name,
+            require_enabled_agent=True,
+        )
+
+        assert session_id
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+        assert agent_store.require_enabled(agent.name).id == agent.id
+    finally:
+        sessions.close()
+        competitor.close()
+        agent_store.close()
+
+
+def test_direct_write_rejects_a_new_agent_that_reuses_the_selected_name(tmp_path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = VibeAgentStore(db_path)
+    background = SQLiteBackgroundTaskStore(db_path)
+    try:
+        original = agent_store.create(name="pm", backend="claude")
+        archived = agent_store.archive(original.name)
+        assert archived is not None
+        replacement = agent_store.create(name="pm", backend="claude")
+
+        with pytest.raises(ValueError, match="replaced before the write"):
+            background.enqueue_run(
+                {
+                    "id": "run_stale_identity",
+                    "agent_name": replacement.name,
+                    "agent_id": original.id,
+                    "request_type": "agent_run",
+                    "status": "queued",
+                    "message": "continue",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                },
+                expected_enabled_agent_id=original.id,
+            )
+        assert background.get_run("run_stale_identity") is None
+    finally:
+        background.close()
+        agent_store.close()
+
+
 def test_rename_moves_references_and_default_without_changing_agent_identity(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
@@ -376,7 +526,7 @@ def test_remove_compacts_legacy_archive_name_and_moves_its_references(tmp_path) 
             )
             store._rewrite_references(
                 conn,
-                old_name=original.name,
+                reference_names=frozenset((original.name, original.normalized_name)),
                 new_name=legacy_name,
                 revision=NOW,
             )
@@ -412,6 +562,42 @@ def test_archive_rolls_back_when_default_has_no_replacement(tmp_path) -> None:
 
         assert store.require(original.name).id == original.id
         assert store.get_default_agent_name() == original.name
+    finally:
+        store.close()
+
+
+def test_archive_moves_references_that_use_the_normalized_agent_alias(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="Project Manager", backend="claude")
+        _seed_references(store, original.normalized_name)
+
+        result = store.archive(original.name)
+
+        assert result is not None
+        assert result.references == {"scopes": 1, "sessions": 1, "definitions": 1}
+        assert store.require_reference_by_id(original.id).name == result.archived_name
+        with store.engine.connect() as conn:
+            scope = conn.execute(select(scope_settings)).mappings().one()
+            session = conn.execute(select(agent_sessions)).mappings().one()
+            definitions = conn.execute(select(run_definitions)).mappings().all()
+            live_runs = conn.execute(
+                select(agent_runs.c.agent_name).where(
+                    agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
+                )
+            ).scalars().all()
+        assert scope["agent_name"] == result.archived_name
+        assert json.loads(scope["settings_json"])["routing"] == {
+            "agent_name": result.archived_name,
+            "agent": result.archived_name,
+        }
+        assert session["agent_name"] == result.archived_name
+        assert {row["agent_name"] for row in definitions} == {result.archived_name}
+        assert {
+            json.loads(row["metadata_json"])["session_settings_snapshot"]["agent_name"]
+            for row in definitions
+        } == {result.archived_name}
+        assert set(live_runs) == {result.archived_name}
     finally:
         store.close()
 

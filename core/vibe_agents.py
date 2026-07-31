@@ -125,7 +125,11 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return default
 
 
-def _rewrite_scope_agent_name(raw: str | None, old_name: str, new_name: str) -> tuple[str, bool]:
+def _rewrite_scope_agent_name(
+    raw: str | None,
+    reference_names: frozenset[str],
+    new_name: str,
+) -> tuple[str, bool]:
     payload = _json_loads(raw, {})
     if not isinstance(payload, dict):
         return raw or "{}", False
@@ -134,7 +138,7 @@ def _rewrite_scope_agent_name(raw: str | None, old_name: str, new_name: str) -> 
         return raw or "{}", False
     changed = False
     for key in ("agent_name", "agent"):
-        if routing.get(key) == old_name:
+        if routing.get(key) in reference_names:
             routing[key] = new_name
             changed = True
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
@@ -142,7 +146,7 @@ def _rewrite_scope_agent_name(raw: str | None, old_name: str, new_name: str) -> 
 
 def _rewrite_definition_agent_name(
     raw: str | None,
-    old_name: str,
+    reference_names: frozenset[str],
     new_name: str,
     *,
     direct_binding_changed: bool,
@@ -153,7 +157,7 @@ def _rewrite_definition_agent_name(
         payload = {}
     changed = direct_binding_changed
     snapshot = payload.get("session_settings_snapshot")
-    if isinstance(snapshot, dict) and snapshot.get("agent_name") == old_name:
+    if isinstance(snapshot, dict) and snapshot.get("agent_name") in reference_names:
         snapshot["agent_name"] = new_name
         changed = True
     if not changed:
@@ -288,6 +292,16 @@ class VibeAgentStore:
             ).mappings().first()
             return self._from_row(row) if row else None
 
+    def get_by_id(self, agent_id: str) -> Optional[VibeAgent]:
+        cleaned = str(agent_id or "").strip()
+        if not cleaned:
+            return None
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agents).where(agents.c.id == cleaned).limit(1)
+            ).mappings().first()
+            return self._from_row(row) if row else None
+
     def require(self, name: str) -> VibeAgent:
         agent = self.get(name)
         if agent is None:
@@ -309,7 +323,22 @@ class VibeAgentStore:
     def require_reference(self, name: str) -> VibeAgent:
         """Resolve a durable Agent reference, including a disabled archive."""
 
-        agent = self.require(name)
+        return self._require_reference_agent(self.require(name))
+
+    def require_reference_by_id(self, agent_id: str) -> VibeAgent:
+        """Resolve a durable Agent identity across rename/archive operations."""
+
+        agent = self.get_by_id(agent_id)
+        if agent is None:
+            raise AgentUnavailableError(
+                f"agent id '{agent_id}' not found",
+                agent_name=str(agent_id),
+                reason="missing",
+            )
+        return self._require_reference_agent(agent)
+
+    @staticmethod
+    def _require_reference_agent(agent: VibeAgent) -> VibeAgent:
         archive_metadata = agent.metadata.get(AGENT_ARCHIVE_METADATA_KEY)
         archived_was_enabled = (
             archive_metadata.get("was_enabled", True)
@@ -454,7 +483,7 @@ class VibeAgentStore:
                 )
                 self._rewrite_references(
                     conn,
-                    old_name=agent.name,
+                    reference_names=frozenset((agent.name, agent.normalized_name)),
                     new_name=raw_new_name,
                     revision=now,
                 )
@@ -509,7 +538,8 @@ class VibeAgentStore:
                 normalized_name=agent.normalized_name,
             )
 
-            references = self._reference_counts(conn, agent.name)
+            reference_names = frozenset((agent.name, agent.normalized_name))
+            references = self._reference_counts(conn, reference_names)
             archive_metadata = {
                 "original_name": agent.name,
                 "archived_at": now,
@@ -530,7 +560,7 @@ class VibeAgentStore:
             )
             self._rewrite_references(
                 conn,
-                old_name=agent.name,
+                reference_names=reference_names,
                 new_name=archived_name,
                 revision=now,
             )
@@ -597,7 +627,8 @@ class VibeAgentStore:
             conn,
             normalized_name=normalize_agent_name(original_name),
         )
-        references = self._reference_counts(conn, agent.name)
+        reference_names = frozenset((agent.name, agent.normalized_name))
+        references = self._reference_counts(conn, reference_names)
         conn.execute(
             agents.update()
             .where(agents.c.id == agent.id)
@@ -609,7 +640,7 @@ class VibeAgentStore:
         )
         self._rewrite_references(
             conn,
-            old_name=agent.name,
+            reference_names=reference_names,
             new_name=archived_name,
             revision=now,
         )
@@ -645,26 +676,33 @@ class VibeAgentStore:
         if agent is None:
             return {}
         with self.engine.connect() as conn:
-            return self._reference_counts(conn, agent.name)
+            return self._reference_counts(
+                conn,
+                frozenset((agent.name, agent.normalized_name)),
+            )
 
     @staticmethod
-    def _reference_counts(conn: Any, name: str) -> dict[str, int]:
+    def _reference_counts(conn: Any, reference_names: frozenset[str]) -> dict[str, int]:
         return {
             "scopes": int(
                 conn.execute(
-                    select(func.count()).select_from(scope_settings).where(scope_settings.c.agent_name == name)
+                    select(func.count())
+                    .select_from(scope_settings)
+                    .where(scope_settings.c.agent_name.in_(reference_names))
                 ).scalar_one()
             ),
             "sessions": int(
                 conn.execute(
-                    select(func.count()).select_from(agent_sessions).where(agent_sessions.c.agent_name == name)
+                    select(func.count())
+                    .select_from(agent_sessions)
+                    .where(agent_sessions.c.agent_name.in_(reference_names))
                 ).scalar_one()
             ),
             "definitions": int(
                 conn.execute(
                     select(func.count())
                     .select_from(run_definitions)
-                    .where(run_definitions.c.agent_name == name)
+                    .where(run_definitions.c.agent_name.in_(reference_names))
                     .where(run_definitions.c.deleted_at.is_(None))
                 ).scalar_one()
             ),
@@ -674,18 +712,18 @@ class VibeAgentStore:
     def _rewrite_references(
         conn: Any,
         *,
-        old_name: str,
+        reference_names: frozenset[str],
         new_name: str,
         revision: str,
     ) -> None:
         conn.execute(
             agent_sessions.update()
-            .where(agent_sessions.c.agent_name == old_name)
+            .where(agent_sessions.c.agent_name.in_(reference_names))
             .values(agent_name=new_name)
         )
         conn.execute(
             agent_runs.update()
-            .where(agent_runs.c.agent_name == old_name)
+            .where(agent_runs.c.agent_name.in_(reference_names))
             .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
             .values(agent_name=new_name)
         )
@@ -695,9 +733,11 @@ class VibeAgentStore:
         ).mappings().all()
         for row in scope_rows:
             values: dict[str, Any] = {}
-            if row["agent_name"] == old_name:
+            if row["agent_name"] in reference_names:
                 values["agent_name"] = new_name
-            settings, changed = _rewrite_scope_agent_name(row["settings_json"], old_name, new_name)
+            settings, changed = _rewrite_scope_agent_name(
+                row["settings_json"], reference_names, new_name
+            )
             if changed:
                 values["settings_json"] = settings
             if values:
@@ -712,12 +752,12 @@ class VibeAgentStore:
         ).mappings().all()
         for row in definition_rows:
             values = {}
-            direct_binding_changed = row["agent_name"] == old_name
+            direct_binding_changed = row["agent_name"] in reference_names
             if direct_binding_changed:
                 values["agent_name"] = new_name
             metadata, changed = _rewrite_definition_agent_name(
                 row["metadata_json"],
-                old_name,
+                reference_names,
                 new_name,
                 direct_binding_changed=direct_binding_changed,
                 revision=revision,

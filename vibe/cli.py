@@ -2925,12 +2925,16 @@ def cmd_task_add(args):
             help_command="vibe task add --help",
         )
         agent_name = agent.name if agent else None
+        expected_enabled_agent_id = (
+            agent.id if agent is not None and bool((getattr(args, "agent", None) or "").strip()) else None
+        )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 deliver_key=scope_key or "",
                 workdir=cwd,
                 help_command="vibe task add --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
             )
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
@@ -2981,6 +2985,7 @@ def cmd_task_add(args):
                 cron=args.cron,
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                expected_enabled_agent_id=expected_enabled_agent_id,
             )
         else:
             try:
@@ -3008,6 +3013,7 @@ def cmd_task_add(args):
                 run_at=run_at,
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                expected_enabled_agent_id=expected_enabled_agent_id,
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(task)
@@ -3384,6 +3390,11 @@ def cmd_task_update(args):
                 existing_agent_reference=not explicit_agent_requested,
             )
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id = (
+            _agent_store().require_enabled(agent_name).id
+            if explicit_agent_requested and agent_name
+            else None
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
@@ -3392,6 +3403,7 @@ def cmd_task_update(args):
                 deliver_key=scope_key,
                 workdir=cwd,
                 help_command="vibe task update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
             )
             session_key = ""
         if session_policy == "existing":
@@ -3468,6 +3480,7 @@ def cmd_task_update(args):
             run_at=run_at,
             timezone_name=timezone_name,
             metadata=metadata,
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(updated)
@@ -4494,6 +4507,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
+            require_enabled_agent=True,
         )
     else:
         session_anchor = f"standalone_{uuid4().hex[:12]}"
@@ -4507,6 +4521,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=True,
         )
     if not session_id:
         raise TaskCliError(
@@ -4566,6 +4581,7 @@ def _reserve_definition_session(
     deliver_key: str,
     help_command: str,
     workdir: Optional[str] = None,
+    require_enabled_agent: bool = False,
 ) -> str:
     from core.services import sessions as sessions_service
 
@@ -4597,6 +4613,7 @@ def _reserve_definition_session(
         reasoning_effort=agent.reasoning_effort if agent else None,
         workdir=workdir,
         visibility="foreground",
+        require_enabled_agent=require_enabled_agent,
     )
     if not session_id:
         raise TaskCliError(
@@ -4810,6 +4827,7 @@ def cmd_agent_run(args):
             callback_active=run_async,
             delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
+            expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {
@@ -8411,6 +8429,9 @@ def cmd_watch_add(args):
             help_command="vibe watch add --help",
         )
         agent_name = agent.name if agent else None
+        expected_enabled_agent_id = (
+            agent.id if agent is not None and bool((getattr(args, "agent", None) or "").strip()) else None
+        )
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         session_workdir = (
             _resolve_definition_session_cwd(
@@ -8429,6 +8450,7 @@ def cmd_watch_add(args):
                 deliver_key=scope_key or "",
                 workdir=session_workdir,
                 help_command="vibe watch add --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
             )
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
@@ -8477,6 +8499,7 @@ def cmd_watch_add(args):
             agent_name=agent_name,
             session_policy=session_policy,
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
@@ -8810,6 +8833,11 @@ def cmd_watch_update(args):
                 existing_agent_reference=not explicit_agent_requested,
             )
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id = (
+            _agent_store().require_enabled(agent_name).id
+            if explicit_agent_requested and agent_name
+            else None
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
@@ -8818,6 +8846,7 @@ def cmd_watch_update(args):
                 deliver_key=scope_key,
                 workdir=session_workdir,
                 help_command="vibe watch update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
             )
             session_key = ""
         if session_workdir:
@@ -8883,7 +8912,11 @@ def cmd_watch_update(args):
                 details={"watch_id": args.watch_id},
             )
 
-        updated = store.update_watch(args.watch_id, **changes)
+        updated = store.update_watch(
+            args.watch_id,
+            **changes,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+        )
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_mutation_payload(updated, runtime_entry)

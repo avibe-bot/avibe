@@ -1590,7 +1590,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                     : channelConfig.routing.opencode_model
               );
               const agentSummary = selectedAgent
-                ? `${selectedAgent.name}${selectedAgent.model ? ` / ${selectedAgent.model}` : ''}`
+                ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? ` / ${selectedAgent.model}` : ''}`
                 : `${effectiveBackend === 'claude' ? 'Claude' : effectiveBackend === 'codex' ? 'Codex' : 'OpenCode'}${backendModel ? ` / ${backendModel}` : ''}`;
 
               return (

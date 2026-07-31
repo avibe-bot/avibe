@@ -152,7 +152,7 @@ def reserve_forked_session(
     from sqlalchemy import select
 
     from core.vibe_agents import VibeAgentStore
-    from storage.agent_session_rows import create_agent_session_row, utc_now_iso
+    from storage.agent_session_rows import create_agent_session_row, reserve_write_lock, utc_now_iso
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
@@ -165,6 +165,7 @@ def reserve_forked_session(
     agent_store = VibeAgentStore(path)
     try:
         with engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()

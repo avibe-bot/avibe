@@ -6830,6 +6830,69 @@ def test_claimed_request_refreshes_agent_name_after_archive(monkeypatch, tmp_pat
         agent_store.close()
 
 
+def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from core.vibe_agents import VibeAgentStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_store = VibeAgentStore()
+    try:
+        agent = agent_store.create(name="pm", backend="claude")
+        request_store = TaskExecutionStore()
+        request = request_store.enqueue_hook_send(
+            session_key="slack::channel::C123",
+            prompt="continue",
+            agent_name=agent.name,
+        )
+        claimed = request_store.claim(request.id)
+        assert claimed is not None
+
+        original_refresh = request_store.refresh_claimed_request
+        archived_result = None
+
+        def _refresh_then_archive(item):
+            nonlocal archived_result
+            refreshed = original_refresh(item)
+            assert refreshed.agent_id == agent.id
+            archived_result = agent_store.archive(agent.name)
+            return refreshed
+
+        request_store.refresh_claimed_request = _refresh_then_archive  # type: ignore[method-assign]
+        calls: list[dict[str, Any]] = []
+        service = ScheduledTaskService(
+            controller=SimpleNamespace(),
+            store=ScheduledTaskStore(),
+            request_store=request_store,
+        )
+
+        async def _execute_request(**kwargs):
+            calls.append(kwargs)
+            return None
+
+        service._execute_request = _execute_request  # type: ignore[method-assign]
+        asyncio.run(service._execute_claimed_request(claimed))
+
+        assert archived_result is not None
+        assert calls == [
+            {
+                "session_key": "slack::channel::C123",
+                "session_id": None,
+                "post_to": None,
+                "deliver_key": None,
+                "prompt": "continue",
+                "execution_id": request.id,
+                "task_id": None,
+                "trigger_kind": "hook",
+                "agent_name": "pm",
+                "agent_id": agent.id,
+            }
+        ]
+        assert agent_store.require_reference_by_id(agent.id).name == archived_result.archived_name
+    finally:
+        agent_store.close()
+
+
 def test_drain_requests_agent_run_passes_agent_name(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_agent_run(
