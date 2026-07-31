@@ -10,7 +10,9 @@ with no dependencies of its own. One function, two importers, zero drift.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 _INT64_MAX = 2**63 - 1
 _INT64_MIN = -(2**63)
@@ -61,3 +63,25 @@ def sqlite_cast_integer(raw: Any) -> int:
     if match is None or not match.group(2):
         return 0
     return min(max(int(match.group(1) + match.group(2)), _INT64_MIN), _INT64_MAX)
+
+
+def sqlite_run_at_epoch(run_at: Any, timezone_name: Any) -> float | None:
+    """Resolve a one-shot wall clock exactly like the scheduler does.
+
+    SQLite's ``datetime()`` treats an offset-free timestamp as UTC and cannot
+    resolve IANA timezone names. Scheduled tasks do carry an IANA timezone, so
+    lifecycle queries use this connection-local function instead of silently
+    reading the same ``run_at`` as a different instant than APScheduler.
+
+    ``None`` is the SQL-friendly invalid-input result: it makes the lifecycle
+    predicate false and leaves the row visible rather than retiring a schedule
+    whose instant cannot be proved.
+    """
+
+    try:
+        zone = ZoneInfo(str(timezone_name or "UTC"))
+        instant = datetime.fromisoformat(str(run_at))
+        resolved = instant.replace(tzinfo=zone) if instant.tzinfo is None else instant.astimezone(zone)
+        return resolved.timestamp()
+    except (KeyError, OSError, TypeError, ValueError, OverflowError):
+        return None

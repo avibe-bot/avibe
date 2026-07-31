@@ -1982,8 +1982,17 @@ class ConsolidatedMessageDispatcher:
                 # same body+footer without double-appending (persist_text is never
                 # mutated) and is a no-op when there is no footer.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                run_provenance = output_semantics.provenance(context)
+                workbench_run_waits_for_persistence = (
+                    target_context.platform == "avibe"
+                    and output_semantics.settles_run
+                    and bool(run_provenance.get("run_id") or run_provenance.get("run_ids"))
+                )
+                settlement_waits_for_persistence = (
+                    output_semantics.requires_delivery_for_run_settlement or workbench_run_waits_for_persistence
+                )
 
-                if not output_semantics.requires_delivery_for_run_settlement:
+                if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
                         persisted_result_text,
@@ -2032,10 +2041,20 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                         )
 
-                if output_semantics.requires_delivery_for_run_settlement:
-                    if persisted_output is None and not (
-                        native_output_id
-                        and agent_message_exists(target_context, native_output_id)
+                if settlement_waits_for_persistence:
+                    durable_output_exists = bool(
+                        persisted_output is not None
+                        or (
+                            native_output_id
+                            and agent_message_exists(target_context, native_output_id)
+                        )
+                    )
+                    if workbench_run_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError("Workbench run output was not durably persisted")
+                    if (
+                        output_semantics.requires_delivery_for_run_settlement
+                        and not workbench_run_waits_for_persistence
+                        and not durable_output_exists
                     ):
                         raise RuntimeError(
                             "Activity output was not durably persisted after delivery"

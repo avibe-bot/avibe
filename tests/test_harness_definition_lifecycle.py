@@ -804,6 +804,40 @@ def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
     assert (counts["waiting"], counts["finished"], counts["paused"]) == (1, 1, 1)
 
 
+def test_naive_one_shot_uses_its_task_timezone_in_rows_counts_and_next_fire(store) -> None:
+    """Offset-free ``run_at`` has one meaning across SQL and the scheduler."""
+
+    now_utc = datetime.now(timezone.utc)
+    los_angeles = ZoneInfo("America/Los_Angeles")
+    shanghai = ZoneInfo("Asia/Shanghai")
+    ahead = (now_utc.astimezone(los_angeles) + timedelta(hours=1)).replace(tzinfo=None)
+    behind = (now_utc.astimezone(shanghai) - timedelta(hours=1)).replace(tzinfo=None)
+
+    _task(
+        store,
+        "naive-ahead",
+        schedule_type="at",
+        run_at=ahead.isoformat(),
+        timezone="America/Los_Angeles",
+    )
+    _task(
+        store,
+        "naive-behind",
+        schedule_type="at",
+        run_at=behind.isoformat(),
+        timezone="Asia/Shanghai",
+    )
+
+    rows = {row["id"]: row for row in store.list_scheduled_tasks()}
+    assert rows["naive-ahead"]["lifecycle_state"] == "waiting"
+    assert rows["naive-behind"]["lifecycle_state"] == "finished"
+    assert rows["naive-ahead"]["next_run_at"] is not None
+    assert rows["naive-behind"]["next_run_at"] is None
+
+    counts = store.count_scheduled_tasks()
+    assert (counts["waiting"], counts["finished"]) == (1, 1)
+
+
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
     """Only the cycle that changes enabled -> disabled owns retirement state."""
     from core.watches import ManagedWatchStore

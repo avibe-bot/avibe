@@ -19,6 +19,7 @@ from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, 
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
 from storage import migrations
+from storage.background import SQLiteBackgroundTaskStore
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
@@ -1429,6 +1430,10 @@ def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Pat
     # the backoff term would stay a per-row filter. Repairing has to REBUILD it, not
     # leave it because the name is taken.
     with sqlite3.connect(db_path) as conn:
+        # Seeding uses the production store, which now repairs the already-ready
+        # schema on construction. Replace just this index afterwards to exercise
+        # the lower-level head-schema repair route this test owns.
+        conn.execute(f"drop index if exists {superseded._INDEX}")
         conn.execute(
             f"create index {superseded._INDEX} on agent_runs "
             f"({superseded._STATE_EXPR}, created_at, id)"
@@ -1456,6 +1461,26 @@ def test_head_schema_repair_installs_agent_runs_expression_indexes(tmp_path: Pat
     # 0041 shape — the 0040 survivor seeded above has to be gone.
     assert repaired_sql == reference_sql
     _assert_live_reads_seek_agent_runs_indexes(db_path, route="the head-schema repair path")
+
+
+def test_background_store_repairs_indexes_on_an_already_ready_schema(tmp_path: Path) -> None:
+    """Store construction reaches index repair even when no migration is needed."""
+
+    reference_sql = _reference_agent_runs_index_sql(tmp_path)
+    db_path = _head_shaped_unversioned_db(tmp_path, "store-ready.sqlite")
+    assert background_tables_ready(db_path)
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    store.close()
+
+    with sqlite3.connect(db_path) as conn:
+        repaired_sql = {name: _index_sql(conn, name) for name in _agent_runs_index_names()}
+        assert conn.execute("select name from sqlite_master where name = 'alembic_version'").fetchone() is None
+    assert repaired_sql == reference_sql
+    _assert_live_reads_seek_agent_runs_indexes(
+        db_path,
+        route="already-ready background store construction",
+    )
 
 
 def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> None:

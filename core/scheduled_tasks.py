@@ -40,6 +40,7 @@ from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
+    RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
@@ -429,6 +430,7 @@ class TaskExecutionResult:
     error: Optional[str]
     session_key: str
     session_id: Optional[str]
+    failure_code: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -449,6 +451,12 @@ class AgentRunExecutionResult:
 #: definition that keeps hitting the same dead session is reported once and not
 #: once per cron minute.
 BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
+
+#: Stable terminal code written only after the target resolver has proved that
+#: a pinned Session cannot accept a turn. Human-readable error text is allowed
+#: to evolve; the three-failure auto-pause policy must never parse it.
+FAILURE_CODE_UNRESOLVABLE_TARGET = "unresolvable_target"
+UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES = 3
 
 #: Durable definition-metadata flag: this definition deliberately pins NO Agent
 #: of its own and follows whatever Agent its bound Session carries.
@@ -528,6 +536,7 @@ class SessionBindingChange:
     """What the scheduler did about a pinned session that no longer exists."""
 
     # "rebound"   -- a replacement session was reserved AND stored
+    # "failing"   -- a user-pinned binding failed below the auto-pause threshold
     # "paused"    -- the definition was user-pinned, so it was disabled instead
     # "reclaimed" -- a replacement was reserved but the guarded write refused it, so
     #                nothing was stored and the fire did not run (HFR-268), AND the
@@ -1789,6 +1798,43 @@ class TaskExecutionStore:
             return self._sqlite.list_runs(status=status)
         return self._list_file_runs(status=status)
 
+    def consecutive_definition_failures_with_code(
+        self,
+        definition_id: str,
+        failure_code: str,
+        *,
+        limit: int,
+    ) -> int:
+        """Count the newest consecutive failed verdicts carrying one stable code."""
+
+        if limit <= 0:
+            return 0
+        if self._sqlite is not None:
+            return self._sqlite.consecutive_definition_failures_with_code(
+                definition_id,
+                failure_code,
+                limit=limit,
+            )
+        verdicts = [
+            run
+            for run in self._list_file_runs()
+            if str(run.get("definition_id") or run.get("task_id") or "") == str(definition_id)
+            and (_normalize_requested_run_status(run.get("status")) or run.get("status")) in {"succeeded", "failed"}
+            and not (
+                isinstance(run.get("metadata"), dict)
+                and run["metadata"].get("interrupt_reason") in RUN_INTERRUPTION_REASONS
+            )
+        ]
+        count = 0
+        for run in reversed(verdicts[-limit:]):
+            if (_normalize_requested_run_status(run.get("status")) or run.get("status")) != "failed":
+                break
+            metadata = run.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("failure_code") != failure_code:
+                break
+            count += 1
+        return count
+
     def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
         if self._sqlite is not None:
             return self._sqlite.list_pending_callbacks(limit=limit)
@@ -2265,6 +2311,7 @@ class TaskExecutionStore:
         session_key: Optional[str] = None,
         session_id: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
+        failure_code: Optional[str] = None,
     ) -> None:
         """Settle one claimed request.
 
@@ -2279,15 +2326,17 @@ class TaskExecutionStore:
         written after the stamp would be recorded on the run and missing from the very
         blob the drain renders from.
 
-        One keyword rather than a general ``metadata`` dict, deliberately: this argument
-        is merged verbatim into a run's metadata, and a wide-open passthrough at a
-        completion site is how an unrelated key comes to overwrite ``interrupt_reason``
-        or the notice blob itself.
+        Named keywords rather than a general ``metadata`` dict, deliberately: these
+        arguments are merged verbatim into a run's metadata, and a wide-open
+        passthrough at a completion site is how an unrelated key comes to overwrite
+        ``interrupt_reason``, ``failure_code`` or the notice blob itself.
         """
 
         extra_metadata: dict[str, Any] = {"ok": ok}
         if interrupt_reason:
             extra_metadata["interrupt_reason"] = interrupt_reason
+        if failure_code:
+            extra_metadata["failure_code"] = failure_code
         if self._sqlite is not None:
             # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
             # predicate, so an ordinary completion rewrote a status another actor had
@@ -2320,7 +2369,7 @@ class TaskExecutionStore:
                 "callback_session_id": request.callback_session_id,
             }
         )
-        if interrupt_reason:
+        if interrupt_reason or failure_code:
             # The file backend has no owed-notice machinery at all, so this records the
             # class where its only reader — an operator looking at the completed JSON —
             # can see it, rather than dropping the one fact the caller went to the
@@ -2328,7 +2377,8 @@ class TaskExecutionStore:
             existing = payload.get("metadata")
             payload["metadata"] = {
                 **(existing if isinstance(existing, dict) else {}),
-                "interrupt_reason": interrupt_reason,
+                **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
+                **({"failure_code": failure_code} if failure_code else {}),
             }
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -4806,6 +4856,7 @@ class ScheduledTaskService:
         #: beside ``error`` rather than parsed back out of it: the text is a sentence
         #: for a human, this is the value the notice's lane and label are chosen from.
         interrupt_reason: Optional[str] = None
+        failure_code: Optional[str] = None
         should_complete = True
         settled_out_of_band = False
         recover_queue_on_return = False
@@ -4830,6 +4881,7 @@ class ScheduledTaskService:
                 error = result.error
                 session_key = result.session_key
                 session_id = result.session_id
+                failure_code = result.failure_code
             elif request.request_type in {"hook_send", "watch", "webhook"}:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
@@ -4937,6 +4989,7 @@ class ScheduledTaskService:
             # ``notice_failure_class_i18n_key`` already renders NO line rather than a
             # generic one when there is nothing to name. Same for ``unusable``.
             error = str(exc)
+            failure_code = FAILURE_CODE_UNRESOLVABLE_TARGET
             if exc.reason == "missing":
                 interrupt_reason = INTERRUPT_REASON_DELIVERY_TARGET_MISSING
             logger.error(
@@ -4975,6 +5028,7 @@ class ScheduledTaskService:
                         # ``agent_run`` fan-outs, which reserve their own session per
                         # run and so cannot reach the branch above.
                         interrupt_reason=interrupt_reason,
+                        failure_code=failure_code,
                     )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes
@@ -5012,6 +5066,7 @@ class ScheduledTaskService:
         disable_one_shot: bool,
     ) -> TaskExecutionResult:
         error: Optional[str] = None
+        failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
         binding_change: Optional[SessionBindingChange] = None
@@ -5053,7 +5108,12 @@ class ScheduledTaskService:
             logger.error("Scheduled task %s has an unresolvable session binding: %s", task.id, exc)
             binding_change = self._recover_pinned_session_binding(task, exc)
             error = binding_change.detail
+            failure_code = FAILURE_CODE_UNRESOLVABLE_TARGET
             if binding_change.action == "rebound" and binding_change.new_session_id:
+                # The binding failure was repaired. Any error from the retried turn
+                # is a new backend/dispatch outcome, not another member of the
+                # unresolvable-target auto-pause streak.
+                failure_code = None
                 session_id = binding_change.new_session_id
                 session_key = ""
                 try:
@@ -5115,7 +5175,12 @@ class ScheduledTaskService:
                 binding_change, run_id=execution_id, run_error=error
             )
         self.reconcile_jobs()
-        return TaskExecutionResult(error=error, session_key=session_key, session_id=session_id)
+        return TaskExecutionResult(
+            error=error,
+            session_key=session_key,
+            session_id=session_id,
+            failure_code=failure_code if error else None,
+        )
 
     async def _execute_agent_run(
         self,
@@ -5558,20 +5623,26 @@ class ScheduledTaskService:
                     settings_preserved=settings_preserved,
                 )
 
-        # Paused on the FIRST unresolvable binding, not after a failure threshold.
-        #
-        # PR6's step 4 asks for "auto-pause at 3 consecutive failures, only for the
-        # unresolvable-target class". Those two halves contradict each other on this
-        # tree: the unresolvable-target class is precisely what PR5 already pauses
-        # immediately, so applying a threshold here does not ADD a policy, it
-        # weakens a landed one — two of PR5's own tests assert the immediate pause,
-        # and both failed when the threshold was tried.
-        #
-        # Immediate is also the better behaviour. The session row is hard-deleted, so
-        # the condition is permanent by construction: waiting three fires cannot
-        # discover anything a transient error would, and it burns three fires plus
-        # three failure rows to learn what the first one proved. The threshold's real
-        # target is the class PR6's own sentence then excludes.
+        prior_failures = self.request_store.consecutive_definition_failures_with_code(
+            task.id,
+            FAILURE_CODE_UNRESOLVABLE_TARGET,
+            limit=UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES - 1,
+        )
+        failure_number = prior_failures + 1
+        if failure_number < UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES:
+            return SessionBindingChange(
+                action="failing",
+                task_id=task.id,
+                reason=exc.reason,
+                previous_session_id=previous,
+                detail=(
+                    f"binding unresolved ({failure_number}/"
+                    f"{UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES}): {exc}. This definition "
+                    "will be paused after three consecutive unresolvable-target failures; "
+                    f"re-point it with `vibe task update {task.id} --session-id <id>`."
+                ),
+            )
+
         self._pause_task(task)
         return SessionBindingChange(
             action="paused",

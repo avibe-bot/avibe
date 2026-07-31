@@ -1797,19 +1797,20 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         f"a genuinely paused cron task keeps the resume copy: {control!r}"
     )
 
-    # THE TIMEZONE SPLIT: a naive ``run_at`` in a non-UTC task timezone reads
-    # differently to ``compute_next_run_at`` (which resolves it in the task's
-    # zone) and to the lifecycle badge (SQLite compares ``datetime(run_at)`` with
-    # its UTC clock). This instant is 4 hours in the FUTURE on the badge's clock
-    # and 4 hours in the PAST on the Python read (Asia/Shanghai is UTC+8), so a
-    # copy inferred from ``compute_next_run_at`` says FINISHED while the badge the
-    # user is looking at says PAUSED. The copy must consume the badge's own
-    # answer. Both readings are hours from the boundary, so the premise cannot
-    # flake across the test's runtime.
+    # A naive ``run_at`` is resolved in the task's own timezone by both the SQL
+    # lifecycle projection and ``compute_next_run_at``. This Shanghai wall clock
+    # is one hour in the past there but seven hours ahead if misread as UTC, so it
+    # consumes the exact disagreement the SQLite connection UDF closes.
     from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
 
-    naive_future_utc = (datetime.now(timezone.utc) + timedelta(hours=4)).strftime(
-        "%Y-%m-%dT%H:%M:%S"
+    naive_past_shanghai = (
+        (
+            datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
+            - timedelta(hours=1)
+        )
+        .replace(tzinfo=None)
+        .isoformat()
     )
     _task(
         sqlite,
@@ -1817,15 +1818,12 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         name="tz one shot",
         schedule_type="at",
         cron=None,
-        run_at=naive_future_utc,
+        run_at=naive_past_shanghai,
         timezone="Asia/Shanghai",
         enabled=False,
     )
     store.load()
-    # The premise, asserted so a clock/parse change fails loudly: the badge reads
-    # this row as PAUSED (the named instant is ahead of the UTC clock), while the
-    # Python inference reads the same instant as already passed.
-    assert sqlite.definition_lifecycle_state("task-tz", definition_type="task") == "paused"
+    assert sqlite.definition_lifecycle_state("task-tz", definition_type="task") == "finished"
     from storage.background import compute_next_run_at as _next_run
 
     assert (
@@ -1833,22 +1831,20 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
             enabled=True,
             schedule_type="at",
             cron=None,
-            run_at=naive_future_utc,
+            run_at=naive_past_shanghai,
             timezone_name="Asia/Shanghai",
         )
         is None
-    ), "the divergence premise: the task-zone read must place this instant in the past"
+    )
 
     tz_body = service._failure_notice_body(
         {"id": "run-tz", "task_id": "task-tz", "error": "boom"},
         {"failure_id": "failure:run-tz", "interrupt_reason": None},
     )
-    assert i18n_t("harness.notice.taskFinished", "en") not in tz_body, (
-        f"the copy must not say FINISHED while the badge says PAUSED: {tz_body!r}"
+    assert i18n_t("harness.notice.taskFinished", "en") in tz_body, (
+        f"the copy and badge must both read the task-zone instant as FINISHED: {tz_body!r}"
     )
-    assert "vibe task resume task-tz" in tz_body, (
-        f"the copy must agree with the badge the user is looking at: {tz_body!r}"
-    )
+    assert "vibe task resume task-tz" not in tz_body, f"a finished task must not offer resume: {tz_body!r}"
 
     # THE IN-FLIGHT SPLIT: ``vibe task run`` accepts a disabled one-shot, and an
     # in-flight execution outranks the ended predicate in the canonical CASE — the
@@ -10911,12 +10907,13 @@ def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(
     ``create_once`` is ever rebound, and a ``create_once`` definition reserved its own
     session from ``SESSION_ID_ALPHABET``, which contains no ``-`` and therefore can
     never mint ``ses-workspace-notices``. Reaching the reserved id at all takes a
-    user-pinned ``existing`` binding, and ``existing`` is never rebound — it is PAUSED,
-    which is the correct disposal: the condition is permanent until somebody re-points
-    the definition, so every future fire would fail identically.
+    user-pinned ``existing`` binding, and ``existing`` is never rebound. Its first
+    classified failure is visible and the third consecutive classified failure pauses
+    it; transient failures carry no such code and never advance this policy.
 
-    Pinned here so the structural argument has a test behind it: paused, no replacement
-    session, and no turn handed to the message handler.
+    Pinned here so the structural argument has a test behind it: still enabled for the
+    first two failures, paused on the third, no replacement session, and no turn handed
+    to the message handler.
     """
 
     from core.scheduled_tasks import ScheduledTaskStore
@@ -10950,10 +10947,18 @@ def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(
     service = _binding_service(tmp_path, store, dispatched)
     service.request_store = requests
 
-    queued = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
-    claimed = requests.claim(queued.id)
-    assert claimed is not None
-    asyncio.run(service._execute_claimed_request(claimed))
+    claimed_ids: list[str] = []
+    for attempt in range(1, 4):
+        current = store.get_task(task.id)
+        assert current is not None
+        queued = requests.enqueue_task_run(task.id, source_kind="scheduler", task=current)
+        claimed = requests.claim(queued.id)
+        assert claimed is not None
+        claimed_ids.append(claimed.id)
+        asyncio.run(service._execute_claimed_request(claimed))
+        saved = store.get_task(task.id)
+        assert saved is not None
+        assert saved.enabled is (attempt < 3)
 
     saved = store.get_task(task.id)
     assert saved is not None
@@ -10968,13 +10973,20 @@ def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(
         f"no prompt may reach the message handler on this fire: {dispatched}"
     )
 
-    run = sqlite.get_run(claimed.id)
+    run = sqlite.get_run(claimed_ids[-1])
     assert run["status"] == "failed", f"the fire that could not run is a failure: {run}"
     assert "paused" in str(run.get("error") or ""), (
         f"and its recorded detail is the recovery's own verdict: {run}"
     )
     assert reserved in str(run.get("error") or ""), (
         f"which still names the session the user pinned: {run}"
+    )
+    assert {
+        (sqlite.get_run(run_id).get("metadata") or {}).get("failure_code")
+        for run_id in claimed_ids
+    } == {"unresolvable_target"}
+    assert sqlite.owed_failure_notice(claimed_ids[0]) is not None, (
+        "the first classified failure must be visible before the third failure pauses"
     )
     assert _session_transcript(reserved) == before, (
         f"the runtime's own row stays notices-only: {_session_transcript(reserved)}"

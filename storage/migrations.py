@@ -222,6 +222,26 @@ def initialize_background_tables(db_path: Path | None = None) -> None:
     run_migrations(target_db)
 
 
+def ensure_background_indexes(db_path: Path | None = None) -> None:
+    """Repair head indexes even when the tables already pass readiness checks.
+
+    ``metadata.create_all`` can produce every required table and column without
+    the expression indexes owned by migrations 0039/0041/0042. Such a database
+    correctly skips schema migration, so store construction must still enter the
+    index repair path. Correct expression indexes are detected byte-for-byte
+    against their owning migration DDL and are not rebuilt on ordinary opens.
+    """
+
+    target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+    if not target_db.exists():
+        return
+    with sqlite3.connect(target_db) as conn:
+        tables = _table_names(conn)
+        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_expression_indexes_ready(conn):
+            _ensure_agent_runs_expression_indexes(conn)
+            conn.commit()
+
+
 def guard_source_checkout_default_state_migration(db_path: Path) -> None:
     if _env_flag_enabled(ALLOW_DEV_STATE_MIGRATION_ENV):
         return
@@ -633,7 +653,8 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
-    _ensure_agent_runs_expression_indexes(conn)
+    if not _agent_runs_expression_indexes_ready(conn):
+        _ensure_agent_runs_expression_indexes(conn)
 
 
 #: The ``agent_runs`` index migrations whose DDL the head-schema repair path must also
@@ -649,6 +670,24 @@ _AGENT_RUNS_INDEX_REVISION_MODULES = (
 #: this helper is also reached from ``_repair_head_required_columns`` on older drifted
 #: shapes, and ``create index`` on a missing column raises rather than skipping.
 _AGENT_RUNS_INDEX_COLUMNS = frozenset({"definition_id", "created_at", "completed_at", "metadata_json"})
+
+
+def _normalized_index_sql(value: object) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
+    if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
+        return True
+    for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
+        revision_module = import_module(module_name)
+        row = conn.execute(
+            "select sql from sqlite_master where type = 'index' and name = ?",
+            (revision_module._INDEX,),
+        ).fetchone()
+        if row is None or _normalized_index_sql(row[0]) != _normalized_index_sql(revision_module.CREATE_INDEX_SQL):
+            return False
+    return True
 
 
 def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:

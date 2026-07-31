@@ -56,6 +56,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -220,22 +221,16 @@ RESERVED_SESSION_CLI_CODE = "reserved_session"
 
 
 def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliError:
-    """Re-type the resolver's refusal as a coded CLI error, keeping its diagnostic.
+    """Re-type the resolver refusal and localize its user-facing guidance."""
 
-    ``str(exc)`` is preserved verbatim as the ``error`` because it names the refused
-    session id, which is what a caller greps for. The added ``hint`` mirrors the Web
-    surface's ``harness.notice.workspaceSessionReadOnly`` sentence in the CLI's own plain
-    English (CLI payloads are not routed through ``vibe/i18n``; every other
-    ``TaskCliError`` message here is untranslated too).
-    """
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
     return TaskCliError(
         str(exc),
         code=RESERVED_SESSION_CLI_CODE,
-        hint=(
-            "This Session only receives Avibe's workspace failure notifications — it "
-            "does not accept turns. Target an ordinary Session, or omit --session-id to "
-            "create one."
-        ),
+        hint=i18n_t("harness.notice.workspaceSessionReadOnly", lang),
         details={"session_id": exc.session_id, "reason": exc.reason},
     )
 

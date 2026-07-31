@@ -39,6 +39,7 @@ from storage.agent_session_rows import (
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
+    ensure_background_indexes,
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
@@ -398,12 +399,17 @@ def definition_lifecycle_expression(definition_type: str):
         # ``None`` exactly when the instant is behind us — so the state and the
         # time printed beside it cannot contradict each other.
         #
-        # ``datetime()`` normalises offset-carrying timestamps before comparing
-        # the scheduled instant with SQLite's current UTC clock.
+        # SQLite cannot resolve an IANA timezone and treats a naive timestamp as
+        # UTC. The connection UDF delegates that resolution to the same stdlib
+        # rule the scheduler uses, then compares two epoch values in UTC.
         ended = and_(
             run_definitions.c.schedule_type == "at",
             run_definitions.c.run_at.is_not(None),
-            func.datetime(run_definitions.c.run_at) <= func.datetime("now"),
+            func.avibe_run_at_epoch(
+                run_definitions.c.run_at,
+                run_definitions.c.timezone,
+            )
+            <= (func.julianday("now") - literal(2440587.5)) * literal(86400.0),
         )
     return case(
         (in_flight, "running"),
@@ -2135,6 +2141,7 @@ class SQLiteBackgroundTaskStore:
             ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
         if not background_tables_ready(self.db_path):
             initialize_background_tables(self.db_path)
+        ensure_background_indexes(self.db_path)
         self.engine = create_sqlite_engine(self.db_path)
         self._probe = SqliteInvalidationProbe(self.engine)
 
@@ -3037,11 +3044,10 @@ class SQLiteBackgroundTaskStore:
         ``definition_lifecycle_expression`` evaluated for a single row — the same
         CASE every list and count surface reads, so a consumer rendering copy
         beside the badge cannot reach a different answer by re-deriving the state
-        in Python. That is not hypothetical: a naive ``run_at`` in a non-UTC task
-        timezone reads differently to ``compute_next_run_at`` (which resolves it in
-        the task's zone) and to this expression (SQLite compares ``datetime(run_at)``
-        with its UTC clock), and any Python twin inherits one side of that split.
-        ``None`` when the definition row does not exist.
+        in Python. The expression resolves an offset-free ``run_at`` in the stored
+        IANA timezone through the same rule as ``compute_next_run_at``; the state
+        and the displayed next fire therefore cannot disagree during the zone's
+        UTC-offset interval. ``None`` when the definition row does not exist.
         """
 
         resolved = str(definition_id or "").strip()
@@ -4572,6 +4578,45 @@ class SQLiteBackgroundTaskStore:
             )
             .where(_not_an_out_of_band_interruption())
         )
+
+    def consecutive_definition_failures_with_code(
+        self,
+        definition_id: str,
+        failure_code: str,
+        *,
+        limit: int,
+    ) -> int:
+        """Count a bounded suffix of failed verdicts carrying ``failure_code``.
+
+        The current run is still ``running`` when binding recovery asks, so this
+        reads only prior terminal verdicts. A success or a differently-classified
+        failure closes the suffix; canceled and out-of-band interruption rows are
+        transparent through ``_definition_history_scope``.
+        """
+
+        if limit <= 0:
+            return 0
+        statement = (
+            self._definition_history_scope(
+                str(definition_id),
+                agent_runs.c.status,
+                agent_runs.c.metadata_json,
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("succeeded") + _status_query_values("failed")))
+            .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
+            .limit(limit)
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).all()
+        count = 0
+        for status, metadata_json in rows:
+            if normalize_run_status(status) != "failed":
+                break
+            metadata = _json_loads(metadata_json, {})
+            if not isinstance(metadata, dict) or metadata.get("failure_code") != failure_code:
+                break
+            count += 1
+        return count
 
     def failure_streak_decision(self, definition_id: str, run_id: str) -> dict[str, Any]:
         """The three facts ``core.failure_notices.decide`` needs, in ONE statement.

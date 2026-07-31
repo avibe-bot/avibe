@@ -3393,6 +3393,38 @@ def _reserved_session_cli_db(tmp_path: Path):
     return db_path, agent_store, ordinary
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_hint"),
+    [
+        (
+            "en",
+            "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
+        ),
+        (
+            "zh",
+            "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
+        ),
+    ],
+)
+def test_reserved_session_cli_hint_uses_the_configured_backend_locale(
+    language: str,
+    expected_hint: str,
+) -> None:
+    exc = cli.UnresolvableSessionTarget(
+        "reserved",
+        session_id="ses-workspace-notices",
+        reason="reserved",
+    )
+    with patch.object(
+        cli.V2Config,
+        "load",
+        return_value=SimpleNamespace(language=language),
+    ):
+        error = cli._reserved_session_cli_error(exc)
+
+    assert error.hint == expected_hint
+
+
 def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
     from sqlalchemy import text as sa_text
 
