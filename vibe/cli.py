@@ -3061,7 +3061,7 @@ def cmd_task_add(args):
         return 0
     except Exception as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task creation failed before its Session reservation was adopted",
             )
@@ -3535,7 +3535,7 @@ def cmd_task_update(args):
         return 0
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
@@ -3549,7 +3549,7 @@ def cmd_task_update(args):
         return 1
     except Exception as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
@@ -4748,7 +4748,7 @@ def _reserve_definition_session(
     return session_id
 
 
-def _release_definition_session_reservation(session_id: str, *, reason: str) -> bool:
+def _release_cli_session_reservation(session_id: str, *, reason: str) -> bool:
     """Release only the unadopted Session reserved by a failed CLI mutation."""
 
     from storage.sessions_service import SQLiteSessionsService
@@ -4759,7 +4759,7 @@ def _release_definition_session_reservation(session_id: str, *, reason: str) -> 
         return service.release_reserved_agent_session(session_id, reason=reason)
     except Exception:
         logger.exception(
-            "Could not release the reserved Agent Session %s after a failed definition mutation",
+            "Could not release the reserved Agent Session %s after a failed CLI mutation",
             session_id,
         )
         return False
@@ -4775,6 +4775,7 @@ def _release_definition_session_reservation(session_id: str, *, reason: str) -> 
 
 
 def cmd_agent_run(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         visibility = (getattr(args, "visibility", None) or "background").strip()
@@ -4912,6 +4913,7 @@ def cmd_agent_run(args):
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "none":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -4920,6 +4922,7 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=source_session_id or "",
@@ -4930,6 +4933,7 @@ def cmd_agent_run(args):
                 visibility=visibility,
             )
             session_id = fork_result.session_id
+            reserved_session_id = session_id
             if agent_name:
                 agent = _agent_store().require_enabled(agent_name)
         if session_id and not session_key:
@@ -4979,6 +4983,7 @@ def cmd_agent_run(args):
             metadata=provenance_metadata or None,
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
+        reserved_session_id = None
         resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {
             "accepted": True,
@@ -5028,6 +5033,11 @@ def cmd_agent_run(args):
         _print_cli_payload("agent_run", **payload)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="Agent Run enqueue failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe agent run --help")
         return 1
 
@@ -8670,7 +8680,7 @@ def cmd_watch_add(args):
         return 0
     except Exception as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch creation failed before its Session reservation was adopted",
             )
@@ -9092,7 +9102,7 @@ def cmd_watch_update(args):
         return 0
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )
@@ -9106,7 +9116,7 @@ def cmd_watch_update(args):
         return 1
     except Exception as exc:
         if reserved_session_id:
-            _release_definition_session_reservation(
+            _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )

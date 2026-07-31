@@ -727,6 +727,54 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             any("archived Agent is disabled" in text for _, text in controller.im_client.sent_messages)
         )
 
+    async def test_unusable_persisted_scope_agent_does_not_fallback_to_backend(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.routing = type(
+            "Routing",
+            (),
+            {"agent_name": "_worker-ab12"},
+        )()
+        observed = {}
+
+        def _reject_archived_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            raise ValueError("archived scope Agent is disabled")
+
+        controller.resolve_vibe_agent_for_context = _reject_archived_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "start a new thread")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": None,
+                "agent_name": None,
+                "required": True,
+            },
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+        self.assertTrue(
+            any("archived scope Agent is disabled" in text for _, text in controller.im_client.sent_messages)
+        )
+
     async def test_existing_session_backend_does_not_attach_default_vibe_agent_metadata(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         handler = MessageHandler(controller)

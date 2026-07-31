@@ -291,6 +291,28 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
     assert listed["default_agent"]["agent_backend"] == "claude"
 
 
+def test_update_project_canonicalizes_normalized_agent_name(engine, tmp_path):
+    _ensure_agent("Project Manager", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        updated = projects_service.update_project(
+            conn,
+            created["id"],
+            agent_name="PROJECT-MANAGER",
+        )
+        stored_name = conn.execute(
+            select(scope_settings.c.agent_name).where(
+                scope_settings.c.scope_id == created["scope_id"]
+            )
+        ).scalar_one()
+
+    assert updated["default_agent"]["agent_name"] == "Project Manager"
+    assert stored_name == "Project Manager"
+
+
 def test_update_project_clears_default_agent(engine, tmp_path):
     _ensure_agent("codex", "codex")
     folder = tmp_path / "proj"

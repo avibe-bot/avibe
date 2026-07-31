@@ -251,10 +251,12 @@ class SQLiteSettingsService:
         ).scalar_one_or_none()
         if current == expected:
             if item.routing.agent_name != current:
-                SQLiteSettingsService._require_enabled_agent_binding(
+                canonical_agent_name = SQLiteSettingsService._require_enabled_agent_binding(
                     conn,
                     item.routing.agent_name,
                 )
+                if canonical_agent_name != item.routing.agent_name:
+                    return replace(item.routing, agent_name=canonical_agent_name)
             return item.routing
         if item.routing.agent_name == expected:
             return replace(item.routing, agent_name=current)
@@ -263,18 +265,25 @@ class SQLiteSettingsService:
         )
 
     @staticmethod
-    def _require_enabled_agent_binding(conn: Connection, agent_name: str | None) -> None:
+    def _require_enabled_agent_binding(conn: Connection, agent_name: str | None) -> str | None:
         if not agent_name:
-            return
+            return None
+        from core.vibe_agents import normalize_agent_name
+
+        try:
+            normalized_name = normalize_agent_name(agent_name)
+        except ValueError as exc:
+            raise ScopeAgentUnavailableError(f"Agent is unavailable: {agent_name}") from exc
         available = conn.execute(
-            select(agents.c.id)
-            .where(agents.c.name == agent_name)
+            select(agents.c.name)
+            .where(agents.c.normalized_name == normalized_name)
             .where(agents.c.enabled == 1)
             .where(agents.c.archived_at.is_(None))
             .limit(1)
-        ).first()
+        ).scalar_one_or_none()
         if available is None:
             raise ScopeAgentUnavailableError(f"Agent is unavailable: {agent_name}")
+        return str(available)
 
     def _upsert_scope_settings(self, conn: Connection, *, scope_id: str, **values: Any) -> None:
         """Insert or update one scope's settings row by scope_id — no delete.

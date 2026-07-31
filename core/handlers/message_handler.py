@@ -206,7 +206,8 @@ class MessageHandler(BaseHandler):
             requested_vibe_agent = platform_payload.get("vibe_agent_name")
             requested_vibe_agent_id = platform_payload.get("vibe_agent_id")
             session_target = platform_payload.get("agent_session_target")
-            durable_agent_identity = bool(requested_vibe_agent_id)
+            scope_agent_name = getattr(routing, "agent_name", None) if routing else None
+            durable_agent_identity = bool(requested_vibe_agent_id or scope_agent_name)
             if not requested_vibe_agent_id and isinstance(session_target, dict):
                 requested_vibe_agent_id = session_target.get("agent_id")
             if not requested_vibe_agent and isinstance(session_target, dict):
@@ -277,7 +278,7 @@ class MessageHandler(BaseHandler):
                     resolve_kwargs["override_agent_id"] = requested_vibe_agent_id
                 vibe_agent = resolve_vibe_agent(context, **resolve_kwargs)
             elif callable(resolve_vibe_agent) and not session_agent_backend:
-                vibe_agent = resolve_vibe_agent(context, required=False)
+                vibe_agent = resolve_vibe_agent(context, required=durable_agent_identity)
             if vibe_agent:
                 agent_name = vibe_agent.backend
             elif session_agent_backend:

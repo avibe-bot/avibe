@@ -617,6 +617,32 @@ def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_p
         store.close()
 
 
+def test_settings_save_canonicalizes_normalized_agent_binding(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agent_store.create(name="Project Manager", backend="claude")
+
+        settings = ChannelSettings(
+            enabled=True,
+            routing=RoutingSettings(agent_name="PROJECT-MANAGER"),
+        )
+        store.update_channel("C1", settings, platform="slack")
+
+        assert settings.routing.agent_name == "Project Manager"
+        with agent_store.engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).scalar_one()
+        assert stored_name == "Project Manager"
+    finally:
+        agent_store.close()
+        store.close()
+
+
 def test_settings_save_preserves_observed_scope_metadata(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)

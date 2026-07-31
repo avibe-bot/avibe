@@ -963,7 +963,7 @@ def test_task_add_releases_create_once_session_when_definition_write_fails(monke
             ),
         ),
         patch(
-            "vibe.cli._release_definition_session_reservation",
+            "vibe.cli._release_cli_session_reservation",
             side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
         ),
     ):

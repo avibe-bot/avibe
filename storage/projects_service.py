@@ -336,9 +336,15 @@ def update_project(
     if agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
         if requested_agent is not None and requested_agent != current_agent_name:
+            from core.vibe_agents import normalize_agent_name
+
+            try:
+                normalized_agent = normalize_agent_name(requested_agent)
+            except ValueError as exc:
+                raise ValueError(f"Agent is unavailable: {requested_agent}") from exc
             available_agent = conn.execute(
                 select(agents.c.name)
-                .where(agents.c.name == requested_agent)
+                .where(agents.c.normalized_name == normalized_agent)
                 .where(agents.c.enabled == 1)
                 .where(agents.c.archived_at.is_(None))
                 .limit(1)
