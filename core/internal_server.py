@@ -760,7 +760,11 @@ def create_app(
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
-        if session_id or user_key != "avibe:local":
+        remote_prefix = "avibe:remote:"
+        if session_id or not (
+            user_key == "avibe:local"
+            or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
+        ):
             return None
         from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 

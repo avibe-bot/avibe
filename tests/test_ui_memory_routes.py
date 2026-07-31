@@ -12,7 +12,7 @@ from config.v2_config import (
     V2Config,
 )
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, internal_client, ui_memory_routes, ui_server
+from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
 
 
@@ -24,6 +24,21 @@ def _save_config(tmp_path) -> None:
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
     ).save()
+
+
+def _save_remote_config(tmp_path) -> V2Config:
+    _save_config(tmp_path)
+    config = V2Config.load()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    config.save()
+    return config
 
 
 def _local_headers() -> dict[str, str]:
@@ -74,6 +89,89 @@ def test_memory_direct_loopback_predicate_rejects_forwarding(monkeypatch) -> Non
         },
     ):
         assert ui_server.is_direct_loopback_memory_request() is False
+
+
+def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    async def profile(*, user_key: str):
+        calls.append(("profile", user_key))
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    async def clear(*, user_key: str):
+        calls.append(("clear", user_key))
+        return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
+
+    monkeypatch.setattr(internal_client, "memory_profile", profile)
+    monkeypatch.setattr(internal_client, "memory_clear", clear)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    remote_headers = {"Origin": "https://alex.avibe.bot"}
+
+    settings_response = client.get(
+        "/api/memory/settings",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    profile_response = client.get(
+        "/api/memory/profile",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    clear_response = client.post(
+        "/api/memory/clear",
+        json={"confirm": True},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert settings_response.status_code == 200
+    assert profile_response.status_code == 200
+    assert clear_response.status_code == 200
+    assert calls == [
+        ("profile", "avibe:remote:user-1"),
+        ("clear", "avibe:remote:user-1"),
+    ]
+
+
+def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    missing_origin = client.get(
+        "/api/memory/settings",
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    cross_origin = client.get(
+        "/api/memory/settings",
+        headers={"Origin": "https://attacker.example"},
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert missing_origin.status_code == 403
+    assert missing_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
+    assert cross_origin.status_code == 403
+    assert cross_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
 
 
 def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> None:
@@ -490,88 +588,3 @@ def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_pa
 
     assert response.status_code == 403
     assert calls == []
-
-
-def _save_remote_config(tmp_path) -> V2Config:
-    from config.v2_config import RemoteAccessConfig
-
-    config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(bot_token=""),
-        runtime=RuntimeConfig(default_cwd="."),
-        agents=AgentsConfig(),
-        remote_access=RemoteAccessConfig(),
-    )
-    cloud = config.remote_access.vibe_cloud
-    cloud.enabled = True
-    cloud.public_url = "https://alex.avibe.bot"
-    cloud.client_id = "vr_client_123"
-    cloud.instance_id = "inst_123"
-    cloud.session_secret = "session-secret"
-    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
-    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
-    config.save()
-    return config
-
-
-def test_memory_status_allows_authenticated_remote_session(monkeypatch, tmp_path) -> None:
-    from vibe import remote_access
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_remote_config(tmp_path)
-
-    async def status():
-        return {"status_code": 200, "body": {"state": "disabled", "data_exists": False}}
-
-    monkeypatch.setattr(internal_client, "memory_status", status)
-    client = app.test_client()
-    client.set_cookie(
-        remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
-        domain="alex.avibe.bot",
-    )
-    response = client.get(
-        "/api/memory/status",
-        headers={"Origin": "https://alex.avibe.bot"},
-        base_url="https://alex.avibe.bot",
-        environ_base={"REMOTE_ADDR": "203.0.113.10"},
-    )
-
-    assert response.status_code == 200
-    assert response.get_json()["state"] == "disabled"
-
-
-def test_memory_status_rejects_remote_session_without_cookie(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_remote_config(tmp_path)
-
-    response = app.test_client().get(
-        "/api/memory/status",
-        headers={"Origin": "https://alex.avibe.bot"},
-        base_url="https://alex.avibe.bot",
-        environ_base={"REMOTE_ADDR": "203.0.113.10"},
-        follow_redirects=False,
-    )
-
-    # The global remote-access guard redirects unauthenticated GETs to login
-    # before the Memory route is reached.
-    assert response.status_code == 302
-
-
-def test_memory_admission_rejects_remote_session_with_foreign_origin(monkeypatch, tmp_path) -> None:
-    from vibe import remote_access
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_remote_config(tmp_path)
-    cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
-
-    with app.test_request_context(
-        "/api/memory/status",
-        base_url="https://alex.avibe.bot",
-        headers={
-            "Origin": "https://evil.example",
-            "Cookie": f"{remote_access.SESSION_COOKIE_NAME}={cookie}",
-        },
-    ):
-        assert ui_server.is_memory_request_admitted() is False

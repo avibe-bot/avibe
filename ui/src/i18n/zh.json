@@ -3471,8 +3471,8 @@
       "settings": "设置"
     },
     "remoteUnavailable": {
-      "title": "需要登录后访问",
-      "description": "记忆的设置和数据需要直接连接到本机 Avibe，或通过已登录的 Avibe Cloud 会话访问。"
+      "title": "当前连接无法访问记忆",
+      "description": "请直接连接本机 Avibe，或使用已认证的 Avibe Cloud 会话。其他远程连接仍会被拒绝。"
     },
     "status": {
       "title": "状态",

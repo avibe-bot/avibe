@@ -1364,12 +1364,11 @@ def _is_local_request(config: V2Config | None = None) -> bool:
 
 
 def is_direct_loopback_memory_request() -> bool:
-    """Strict direct-loopback Memory admission, intentionally narrower than UI local.
+    """Strict Memory-only browser admission, intentionally narrower than UI local.
 
-    Never accepts proxy forwarding, Docker bridge allowances or LAN setup
-    hosts: the browser must be directly connected over loopback and present a
-    same-origin header. Authenticated remote sessions are admitted separately
-    via ``is_memory_request_admitted``.
+    Memory content and settings never accept proxy forwarding, Docker bridge
+    allowances, LAN setup hosts, or remote-access cookies. The browser must be
+    directly connected over loopback and present a same-origin header.
     """
 
     if _has_forwarded_metadata() or not _is_loopback_peer() or not _is_loopback_host(request.host):
@@ -1378,32 +1377,39 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
-def _is_authenticated_remote_memory_request() -> bool:
-    """A remote-access request carrying a valid session cookie and a same-origin header.
+def memory_ui_user_key() -> str | None:
+    """Resolve the Memory principal for a trusted browser request.
 
-    Mirrors the admission bar of ``enforce_remote_access_cookie`` (enabled cloud
-    config + signed session cookie) and adds the same-origin requirement the
-    loopback path enforces, so cross-site reads stay rejected.
+    Direct loopback keeps the install-local identity. Remote browser access is
+    admitted only through the configured Avibe Cloud origin with a valid signed
+    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
+    the same origin evidence as mutations so a remote session cookie cannot be
+    used as a cross-origin Memory oracle.
     """
 
+    if is_direct_loopback_memory_request():
+        return "avibe:local"
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
-        return False
-    cloud = config.remote_access.vibe_cloud
-    if not cloud.enabled or not cloud.session_secret:
-        return False
-    from vibe import remote_access
+        return None
+    source = _request_origin(request.headers.get("Origin")) or _request_origin(
+        request.headers.get("Referer")
+    )
+    if not source or not _same_origin(source, _current_origin()):
+        return None
+    try:
+        from vibe import remote_access
 
-    if remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)) is None:
-        return False
-    origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
-    return bool(origin and _remote_access_public_origin_matches(origin, config))
-
-
-def is_memory_request_admitted() -> bool:
-    """Memory browser admission: direct loopback, or an authenticated remote session."""
-
-    return is_direct_loopback_memory_request() or _is_authenticated_remote_memory_request()
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    return f"avibe:remote:{subject.strip()}"
 
 
 def _normalized_host(value: str | None) -> str:
