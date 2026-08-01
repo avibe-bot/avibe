@@ -4488,7 +4488,7 @@ def _harness_dispatcher() -> ConsolidatedMessageDispatcher:
             release_runtime_turn=lambda _context: None,
         ),
         session_turns=SimpleNamespace(
-            on_terminal_result=lambda _context, is_error=False: None,
+            on_terminal_result=lambda _context, is_error=False, **_kwargs: None,
         ),
         mark_turn_complete=lambda _context, **_kwargs: None,
     )

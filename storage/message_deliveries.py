@@ -1101,17 +1101,94 @@ def retire_queued_with_run(
         or delivery["state"] != "queued"
     ):
         return False
-    run_id = owned_agent_run_id(delivery)
-    if run_id:
-        from storage.background import cancel_workbench_queued_agent_run_in_connection
+    run_ids = agent_run_ids_for_delivery(conn, delivery)
+    if run_ids:
+        from storage.background import (
+            can_cancel_workbench_queued_agent_runs_in_connection,
+            cancel_workbench_queued_agent_run_in_connection,
+        )
 
-        if not cancel_workbench_queued_agent_run_in_connection(
+        if not can_cancel_workbench_queued_agent_runs_in_connection(
             conn,
-            run_id,
+            run_ids,
             session_id=session_id,
         ):
             return False
+
+        for run_id in run_ids:
+            if not cancel_workbench_queued_agent_run_in_connection(
+                conn,
+                run_id,
+                session_id=session_id,
+            ):
+                return False
     return retire_queued(conn, session_id, delivery_id)
+
+
+def terminal_turn_agent_run_owners(
+    conn: Connection,
+    session_id: str | None = None,
+) -> list[tuple[dict[str, Any], list[str]]]:
+    """Return terminal Turns and their accepted Agent Run participants."""
+
+    query = (
+        select(
+            session_turns.c.id.label("turn_id"),
+            session_turns.c.terminal_outcome,
+            session_turns.c.settled_by,
+            session_turns.c.terminal_evidence_kind,
+            session_turns.c.terminal_evidence_json,
+            session_turns.c.terminal_at,
+            message_deliveries.c.snapshot_json,
+            messages.c.native_message_id,
+            messages.c.metadata_json,
+        )
+        .join(
+            message_deliveries,
+            message_deliveries.c.accepted_turn_id == session_turns.c.id,
+        )
+        .outerjoin(messages, messages.c.id == message_deliveries.c.message_id)
+        .where(session_turns.c.state == "terminal")
+        .where(message_deliveries.c.state == "accepted")
+    )
+    if session_id:
+        query = query.where(session_turns.c.session_id == session_id)
+    owners: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    rows = conn.execute(
+        query.order_by(session_turns.c.terminal_at, session_turns.c.id)
+    ).mappings()
+    for row in rows:
+        turn_id = str(row["turn_id"])
+        snapshot = _json_object(row["snapshot_json"])
+        run_ids = _agent_run_ids_from_record(
+            native_message_id=(
+                snapshot.get("native_message_id")
+                if snapshot
+                else row["native_message_id"]
+            ),
+            metadata_json=(
+                snapshot.get("metadata_json") if snapshot else row["metadata_json"]
+            ),
+        )
+        if not run_ids:
+            continue
+        owner = owners.setdefault(
+            turn_id,
+            (
+                {
+                    "id": turn_id,
+                    "terminal_outcome": row["terminal_outcome"],
+                    "settled_by": row["settled_by"],
+                    "terminal_evidence_kind": row["terminal_evidence_kind"],
+                    "terminal_evidence_json": row["terminal_evidence_json"],
+                },
+                [],
+            ),
+        )
+        for run_id in run_ids:
+            if run_id not in owner[1]:
+                owner[1].append(run_id)
+    return list(owners.values())
 
 
 def retire_queued_agent_run(

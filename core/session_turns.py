@@ -351,7 +351,11 @@ class SessionTurnManager:
         normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
         if not normalized:
             return
-        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
+        service = (
+            getattr(self.controller, "scheduled_task_service", None)
+            if self.controller
+            else None
+        )
         settle = getattr(service, "settle_agent_runs_without_result", None)
         if not callable(settle):
             logger.debug("turn settlement: no harness settlement writer available")
@@ -363,6 +367,46 @@ class SessionTurnManager:
                 "turn settlement: failed to settle runs %s as %s",
                 normalized,
                 settled_by,
+                exc_info=True,
+            )
+
+    def _settle_agent_run_ids_from_terminal_turn(
+        self,
+        run_ids: set[str] | list[str],
+        turn: dict[str, Any],
+    ) -> None:
+        normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        if not normalized:
+            return
+        service = (
+            getattr(self.controller, "scheduled_task_service", None)
+            if self.controller
+            else None
+        )
+        settle = getattr(service, "settle_agent_runs_from_terminal_turn", None)
+        if not callable(settle):
+            self._settle_agent_run_ids(normalized, turn.get("settled_by"))
+            return
+        try:
+            evidence = json.loads(str(turn.get("terminal_evidence_json") or "{}"))
+            if not isinstance(evidence, dict):
+                evidence = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence = {}
+        try:
+            settle(
+                normalized,
+                turn_id=str(turn["id"]),
+                outcome=str(turn.get("terminal_outcome") or "completed"),
+                settled_by=str(turn.get("settled_by") or "") or None,
+                evidence_kind=str(turn.get("terminal_evidence_kind") or "") or None,
+                evidence=evidence,
+            )
+        except Exception:
+            logger.warning(
+                "turn settlement: failed to settle late accepted runs %s from Turn=%s",
+                normalized,
+                turn.get("id"),
                 exc_info=True,
             )
 
@@ -1304,6 +1348,7 @@ class SessionTurnManager:
         materialized = False
         saved: dict[str, Any] | None = None
         accepted_run_ids: list[str] = []
+        terminal_target: dict[str, Any] | None = None
         session_id = ""
         try:
             with self._sqlite_engine().begin() as conn:
@@ -1364,6 +1409,13 @@ class SessionTurnManager:
                             "receipt_cas_lost",
                         )
                     materialized = True
+                    target_turn = delivery_store.get_turn(conn, target_turn_id)
+                    if (
+                        accepted_run_ids
+                        and target_turn is not None
+                        and target_turn["state"] == "terminal"
+                    ):
+                        terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
                     saved = delivery_store.mark_attempt_unknown(
                         conn,
@@ -1451,6 +1503,11 @@ class SessionTurnManager:
                 run_ids=accepted_run_ids,
                 context=context,
             )
+            if terminal_target is not None:
+                self._settle_agent_run_ids_from_terminal_turn(
+                    accepted_run_ids,
+                    terminal_target,
+                )
             self._publish_materialized_delivery(delivery_id)
             return DeliveryResult(delivery_id, delivery_id, "accepted", target_turn_id or None)
         if start_turn_id:
@@ -2899,6 +2956,35 @@ class SessionTurnManager:
             else:
                 if result.state != "reserved":
                     recovered.append(target_session)
+        with self._sqlite_engine().connect() as conn:
+            terminal_run_owners = delivery_store.terminal_turn_agent_run_owners(
+                conn,
+                session_id,
+            )
+            all_run_ids = {
+                run_id
+                for _terminal_turn, run_ids in terminal_run_owners
+                for run_id in run_ids
+            }
+            statuses = {
+                str(row["id"]): normalize_run_status(row["status"])
+                for row in conn.execute(
+                    select(agent_runs.c.id, agent_runs.c.status).where(
+                        agent_runs.c.id.in_(all_run_ids)
+                    )
+                ).mappings()
+            }
+            unsettled_owners: list[tuple[dict[str, Any], list[str]]] = []
+            for terminal_turn, run_ids in terminal_run_owners:
+                unsettled = [
+                    run_id
+                    for run_id in run_ids
+                    if statuses.get(run_id) in {"queued", "running"}
+                ]
+                if unsettled:
+                    unsettled_owners.append((terminal_turn, unsettled))
+        for terminal_turn, run_ids in unsettled_owners:
+            self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             queued_without_owner = set(
@@ -3781,6 +3867,7 @@ class SessionTurnManager:
         *,
         is_error: bool,
         settled_by: str | None,
+        terminal_evidence: dict[str, Any] | None = None,
     ) -> None:
         current = self.in_flight.get(session_id)
         hold_queue = bool(
@@ -3799,6 +3886,7 @@ class SessionTurnManager:
                 ),
                 settled_by=settled_by or SETTLED_BY_TERMINAL_RESULT,
                 evidence_kind="terminal_result",
+                evidence=terminal_evidence,
                 hold_queue=hold_queue,
             )
         except Exception:
@@ -3828,6 +3916,7 @@ class SessionTurnManager:
         sink: dict[str, Any],
         *,
         is_error: bool,
+        terminal_evidence: dict[str, Any] | None = None,
     ) -> None:
         done = sink.get("done_event")
         if done is not None and not done.is_set():
@@ -3837,9 +3926,16 @@ class SessionTurnManager:
             logical_turn_id,
             is_error=is_error,
             settled_by=str(sink.get("settled_by") or "") or None,
+            terminal_evidence=terminal_evidence,
         )
 
-    def on_terminal_result(self, context: "MessageContext", *, is_error: bool) -> None:
+    def on_terminal_result(
+        self,
+        context: "MessageContext",
+        *,
+        is_error: bool,
+        terminal_evidence: dict[str, Any] | None = None,
+    ) -> None:
         """OUTBOUND turn chokepoint for the active terminal ``result``."""
         if self.controller is None:
             return
@@ -3874,6 +3970,7 @@ class SessionTurnManager:
                         logical_turn_id,
                         sink,
                         is_error=is_error,
+                        terminal_evidence=terminal_evidence,
                     ),
                     name=f"durable-result-reconcile:{session_id}",
                 )
@@ -3885,6 +3982,7 @@ class SessionTurnManager:
                     settled_by=(
                         current.cancel_settled_by if current is not None else None
                     ),
+                    terminal_evidence=terminal_evidence,
                 )
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
 

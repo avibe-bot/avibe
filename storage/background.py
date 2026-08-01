@@ -1906,6 +1906,39 @@ def cancel_workbench_queued_agent_run_in_connection(
     return True
 
 
+def can_cancel_workbench_queued_agent_runs_in_connection(
+    conn: Any,
+    run_ids: list[str],
+    *,
+    session_id: str,
+) -> bool:
+    """Preflight an all-or-nothing Delivery removal for its represented Runs."""
+
+    normalized = list(dict.fromkeys(str(run_id or "").strip() for run_id in run_ids))
+    normalized = [run_id for run_id in normalized if run_id]
+    if not normalized or not str(session_id or "").strip():
+        return False
+    rows = {
+        str(row["id"]): row
+        for row in conn.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(normalized))
+        ).mappings()
+    }
+    for run_id in normalized:
+        row = rows.get(run_id)
+        if row is None:
+            continue
+        metadata = _json_loads(row["metadata_json"], {})
+        if (
+            normalize_run_status(row["status"]) != "queued"
+            or str(row["session_id"] or "").strip() != str(session_id).strip()
+            or not isinstance(metadata, dict)
+            or metadata.get("workbench_queue_holds_run") is not True
+        ):
+            return False
+    return True
+
+
 def record_agent_run_delivery_outcome_in_connection(
     conn: Any,
     run_id: str,

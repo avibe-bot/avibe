@@ -654,7 +654,7 @@ def test_p0_terminal_restart_claims_successor_once_after_old_terminal(managers) 
 
     manager, restarted, engine, _engine_b, starts = managers
 
-    async def run() -> tuple[str, str]:
+    async def run() -> tuple[str, str, str]:
         turn_id, context = await _activate(manager)
         holder = asyncio.create_task(asyncio.Event().wait())
         manager.in_flight["ses_fsm"] = Turn(
@@ -1210,6 +1210,239 @@ def test_accepted_steer_after_target_terminal_attaches_exact_terminal_turn(manag
         message = conn.execute(select(messages).where(messages.c.id == row["id"])).mappings().one()
     assert turn["state"] == "terminal"
     assert message["content_text"] == "late receipt"
+
+
+@pytest.mark.parametrize("activity_blocks_settlement", [False, True])
+def test_late_accepted_agent_run_settles_from_terminal_turn_snapshot(
+    managers,
+    activity_blocks_settlement: bool,
+) -> None:
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _terminal_manager, engine, _engine_b, _starts = managers
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=db_path.parent / "unused-file-store")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    manager.controller.scheduled_task_service = scheduled
+    manager.controller.agent_service.activities = SimpleNamespace(
+        has_blocking_run_activity=lambda _run_id: activity_blocks_settlement,
+    )
+
+    async def run() -> tuple[str, str, str]:
+        turn_id, active_context = await _activate(manager)
+        run_id = "run-late-terminal-steer"
+        now = "2026-08-01T00:00:00Z"
+        with engine.begin() as conn:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="queued",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    callback_session_id="ses_callback",
+                    callback_status="pending",
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json=json.dumps({"workbench_queue_holds_run": True}),
+                )
+            )
+        queued = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="queued Agent Run prompt",
+                source="harness",
+                author="harness",
+                message_type="harness",
+                native_message_id=f"agent_run:{run_id}",
+                metadata={
+                    "scheduled_provenance": {
+                        "task_execution_id": run_id,
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                        },
+                    }
+                },
+            ),
+            context=_context(),
+        )
+        assert queued.state == "queued"
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def accepted(_backend, _request):
+            entered.set()
+            await release.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accepted
+        promoted = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p1", content=None),
+                context=_context(),
+            )
+        )
+        await entered.wait()
+        manager.on_terminal_result(
+            active_context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "immutable terminal body",
+                "settles_run": True,
+            },
+        )
+        release.set()
+        accepted_delivery = await promoted
+        assert accepted_delivery.state == "accepted"
+        return turn_id, run_id, str(queued.delivery_id)
+
+    try:
+        turn_id, run_id, delivery_id = asyncio.run(run())
+        with engine.connect() as conn:
+            run_row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id)
+            ).mappings().one()
+            delivery = conn.execute(
+                select(message_deliveries).where(
+                    message_deliveries.c.id == delivery_id
+                )
+            ).mappings().one()
+        assert delivery["accepted_turn_id"] == turn_id
+        if activity_blocks_settlement:
+            assert run_row["status"] == "running"
+            payload = json.loads(run_row["result_payload_json"])
+            assert payload["deferred_terminal_status"] == "succeeded"
+            assert payload["deferred_terminal_result_text"] == "immutable terminal body"
+            manager.controller.agent_service.activities.has_blocking_run_activity = (
+                lambda _run_id: False
+            )
+            scheduled._recover_activity_lifecycle()
+            assert request_store.get_run(run_id)["status"] == "succeeded"
+        else:
+            assert run_row["status"] == "succeeded"
+            assert run_row["result_text"] == "immutable terminal body"
+        assert run_row["callback_status"] == "pending"
+        assert scheduled._drain_dirty is True
+    finally:
+        run_store.close()
+
+
+def test_restart_settles_agent_run_after_late_acceptance_commit(managers) -> None:
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, restarted, engine, _engine_b, _starts = managers
+
+    async def settle_turn() -> str:
+        turn_id, active_context = await _activate(manager)
+        manager.on_terminal_result(
+            active_context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "recovered immutable terminal body",
+                "settles_run": True,
+            },
+        )
+        await asyncio.sleep(0)
+        return turn_id
+
+    turn_id = asyncio.run(settle_turn())
+    run_id = "run-recovered-late-terminal-steer"
+    delivery_id = delivery_store.new_delivery_id()
+    attempt_id = delivery_store.new_attempt_id()
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="accepted before settlement crashed",
+                native_message_id=f"agent_run:{run_id}",
+                metadata={
+                    "scheduled_provenance": {
+                        "task_execution_id": run_id,
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                        },
+                    }
+                },
+            ),
+            dispatch_text="accepted before settlement crashed",
+        )
+        delivery = delivery_store.get_delivery(conn, delivery_id)
+        assert delivery is not None
+        steering = delivery_store.open_steer_attempt(
+            conn,
+            delivery_id,
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+            expected_native_turn_id=f"native-{turn_id}",
+        )
+        assert steering is not None
+        assert delivery_store.materialize_acceptance(
+            conn,
+            delivery_id=delivery_id,
+            expected_attempt_id=attempt_id,
+            accepted_turn_id=turn_id,
+            evidence={"kind": "steer_receipt", "receipt": {"outcome": "accepted"}},
+        ) is not None
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=db_path.parent / "unused-recovery-store")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    restarted.controller.scheduled_task_service = scheduled
+    try:
+        asyncio.run(restarted.recover_durable_delivery_state())
+        with engine.connect() as conn:
+            run_row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id)
+            ).mappings().one()
+        assert run_row["status"] == "succeeded"
+        assert run_row["result_text"] == "recovered immutable terminal body"
+        assert run_row["callback_status"] == "pending"
+        assert scheduled._drain_dirty is True
+    finally:
+        run_store.close()
 
 
 def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) -> None:

@@ -5419,6 +5419,99 @@ class ScheduledTaskService:
         if settled_any:
             self._drain_dirty = True
 
+    def settle_agent_runs_from_terminal_turn(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        turn_id: str,
+        outcome: str,
+        settled_by: str | None,
+        evidence_kind: str | None,
+        evidence: Mapping[str, Any],
+    ) -> None:
+        """Settle late accepted Runs from their immutable Turn snapshot."""
+
+        if settled_by in SETTLEMENTS_WITHOUT_RESULT:
+            self.settle_agent_runs_without_result(
+                execution_ids,
+                settled_by=str(settled_by),
+            )
+            return
+        if evidence.get("settles_run") is False:
+            return
+        store = self.request_store.sqlite_backend
+        if store is None:
+            logger.warning(
+                "cannot settle late accepted Agent Runs for Turn=%s without SQLite",
+                turn_id,
+            )
+            return
+        terminal_status = {
+            "completed": "succeeded",
+            "failed": "failed",
+            "canceled": "canceled",
+        }.get(outcome)
+        if terminal_status is None:
+            return
+        result_text = str(evidence.get("result_text") or "")
+        terminal_error = evidence.get("terminal_error")
+        message_id = str(evidence.get("message_id") or "").strip() or None
+        output_provenance = evidence.get("output_provenance")
+        output_provenance = (
+            dict(output_provenance) if isinstance(output_provenance, Mapping) else {}
+        )
+        output_id = str(output_provenance.get("output_id") or "").strip()
+        if not output_id and output_provenance.get("sequence") is not None:
+            output_id = f"sequence:{output_provenance['sequence']}"
+        if not output_id:
+            output_id = "terminal"
+        registry = getattr(
+            getattr(getattr(self, "controller", None), "agent_service", None),
+            "activities",
+            None,
+        )
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        settled_any = False
+        for raw_execution_id in execution_ids:
+            execution_id = str(raw_execution_id or "").strip()
+            if not execution_id:
+                continue
+            run_terminal_status = terminal_status
+            if callable(has_blocker) and has_blocker(execution_id):
+                if not store.defer_run_terminal(
+                    execution_id,
+                    terminal_status=terminal_status,
+                    result_text=result_text,
+                    error=(
+                        str(terminal_error) if terminal_error is not None else None
+                    ),
+                ):
+                    logger.warning(
+                        "failed to defer late terminal settlement for Run=%s Turn=%s",
+                        execution_id,
+                        turn_id,
+                    )
+                run_terminal_status = None
+            result = store.record_run_output(
+                execution_id,
+                output_id=output_id,
+                text=result_text,
+                message_id=message_id,
+                provenance={
+                    **output_provenance,
+                    "turn_id": turn_id,
+                    "evidence_kind": evidence_kind,
+                    "settled_by": settled_by,
+                },
+                terminal_status=run_terminal_status,
+                error=str(terminal_error) if terminal_error is not None else None,
+            )
+            settled_any = settled_any or bool(
+                result.get("terminal_transition") or result.get("text_backfilled")
+            )
+        if settled_any:
+            self._drain_dirty = True
+
     def _settle_agent_run_without_result(
         self,
         execution_id: str,

@@ -121,10 +121,11 @@ class SourceMessageAnchor:
     message_id: Optional[str] = None
     author: Optional[str] = None
     message_type: Optional[str] = None
+    running_turn: bool = False
 
     @property
     def is_running_input_turn(self) -> bool:
-        return is_input_turn(self.author, self.message_type)
+        return self.running_turn or is_input_turn(self.author, self.message_type)
 
 
 def reserve_forked_session(
@@ -621,14 +622,22 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import select
 
-    from storage.models import agent_events, messages, session_turns
+    from storage.models import agent_events, message_deliveries, messages, session_turns
 
     active_initial = conn.execute(
-        select(messages.c.id, messages.c.author, messages.c.type)
+        select(
+            messages.c.id,
+            messages.c.author,
+            messages.c.type,
+            message_deliveries.c.state.label("delivery_state"),
+        )
         .select_from(
             session_turns.join(
+                message_deliveries,
+                message_deliveries.c.id == session_turns.c.initial_delivery_id,
+            ).outerjoin(
                 messages,
-                messages.c.id == session_turns.c.initial_delivery_id,
+                messages.c.id == message_deliveries.c.message_id,
             )
         )
         .where(
@@ -638,12 +647,16 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(1)
     ).mappings().first()
-    if active_initial is not None:
+    if active_initial is not None and active_initial["id"] is not None:
         return SourceMessageAnchor(
             message_id=str(active_initial["id"]),
             author=str(active_initial["author"] or "").strip() or None,
             message_type=str(active_initial["type"] or "").strip() or None,
         )
+    pre_materialized_start = bool(
+        active_initial is not None
+        and active_initial["delivery_state"] in {"start_attempting", "reconciling_start"}
+    )
 
     row = conn.execute(
         select(messages.c.id, messages.c.author, messages.c.type, messages.c.created_at)
@@ -655,7 +668,7 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         .limit(1)
     ).mappings().first()
     if row is None:
-        return SourceMessageAnchor()
+        return SourceMessageAnchor(running_turn=pre_materialized_start)
     latest_turn = conn.execute(
         select(
             session_turns.c.state,
@@ -717,11 +730,13 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
             message_type=(
                 "error" if latest_terminal[1] == "failed" else "result"
             ),
+            running_turn=pre_materialized_start,
         )
     return SourceMessageAnchor(
         message_id=str(row["id"]) if row["id"] else None,
         author=str(row["author"] or "").strip() or None,
         message_type=str(row["type"] or "").strip() or None,
+        running_turn=pre_materialized_start,
     )
 
 

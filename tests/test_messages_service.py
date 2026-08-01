@@ -1183,16 +1183,21 @@ def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
         _seed_session(conn, scope_id, "ses_rm_run")
 
     store = TaskExecutionStore()
-    request = store.enqueue_agent_run(
-        session_id="ses_rm_run",
-        message="obsolete delegated work",
-        agent_name="worker",
-    )
-    assert store.claim(request.id) is not None
-    store.requeue(
-        request.id,
-        metadata={"workbench_queue_holds_run": True},
-    )
+    requests = [
+        store.enqueue_agent_run(
+            session_id="ses_rm_run",
+            message=f"obsolete delegated work {index}",
+            agent_name="worker",
+        )
+        for index in range(2)
+    ]
+    for request in requests:
+        assert store.claim(request.id) is not None
+        store.requeue(
+            request.id,
+            metadata={"workbench_queue_holds_run": True},
+        )
+    primary, sibling = requests
     with engine.begin() as conn:
         queued = message_deliveries.enqueue_queued(
             conn,
@@ -1200,13 +1205,17 @@ def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
             session_id="ses_rm_run",
             author="harness",
             source="harness",
-            text=request.message or "",
-            native_message_id=f"agent_run:{request.id}",
+            text=primary.message or "",
+            native_message_id=f"agent_run:{primary.id}",
             metadata={
                 "scheduled_provenance": {
+                    "task_execution_id": primary.id,
                     "platform_specific": {
                         "task_trigger_kind": "agent_run",
-                        "task_execution_id": request.id,
+                        "task_execution_id": primary.id,
+                        "coalesced_queue": {
+                            "execution_ids": [primary.id, sibling.id],
+                        },
                     }
                 }
             },
@@ -1222,11 +1231,12 @@ def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
             is True
         )
 
-    stored = store.get_run(request.id)
-    assert stored is not None
-    assert stored["status"] == "canceled"
-    assert stored["cancel_requested"] is True
-    assert stored["completed_at"]
+    for request in requests:
+        stored = store.get_run(request.id)
+        assert stored is not None
+        assert stored["status"] == "canceled"
+        assert stored["cancel_requested"] is True
+        assert stored["completed_at"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, "ses_rm_run") == []
 
@@ -1277,6 +1287,73 @@ def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
         assert [row["id"] for row in message_deliveries.list_queued(conn, "ses_rm_claimed")] == [
             queued["id"]
         ]
+
+
+def test_remove_coalesced_queue_is_all_or_nothing_when_one_run_is_claimed(
+    isolated_state,
+):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import run_update_event_transaction
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_rm_coalesced_claimed")
+
+    store = TaskExecutionStore()
+    primary = store.enqueue_agent_run(
+        session_id="ses_rm_coalesced_claimed",
+        message="primary queued work",
+        agent_name="worker",
+    )
+    sibling = store.enqueue_agent_run(
+        session_id="ses_rm_coalesced_claimed",
+        message="sibling claimed work",
+        agent_name="worker",
+    )
+    assert store.claim(primary.id) is not None
+    store.requeue(primary.id, metadata={"workbench_queue_holds_run": True})
+    assert store.claim(sibling.id) is not None
+    with engine.begin() as conn:
+        queued = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_rm_coalesced_claimed",
+            author="harness",
+            source="harness",
+            text=primary.message or "",
+            native_message_id=f"agent_run:{primary.id}",
+            metadata={
+                "scheduled_provenance": {
+                    "task_execution_id": primary.id,
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": primary.id,
+                        "coalesced_queue": {
+                            "execution_ids": [primary.id, sibling.id],
+                        },
+                    },
+                }
+            },
+        )
+
+    with run_update_event_transaction(engine) as conn:
+        assert message_deliveries.retire_queued_with_run(
+            conn,
+            "ses_rm_coalesced_claimed",
+            queued["id"],
+        ) is False
+
+    assert store.get_run(primary.id)["status"] == "queued"
+    assert store.get_run(sibling.id)["status"] == "running"
+    with engine.connect() as conn:
+        assert [
+            row["id"]
+            for row in message_deliveries.list_queued(
+                conn,
+                "ses_rm_coalesced_claimed",
+            )
+        ] == [queued["id"]]
 
 
 def test_list_queued_page_is_bounded_and_fifo(isolated_state):

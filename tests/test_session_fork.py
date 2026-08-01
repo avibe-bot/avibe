@@ -1656,6 +1656,77 @@ def test_fork_anchor_uses_active_turn_initial_delivery_before_transcript_order(
     assert result.fork.trim_latest_running_turn is True
 
 
+@pytest.mark.parametrize("delivery_state", ["start_attempting", "reconciling_start"])
+def test_fork_anchor_treats_pre_materialization_start_as_running(
+    tmp_path: Path,
+    delivery_state: str,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous terminal boundary",
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="start_attempting",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="possibly written native input",
+                ),
+                dispatch_text="possibly written native input",
+                current_attempt_id=attempt_id,
+                current_attempt_kind="start",
+                current_target_turn_id=turn_id,
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                initial_delivery_id=delivery_id,
+                state="starting",
+                backend="codex",
+            )
+            if delivery_state == "reconciling_start":
+                delivery = message_deliveries.get_delivery(conn, delivery_id)
+                assert delivery is not None
+                assert message_deliveries.mark_attempt_unknown(
+                    conn,
+                    delivery_id,
+                    expected_version=int(delivery["version"]),
+                    receipt={"reason": "restart_without_native_evidence"},
+                ) is not None
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == previous_result["id"]
+    assert result.fork.trim_latest_running_turn is True
+
+
 def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

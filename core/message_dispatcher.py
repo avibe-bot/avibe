@@ -1500,24 +1500,10 @@ class ConsolidatedMessageDispatcher:
         else:
             terminal_reason = "failed"
 
-        # OUTBOUND status chokepoint (one of exactly two — the other is the
-        # inbound AgentService.handle_message). A terminal ``result`` ends the
-        # turn, so settle the avibe sidebar dot here regardless of delivery
-        # outcome. Non-avibe contexts resolve to no session id and are skipped;
-        # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
-        # ``_signal_turn_complete``).
         if canonical_type == "result":
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
                 return None
-            # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
-            # failed on is_error) via the turn owner, which applies the active-turn
-            # guard + skips non-avibe contexts. Runtime gate release happens after
-            # the result path clears/persists/streams its own state.
-            if mutates_turn_lifecycle:
-                manager = getattr(self.controller, "session_turns", None)
-                if manager is not None:
-                    manager.on_terminal_result(context, is_error=is_error)
         raw_text = text
         enhanced = None
         if canonical_type == "result" and level != "silent":
@@ -1526,6 +1512,23 @@ class ConsolidatedMessageDispatcher:
             text = enhanced.visible_text
         else:
             text = strip_silent_blocks(raw_text)
+        # Persist the exact terminal body in the Turn snapshot before delivery.
+        # A steer accepted after this Turn settles can then complete its Agent Run
+        # without guessing from transcript order or requiring a live sink.
+        if mutates_turn_lifecycle:
+            terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            manager = getattr(self.controller, "session_turns", None)
+            if manager is not None:
+                manager.on_terminal_result(
+                    context,
+                    is_error=is_error,
+                    terminal_evidence={
+                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        "terminal_error": terminal_error,
+                        "settles_run": output_semantics.settles_run,
+                        "output_provenance": output_semantics.provenance(context),
+                    },
+                )
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
         # we release the SSE waiter and return BEFORE any delivery / persistence /

@@ -258,7 +258,21 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             [item[1] for item in controller.im_client.sent_messages],
             ["first output", "final output"],
         )
-        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        controller.session_turns.on_terminal_result.assert_called_once_with(
+            context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "final output",
+                "terminal_error": None,
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_id": "turn-1",
+                    "sequence": 2,
+                    "output_id": "output-2",
+                    "detached": False,
+                },
+            },
+        )
         controller.agent_service.release_runtime_turn.assert_called_once_with(context)
 
     async def test_duplicate_terminal_output_still_settles_lifecycle(self):
@@ -313,7 +327,20 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             "agent-output:unknown:runtime-1:terminal-output",
         )
         self.assertEqual(controller.im_client.sent_messages, [])
-        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        controller.session_turns.on_terminal_result.assert_called_once_with(
+            context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "already delivered",
+                "terminal_error": None,
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_id": "turn-1",
+                    "output_id": "terminal-output",
+                    "detached": False,
+                },
+            },
+        )
         dispatcher._record_agent_run_terminal_result.assert_called_once_with(
             context,
             "already delivered",
