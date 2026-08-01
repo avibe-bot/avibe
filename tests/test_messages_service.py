@@ -1387,6 +1387,77 @@ def test_inbox_ignores_draft_and_queued_delivery_activity(isolated_state):
     assert row["replied"] is False
 
 
+def test_inbox_ignores_not_written_successor_as_terminal_evidence(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "Not written",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "agent",
+            "previous reply",
+            "2026-05-30T10:00:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "user",
+            "still running",
+            "2026-05-30T10:01:00Z",
+        )
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_not_written_inbox",
+            session_id="ses_not_written_inbox",
+            priority="p0",
+            state="interrupt_waiting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_not_written_inbox",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="refused replacement",
+            ),
+            dispatch_text="refused replacement",
+            now="2026-05-30T10:02:00Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_not_written_inbox",
+            session_id="ses_not_written_inbox",
+            initial_delivery_id="msg_not_written_inbox",
+            state="waiting",
+            backend="codex",
+            now="2026-05-30T10:02:00Z",
+        )
+        message_deliveries.terminalize_turn(
+            conn,
+            "trn_not_written_inbox",
+            outcome="not_written",
+            settled_by="interrupt_refused",
+            evidence_kind="definitive_stop_receipt",
+        )
+
+    with engine.connect() as conn:
+        rows = messages_service.list_inbox_sessions(conn, platform="avibe")[
+            "sessions"
+        ]
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "ses_not_written_inbox"
+    assert rows[0]["replied"] is True
+
+
 def test_list_session_messages_tail_returns_recent_window(isolated_state):
     """``tail=True`` returns the most-recent ``limit`` rows in chronological
     order (not the oldest page), so the Chat page's gap recovery sees the latest

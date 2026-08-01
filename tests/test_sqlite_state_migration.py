@@ -142,6 +142,21 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
                 content_text, content_json, metadata_json, created_at, updated_at,
                 delivered_at, read_at
             ) values (
+                'msg_fsm_agent_run', null, 'ses_fsm', 'avibe', 'harness',
+                'queued', null, null, 'harness', 'agent_run:run-legacy',
+                null, 'run prompt', '{"text":"run prompt"}', '{}', ?, ?, null, null
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, author_id,
+                author_name, source, native_message_id, parent_native_message_id,
+                content_text, content_json, metadata_json, created_at, updated_at,
+                delivered_at, read_at
+            ) values (
                 'msg_fsm_dedupe', null, 'ses_fsm', 'avibe', 'harness',
                 'harness_dedupe', null, null, 'harness', 'watch:legacy:run-1',
                 null, '', '{}', '{}', ?, ?, null, null
@@ -188,6 +203,10 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             "select state, dedupe_key from message_deliveries "
             "where id = 'msg_fsm_dedupe'"
         ).fetchone()
+        migrated_agent_run = conn.execute(
+            "select state, dedupe_key from message_deliveries "
+            "where id = 'msg_fsm_agent_run'"
+        ).fetchone()
         hold_state = conn.execute(
             "select queue_hold_state from agent_sessions where id = 'ses_fsm'"
         ).fetchone()
@@ -219,6 +238,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert delivery[0:2] == ("queued", "hello")
     assert json.loads(delivery[2])["content_text"] == "hello"
     assert migrated_dedupe == ("retired", "avibe:watch:legacy:run-1")
+    assert migrated_agent_run == ("queued", "avibe:agent_run:run-legacy")
     assert hold_state == ("held",)
     assert draft_state == ("unfinished thought", now)
     assert version == (HEAD_REVISION,)
@@ -252,12 +272,17 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
         restored_dedupe = conn.execute(
             "select type, native_message_id from messages where id = 'msg_fsm_dedupe'"
         ).fetchone()
+        restored_agent_run = conn.execute(
+            "select type, native_message_id from messages "
+            "where id = 'msg_fsm_agent_run'"
+        ).fetchone()
         version = conn.execute("select version_num from alembic_version").fetchone()
     assert "session_turns" not in tables
     assert "message_deliveries" not in tables
     assert existing == ("hello", "queued", "ses_fsm")
     assert restored_draft == ("unfinished thought", "draft")
     assert restored_dedupe == ("harness_dedupe", "watch:legacy:run-1")
+    assert restored_agent_run == ("queued", "agent_run:run-legacy")
     assert version == ("20260729_0042",)
 
 
@@ -329,6 +354,36 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
                 ),
             ),
         )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, content_text,
+                content_json, metadata_json, created_at, updated_at
+            ) values ('msg_accepted_ref', 'scope_fsm_trace', 'ses_fsm_trace',
+                'avibe', 'agent', 'result', 'accepted', '{}', '{}', ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, message_id, created_at
+            ) values ('show_accepted_ref', 'ses_fsm_trace', 'annotation',
+                'agent', 'session', '{}', '{}', 'msg_accepted_ref', ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, message_id, kind, source,
+                local_path, created_at
+            ) values ('media_accepted_ref', 'scope_fsm_trace', 'ses_fsm_trace',
+                'msg_accepted_ref', 'file', 'agent', '/tmp/accepted.txt', ?)
+            """,
+            (now,),
+        )
         conn.commit()
 
     run_migrations(db_path)
@@ -352,10 +407,21 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
             "select event_type from agent_events where id = ?",
             (tool_event_id,),
         ).fetchone()
+        accepted_refs = (
+            conn.execute(
+                "select message_id from show_session_events "
+                "where id = 'show_accepted_ref'"
+            ).fetchone(),
+            conn.execute(
+                "select message_id from media_objects "
+                "where token = 'media_accepted_ref'"
+            ).fetchone(),
+        )
     assert pseudo_count == 0
     assert tool_events == [(f"{tool_event_id}_1",)]
     assert silent_events == [("evt_existing_silent",)]
     assert collision == ("unrelated",)
+    assert accepted_refs == (("msg_accepted_ref",), ("msg_accepted_ref",))
 
     from storage import agent_activity_service
 
@@ -378,10 +444,32 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
             "where id in (?, ?) order by id",
             (tool_message_id, silent_message_id),
         ).fetchall()
+        remaining_events = conn.execute(
+            "select id, metadata_json from agent_events order by id"
+        ).fetchall()
+        downgraded_refs = (
+            conn.execute(
+                "select message_id from show_session_events "
+                "where id = 'show_accepted_ref'"
+            ).fetchone(),
+            conn.execute(
+                "select message_id from media_objects "
+                "where token = 'media_accepted_ref'"
+            ).fetchone(),
+        )
     assert restored_trace == [
         (silent_message_id, "silent", "silent trace"),
         (tool_message_id, "tool_call", "tool trace"),
     ]
+    assert {row[0] for row in remaining_events} == {
+        tool_event_id,
+        "evt_existing_silent",
+    }
+    metadata_by_id = {row[0]: json.loads(row[1]) for row in remaining_events}
+    assert metadata_by_id["evt_existing_silent"] == {
+        "legacy_message_id": silent_message_id
+    }
+    assert downgraded_refs == (("msg_accepted_ref",), ("msg_accepted_ref",))
 
 
 def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
@@ -921,11 +1009,11 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
     assert json.loads(downgraded["show_evt_legacy"]) == {"state": "accepted"}
     assert json.loads(downgraded["show_evt_accepted"]) == {"state": "accepted"}
     assert downgraded_messages["msg_accepted_show"] == (
-        "harness",
-        "harness",
-        "harness",
-        "show_annotation",
-        "show_evt_accepted",
+        "user",
+        "user",
+        None,
+        None,
+        None,
     )
 
 

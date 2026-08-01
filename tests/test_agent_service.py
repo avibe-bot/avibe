@@ -1017,10 +1017,16 @@ def test_agent_service_refresh_runtime_config_releases_backend_gates() -> None:
     asyncio.run(_run())
 
 
-def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
+@pytest.mark.parametrize("reason", ["not_active", "runtime_unavailable"])
+def test_agent_service_releases_runtime_gate_for_stale_stop_without_terminal_evidence(
+    reason: str,
+) -> None:
     async def _run():
-        service = AgentService(controller=_Controller())
-        agent = _StopRuntimeAgent("not_active")
+        controller = _Controller()
+        terminal_owner = Mock()
+        controller.session_turns = SimpleNamespace(on_native_terminal=terminal_owner)
+        service = AgentService(controller=controller)
+        agent = _StopRuntimeAgent(reason)
         service.register(agent)
         request = _request("stop")
         gate = service._get_turn_gate("session:/repo")
@@ -1034,6 +1040,7 @@ def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
         assert handled is False
         assert not gate.lock.locked()
         assert request.context.platform_specific["agent_runtime_turn_token"] == "stop-token"
+        terminal_owner.assert_not_called()
 
     asyncio.run(_run())
 

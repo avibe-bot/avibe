@@ -135,8 +135,15 @@ def _migrate_legacy_trace(bind, row: sa.RowMapping) -> None:
         },
     ).first()
     if existing:
+        previous_metadata_json = str(existing[1] or "{}")
         existing_metadata = _metadata(existing[1])
-        existing_metadata.update(metadata)
+        existing_metadata.update(
+            {
+                **metadata,
+                "migration_event_created": False,
+                "migration_previous_metadata_json": previous_metadata_json,
+            }
+        )
         bind.execute(
             sa.text(
                 "update agent_events set metadata_json = :metadata_json "
@@ -145,6 +152,7 @@ def _migrate_legacy_trace(bind, row: sa.RowMapping) -> None:
             {"id": existing[0], "metadata_json": _json(existing_metadata)},
         )
         return
+    metadata["migration_event_created"] = True
     bind.execute(
         sa.text(
             "insert into agent_events ("
@@ -227,6 +235,19 @@ def _migrate_pseudo_messages(bind) -> None:
             snapshot["author"] = "harness"
         snapshot_json = _json(snapshot)
         metadata = _metadata(row["metadata_json"])
+        provenance = metadata.get("scheduled_provenance")
+        provenance_spec = (
+            provenance.get("platform_specific")
+            if isinstance(provenance, dict)
+            else None
+        )
+        owned_agent_run = kind == "queued" and (
+            str(row["native_message_id"] or "").startswith("agent_run:")
+            or (
+                isinstance(provenance_spec, dict)
+                and provenance_spec.get("task_trigger_kind") == "agent_run"
+            )
+        )
         dispatch_text = str(
             metadata.get("_queued_dispatch_text")
             or row["content_text"]
@@ -246,18 +267,6 @@ def _migrate_pseudo_messages(bind) -> None:
             and session_id not in seen_queued_sessions
         ):
             seen_queued_sessions.add(session_id)
-            provenance = metadata.get("scheduled_provenance")
-            provenance_spec = (
-                provenance.get("platform_specific")
-                if isinstance(provenance, dict)
-                else None
-            )
-            owned_agent_run = str(row["native_message_id"] or "").startswith(
-                "agent_run:"
-            ) or (
-                isinstance(provenance_spec, dict)
-                and provenance_spec.get("task_trigger_kind") == "agent_run"
-            )
             if not owned_agent_run:
                 # Legacy startup resumed only an Agent-Run-owned queue head.
                 # Keep an ordinary head held so upgrade cannot dispatch it.
@@ -310,7 +319,7 @@ def _migrate_pseudo_messages(bind) -> None:
                 "dedupe_key": (
                     (
                         f"{row['platform']}:{row['native_message_id']}"
-                        if kind == "harness_dedupe"
+                        if kind == "harness_dedupe" or owned_agent_run
                         else f"legacy:{row['platform']}:{row['native_message_id']}"
                     )
                     if row["native_message_id"]
@@ -654,6 +663,23 @@ def upgrade() -> None:
     # SQLite rebuilds ``messages`` to add the CHECK.  Its SET NULL dependents
     # observe the transient DROP even though their accepted Message survives,
     # so retain and restore those audit links around the batch operation.
+    _snapshot_message_references(bind)
+    with op.batch_alter_table("messages") as batch:
+        batch.create_check_constraint(
+            "ck_messages_communication_type",
+            "type not in ('queued','pending','draft','harness_dedupe','silent','tool_call')",
+        )
+    _restore_message_references(bind)
+    for index_name, create_sql in (
+        ("ix_messages_inbox_activity", _INBOX_ACTIVITY_SQL),
+        ("ix_messages_inbox_agent_reply", _INBOX_AGENT_REPLY_SQL),
+        ("ix_messages_inbox_user_send", _INBOX_USER_SEND_SQL),
+    ):
+        op.drop_index(index_name, table_name="messages")
+        op.execute(create_sql)
+
+
+def _snapshot_message_references(bind) -> None:
     bind.execute(
         sa.text(
             "create temporary table _0043_show_message_refs as "
@@ -666,11 +692,9 @@ def upgrade() -> None:
             "select token, message_id from media_objects where message_id is not null"
         )
     )
-    with op.batch_alter_table("messages") as batch:
-        batch.create_check_constraint(
-            "ck_messages_communication_type",
-            "type not in ('queued','pending','draft','harness_dedupe','silent','tool_call')",
-        )
+
+
+def _restore_message_references(bind) -> None:
     bind.execute(
         sa.text(
             "update show_session_events set message_id = ("
@@ -689,13 +713,6 @@ def upgrade() -> None:
     )
     bind.execute(sa.text("drop table _0043_show_message_refs"))
     bind.execute(sa.text("drop table _0043_media_message_refs"))
-    for index_name, create_sql in (
-        ("ix_messages_inbox_activity", _INBOX_ACTIVITY_SQL),
-        ("ix_messages_inbox_agent_reply", _INBOX_AGENT_REPLY_SQL),
-        ("ix_messages_inbox_user_send", _INBOX_USER_SEND_SQL),
-    ):
-        op.drop_index(index_name, table_name="messages")
-        op.execute(create_sql)
 
 
 def _restore_legacy_messages(bind) -> None:
@@ -808,7 +825,7 @@ def _restore_legacy_drafts(bind) -> None:
 def _restore_legacy_trace_messages(bind) -> None:
     rows = bind.execute(
         sa.text(
-            "select metadata_json from agent_events "
+            "select id, metadata_json from agent_events "
             "where event_type in ('tool_call', 'silent_terminal') "
             "and json_valid(metadata_json) = 1 "
             "and json_extract(metadata_json, '$.migration_revision') = :revision"
@@ -857,6 +874,32 @@ def _restore_legacy_trace_messages(bind) -> None:
                 ),
                 {"message_id": message_id, "session_id": session_id},
             )
+        if metadata.get("migration_event_created") is True:
+            bind.execute(
+                sa.text(
+                    "delete from agent_events where id = :id "
+                    "and json_valid(metadata_json) = 1 "
+                    "and json_extract(metadata_json, '$.migration_revision') = :revision "
+                    "and json_extract(metadata_json, '$.legacy_message_id') = :message_id"
+                ),
+                {
+                    "id": row["id"],
+                    "revision": revision,
+                    "message_id": message_id,
+                },
+            )
+        else:
+            previous_metadata_json = metadata.get(
+                "migration_previous_metadata_json"
+            )
+            if not isinstance(previous_metadata_json, str):
+                raise RuntimeError(
+                    "0043 downgrade cannot restore pre-existing trace event metadata"
+                )
+            bind.execute(
+                sa.text("update agent_events set metadata_json = :metadata_json where id = :id"),
+                {"id": row["id"], "metadata_json": previous_metadata_json},
+            )
 
 
 def downgrade() -> None:
@@ -897,8 +940,10 @@ def downgrade() -> None:
         raise RuntimeError(
             "0043 downgrade refused: live, accepted, or ambiguous Delivery state cannot be represented without replay risk"
         )
+    _snapshot_message_references(bind)
     with op.batch_alter_table("messages") as batch:
         batch.drop_constraint("ck_messages_communication_type", type_="check")
+    _restore_message_references(bind)
     bind.execute(
         sa.text(
             "create temporary table _0043_message_session_refs ("

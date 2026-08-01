@@ -723,6 +723,102 @@ def test_replyless_terminal_keeps_subsecond_order_after_last_activity(isolated_s
     assert groups[0]["steps"] == 1
 
 
+def test_not_written_successor_does_not_close_active_turn_activity(isolated_state):
+    engine = create_sqlite_engine()
+    sid = "ses_not_written_activity"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_active_initial",
+            session_id=sid,
+            priority="p1",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="active input",
+            ),
+            dispatch_text="active input",
+            current_attempt_id="atm_active_initial",
+            current_attempt_kind="start",
+            current_target_turn_id="trn_active",
+            now="2026-06-01T10:00:00Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_active",
+            session_id=sid,
+            initial_delivery_id="msg_active_initial",
+            state="starting",
+            backend="codex",
+            now="2026-06-01T10:00:00Z",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id="msg_active_initial",
+            expected_attempt_id="atm_active_initial",
+            accepted_turn_id="trn_active",
+            evidence={"kind": "test_native_acceptance"},
+        ) is not None
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="evt_active_tool",
+            created_at="2026-06-01T10:00:01Z",
+            text="active tool",
+        )
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_refused_successor",
+            session_id=sid,
+            priority="p0",
+            state="interrupt_waiting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="replacement",
+            ),
+            dispatch_text="replacement",
+            now="2026-06-01T10:00:02Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_refused_successor",
+            session_id=sid,
+            initial_delivery_id="msg_refused_successor",
+            state="waiting",
+            backend="codex",
+            now="2026-06-01T10:00:02Z",
+        )
+        message_deliveries.terminalize_turn(
+            conn,
+            "trn_refused_successor",
+            outcome="not_written",
+            settled_by="interrupt_refused",
+            evidence_kind="definitive_stop_receipt",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert len(groups) == 1
+    assert groups[0]["status"] == "interrupted"
+    assert groups[0]["open"] is True
+    assert groups[0]["steps"] == 1
+
+
 def test_queued_initial_message_opens_at_its_accepted_turn(
     isolated_state,
     monkeypatch,

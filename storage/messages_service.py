@@ -926,6 +926,7 @@ def list_inbox_sessions(
         .where(
             session_turns.c.session_id == agent_sessions.c.id,
             session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome != "not_written",
         )
         .order_by(
             func.julianday(session_turns.c.terminal_at).desc(),
@@ -939,6 +940,7 @@ def list_inbox_sessions(
         .where(
             session_turns.c.session_id == agent_sessions.c.id,
             session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome != "not_written",
         )
         .order_by(
             func.julianday(session_turns.c.terminal_at).desc(),

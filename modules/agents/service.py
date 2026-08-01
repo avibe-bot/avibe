@@ -378,7 +378,11 @@ class AgentService:
             and gate.token
             and gate.runtime_started
         ):
-            self.release_runtime_turn(request.context)
+            # A stale Stop result proves only that this process-local gate no
+            # longer owns a stoppable runtime.  It is not terminal evidence for
+            # the durable Turn: ``not_active`` is consumed by the Turn control
+            # receipt, while ``runtime_unavailable`` remains ambiguous.
+            self.release_runtime_turn_key(runtime_key, gate.token)
         return handled
 
     def mark_runtime_turn_started(self, context: Any) -> None:

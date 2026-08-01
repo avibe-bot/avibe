@@ -334,6 +334,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         )
         .where(session_turns.c.session_id == session_id)
         .where(session_turns.c.state == "terminal")
+        .where(session_turns.c.terminal_outcome != "not_written")
         .where(session_turns.c.terminal_at.is_not(None))
         .order_by(
             func.julianday(session_turns.c.terminal_at).desc(),
