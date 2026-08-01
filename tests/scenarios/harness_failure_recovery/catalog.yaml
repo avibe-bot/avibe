@@ -3969,6 +3969,37 @@ scenarios:
     # teardown_admission hold: begin_ handed back a token
     # ('74cc7324...' is not None) and registered the successor in in_flight.
     test: tests/test_claude_agent_initiated_turn.py::AgentInitiatedTurnTeardownAdmissionTests::test_agent_initiated_successor_is_refused_during_teardown
+  - id: HFR-344
+    name: >-
+      the process-exit admission barrier applies to agent-initiated turns before
+      session-id resolution, so session-less platforms honor it too
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 18. HFR-343's ONE-ORDERING-BUG refinement. The outer
+    # predicate (AgentService._teardown_admission_closed) resolved the context's
+    # session id FIRST and proceeded when there was none -- the documented IM / CLI
+    # / failed-session-persistence case. But the HFR-339 shutdown flag is
+    # session-INDEPENDENT by construction: "this process is dying" is true for
+    # every platform, not just contexts that can name an agent_sessions row. So
+    # after close_admission_for_shutdown(), unsolicited backend output on exactly
+    # those session-less platforms could still acquire a runtime gate and start
+    # delivering a backend-initiated turn while cleanup_sync dismantled the
+    # backends -- stranding the gate and the output.
+    # THE FIX: the flag is consulted FIRST and independently of session-id
+    # resolution (getattr-guarded, failure proceeds as before); only the COUNTED
+    # holds are session-scoped and keep the session-id requirement. The INNER
+    # chokepoint (register_agent_initiated_turn) needed no change: it refuses
+    # session-less contexts outright (the pre-existing avibe-only no-op), so it
+    # never had the hole.
+    # PINNED COMPANION: a session-less context under only a COUNTED hold (no flag)
+    # keeps today's proceed behavior -- counted holds are per-session and a context
+    # with no session row cannot be held by one; the finding is about the global
+    # barrier, not about making session-less contexts guess.
+    # RED: pre-fix, the session-less begin_ call under the shutdown flag returned a
+    # live token with the gate acquired.
+    test: tests/test_claude_agent_initiated_turn.py::AgentInitiatedTurnTeardownAdmissionTests::test_shutdown_refuses_agent_initiated_turns_without_a_session_id
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

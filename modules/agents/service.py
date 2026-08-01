@@ -598,14 +598,34 @@ class AgentService:
         SAME DEFENSIVE ADAPTER SHAPE as every other cross-service read in this codebase
         (compare ``ScheduledTaskService._teardown_held_session_locks``): resolve through
         ``getattr``, verify the predicate is callable, and on ANY failure proceed as
-        before rather than refusing work on a manager that could not be consulted. A
-        context that resolves to no session id is the avibe-only no-op case — IM / CLI
-        turns have no session row to hold — and also proceeds as today.
+        before rather than refusing work on a manager that could not be consulted.
+
+        ORDERING (HFR-344): the HFR-339 process-exit flag is consulted FIRST and
+        INDEPENDENTLY of the session-id resolution, because it is session-independent
+        by construction — "this process is dying" is true for every platform, not just
+        the contexts that can name an ``agent_sessions`` row. Round 18 found the
+        inverse ordering: the no-session-id early return (IM / CLI, or a context whose
+        session persistence failed) sat in front of the flag, so unsolicited backend
+        output on exactly those platforms could still acquire a runtime gate while
+        ``cleanup_sync`` was dismantling the backends, stranding the gate and the
+        output. Only the COUNTED holds are session-scoped: a context that resolves to
+        no session id has no session row a teardown could hold, so it proceeds past
+        that half exactly as before — the flag is the one barrier that applies to
+        everything.
         """
 
         manager = getattr(self.controller, "session_turns", None)
         if manager is None:
             return False
+        shutdown_closed = getattr(manager, "is_admission_closed_for_shutdown", None)
+        try:
+            if callable(shutdown_closed) and shutdown_closed():
+                return True
+        except Exception:
+            logger.debug(
+                "agent-initiated turn: shutdown-admission read failed; proceeding",
+                exc_info=True,
+            )
         closed = getattr(manager, "is_teardown_admission_closed", None)
         if not callable(closed):
             return False

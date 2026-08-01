@@ -2710,3 +2710,53 @@ class AgentInitiatedTurnTeardownAdmissionTests(unittest.IsolatedAsyncioTestCase)
             manager.register_agent_initiated_turn(_teardown_ctx(shutdown_session))
         )
         self.assertNotIn(shutdown_session, manager.in_flight)
+
+    async def test_shutdown_refuses_agent_initiated_turns_without_a_session_id(self):
+        """HFR-344: the process-exit barrier applies BEFORE session-id resolution.
+
+        HFR-343's outer predicate resolved the context's session id first and
+        proceeded when there was none — the documented IM / CLI /
+        failed-session-persistence case. But the HFR-339 shutdown flag is
+        session-INDEPENDENT: after ``close_admission_for_shutdown()`` a session-less
+        context could still acquire a runtime gate and start delivering a
+        backend-initiated turn while ``cleanup_sync`` dismantled the backends,
+        stranding the gate and the output. The flag must be consulted first; only
+        the counted holds need a session id.
+        """
+        agent, service, manager, controller = _wire_real_manager()
+        sessionless = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"turn_token": "T-ai-344"},
+        )
+        assert controller._session_id_from_context(sessionless) is None
+        runtime_key = "S:/w-344"
+
+        # COMPANION FIRST (pins today's behavior the finding does NOT change): a
+        # session-less context under only a COUNTED hold proceeds — counted holds
+        # are session-scoped, and a context with no session row cannot be held by
+        # one. The finding is about the global flag, not about making session-less
+        # contexts guess.
+        with manager.teardown_admission("some-other-session"):
+            token = await service.begin_agent_initiated_turn(
+                "claude", sessionless, runtime_key
+            )
+            self.assertTrue(token)
+            gate = service._get_turn_gate(runtime_key)
+            self.assertTrue(gate.lock.locked())
+            # A session-less context never registers an FSM turn (pre-existing
+            # avibe-only no-op) — only the gate is held; release it for the next leg.
+            self.assertEqual(manager.in_flight, {})
+            gate.lock.release()
+
+        # THE FINDING: after the process-wide close, the SAME session-less context
+        # must be refused at the service layer — no gate acquired, nothing to
+        # strand while the backends come apart.
+        manager.close_admission_for_shutdown()
+        token = await service.begin_agent_initiated_turn(
+            "claude", sessionless, runtime_key
+        )
+        self.assertIsNone(token)
+        self.assertFalse(service._get_turn_gate(runtime_key).lock.locked())
+        self.assertEqual(manager.in_flight, {})
