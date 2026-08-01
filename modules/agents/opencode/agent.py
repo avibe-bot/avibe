@@ -617,6 +617,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # non-404), and the error-cleanup paths reference session_id — keep it
         # defined so they can't trip UnboundLocalError (Codex P2).
         session_id = None
+        logical_turn_id = ""
+        start_attempt_id = ""
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
@@ -957,6 +959,46 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if session_id:
                 self.sessions.remove_active_poll(session_id)
             raise
+        except OpenCodePromptRejectedError as e:
+            error_text = f"{type(e).__name__}: {e}"
+            logger.error("OpenCode prompt was definitively rejected: %s", e)
+
+            poll_can_be_removed = not (logical_turn_id and start_attempt_id)
+            if logical_turn_id and start_attempt_id:
+                reconcile = getattr(
+                    getattr(self.controller, "session_turns", None),
+                    "reconcile_start_attempt_not_written",
+                    None,
+                )
+                if callable(reconcile):
+                    try:
+                        poll_can_be_removed = bool(
+                            reconcile(
+                                logical_turn_id,
+                                start_attempt_id,
+                                backend=self.name,
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist definitive rejected OpenCode start "
+                            "for Turn=%s; preserving its active poll",
+                            logical_turn_id,
+                        )
+
+            await self._remove_ack_reaction(request)
+            if session_id and poll_can_be_removed:
+                self.sessions.remove_active_poll(session_id)
+
+            await self.record_model_hub_native_failure(request.context, error_text)
+            await emit_backend_failure(
+                self.controller,
+                request.context,
+                self.name,
+                error_text,
+                display_text=f"OpenCode request failed: {error_text}",
+                request=request,
+            )
         except Exception as e:
             error_name = type(e).__name__
             error_details = str(e).strip()

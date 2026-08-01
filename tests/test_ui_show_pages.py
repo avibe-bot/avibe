@@ -211,6 +211,16 @@ def _accept_dispatch(payload: dict, message_type: str = "harness") -> None:
             turn_id=turn_id,
             attempt_id=attempt_id,
         )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key=f"runtime:{turn_id}",
+            runtime_turn_id=f"runtime-turn:{turn_id}",
+            native_turn_id=f"native:{turn_id}",
+        ) is not None
         assert message_deliveries.materialize_start_acceptance(
             conn,
             turn_id=turn_id,
