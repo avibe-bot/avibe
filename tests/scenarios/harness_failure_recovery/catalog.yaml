@@ -4550,6 +4550,29 @@ scenarios:
     # A create-per-run Session reserved before the refusal is released (or recorded
     # for retry cleanup) so repeated teardown races cannot leak reservations.
     test: tests/test_scheduled_tasks.py::test_teardown_admission_refusal_requeues_a_claimed_scheduled_turn
+  - id: HFR-371
+    name: scheduled IM dispatch preserves structured admission refusal
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 31 (F1). MessageHandler's shared IM path converted
+    # TurnAdmissionClosedError into ordinary error text, so the claim owner never
+    # reached HFR-370's requeue branch. Scheduled turns now propagate that internal
+    # refusal without posting a false failure while human-turn error behavior stays
+    # unchanged.
+    test: tests/test_scheduled_tasks.py::test_im_handler_preserves_scheduled_admission_refusal
+  - id: HFR-372
+    name: a cancelled scheduler one-shot retires before job reconciliation
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 31 (F2). Cancellation terminalized the fired run but skipped
+    # the definition result stamp; reconcile_jobs therefore re-added the still-live
+    # past-due DateTrigger and could send the prompt twice. The definition is now
+    # disabled with the same interruption cause before scheduler reconciliation.
+    test: tests/test_scheduled_tasks.py::test_cancelled_scheduler_one_shot_is_retired_before_reconcile
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

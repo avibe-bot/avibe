@@ -16,6 +16,7 @@ from core.message_output import terminal_output_for, terminal_turn_output
 from core.message_context import resolve_context_thread_id
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
+from modules.agents.service import TurnAdmissionClosedError
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
@@ -589,6 +590,15 @@ class MessageHandler(BaseHandler):
                     await self._delete_ack(context.channel_id, request)
             return None
         except Exception as e:
+            # HFR-371. A scheduled IM turn that teardown refuses before backend
+            # dispatch is still durable queued work, not a user-visible execution
+            # failure. Preserve the structured refusal for ScheduledTaskService's
+            # claim owner; human turns retain the ordinary error path below.
+            if (
+                source == self.TURN_SOURCE_SCHEDULED
+                and isinstance(e, TurnAdmissionClosedError)
+            ):
+                raise
             logger.error(f"Error processing user message: {e}", exc_info=True)
             # Clean up reaction on any exception
             try:

@@ -6678,6 +6678,51 @@ class ScheduledTaskService:
             ", ".join(run_ids),
         )
 
+    def _retire_cancelled_one_shot(
+        self,
+        task: ScheduledTask,
+        *,
+        execution_id: str,
+        disable_one_shot: bool,
+    ) -> None:
+        """Retire a fired ``at`` definition before scheduler reconciliation.
+
+        ``mark_task_result`` is the definition store's guarded, single-write
+        terminal stamp. Applying it before ``reconcile_jobs`` makes the interrupted
+        fire and the definition lifecycle one outcome: the past-due DateTrigger can
+        never be re-added after its run has been terminalized. A refused or failed
+        stamp must not replace the ``CancelledError`` already unwinding.
+        """
+
+        if not disable_one_shot or task.schedule_type != "at":
+            return
+        settled_by = (
+            self._execution_cancel_causes.get(execution_id)
+            or SETTLED_BY_INTERRUPTED
+        )
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(
+                settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_INTERRUPTED]
+            )
+        )
+        try:
+            if not self.store.mark_task_result(
+                task.id,
+                error=error_text,
+                disable_one_shot=True,
+            ):
+                logger.warning(
+                    "Cancelled one-shot task %s was already reclaimed before its "
+                    "definition could be retired",
+                    task.id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to retire cancelled one-shot task %s",
+                task.id,
+                exc_info=True,
+            )
+
     async def _execute_task(
         self,
         task: ScheduledTask,
@@ -6721,6 +6766,14 @@ class ScheduledTaskService:
                 **({"agent_id": agent_id} if agent_id else {}),
             )
         except asyncio.CancelledError:
+            # HFR-372. Retire a scheduler-fired one-shot before reconcile_jobs can
+            # re-add its past-due DateTrigger. The outer claim owner still records
+            # the run's guarded terminal settlement while this cancellation unwinds.
+            self._retire_cancelled_one_shot(
+                task,
+                execution_id=execution_id,
+                disable_one_shot=disable_one_shot,
+            )
             self.reconcile_jobs()
             raise
         except TurnAdmissionClosedError:
@@ -6777,6 +6830,11 @@ class ScheduledTaskService:
                         ),
                     )
                 except asyncio.CancelledError:
+                    self._retire_cancelled_one_shot(
+                        task,
+                        execution_id=execution_id,
+                        disable_one_shot=disable_one_shot,
+                    )
                     self.reconcile_jobs()
                     raise
                 except TurnAdmissionClosedError:

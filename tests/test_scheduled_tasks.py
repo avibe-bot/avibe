@@ -2167,8 +2167,8 @@ def test_recover_processing_drops_completed_requests(tmp_path: Path) -> None:
     assert not (store.pending_dir / f"{request.id}.json").exists()
 
 
-def test_drain_requests_terminalizes_cancelled_task_run(tmp_path: Path) -> None:
-    """HFR-003: cancellation terminalizes the claim and releases its Session slot.
+def test_cancelled_scheduler_one_shot_is_retired_before_reconcile(tmp_path: Path) -> None:
+    """HFR-003/HFR-372: cancellation terminalizes the fired one-shot exactly once.
 
     This test used to assert the opposite — that the claim went back to
     ``pending`` — which is the defect PR2 removes. Requeueing on the legacy file
@@ -2192,7 +2192,9 @@ def test_drain_requests_terminalizes_cancelled_task_run(tmp_path: Path) -> None:
         run_at="2026-03-31T09:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    request = request_store.enqueue_task_run(task.id)
+    request = request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
@@ -2227,8 +2229,10 @@ def test_drain_requests_terminalizes_cancelled_task_run(tmp_path: Path) -> None:
     reloaded = ScheduledTaskStore(path)
     updated = reloaded.get_task(task.id)
     assert updated is not None
-    assert updated.last_run_at is None
-    assert updated.enabled is True
+    assert updated.last_run_at is not None
+    assert updated.last_error
+    assert updated.enabled is False
+    assert service.scheduler.get_job(task.id) is None
     # Terminal, and NOT waiting to fire the same prompt a second time.
     assert not (request_store.pending_dir / f"{request.id}.json").exists()
     assert not (request_store.processing_dir / f"{request.id}.json").exists()
@@ -2237,6 +2241,7 @@ def test_drain_requests_terminalizes_cancelled_task_run(tmp_path: Path) -> None:
     completed = json.loads(completed_path.read_text(encoding="utf-8"))
     assert completed["ok"] is False
     assert completed["error"]
+    assert completed["error"] == updated.last_error
     assert completed["completed_at"]
     assert completed["metadata"]["interrupt_reason"] == "interrupted"
 
@@ -5943,6 +5948,50 @@ def test_teardown_admission_refusal_requeues_a_claimed_scheduled_turn(
             f"teardown refused harness definition {task.id} before dispatch",
         )
     ]
+
+
+def test_im_handler_preserves_scheduled_admission_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-371: the real IM pipeline must not flatten pre-dispatch refusal."""
+
+    from modules.agents.service import TurnAdmissionClosedError
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    task_store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = task_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="deliver after teardown",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+    )
+    service = _dispatching_binding_service(
+        tmp_path, task_store, db_path=db_path
+    )
+
+    async def _refuse_before_backend(_agent_name, _request):
+        raise TurnAdmissionClosedError("teardown owns admission")
+
+    service.controller.agent_service.handle_message = _refuse_before_backend
+    queued = service.request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    saved = service.request_store.get_run(queued.id)
+    assert saved is not None
+    assert saved["status"] == "queued"
+    assert saved.get("error") is None
+    current = task_store.get_task(task.id)
+    assert current is not None
+    assert current.enabled is True
+    assert current.last_error is None
+    assert current.last_run_at is None
+    assert service.controller.im_client.sent == []
 
 
 def test_swept_run_notifies_the_session_that_launched_it(tmp_path: Path, monkeypatch) -> None:
