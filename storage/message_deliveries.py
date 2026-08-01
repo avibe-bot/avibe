@@ -61,6 +61,13 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def native_dedupe_key(platform: str, native_message_id: str | None) -> str | None:
+    """Return the canonical live dedupe identity for a native submission."""
+
+    native_id = str(native_message_id or "").strip()
+    return f"{platform}:{native_id}" if native_id else None
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -278,6 +285,30 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS)
 
 
+def has_substantive_input(
+    dispatch_text: str | None,
+    content: dict[str, Any] | None = None,
+    *,
+    has_attachments: bool = False,
+) -> bool:
+    """Whether an admission contains text or an actual attachment."""
+
+    if str(dispatch_text or "").strip():
+        return True
+    attachments = (content or {}).get("attachments")
+    return has_attachments or (isinstance(attachments, list) and bool(attachments))
+
+
+def has_substantive_content(delivery: dict[str, Any]) -> bool:
+    """Whether a reserved Delivery can produce a meaningful backend input."""
+
+    payload = delivery_payload(delivery)
+    return has_substantive_input(
+        delivery.get("dispatch_text"),
+        payload.get("content"),
+    )
+
+
 def list_queued_page(conn: Connection, session_id: str, *, page_request: Any) -> Any:
     from storage.pagination import page_result_from_limit_plus_one
 
@@ -451,9 +482,7 @@ def enqueue_queued(
             native_message_id=native_message_id,
         ),
         dispatch_text=text if dispatch_text is None else dispatch_text,
-        dedupe_key=(
-            f"{platform}:{native_message_id}" if native_message_id else None
-        ),
+        dedupe_key=native_dedupe_key(platform, native_message_id),
         history_event={"kind": "submitted", "priority": "p3"},
         now=now,
     )

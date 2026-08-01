@@ -70,6 +70,13 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _turn_event_payload(session_id: str, turn_id: str | None = None) -> dict[str, str]:
+    payload = {"session_id": session_id}
+    if turn_id:
+        payload["turn_id"] = turn_id
+    return payload
+
+
 def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
     """Annotate a registry background activity with the unified banner fields.
 
@@ -848,7 +855,7 @@ class SessionTurnManager:
             session_id=str(delivery["session_id"]),
             priority=str(delivery["priority"]),
             content=str(delivery.get("dispatch_text") or ""),
-            has_content=True,
+            has_content=delivery_store.has_substantive_content(delivery),
             delivery_id=str(delivery["id"]),
             scope_id=payload.get("scope_id"),
             platform=str(payload.get("platform") or "avibe"),
@@ -1040,10 +1047,9 @@ class SessionTurnManager:
             if existing["session_id"] != request.session_id:
                 raise ValueError("Delivery does not belong to the target Session")
             return existing
-        dedupe_key = (
-            f"{request.platform}:{request.native_message_id}"
-            if request.native_message_id
-            else None
+        dedupe_key = delivery_store.native_dedupe_key(
+            request.platform,
+            request.native_message_id,
         )
         return delivery_store.insert_delivery(
             conn,
@@ -2225,7 +2231,10 @@ class SessionTurnManager:
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
 
-                bus.publish("turn.end", {"session_id": session_id})
+                bus.publish(
+                    "turn.end",
+                    _turn_event_payload(session_id, logical_turn_id),
+                )
             successor_turn_id = terminal.get("successor_turn_id")
             if successor_turn_id:
                 await self._start_persisted_turn(str(successor_turn_id))
@@ -3457,6 +3466,26 @@ class SessionTurnManager:
             reservations = delivery_store.recoverable_reservations(conn, session_id)
         for reservation in reservations:
             target_session = str(reservation["session_id"])
+            if not delivery_store.has_substantive_content(reservation):
+                with self._sqlite_engine().begin() as conn:
+                    reserve_write_lock(conn)
+                    latest = delivery_store.get_delivery(
+                        conn, str(reservation["id"])
+                    )
+                    retired = bool(
+                        latest is not None
+                        and latest["state"] == "reserved"
+                        and not delivery_store.has_substantive_content(latest)
+                        and delivery_store.retire_reserved(
+                            conn,
+                            target_session,
+                            str(latest["id"]),
+                            reason="empty_reserved_submission",
+                        )
+                    )
+                if retired:
+                    recovered.append(target_session)
+                continue
             try:
                 context = self._delivery_context(target_session)
                 self._hydrate_delivery_context(context, reservation)
@@ -3555,6 +3584,33 @@ class SessionTurnManager:
         else:
             await self.drain_delivery_queue(session_id)
 
+    def _turn_has_terminal_run(self, turn_id: str) -> bool:
+        with self._sqlite_engine().connect() as conn:
+            deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+            run_ids = list(
+                dict.fromkeys(
+                    run_id
+                    for delivery in deliveries
+                    for run_id in delivery_store.agent_run_ids_for_delivery(
+                        conn, delivery
+                    )
+                )
+            )
+            if not run_ids:
+                return False
+            statuses = {
+                str(row["id"]): normalize_run_status(row["status"])
+                for row in conn.execute(
+                    select(agent_runs.c.id, agent_runs.c.status).where(
+                        agent_runs.c.id.in_(run_ids)
+                    )
+                ).mappings()
+            }
+        return any(
+            statuses.get(run_id) not in {"queued", "running"}
+            for run_id in run_ids
+        )
+
     async def submit(
         self,
         session_id: Optional[str],
@@ -3591,7 +3647,13 @@ class SessionTurnManager:
             session_id=session_id,
             priority="p0" if delivery_intent == "send_now" else "p3",
             content=text,
-            has_content=bool(text or getattr(context, "files", None)),
+            has_content=delivery_store.has_substantive_input(
+                text,
+                spec.get("message_content")
+                if isinstance(spec.get("message_content"), dict)
+                else None,
+                has_attachments=bool(getattr(context, "files", None)),
+            ),
             delivery_id=delivery_id,
             scope_id=str(spec.get("scope_id") or "").strip() or None,
             platform="avibe",
@@ -3671,6 +3733,7 @@ class SessionTurnManager:
         async def _runner() -> None:
             cancelled = False
             failed = False
+            prewrite_refused = False
             # How this turn's waiter was released, in the ``core.run_settlement``
             # vocabulary. Anything other than a real terminal result means no result
             # is coming, so an ``agent_runs`` row this turn owns has to be settled
@@ -3678,6 +3741,19 @@ class SessionTurnManager:
             # turn ends, so nobody downstream can do it (Codex P1).
             settled_by: Optional[str] = None
             try:
+                if (
+                    durable_turn_registered
+                    and logical_turn_id
+                    and self._turn_has_terminal_run(logical_turn_id)
+                ):
+                    prewrite_refused = True
+                    self._terminalize_durable_turn(
+                        logical_turn_id,
+                        "not_written",
+                        settled_by="terminal_run",
+                        evidence_kind="terminal_run_before_native_dispatch",
+                    )
+                    return
                 outcome = await dispatch_turn_with_outcome(
                     self.controller,
                     context,
@@ -3713,7 +3789,7 @@ class SessionTurnManager:
             finally:
                 if isinstance(session_id, str):
                     durable_terminal_result: dict[str, Any] = {}
-                    prewrite_refused = (
+                    prewrite_refused = prewrite_refused or (
                         settled_by == SETTLED_BY_REFUSED_CONCURRENT_TURN
                     )
                     # The turn is over — the agent emitted its terminal result, the
@@ -3734,7 +3810,10 @@ class SessionTurnManager:
                     if turn is not None:
                         self.in_flight.pop(session_id, None)
                     if turn is not None:
-                        bus.publish("turn.end", {"session_id": session_id})
+                        bus.publish(
+                            "turn.end",
+                            _turn_event_payload(session_id, logical_turn_id),
+                        )
                     if cancelled:
                         # Attribute the cancellation to whoever caused it. The Turn
                         # carries the cause when the canceller had a more specific one
@@ -3817,11 +3896,61 @@ class SessionTurnManager:
             # no-op; every terminal path still settles the status (outbound
             # chokepoint / cancel / startup recovery).
             self.controller.set_agent_status(session_id, "running")
-            bus.publish("turn.start", {"session_id": session_id})
+            bus.publish(
+                "turn.start",
+                _turn_event_payload(session_id, logical_turn_id),
+            )
 
     async def flush_queue(self, session_id: str) -> bool:
         """Drain one claimable Delivery through the sole FIFO owner."""
         return await self.drain_delivery_queue(session_id)
+
+    async def reconcile_terminal_run_delivery(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Retire an exact terminal Run input when no native effect is possible."""
+
+        retired = False
+        state: str | None = None
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            run = conn.execute(
+                select(
+                    agent_runs.c.status,
+                    agent_runs.c.session_id,
+                    agent_runs.c.delivery_id,
+                )
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            ).mappings().first()
+            if (
+                run is None
+                or normalize_run_status(run["status"]) in {"queued", "running"}
+                or str(run["session_id"] or "") != session_id
+                or not run["delivery_id"]
+            ):
+                return {"changed": False, "state": None}
+            delivery = delivery_store.get_delivery(conn, str(run["delivery_id"]))
+            if delivery is None or str(delivery["session_id"]) != session_id:
+                return {"changed": False, "state": None}
+            state = str(delivery["state"])
+            if delivery_store.policy_for(state).run_cancel == "retire":
+                retired = delivery_store.retire_not_written(
+                    conn,
+                    session_id,
+                    str(delivery["id"]),
+                    reason="terminal_run_before_native_write",
+                )
+                if retired:
+                    state = "retired"
+        if retired:
+            from core.inbox_events import bus
+
+            bus.publish("queue.updated", {"session_id": session_id})
+        return {"changed": retired, "state": state}
 
     async def recover_persisted_agent_run_queue(
         self,
@@ -4109,7 +4238,10 @@ class SessionTurnManager:
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
 
-                bus.publish("turn.end", {"session_id": session_id})
+                bus.publish(
+                    "turn.end",
+                    _turn_event_payload(session_id, turn.logical_turn_id),
+                )
             else:
                 turn.task.cancel()
                 tasks_to_settle.append(turn.task)
@@ -4215,7 +4347,10 @@ class SessionTurnManager:
                 from core.inbox_events import bus
 
                 if released_turn is not None:
-                    bus.publish("turn.end", {"session_id": session_id})
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, turn.logical_turn_id),
+                    )
                 if self.controller is not None:
                     self.controller.set_agent_status(session_id, "idle")
                 backend = self._context_backend(turn.context)
@@ -4664,7 +4799,10 @@ class SessionTurnManager:
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:
-                    bus.publish("turn.end", {"session_id": session_id})
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, turn_token),
+                    )
                 if durable_turn_registered:
                     try:
                         durable_terminal_result = self._terminalize_durable_turn(
@@ -4726,7 +4864,10 @@ class SessionTurnManager:
             started_at=_utc_now_iso(),
             logical_turn_id=turn_token,
         )
-        bus.publish("turn.start", {"session_id": session_id})
+        bus.publish(
+            "turn.start",
+            _turn_event_payload(session_id, turn_token),
+        )
         if self._pop_context_flag(context, _SHOW_CHECKPOINT_DEFERRED_START_KEY):
             self._begin_show_checkpoint(context)
         return True

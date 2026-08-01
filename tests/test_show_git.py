@@ -511,8 +511,9 @@ def test_turn_event_subscriber_uses_storage_context_without_payload_changes(reso
     bus = InboxEventBus()
     service.start(bus)
 
-    bus.publish("turn.start", {"session_id": session_id})
-    bus.publish("turn.end", {"session_id": session_id})
+    event = {"session_id": session_id, "turn_id": "turn-current"}
+    bus.publish("turn.start", event)
+    bus.publish("turn.end", event)
     service.stop()
     bus.publish("turn.end", {"session_id": session_id})
 
@@ -520,9 +521,10 @@ def test_turn_event_subscriber_uses_storage_context_without_payload_changes(reso
         (PRE_TURN, {"run_id": "run-event"}),
         (POST_TURN, {"message": "driving user message", "run_id": "run-event"}),
     ]
-    assert lookups[0] == (session_id, {})
-    assert lookups[1][0] == session_id
-    assert set(lookups[1][1]) == {"after"}
+    assert lookups == [
+        (session_id, {"turn_id": "turn-current"}),
+        (session_id, {"turn_id": "turn-current"}),
+    ]
 
 
 def test_turn_event_subscriber_keeps_start_message_when_next_pending_can_arrive(resolved_git, monkeypatch):
@@ -699,8 +701,8 @@ def test_agent_initiated_turn_reuses_fsm_bus_lifecycle(resolved_git, monkeypatch
         service.stop()
 
     assert lifecycle == [
-        ("turn.start", {"session_id": session_id}),
-        ("turn.end", {"session_id": session_id}),
+        ("turn.start", {"session_id": session_id, "turn_id": "turn-agent"}),
+        ("turn.end", {"session_id": session_id, "turn_id": "turn-agent"}),
     ]
     assert calls == [
         (PRE_TURN, {"run_id": None}),
@@ -872,6 +874,13 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     context = show_git.load_turn_checkpoint_context(session_id, after="2099-01-01T00:00:00+00:00")
     assert context.message == "current driving message"
     assert context.message_id == current["id"]
+    exact_context = show_git.load_turn_checkpoint_context(
+        session_id,
+        turn_id="turn_storage_boundary",
+        after="2100-01-01T00:00:00+00:00",
+    )
+    assert exact_context.message == "current driving message"
+    assert exact_context.turn_id == "turn_storage_boundary"
 
 
 def test_storage_lookup_includes_harness_driving_message():

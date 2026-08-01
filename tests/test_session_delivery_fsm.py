@@ -1610,6 +1610,83 @@ def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(manage
     assert turn is not None and turn["terminal_outcome"] == "not_written"
 
 
+def test_terminal_run_wins_after_turn_launch_before_runner_dispatch(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    native_dispatch = AsyncMock()
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", native_dispatch)
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    run_id = "run-failed-after-turn-launch"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="must still not run",
+            ),
+            dispatch_text="must still not run",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="must still not run",
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                run_type="task_run",
+                status="failed",
+                session_id="ses_fsm",
+                delivery_id=delivery_id,
+                cancel_requested=0,
+                error="task result was not recorded",
+                created_at=now,
+                completed_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            _context(),
+            "must still not run",
+            source="scheduled",
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    native_dispatch.assert_not_awaited()
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["settled_by"] == "terminal_run"
+
+
 def test_materialized_message_preserves_submission_and_acceptance_times(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     turn_id, _context_value = asyncio.run(_activate(manager, text="ordered input"))
@@ -1727,6 +1804,84 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
 
     assert dispatched == [("", [str(attachment)])]
     assert _row(engine, delivery_id)["state"] == "claimed"
+
+
+def test_empty_reserved_submission_is_retired_without_native_dispatch(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="   ",
+                content={"attachments": []},
+            ),
+            dispatch_text="   ",
+        )
+
+    assert asyncio.run(manager.recover_durable_delivery_state()) == ["ses_fsm"]
+
+    assert starts == []
+    assert _row(engine, delivery_id)["state"] == "retired"
+
+
+def test_terminal_run_retires_its_exact_prewrite_delivery(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="scheduled input",
+            ),
+            dispatch_text="scheduled input",
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id="run_terminal_stamp_refused",
+                run_type="task_run",
+                status="failed",
+                session_id="ses_fsm",
+                delivery_id=delivery_id,
+                cancel_requested=0,
+                error="task result was not recorded",
+                created_at=now,
+                completed_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    result = asyncio.run(
+        manager.reconcile_terminal_run_delivery(
+            "run_terminal_stamp_refused",
+            session_id="ses_fsm",
+        )
+    )
+
+    assert result == {"changed": True, "state": "retired"}
+    assert starts == []
+    assert _row(engine, delivery_id)["state"] == "retired"
 
 
 def test_unresolved_p1_fence_blocks_later_but_not_older_fifo(managers) -> None:

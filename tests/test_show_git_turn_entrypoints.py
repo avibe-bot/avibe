@@ -352,14 +352,14 @@ def test_all_turn_entrypoints_reach_checkpoint_subscriber(monkeypatch, tmp_path)
         bus.unsubscribe(subscription_id)
         service.stop()
 
-    expected_lifecycle = []
-    for name, context in contexts.items():
+    assert len(lifecycle) == len(contexts) * 2
+    for index, (name, context) in enumerate(contexts.items()):
         session_id = context.platform_specific["agent_session_id"]
-        expected_lifecycle.extend(
-            [
-                ("turn.start", {"session_id": session_id}),
-                ("turn.end", {"session_id": session_id}),
-            ]
-        )
+        start_event, end_event = lifecycle[index * 2 : index * 2 + 2]
+        assert start_event[0] == "turn.start", name
+        assert end_event[0] == "turn.end", name
+        assert start_event[1]["session_id"] == session_id, name
+        assert end_event[1]["session_id"] == session_id, name
+        assert start_event[1].get("turn_id"), name
+        assert end_event[1].get("turn_id") == start_event[1]["turn_id"], name
         assert checkpoint_calls[session_id] == [PRE_TURN, POST_TURN], name
-    assert lifecycle == expected_lifecycle

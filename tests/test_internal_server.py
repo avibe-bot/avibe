@@ -2115,6 +2115,7 @@ def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeyp
                     author="user",
                     source="user",
                     text="q2",
+                    author_id="remote:user-a",
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
         return None

@@ -148,7 +148,9 @@ def create_app(controller: "Controller") -> FastAPI:
         )
 
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
-        dedupe_key = f"avibe:{native_message_id}" if native_message_id else None
+        dedupe_key = message_deliveries.native_dedupe_key(
+            "avibe", native_message_id
+        )
         delivery_id: str | None = None
         delivery_request: DeliveryRequest | None = None
         scope_id: str | None = None

@@ -138,6 +138,8 @@ def normalize_agent_run_delivery_intent(value: Any) -> str:
     """Return the durable Agent Run delivery intent or reject an unknown value."""
 
     normalized = str(value or AGENT_RUN_DELIVERY_STEER).strip().lower()
+    if normalized == "queue":
+        normalized = AGENT_RUN_DELIVERY_STEER
     if normalized not in AGENT_RUN_DELIVERY_INTENTS:
         raise ValueError(f"unsupported Agent Run delivery intent: {normalized}")
     return normalized
@@ -432,6 +434,7 @@ class TaskExecutionResult:
     session_id: Optional[str]
     failure_code: Optional[str] = None
     complete_on_return: bool = True
+    reconcile_delivery_on_return: bool = False
 
 
 @dataclass(frozen=True)
@@ -4876,6 +4879,7 @@ class ScheduledTaskService:
         should_complete = True
         settled_out_of_band = False
         recover_queue_on_return = False
+        reconcile_delivery_on_return = False
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -4904,6 +4908,7 @@ class ScheduledTaskService:
                 session_id = result.session_id
                 failure_code = result.failure_code
                 should_complete = result.complete_on_return
+                reconcile_delivery_on_return = result.reconcile_delivery_on_return
             elif request.request_type in {"hook_send", "watch", "webhook"}:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
@@ -5045,6 +5050,22 @@ class ScheduledTaskService:
                     interrupt_reason=interrupt_reason,
                     failure_code=failure_code,
                 )
+            if reconcile_delivery_on_return and session_id:
+                manager = getattr(self.controller, "session_turns", None)
+                reconcile_delivery = getattr(
+                    manager,
+                    "reconcile_terminal_run_delivery",
+                    None,
+                )
+                if callable(reconcile_delivery):
+                    try:
+                        await reconcile_delivery(request.id, session_id=session_id)
+                    except Exception:
+                        logger.exception(
+                            "Failed to reconcile terminal task Delivery: run=%s session=%s",
+                            request.id,
+                            session_id,
+                        )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes
                 # the same callback follow-through as ``complete()``.
@@ -5083,6 +5104,7 @@ class ScheduledTaskService:
     ) -> TaskExecutionResult:
         error: Optional[str] = None
         complete_on_return = True
+        reconcile_delivery_on_return = False
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
@@ -5189,9 +5211,10 @@ class ScheduledTaskService:
             # success, while an ``at`` task that was never disabled can fire again.
             # Carried on the EXISTING error channel: a non-empty ``error`` is already
             # what makes ``complete(ok=not error)`` record the run as failed and what
-            # the CLI and the Harness detail pane show, so no new settlement path is
-            # needed. A real failure keeps its own message; only a would-be success
-            # gains one.
+            # the CLI and the Harness detail pane show. A real failure keeps its own
+            # message; only a would-be success gains one. If a durable Delivery owns
+            # the run, the caller reconciles that exact owner after the failed run
+            # write commits so the Turn cannot later replace it with success.
             logger.warning(
                 "Scheduled task %s produced a result the store refused to stamp; "
                 "reporting the run as failed",
@@ -5199,6 +5222,8 @@ class ScheduledTaskService:
             )
             if not error:
                 error = _TASK_RESULT_NOT_RECORDED_ERROR
+            reconcile_delivery_on_return = not complete_on_return
+            complete_on_return = True
         if binding_change is not None:
             # ``execution_id`` IS the run row's id on every path that reaches here
             # (``_execute_claimed_request`` passes ``request.id``), and this runs
@@ -5217,6 +5242,7 @@ class ScheduledTaskService:
             session_id=session_id,
             failure_code=failure_code if error else None,
             complete_on_return=complete_on_return,
+            reconcile_delivery_on_return=reconcile_delivery_on_return,
         )
 
     async def _execute_agent_run(

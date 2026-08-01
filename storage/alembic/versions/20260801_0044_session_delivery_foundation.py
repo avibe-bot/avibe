@@ -77,6 +77,19 @@ def _legacy_inbound_type(row: sa.RowMapping) -> str:
     return "user"
 
 
+def _legacy_delivery_dedupe_key(row: sa.RowMapping) -> str | None:
+    native_id = str(row["native_message_id"] or "").strip()
+    if not native_id:
+        return None
+    platform = str(row["platform"] or "")
+    if str(row["type"]) == "harness_dedupe" or _legacy_inbound_type(row) in {
+        "harness",
+        "annotation",
+    }:
+        return f"{platform}:{native_id}"
+    return f"legacy:{platform}:{native_id}"
+
+
 def _message_snapshot(row: sa.RowMapping) -> dict[str, object]:
     legacy_type = str(row["type"])
     inbound_type = (
@@ -304,15 +317,7 @@ def _migrate_pseudo_messages(bind) -> None:
             "snapshot_sha256": _hash(snapshot_json),
             "dispatch_text": dispatch_text,
             "dispatch_sha256": _hash(dispatch_text),
-            "dedupe_key": (
-                (
-                    f"{row['platform']}:{row['native_message_id']}"
-                    if kind == "harness_dedupe" or owned_agent_run
-                    else f"legacy:{row['platform']}:{row['native_message_id']}"
-                )
-                if row["native_message_id"]
-                else None
-            ),
+            "dedupe_key": _legacy_delivery_dedupe_key(row),
             "attempt_id": None,
             "attempt_kind": None,
             "receipt_outcome": None,

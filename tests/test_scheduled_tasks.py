@@ -38,10 +38,13 @@ from core.scheduled_tasks import (
     ScheduledTaskService,
     ScheduledTaskStore,
     SessionBindingChange,
+    TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
+    _TASK_RESULT_NOT_RECORDED_ERROR,
     _agent_run_message_for_request,
     build_session_key_for_context,
+    normalize_agent_run_delivery_intent,
     parse_session_key,
     resolve_session_id_target,
     session_anchor_for_target,
@@ -6356,6 +6359,20 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
         message="run in workbench session",
         agent_name="codex",
     )
+    sqlite_backend = request_store.sqlite_backend
+    assert sqlite_backend is not None
+    with sqlite_backend.engine.begin() as conn:
+        metadata = json.loads(
+            conn.execute(
+                select(agent_runs.c.metadata_json).where(agent_runs.c.id == request.id)
+            ).scalar_one()
+        )
+        metadata["delivery_intent"] = "queue"
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == request.id)
+            .values(metadata_json=json.dumps(metadata))
+        )
     submitted: list[tuple] = []
     handler_calls: list = []
 
@@ -6389,6 +6406,10 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert run.get("completed_at") is None
     assert submitted == [(session_id, "run in workbench session", "avibe", request.id)]
     assert handler_calls == []
+
+
+def test_legacy_queue_delivery_intent_normalizes_to_current_steer() -> None:
+    assert normalize_agent_run_delivery_intent("queue") == "steer"
 
 
 def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypatch, tmp_path) -> None:
@@ -10040,6 +10061,55 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
     assert row["last_run_at"] is None and row["last_error"] is None, (
         "the refused write partially landed — a lost compare-and-set must change NOTHING"
     )
+
+
+def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_refusal")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        metadata={"origin": "test"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    reconciled: list[tuple[str, str]] = []
+
+    async def _execute_request(**_kwargs):
+        return TaskDispatchResult(error=None, complete_on_return=False)
+
+    async def _reconcile(run_id: str, *, session_id: str):
+        reconciled.append((run_id, session_id))
+        return {"changed": True, "state": "retired"}
+
+    service._execute_request = _execute_request
+    service.controller.session_turns = SimpleNamespace(
+        reconcile_terminal_run_delivery=_reconcile
+    )
+    monkeypatch.setattr(store, "mark_task_result", lambda *_args, **_kwargs: False)
+    queued = service.request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR
+    assert reconciled == [(queued.id, session_id)]
 
 
 def test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup(

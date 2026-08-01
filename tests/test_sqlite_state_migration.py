@@ -303,6 +303,127 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert version == ("20260729_0042",)
 
 
+def test_session_delivery_migration_uses_live_dedupe_for_harness_provenance(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260729_0042")
+    now = "2026-07-31T00:00:00Z"
+    cases = [
+        (
+            "human",
+            "user",
+            "user",
+            None,
+            "human:1",
+            "user",
+            "legacy:avibe:human:1",
+        ),
+        (
+            "task",
+            "harness",
+            "harness",
+            None,
+            "task:1",
+            "harness",
+            "avibe:task:1",
+        ),
+        (
+            "watch",
+            "harness",
+            "harness",
+            None,
+            "watch:1",
+            "harness",
+            "avibe:watch:1",
+        ),
+        (
+            "webhook",
+            "harness",
+            "harness",
+            None,
+            "webhook:1",
+            "harness",
+            "avibe:webhook:1",
+        ),
+        (
+            "show",
+            "harness",
+            "harness",
+            "show_annotation",
+            "show:1",
+            "annotation",
+            "avibe:show:1",
+        ),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_id, agent_name, agent_backend, agent_variant,
+                model, reasoning_effort, session_anchor, workdir, native_session_id,
+                title, status, visibility, pinned, agent_status, created_at,
+                updated_at, last_active_at, metadata_json
+            ) values (
+                'ses_dedupe_classifier', null, null, 'codex', 'codex', 'codex',
+                null, null, 'ses_dedupe_classifier', '/tmp', '', null, 'active',
+                'foreground', 0, 'idle', ?, ?, ?, '{}'
+            )
+            """,
+            (now, now, now),
+        )
+        for name, author, source, author_name, native_id, _type, _dedupe in cases:
+            conn.execute(
+                """
+                insert into messages (
+                    id, scope_id, session_id, platform, author, type, author_id,
+                    author_name, source, native_message_id, parent_native_message_id,
+                    content_text, content_json, metadata_json, created_at, updated_at,
+                    delivered_at, read_at
+                ) values (
+                    ?, null, 'ses_dedupe_classifier', 'avibe', ?, 'queued', null,
+                    ?, ?, ?, null, ?, json_object('text', ?), '{}', ?, ?, null, null
+                )
+                """,
+                (
+                    f"msg_{name}",
+                    author,
+                    author_name,
+                    source,
+                    native_id,
+                    name,
+                    name,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            "select id, dedupe_key, snapshot_json from message_deliveries "
+            "where session_id = 'ses_dedupe_classifier' order by id"
+        ).fetchall()
+    by_id = {
+        row_id: (dedupe_key, json.loads(snapshot_json)["type"])
+        for row_id, dedupe_key, snapshot_json in migrated
+    }
+    assert by_id == {
+        f"msg_{name}": (expected_dedupe, expected_type)
+        for (
+            name,
+            _author,
+            _source,
+            _author_name,
+            _native_id,
+            expected_type,
+            expected_dedupe,
+        ) in cases
+    }
+
+
 def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collisions(
     tmp_path: Path,
 ) -> None:

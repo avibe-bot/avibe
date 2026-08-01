@@ -97,12 +97,14 @@ class TurnCheckpointContext:
     message: str = ""
     run_id: str | None = None
     message_id: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
 class _ActiveTurnCheckpoint:
     context: TurnCheckpointContext
     started_at: str
+    turn_id: str | None = None
 
 
 def _record_checkpoint_service_state(active: bool) -> None:
@@ -271,7 +273,12 @@ def _delivery_snapshot_text(value: Any) -> str:
     )
 
 
-def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -> TurnCheckpointContext:
+def load_turn_checkpoint_context(
+    session_id: str,
+    *,
+    turn_id: str | None = None,
+    after: str | None = None,
+) -> TurnCheckpointContext:
     """Read the driving message/run without changing the turn event payload."""
 
     try:
@@ -292,7 +299,9 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
                 session_turns.c.created_at,
                 session_turns.c.started_at,
             ).where(session_turns.c.session_id == session_id)
-            if after is None:
+            if turn_id:
+                turn_query = turn_query.where(session_turns.c.id == turn_id).limit(1)
+            elif after is None:
                 turn_query = (
                     turn_query.where(session_turns.c.state.in_(("starting", "active")))
                     .order_by(
@@ -370,11 +379,13 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
                                     )
                                 ),
                                 message_id=str(message_row.id),
+                                turn_id=str(turn.id),
                             )
                     return TurnCheckpointContext(
                         message=_delivery_snapshot_text(delivery.snapshot_json),
                         run_id=str(run_id) if run_id is not None else None,
                         message_id=str(delivery.id),
+                        turn_id=str(turn.id),
                     )
 
             active_run = conn.execute(
@@ -842,7 +853,11 @@ class ShowGitCheckpointService:
         # Workbench and /internal/dispatch may already have published their UI
         # lifecycle before backend execution reached this shared boundary.
         if owns_bus_lifecycle:
-            self._bus.publish("turn.start", {"session_id": session_id})
+            turn_id = str(payload.get("turn_token") or "").strip()
+            event = {"session_id": session_id}
+            if turn_id:
+                event["turn_id"] = turn_id
+            self._bus.publish("turn.start", event)
 
     def end_turn(self, context: Any) -> None:
         """Publish checkpoint end from the shared terminal-result boundary."""
@@ -858,7 +873,11 @@ class ShowGitCheckpointService:
         payload[_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
         context.platform_specific = payload
         if session_id and (not state.get("start_observed") or state.get("owns_bus_lifecycle")):
-            self._bus.publish("turn.end", {"session_id": session_id})
+            turn_id = str(payload.get("turn_token") or "").strip()
+            event = {"session_id": session_id}
+            if turn_id:
+                event["turn_id"] = turn_id
+            self._bus.publish("turn.end", event)
 
     def _handle_event(self, event_type: str, data: Any) -> None:
         if event_type not in {"turn.start", "turn.end"} or not isinstance(data, dict):
@@ -877,21 +896,43 @@ class ShowGitCheckpointService:
         try:
             if event_type == "turn.start":
                 started_at = datetime.now(timezone.utc).isoformat()
-                context = load_turn_checkpoint_context(session_id)
-                self._active_turns[session_id] = _ActiveTurnCheckpoint(context=context, started_at=started_at)
+                turn_id = str(data.get("turn_id") or "").strip() or None
+                context = (
+                    load_turn_checkpoint_context(session_id, turn_id=turn_id)
+                    if turn_id
+                    else load_turn_checkpoint_context(session_id)
+                )
+                self._active_turns[session_id] = _ActiveTurnCheckpoint(
+                    context=context,
+                    started_at=started_at,
+                    turn_id=turn_id or context.turn_id,
+                )
                 self._repository(session_id).checkpoint(PRE_TURN, run_id=context.run_id)
                 return
 
             active = self._active_turns.pop(session_id, None)
             if active is None:
-                context = load_turn_checkpoint_context(session_id)
+                turn_id = str(data.get("turn_id") or "").strip() or None
+                context = (
+                    load_turn_checkpoint_context(session_id, turn_id=turn_id)
+                    if turn_id
+                    else load_turn_checkpoint_context(session_id)
+                )
                 start_context = TurnCheckpointContext()
             else:
                 start_context = active.context
                 context = (
                     TurnCheckpointContext()
                     if start_context.message_id is not None
-                    else load_turn_checkpoint_context(session_id, after=active.started_at)
+                    else load_turn_checkpoint_context(
+                        session_id,
+                        turn_id=active.turn_id,
+                    )
+                    if active.turn_id
+                    else load_turn_checkpoint_context(
+                        session_id,
+                        after=active.started_at,
+                    )
                 )
             run_id = start_context.run_id or context.run_id
             self._repository(session_id).checkpoint(
