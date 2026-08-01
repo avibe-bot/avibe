@@ -61,6 +61,18 @@ def test_validate_manifest_requires_the_complete_pinned_platform_set() -> None:
         validate_manifest_bytes(json.dumps(manifest).encode(), release_tag=RELEASE_TAG)
 
 
+@pytest.mark.parametrize(
+    "minimum_node",
+    ["", " ", "definitely-not-a-node-range", "^20", ">=22.12.0 <23.0.0", ">=22.12.0 ||"],
+)
+def test_validate_manifest_rejects_unsupported_node_requirements(minimum_node: str) -> None:
+    manifest = _manifest()
+    manifest["minimum_node"] = minimum_node
+
+    with pytest.raises(ValueError, match="unsupported Node requirement"):
+        validate_manifest_bytes(json.dumps(manifest).encode(), release_tag=RELEASE_TAG)
+
+
 def test_validate_manifest_file_rejects_an_uninstallable_wheel_source(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Cannot build an installable Avibe artifact"):
         validate_manifest_file(tmp_path / "missing.json")

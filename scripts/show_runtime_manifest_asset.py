@@ -23,6 +23,7 @@ EXPECTED_PLATFORMS = {
 }
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_NODE_REQUIREMENT_CLAUSE_RE = re.compile(r"(?:\^|>=)?\d+\.\d+\.\d+")
 UrlOpener = Callable[..., Any]
 
 
@@ -44,8 +45,14 @@ def validate_manifest_bytes(content: bytes, *, release_tag: str | None = None) -
         raise ValueError("Show Runtime manifest runtime_source must be an object")
     if runtime_source.get("repo") != RUNTIME_REPOSITORY or runtime_source.get("ref") != runtime_version:
         raise ValueError("Show Runtime manifest runtime_source must pin the declared runtime_version")
-    if not isinstance(manifest.get("minimum_node"), str) or not manifest["minimum_node"]:
-        raise ValueError("Show Runtime manifest minimum_node must be non-empty")
+    minimum_node = manifest.get("minimum_node")
+    if not isinstance(minimum_node, str):
+        raise ValueError("Show Runtime manifest minimum_node must be a string")
+    node_clauses = [clause.strip() for clause in minimum_node.split("||")]
+    if not node_clauses or any(
+        not clause or not _NODE_REQUIREMENT_CLAUSE_RE.fullmatch(clause) for clause in node_clauses
+    ):
+        raise ValueError("Show Runtime manifest minimum_node uses an unsupported Node requirement")
 
     archives = manifest.get("archives")
     if not isinstance(archives, dict) or set(archives) != EXPECTED_PLATFORMS:

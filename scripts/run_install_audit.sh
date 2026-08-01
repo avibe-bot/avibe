@@ -58,6 +58,17 @@ def build_wheel(dest: Path, version: str) -> Path:
     return wheel
 
 
+def prepare_show_runtime_manifest() -> None:
+    result = run(
+        [python_executable, str(repo_root / "scripts" / "prepare_local_show_runtime_manifest.py")],
+        cwd=repo_root,
+        env=os.environ.copy(),
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout + result.stderr)
+
+
 def build_scenarios(current_name: str, old_name: str, new_name: str) -> list[tuple[str, str]]:
     return [
         (
@@ -224,6 +235,7 @@ def main() -> int:
     results: list[dict[str, str | int]] = []
 
     try:
+        prepare_show_runtime_manifest()
         with tempfile.TemporaryDirectory(prefix="vibe-install-audit-fixtures-") as tmpdir:
             fixtures = Path(tmpdir)
             current_wheel = build_wheel(fixtures, "9997.0.0")
