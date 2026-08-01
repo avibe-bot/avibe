@@ -3380,6 +3380,275 @@ def test_codex_eviction_holds_admission_and_drains_after_transport_removal(
     assert observed["queued_after"] == []
 
 
+def test_codex_eviction_holds_every_shared_session_before_the_first_teardown(
+    tmp_path, monkeypatch
+):
+    """HFR-349: one Codex transport serves a cwd, not a session — hold them all first.
+
+    HFR-334 wrapped the eviction in an ``ExitStack`` and pinned that the hold spans
+    the whole convergence. It did so with ONE session mapped to the cwd, which hid a
+    multiplicity the design has all along: ``_transports`` is keyed by CWD, and
+    ``sessions_for_cwd`` returns every anchor that cwd's single app-server serves.
+    The teardown loop acquired each session's hold only when ITS OWN iteration began
+    (inside ``teardown_runtime_session_runs``), so while the FIRST session's teardown
+    was being awaited the second session's admission was still WIDE OPEN.
+
+    WHAT THAT COSTS THE SECOND SESSION, and why it is worse than a plain missed
+    refusal: its submission is admitted, dispatches, and then blocks on the per-cwd
+    transport lock this eviction is holding. It never sends a prompt. When the loop
+    finally reaches that session it is cancelled ``evicted`` — a turn destroyed for a
+    runtime it never touched, and which could have continued on the replacement
+    transport had it simply been refused into the durable queue.
+
+    THE FIX IS TWO-PHASE, and phase 1 REUSES the resolution rather than repeating it:
+    ``resolve_teardown_session_ids`` (the same call ``teardown_runtime_session_runs``
+    makes, so HFR-323's ambiguity refusal and the HFR-335/345 split ranking are
+    unchanged) maps every anchor to session ids and ``hold_session_admission``
+    registers all of them on the per-cwd stack; phase 2 then settles each id through
+    ``teardown_session_runs``. Because phase 1 owns every hold, phase 2 takes none —
+    so there is no double-hold to reason about, and HFR-334's "resolve the runtime
+    identity ONCE per anchor" pin is preserved rather than doubled.
+
+    Same real machinery as HFR-334's test — the real ``evict_idle_transports``, the
+    real resolve/hold pair, a real ``SessionTurnManager`` over a real durable queue,
+    with only the settlement service doubled so the manager release that opens the
+    window really happens. TWO anchors, TWO Avibe sessions, and the anchors are
+    deliberately different strings from the session ids so the resolve hop is proven
+    for both.
+    """
+
+    from unittest.mock import patch
+
+    from core.services import sessions as sessions_service
+    from modules.agents.codex import agent as codex_agent_module
+    from modules.agents.codex.agent import CodexAgent
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_codex_shared_cwd",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        first = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="codex", agent_name="worker"
+        )
+        second = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="codex", agent_name="worker"
+        )
+    session_a = first["id"]
+    session_b = second["id"]
+    anchor_a = "slack_C1_T1"
+    anchor_b = "slack_C2_T1"
+    cwd = "/tmp/work"
+
+    dispatched: list[str] = []
+    first_started = asyncio.Event()
+
+    async def long_handler(ctx, text):
+        dispatched.append(text)
+        if text == "a-first":
+            first_started.set()
+            await asyncio.sleep(30)
+
+    controller = _build_controller_double(handler=long_handler)
+
+    def _ctx_for(session_id: str) -> MessageContext:
+        ctx = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "codex"},
+        }
+        return ctx
+
+    ctx_a = _ctx_for(session_a)
+    ctx_b = _ctx_for(session_b)
+    contexts = {session_a: ctx_a, session_b: ctx_b}
+    manager = session_turns.SessionTurnManager(
+        controller, build_context=lambda sid: contexts[sid]
+    )
+    controller.session_turns = manager
+
+    resolve_calls: list[tuple] = []
+    by_anchor = {anchor_a: session_a, anchor_b: session_b}
+
+    def _find_session_ids_for_anchor(resolved_anchor, *, workdir=None, agent_backend=None):
+        resolve_calls.append((resolved_anchor, workdir, agent_backend))
+        if agent_backend != "codex":
+            return []
+        found = by_anchor.get(resolved_anchor)
+        return [found] if found else []
+
+    controller.sessions = SimpleNamespace(
+        find_session_ids_for_anchor=_find_session_ids_for_anchor
+    )
+
+    observed: dict = {}
+    torn_down: list[str] = []
+
+    def _enqueue(session_id: str, text: str):
+        def _write() -> bool:
+            with engine.begin() as conn:
+                messages_service.enqueue_queued(
+                    conn, scope_id=scope_id, session_id=session_id, text=text
+                )
+            return True
+
+        return _write
+
+    async def _teardown_session_runs(
+        resolved_session_id, *, settled_by, include_manager_lane=True
+    ):
+        torn_down.append(resolved_session_id)
+        if resolved_session_id == session_a:
+            # THE MOMENT THIS FINDING IS ABOUT. The FIRST session's teardown is being
+            # awaited; the loop has not reached the second session yet. Pre-fix its
+            # hold does not exist, so B reads admissible.
+            observed["b_closed_during_a_teardown"] = (
+                manager.is_teardown_admission_closed(session_b)
+            )
+            # ...and this is what that costs B: admitted here, it dispatches and then
+            # blocks on the per-cwd transport lock the eviction holds, only to be
+            # cancelled ``evicted`` when the loop arrives. Post-fix it is refused into
+            # the durable queue and survives on the replacement transport.
+            observed["b_racer"] = await manager.submit(
+                session_b, ctx_b, "racer-for-b", enqueue=_enqueue(session_b, "racer-for-b")
+            )
+        # What the real ScheduledTaskService does on the leg that matters: release the
+        # manager turn, whose ``finally`` pops ``in_flight``.
+        await manager.release_for_teardown(resolved_session_id, settled_by=settled_by)
+        return SimpleNamespace(cancelled_count=1, reconciled_count=0)
+
+    controller.scheduled_task_service = SimpleNamespace(
+        teardown_session_runs=_teardown_session_runs
+    )
+
+    agent = object.__new__(CodexAgent)
+    agent.controller = controller
+
+    async def _stop_transport():
+        # Both sessions' runtimes are being killed right here — neither may be
+        # admissible, which is HFR-334's invariant applied to the whole set.
+        observed["closed_during_stop"] = {
+            session_a: manager.is_teardown_admission_closed(session_a),
+            session_b: manager.is_teardown_admission_closed(session_b),
+        }
+
+    agent._transports = {cwd: SimpleNamespace(stop=_stop_transport)}
+    agent._transport_last_activity = {cwd: 0.0}
+    agent._transport_locks = {cwd: asyncio.Lock()}
+    agent._session_locks = {anchor_a: asyncio.Lock(), anchor_b: asyncio.Lock()}
+    agent._session_mgr = SimpleNamespace(
+        sessions_for_cwd=lambda resolved_cwd: (
+            [anchor_a, anchor_b] if resolved_cwd == cwd else []
+        ),
+        invalidate_thread=lambda _base: None,
+    )
+    agent._turn_registry = SimpleNamespace(
+        get_active_turn=lambda _base: None,
+        has_pending_turn_start=lambda _base: False,
+        get_request_for_turn=lambda _turn: None,
+        get_latest_request=lambda _base: None,
+        clear_session=lambda _base: None,
+    )
+    agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+
+    def _retire(resolved_cwd):
+        # Immediately after the ``_transports`` / activity / inode pops: the registry
+        # is empty and the holds must STILL be shut, for both sessions (HFR-334).
+        observed["transports_after_pop"] = dict(agent._transports)
+        observed["closed_after_registry_removal"] = {
+            session_a: manager.is_teardown_admission_closed(session_a),
+            session_b: manager.is_teardown_admission_closed(session_b),
+        }
+
+    agent._retire_model_hub_process_scope = _retire
+
+    async def _go():
+        try:
+            started = await manager.submit(
+                session_a, ctx_a, "a-first", enqueue=_enqueue(session_a, "a-first")
+            )
+            assert started.route == "ran"
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            with patch.object(codex_agent_module.time, "monotonic", return_value=2000.0):
+                observed["evicted"] = await agent.evict_idle_transports(600)
+
+            observed["dispatched_at_eviction_return"] = list(dispatched)
+            observed["open_after"] = {
+                session_a: not manager.is_teardown_admission_closed(session_a),
+                session_b: not manager.is_teardown_admission_closed(session_b),
+            }
+            # Nothing flushes by hand: both holds took the DEFAULT drain_on_release,
+            # so the reopening owes the queue back (HFR-332/334).
+            for _ in range(300):
+                if "racer-for-b" in dispatched:
+                    break
+                await asyncio.sleep(0.01)
+            observed["queued_after"] = {
+                session_a: _queued_texts(engine, session_a),
+                session_b: _queued_texts(engine, session_b),
+            }
+        finally:
+            for turn in list(manager.in_flight.values()):
+                turn.task.cancel()
+            await asyncio.gather(
+                *(t.task for t in manager.in_flight.values()), return_exceptions=True
+            )
+
+    asyncio.run(_go())
+
+    assert observed["evicted"] == 1
+    # THE FINDING: every shared session is held BEFORE the first one is settled.
+    assert observed["b_closed_during_a_teardown"] is True, (
+        "the second session mapped to this cwd was still admissible while the first "
+        "session's teardown was being awaited"
+    )
+    b_racer = observed["b_racer"]
+    assert b_racer.route == "enqueued", (
+        "a submission for the second shared session dispatched during the eviction — "
+        "it blocks on the per-cwd transport lock and is then cancelled evicted "
+        "without ever having sent a prompt"
+    )
+    assert b_racer.queue_persisted is True
+    assert observed["dispatched_at_eviction_return"] == ["a-first"], (
+        "nothing may reach the dying Codex transport for ANY session it served"
+    )
+    # ONE resolve per anchor, still: phase 1 resolves and phase 2 reuses the ids, so
+    # the two-phase restructure does not double HFR-334's resolve.
+    assert resolve_calls == [(anchor_a, cwd, "codex"), (anchor_b, cwd, "codex")]
+    assert torn_down == [session_a, session_b], (
+        "every resolved session the transport served must still be settled, in order"
+    )
+    # HFR-334's invariants, now for the whole set rather than a single pin.
+    assert observed["closed_during_stop"] == {session_a: True, session_b: True}
+    assert observed["transports_after_pop"] == {}
+    assert observed["closed_after_registry_removal"] == {
+        session_a: True,
+        session_b: True,
+    }
+    # ...and the drain-on-release timing is unchanged: holds release only after the
+    # transport is gone, and then hand the queue back (HFR-332/334).
+    assert observed["open_after"] == {session_a: True, session_b: True}, (
+        "a leaked hold is a permanently wedged session"
+    )
+    assert dispatched == ["a-first", "racer-for-b"], (
+        "the refused message must run once the eviction is over, on the replacement "
+        "transport — not wait for an unrelated later submission or a restart"
+    )
+    assert observed["queued_after"] == {session_a: [], session_b: []}
+
+
 def test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted(
     tmp_path, monkeypatch
 ):

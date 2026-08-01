@@ -4175,6 +4175,33 @@ scenarios:
     # makes submit take the durable queue -- is already pinned by HFR-330's and
     # HFR-339's tests; this supplies the missing half by composition.
     test: tests/test_running_agents_service.py::test_admission_closes_before_the_scheduler_stop
+  - id: HFR-349
+    name: >-
+      Codex eviction holds every session sharing a transport before settling the
+      first one
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    # PR2 review round 22 (F2). One Codex app-server transport is keyed by workdir,
+    # while several Avibe sessions can share that workdir. The old eviction loop
+    # resolved, held and settled one session at a time. While the first settlement
+    # was awaited, every later session remained admissible: a racing turn could enter
+    # the manager, block on the dying transport's workdir lock, and then be cancelled
+    # as evicted when the loop finally reached it even though it had sent no prompt.
+    #
+    # THE FIX IS TWO-PHASE. Phase one resolves every anchor through the shared
+    # resolve_teardown_session_ids path and acquires every admission hold, deduplicated
+    # by resolved session id. Phase two settles those already-held ids through
+    # teardown_session_runs. This preserves HFR-323/335/345's ambiguity and composite
+    # split rules, resolves each anchor only once, and keeps HFR-334's hold alive until
+    # the transport registry has been removed and the transport has stopped.
+    #
+    # The regression uses one real SessionTurnManager and durable queue with two
+    # sessions sharing one Codex transport. During the first session's teardown it
+    # submits work for the second and proves that work is retained, never dispatched
+    # onto the dying transport, then drained exactly once after replacement is safe.
+    test: tests/test_internal_server.py::test_codex_eviction_holds_every_shared_session_before_the_first_teardown
   - id: HFR-350
     name: >-
       a sessionless submission is refused while the process is exiting instead of

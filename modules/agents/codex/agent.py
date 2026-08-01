@@ -35,7 +35,11 @@ from core.system_prompt_injection import (
 )
 from core.resource_governance import governor_from_controller
 from core.run_settlement import SETTLED_BY_EVICTED
-from core.session_teardown import teardown_runtime_session_runs
+from core.session_teardown import (
+    hold_session_admission,
+    resolve_teardown_session_ids,
+    teardown_session_runs,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -719,9 +723,31 @@ class CodexAgent(BaseAgent):
                     #
                     # Wired here rather than at the controller's periodic sweep because
                     # this is the only layer that knows WHICH sessions the evicted cwd
-                    # covers; the shared helper it calls owns everything after that.
+                    # covers; the shared helpers it calls own everything after that.
+                    #
+                    # TWO PHASES, BECAUSE ONE TRANSPORT SERVES A CWD AND A CWD SERVES
+                    # MANY SESSIONS (HFR-349). ``teardown_runtime_session_runs`` resolves
+                    # and holds per call, so a single loop over the anchors acquired each
+                    # session's hold only when ITS iteration began — leaving every LATER
+                    # session admissible for the whole of the earlier ones' awaited
+                    # teardowns. A submission for one of them was admitted, dispatched,
+                    # blocked on the per-cwd transport lock THIS eviction holds, and was
+                    # then cancelled ``evicted`` when the loop reached it: a turn
+                    # destroyed for a runtime it never sent a prompt to, and which would
+                    # have survived on the replacement transport had it merely been
+                    # refused into the durable queue. HFR-334 pinned the hold's END
+                    # correctly; this is its BEGINNING, for the second session onward.
+                    #
+                    # PHASE 1 — resolve every session this transport serves and hold them
+                    # ALL, before anything is settled. The resolution is
+                    # ``resolve_teardown_session_ids``, i.e. the SAME call
+                    # ``teardown_runtime_session_runs`` makes, so HFR-323's ambiguity
+                    # refusal and the HFR-335/345 split ranking apply per anchor exactly
+                    # as before — reused rather than reimplemented.
+                    torn_down_session_ids: list[str] = []
+                    seen_session_ids: set[str] = set()
                     for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                        await teardown_runtime_session_runs(
+                        for resolved_session_id in resolve_teardown_session_ids(
                             getattr(self, "controller", None),
                             session_anchor=base_session_id,
                             workdir=cwd,
@@ -729,11 +755,35 @@ class CodexAgent(BaseAgent):
                             # row on another backend is not this runtime's to cancel
                             # (HFR-128).
                             agent_backend="codex",
-                            settled_by=SETTLED_BY_EVICTED,
+                        ):
+                            if resolved_session_id in seen_session_ids:
+                                continue
+                            seen_session_ids.add(resolved_session_id)
                             # Registered where the runtime identity has just become a
                             # session id, and released by the stack above once this
-                            # transport is truly gone (HFR-334).
-                            admission_holds=admission_holds,
+                            # transport is truly gone (HFR-334). The DEFAULT
+                            # ``drain_on_release=True`` is deliberate and unchanged: an
+                            # evicted session keeps serving its conversation, so its
+                            # queue has a replacement transport to land on.
+                            hold_session_admission(
+                                getattr(self, "controller", None),
+                                resolved_session_id,
+                                admission_holds=admission_holds,
+                            )
+                            torn_down_session_ids.append(resolved_session_id)
+
+                    # PHASE 2 — settle each held session. ``teardown_session_runs`` is the
+                    # body of ``teardown_runtime_session_runs``' loop minus the resolve
+                    # and the hold, so phase 1 keeps ONE resolve per anchor (HFR-334's
+                    # pin) and owns EVERY hold. Nothing double-holds: the manager's hold
+                    # is counted and would tolerate it, but not needing that is cleaner
+                    # than relying on it, and it leaves exactly one place that decides
+                    # which sessions this eviction covers.
+                    for resolved_session_id in torn_down_session_ids:
+                        await teardown_session_runs(
+                            getattr(self, "controller", None),
+                            resolved_session_id,
+                            settled_by=SETTLED_BY_EVICTED,
                         )
                     try:
                         await transport.stop()
