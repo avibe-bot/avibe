@@ -177,6 +177,11 @@ jobs:
         run: |
           uv pip install --system dist/*.whl pytest
 
+      - name: Prepare Show Runtime manifest for fixture wheels
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/prepare_local_show_runtime_manifest.py
+
       - name: Run install and upgrade regressions
         run: |
           docker info
