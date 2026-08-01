@@ -1462,6 +1462,10 @@ async def end_running_agent(
             teardown_session_id,
             admission_holds=admission_holds,
             drain_on_release=False,
+            # STOP SEMANTICS, not neutrality (HFR-351): End is the user saying stop,
+            # and an overlapping eviction hold's owed drain must not restart the very
+            # work they stopped when the outermost hold releases.
+            drain_veto=True,
         )
         # ...BUT IT IS STILL SCOPED TO THE CLICKED BACKEND (HFR-327).
         #

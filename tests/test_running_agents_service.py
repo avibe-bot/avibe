@@ -3189,13 +3189,21 @@ def test_end_holds_admission_through_the_backend_teardown_without_draining(monke
     recorded = []
     real_hold = hold_session_admission
 
-    def _spy(controller_arg, session_id, *, admission_holds, drain_on_release=True):
-        recorded.append((session_id, drain_on_release))
+    def _spy(
+        controller_arg,
+        session_id,
+        *,
+        admission_holds,
+        drain_on_release=True,
+        drain_veto=False,
+    ):
+        recorded.append((session_id, drain_on_release, drain_veto))
         return real_hold(
             controller_arg,
             session_id,
             admission_holds=admission_holds,
             drain_on_release=drain_on_release,
+            drain_veto=drain_veto,
         )
 
     monkeypatch.setattr(running_agents, "hold_session_admission", _spy)
@@ -3207,8 +3215,10 @@ def test_end_holds_admission_through_the_backend_teardown_without_draining(monke
     )
 
     assert res["ok"] is True
-    # The hold is taken against the session End resolved, and it opts out of the drain.
-    assert recorded == [("sess-end", False)]
+    # The hold is taken against the session End resolved; it opts out of the drain
+    # AND asserts Stop semantics, so an overlapping eviction hold's owed drain is
+    # vetoed rather than merely not-requested (HFR-351).
+    assert recorded == [("sess-end", False, True)]
     assert observed["closed_during_teardown"] is True, (
         "admission reopened before End had removed the runtime it was ending"
     )

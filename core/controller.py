@@ -1703,6 +1703,9 @@ class Controller:
                     session_id,
                     admission_holds=admission_holds,
                     drain_on_release=False,
+                    # STOP SEMANTICS, not neutrality (HFR-351): a dying process must
+                    # not drain a queue an overlapping eviction hold owes.
+                    drain_veto=True,
                 )
                 await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
 

@@ -4175,6 +4175,36 @@ scenarios:
     # makes submit take the durable queue -- is already pinned by HFR-330's and
     # HFR-339's tests; this supplies the missing half by composition.
     test: tests/test_running_agents_service.py::test_admission_closes_before_the_scheduler_stop
+  - id: HFR-351
+    name: >-
+      a Stop-semantics hold vetoes an overlapping eviction's owed drain across the
+      full nesting depth
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 22 (F4). When Running-tab End overlaps an eviction or
+    # cleanup hold for the SAME session, the eviction's drain_on_release=True
+    # recorded the drain debt and End's drain_on_release=False recorded NOTHING —
+    # so the outermost release flushed the queue and immediately restarted, on a
+    # replacement runtime, the very work the user just stopped. Stop's contract is
+    # explicitly "do not flush".
+    # THE VETO IS A THIRD STATE, and that is the load-bearing design decision:
+    # drain_on_release=False alone stays NEUTRAL, because the inner holds every
+    # teardown chain takes (release_for_teardown's own, the settlement phase's)
+    # default to False with no drain opinion — reading their silence as a veto
+    # would suppress every drain HFR-332 exists to schedule. Only drain_veto=True
+    # forbids the drain, passed by exactly the two Stop-semantics callers HFR-334's
+    # audit named: Running-tab End and controller shutdown. Veto outranks owed at
+    # the counter's zero, regardless of nesting order; both markers clear together
+    # so no unrelated later teardown inherits either.
+    # PINNED BOTH DIRECTIONS: End-inside-eviction (and eviction-inside-End)
+    # suppress the drain; an eviction alone, including with a NEUTRAL inner hold,
+    # still drains — HFR-332 stays true. HFR-334's End call-shape pin now records
+    # the veto explicitly.
+    # RED: pre-fix the nested-End shape scheduled the drain at the outermost
+    # release.
+    test: tests/test_session_teardown.py::test_a_stop_semantics_hold_vetoes_an_overlapping_evictions_drain
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -544,6 +544,82 @@ def test_teardown_holds_can_decline_the_drain_they_normally_owe() -> None:
     # Nothing is left owed on either path; a leaked marker would drain a session at
     # some unrelated later teardown's expense.
     assert manager._teardown_drain_owed == set()
+
+
+def test_a_stop_semantics_hold_vetoes_an_overlapping_evictions_drain() -> None:
+    """HFR-351: a nested no-drain hold with STOP semantics suppresses the owed drain.
+
+    When Running-tab End overlaps an eviction (or cleanup) hold for the SAME session,
+    the eviction's ``drain_on_release=True`` records the drain debt — and End's
+    ``drain_on_release=False`` used to record NOTHING, so the outermost release
+    flushed the queue and immediately restarted the very work the user just stopped,
+    on a replacement runtime, against Stop's explicit "do not flush" contract.
+
+    THE VETO IS A THIRD STATE. ``drain_on_release=False`` alone stays NEUTRAL — the
+    inner holds (``release_for_teardown``'s own, the settlement phase's) have no
+    drain opinion, and reading their silence as a veto would suppress every drain
+    HFR-332 exists to schedule. Only ``drain_veto=True`` — Running-tab End and
+    controller shutdown, the two Stop-semantics callers from HFR-334's audit —
+    forbids it, and the veto wins over the debt regardless of nesting order. Both
+    markers clear together at the counter's zero, so no unrelated later teardown
+    inherits either.
+    """
+
+    scheduled: list[str] = []
+
+    def _build(monkey_target: SessionTurnManager) -> SessionTurnManager:
+        monkey_target._schedule_post_teardown_drain = (  # type: ignore[method-assign]
+            lambda session_id: scheduled.append(session_id)
+        )
+        return monkey_target
+
+    # THE FINDING: End (veto) nested inside an eviction (owed) — no drain.
+    manager = _build(SessionTurnManager(SimpleNamespace()))
+    controller = SimpleNamespace(session_turns=manager)
+    with ExitStack() as eviction_holds:
+        hold_session_admission(controller, "sess-351", admission_holds=eviction_holds)
+        with ExitStack() as end_holds:
+            hold_session_admission(
+                controller,
+                "sess-351",
+                admission_holds=end_holds,
+                drain_on_release=False,
+                drain_veto=True,
+            )
+        # End released first; the eviction's outermost release decides.
+    assert scheduled == [], "End's Stop semantics must veto the eviction's owed drain"
+    assert manager._teardown_drain_owed == set()
+    assert manager._teardown_drain_vetoed == set()
+
+    # NESTING ORDER DOES NOT MATTER: eviction inside End vetoes the same way.
+    scheduled.clear()
+    manager = _build(SessionTurnManager(SimpleNamespace()))
+    controller = SimpleNamespace(session_turns=manager)
+    with ExitStack() as end_holds:
+        hold_session_admission(
+            controller,
+            "sess-351b",
+            admission_holds=end_holds,
+            drain_on_release=False,
+            drain_veto=True,
+        )
+        with ExitStack() as eviction_holds:
+            hold_session_admission(
+                controller, "sess-351b", admission_holds=eviction_holds
+            )
+    assert scheduled == []
+    assert manager._teardown_drain_vetoed == set()
+
+    # THE COMPANION (HFR-332 stays true): an eviction alone still drains, and a
+    # NEUTRAL no-drain hold (no veto) does not suppress it.
+    scheduled.clear()
+    manager = _build(SessionTurnManager(SimpleNamespace()))
+    controller = SimpleNamespace(session_turns=manager)
+    with ExitStack() as eviction_holds:
+        hold_session_admission(controller, "sess-351c", admission_holds=eviction_holds)
+        with manager.teardown_admission("sess-351c"):
+            pass  # the neutral inner hold every teardown chain takes
+    assert scheduled == ["sess-351c"], "a neutral inner hold must not veto HFR-332"
     # The opted-out session scheduled no drain at all, so no turn was started against
     # a backend that is going away.
     assert "sess-quiet" not in manager._teardown_drain_tasks

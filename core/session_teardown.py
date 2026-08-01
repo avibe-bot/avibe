@@ -453,6 +453,7 @@ def hold_session_admission(
     *,
     admission_holds: Optional[ExitStack],
     drain_on_release: bool = True,
+    drain_veto: bool = False,
 ) -> None:
     """Extend one session's teardown admission hold onto the CALLER's scope (HFR-330).
 
@@ -515,9 +516,16 @@ def hold_session_admission(
     if not callable(hold):
         return
     try:
-        admission_holds.enter_context(
-            hold(resolved, drain_on_release=drain_on_release)
-        )
+        # ``drain_veto`` rides only when asserted, so a manager predating HFR-351
+        # (test doubles, partial controllers) keeps accepting the ordinary hold.
+        if drain_veto:
+            admission_holds.enter_context(
+                hold(resolved, drain_on_release=drain_on_release, drain_veto=True)
+            )
+        else:
+            admission_holds.enter_context(
+                hold(resolved, drain_on_release=drain_on_release)
+            )
     except Exception:
         logger.warning(
             "Session teardown: holding admission for session %s failed",

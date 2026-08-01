@@ -781,6 +781,10 @@ class SessionTurnManager:
         # Sessions whose admission hold OWES a drain when it finally reopens
         # (HFR-332). See :meth:`teardown_admission`'s ``drain_on_release``.
         self._teardown_drain_owed: set[str] = set()
+        # Sessions where an overlapping hold carried STOP SEMANTICS and forbids the
+        # owed drain outright (HFR-351). See :meth:`teardown_admission`'s
+        # ``drain_veto``; cleared together with the owed set at the counter's zero.
+        self._teardown_drain_vetoed: set[str] = set()
         # The process is exiting: admission is closed for EVERY session, for good
         # (HFR-339). See :meth:`close_admission_for_shutdown`.
         self._admission_closed_for_shutdown: bool = False
@@ -905,6 +909,7 @@ class SessionTurnManager:
         session_id: Optional[str],
         *,
         drain_on_release: bool = False,
+        drain_veto: bool = False,
     ) -> Iterator[None]:
         """Hold one session's admission CLOSED for the whole of a teardown.
 
@@ -964,6 +969,20 @@ class SessionTurnManager:
             return
         if drain_on_release:
             self._teardown_drain_owed.add(resolved)
+        if drain_veto:
+            # THE VETO IS A THIRD STATE, NOT THE ABSENCE OF THE DEBT (HFR-351).
+            # ``drain_on_release=False`` alone is NEUTRAL — the inner holds
+            # (``release_for_teardown``'s own, the settlement phase's) simply have no
+            # drain opinion, and treating their silence as a veto would suppress
+            # every drain HFR-332 exists to schedule. ``drain_veto=True`` is an
+            # explicit STOP-SEMANTICS claim: Running-tab End ("do not flush" is the
+            # user's stated intent) and controller shutdown (a dying process must not
+            # start new turns). When holds NEST — End overlapping an eviction on the
+            # same session — the eviction's owed drain and End's veto are both
+            # recorded, and at the counter's zero the veto WINS: the user's Stop
+            # outranks the eviction's debt, and the queue stays queued exactly as a
+            # lone End would leave it.
+            self._teardown_drain_vetoed.add(resolved)
         self._teardown_admission[resolved] = self._teardown_admission.get(resolved, 0) + 1
         try:
             yield
@@ -974,8 +993,16 @@ class SessionTurnManager:
             else:
                 self._teardown_admission.pop(resolved, None)
                 owed = resolved in self._teardown_drain_owed
+                vetoed = resolved in self._teardown_drain_vetoed
                 self._teardown_drain_owed.discard(resolved)
-                if owed:
+                self._teardown_drain_vetoed.discard(resolved)
+                if owed and vetoed:
+                    logger.info(
+                        "Post-teardown drain for session %s suppressed: an overlapping "
+                        "hold carried Stop semantics (HFR-351); the queue stays queued",
+                        resolved,
+                    )
+                elif owed:
                     self._schedule_post_teardown_drain(resolved)
 
     def _schedule_post_teardown_drain(self, session_id: str) -> None:
