@@ -4175,6 +4175,49 @@ scenarios:
     # makes submit take the durable queue -- is already pinned by HFR-330's and
     # HFR-339's tests; this supplies the missing half by composition.
     test: tests/test_running_agents_service.py::test_admission_closes_before_the_scheduler_stop
+  - id: HFR-350
+    name: >-
+      a sessionless submission is refused while the process is exiting instead of
+      starting a turn nothing can settle
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 22 (F3), landed BEFORE HFR-351 despite the higher number --
+    # round 22 produced four findings and they shipped 351, then 350/349/348, so this
+    # entry sits in numeric order, not in merge order.
+    # THE THIRD DOOR HFR-344's RULE GOVERNS. HFR-344 established that the HFR-339
+    # process-exit flag is SESSION-INDEPENDENT and must therefore be consulted before
+    # any session-id logic. SessionTurnManager.submit broke that at its FIRST
+    # statement: a falsy session_id took an early `await self._run(None, ...)` and
+    # returned route="ran" without ever reaching the admission consult twelve lines
+    # below. The sessionless shape is explicitly supported (CLI-style turns, and a
+    # session-resolution failure lands there too), so cleanup_sync could be
+    # dismantling the backends while a fresh turn started against them.
+    # WHY IT IS WORSE THAN AN ORDINARY MISSED REFUSAL: _run(None, ...) never enters
+    # in_flight -- its finally pops only for a str session id -- so the turn is
+    # invisible to _settle_inflight_turns_for_shutdown and to BOTH shutdown
+    # convergences. Nothing can discover it, cancel it, or settle a row it owns; it
+    # dispatches onto a dying backend and then vanishes.
+    # THE PREDICATE IS THE UNSCOPED is_admission_closed_for_shutdown, not
+    # is_teardown_admission_closed, which is a documented no-op on an empty session id
+    # (no session to refuse admission FOR). Pinned both ways: a counted hold on an
+    # UNRELATED session leaves a sessionless turn running, the process-exit flag
+    # refuses it.
+    # REFUSE, NOT RETAIN, and the refusal RAISES. submit's ordinary closed-admission
+    # answer is durable retention, which needs a session to queue against; the
+    # sessionless shape has none ("nothing to queue against"). The caller evidence
+    # decided the surface over widening the closed route Literal: NO live caller
+    # reaches this branch at all -- both ScheduledTaskService gate calls guard
+    # `and session_id`, and _dispatch_async's payload builder 400s a missing or blank
+    # session_id before any submit -- so a new route value would be dead in every
+    # consumer, while SessionlessTurnRefused (a RuntimeError subclass, matching the
+    # bare RuntimeError _submit_scheduled_turn already raises on this path) is loud
+    # through every audited except Exception with no consumer change.
+    # RESIDUAL, accepted: a dying process loses a sessionless CLI turn to a clean
+    # refusal. Starting it silently, hanging, or answering a fake "ran" would all be
+    # worse, and the refusal is logged.
+    test: tests/test_internal_server.py::test_sessionless_submit_is_refused_during_process_shutdown
   - id: HFR-351
     name: >-
       a Stop-semantics hold vetoes an overlapping eviction's owed drain across the

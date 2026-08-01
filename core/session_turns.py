@@ -733,6 +733,28 @@ class Turn:
     send_now_task: Optional[asyncio.Task[dict[str, Any]]] = None
 
 
+class SessionlessTurnRefused(RuntimeError):
+    """A SESSIONLESS submission was refused because the process is exiting (HFR-350).
+
+    ``submit``'s ordinary refusal is not a refusal at all: a closed admission folds
+    into ``busy`` and the message ENQUEUES durably, to run after the restart. That
+    contract needs a session to queue against, and the sessionless shape has none —
+    ``submit``'s own comment says it, "nothing to queue against" — so retention is
+    not on the table and the only honest answers left are "start it" or "refuse it
+    loudly". During shutdown it must be the latter, because ``_run(None, ...)`` never
+    enters ``in_flight`` and a turn started there is invisible to the settlement that
+    would otherwise cancel it.
+
+    A ``RuntimeError`` SUBCLASS on purpose, so it needs no new handling anywhere: the
+    sibling refusal on this exact path (``_submit_scheduled_turn``'s
+    "scheduled turn queue row was not persisted") is already a bare ``RuntimeError``,
+    and every audited ``except Exception`` between here and the surfaces keeps
+    reporting a failure rather than a fake success. The dedicated type exists so a
+    caller that WANTS to distinguish "the process is exiting" from a genuine
+    dispatch failure can, without parsing a message.
+    """
+
+
 @dataclass(frozen=True)
 class TurnSubmissionResult:
     """Routing decision plus the durable queue / delivery-intent outcome."""
@@ -1388,6 +1410,43 @@ class SessionTurnManager:
         if delivery_intent not in {"queue", "send_now"}:
             raise ValueError(f"unsupported delivery intent: {delivery_intent}")
         if not (isinstance(session_id, str) and session_id):
+            # THE PROCESS-EXIT BARRIER PRECEDES THE SESSION-ID LOGIC (HFR-350). This is
+            # HFR-344's rule applied to ``submit`` itself, the third door it governs:
+            # the HFR-339 flag records "this process is exiting", which is
+            # session-INDEPENDENT, so it cannot sit below a branch that decides there
+            # is no session id to reason about.
+            #
+            # THE UNSCOPED PREDICATE, not ``is_teardown_admission_closed``, which is a
+            # deliberate no-op on an empty session id — there is no session to refuse
+            # admission FOR, and a counted hold on some other session says nothing
+            # about this turn. So a sessionless turn is held by exactly one condition,
+            # and this is it.
+            #
+            # WHY REFUSING BEATS RUNNING IT, sharper here than at the other doors:
+            # ``_run(None, ...)`` never enters ``in_flight`` (its ``finally`` pops only
+            # for a ``str`` session id), so a turn started while ``cleanup_sync`` is
+            # dismantling the backends is invisible to
+            # ``_settle_inflight_turns_for_shutdown`` and to both shutdown
+            # convergences: nothing can discover it, cancel it, or settle the row it
+            # may own. It would dispatch onto a dying backend and then vanish.
+            #
+            # AND WHY IT RAISES rather than answering a widened ``route``: the ordinary
+            # closed-admission answer is DURABLE RETENTION, and this shape has no queue
+            # to be retained in ("nothing to queue against", below). Losing a
+            # sessionless turn to a loud refusal in an exiting process is acceptable;
+            # a silent start, a hang, or a fake ``ran`` is not. See
+            # :class:`SessionlessTurnRefused` for why a ``RuntimeError`` subclass needs
+            # no new handling at the callers.
+            if self.is_admission_closed_for_shutdown():
+                logger.warning(
+                    "Refusing a sessionless turn: process shutdown has closed "
+                    "admission and a sessionless turn cannot be queued for restart "
+                    "(source=%s)",
+                    source,
+                )
+                raise SessionlessTurnRefused(
+                    "sessionless turn refused: process shutdown closed admission"
+                )
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
             return TurnSubmissionResult(

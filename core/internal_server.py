@@ -130,6 +130,15 @@ def create_app(controller: "Controller") -> FastAPI:
         a fresh ``queued`` row attributed to the harness.
         """
         if not session_id:
+            # DEFENSIVE, and worth stating because HFR-350 turned on the answer: no
+            # live caller reaches ``submit``'s sessionless shape. Both
+            # ``ScheduledTaskService`` gate calls guard ``and session_id`` first, and
+            # ``_dispatch_async`` cannot get there either — ``_build_dispatch_payload``
+            # rejects a missing or blank ``session_id`` with a 400 before any submit.
+            # So the shutdown refusal HFR-350 added surfaces as
+            # ``SessionlessTurnRefused``, a ``RuntimeError`` — the same error surface
+            # this function already uses for a submission it cannot honour (below) —
+            # rather than through a widened ``route`` nobody would ever compare against.
             submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
             return submission.route
 

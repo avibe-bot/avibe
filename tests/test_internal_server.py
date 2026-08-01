@@ -2601,6 +2601,96 @@ def test_release_for_teardown_skips_the_callers_own_turn():
     assert statuses == []
 
 
+def test_sessionless_submit_is_refused_during_process_shutdown(
+    monkeypatch, tmp_path, caplog
+):
+    """HFR-350: ``submit``'s sessionless fast path is the THIRD process-exit door.
+
+    HFR-344 established the ordering rule for the agent-initiated door: the HFR-339
+    process-exit flag is SESSION-INDEPENDENT, so it must be consulted BEFORE any
+    session-id logic — including before the code that decides there is no session id
+    to work with. ``submit`` itself broke that rule at its very first statement: a
+    falsy ``session_id`` took an early ``await self._run(None, ...)`` and returned
+    ``route="ran"`` without ever reaching the admission consult twelve lines below.
+
+    WHY THAT IS WORSE THAN AN ORDINARY MISSED REFUSAL. ``_run(None, ...)`` never
+    enters ``in_flight`` (its ``finally`` pops only for a ``str`` session id), so a
+    turn started here is invisible to ``_settle_inflight_turns_for_shutdown`` and to
+    both shutdown convergences: the process cannot discover it, cancel it, or settle
+    the row it may own. It dispatches onto backends ``cleanup_sync`` is dismantling
+    and then vanishes.
+
+    AND THE FLAG IS THE RIGHT PREDICATE, not ``is_teardown_admission_closed`` — that
+    one is a documented no-op on an empty session id (there is no session to refuse
+    admission FOR), which is exactly why the unscoped
+    ``is_admission_closed_for_shutdown`` exists. The companions below pin both
+    halves: a counted hold on some OTHER session cannot hold a sessionless turn (it
+    proceeds, correctly), while the process-exit flag refuses it.
+
+    THE REFUSAL RAISES rather than widening ``route``, because a sessionless turn has
+    no durable queue to be retained in and every reachable caller already treats an
+    exception from this path as its error surface — see the sibling
+    ``raise RuntimeError`` in ``_submit_scheduled_turn``. A dying process losing a
+    sessionless CLI turn to a loud refusal is acceptable; starting it silently is not.
+    """
+
+    import logging
+
+    from core.session_turns import SessionlessTurnRefused
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+
+    ran: list[str] = []
+
+    async def _spy_run(session_id, context, text, *, source=None):
+        ran.append(text)
+
+    monkeypatch.setattr(manager, "_run", _spy_run)
+
+    ctx = MessageContext(user_id="U", channel_id="C", platform="avibe")
+    ctx.platform_specific = {}
+
+    observed: dict = {}
+
+    async def _go():
+        # (1) TODAY'S BEHAVIOUR, unchanged: no flag, so the sessionless turn runs.
+        observed["before"] = await manager.submit(None, ctx, "before-shutdown")
+        # (2) ...and a counted hold on ANOTHER session cannot hold a sessionless one.
+        with manager.teardown_admission("ses_other"):
+            observed["under_other_hold"] = await manager.submit(
+                None, ctx, "under-other-session-hold"
+            )
+        # (3) THE PROCESS IS EXITING — the one condition a sessionless turn must obey.
+        manager.close_admission_for_shutdown()
+        with caplog.at_level(logging.WARNING, logger="core.session_turns"):
+            with pytest.raises(SessionlessTurnRefused) as refused:
+                await manager.submit(None, ctx, "during-shutdown")
+        observed["refused_message"] = str(refused.value)
+        observed["logged"] = [
+            record.getMessage()
+            for record in caplog.records
+            if "sessionless" in record.getMessage()
+        ]
+
+    asyncio.run(_go())
+
+    assert observed["before"].route == "ran"
+    assert observed["under_other_hold"].route == "ran", (
+        "a counted hold on an unrelated session must not hold a sessionless turn"
+    )
+    assert ran == ["before-shutdown", "under-other-session-hold"], (
+        "a sessionless turn started while the process was exiting — it can never "
+        "enter in_flight, so the shutdown settlement cannot discover or cancel it"
+    )
+    # The refusal is a RuntimeError subclass, so the audited ``except Exception``
+    # surfaces every reachable caller already has keep working unchanged.
+    assert issubclass(SessionlessTurnRefused, RuntimeError)
+    assert "shutdown" in observed["refused_message"]
+    assert observed["logged"], "a refused turn must leave a trace in the log"
+
+
 def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_runtime(
     monkeypatch, tmp_path
 ):
