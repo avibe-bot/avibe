@@ -982,9 +982,13 @@ class TaskExecutionRequest:
     callback_session_id: Optional[str] = None
     callback_status: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    claimed_from_updated_at: Optional[str] = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Claim bookkeeping is an in-memory handoff hint, never durable Run data.
+        payload.pop("claimed_from_updated_at", None)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "TaskExecutionRequest":
@@ -1012,6 +1016,7 @@ class TaskExecutionRequest:
             callback_session_id=payload.get("callback_session_id"),
             callback_status=payload.get("callback_status"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            claimed_from_updated_at=payload.get("claimed_from_updated_at"),
         )
 
 
@@ -2646,24 +2651,30 @@ class TaskExecutionStore:
         return TaskExecutionRequest.from_dict(payload)
 
     def refresh_claimed_request(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
-        """Refresh the complete Agent identity serialized at claim."""
+        """Refresh the Agent identity pinned by the claim snapshot."""
 
         if self._sqlite is None:
             return request
         payload = self._sqlite.refresh_run_agent_reference(request.id)
         if payload is None:
             return request
-        request.agent_name = payload.get("agent_name")
-        request.agent_id = payload.get("agent_id")
-        request.agent_backend = payload.get("agent_backend")
+        for field_name in ("agent_name", "agent_id", "agent_backend"):
+            setattr(request, field_name, payload.get(field_name))
         return request
 
-    def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
+    def requeue(
+        self,
+        request_id: str,
+        *,
+        metadata: Optional[dict[str, Any]] = None,
+        updated_at: Optional[str] = None,
+    ) -> None:
         if self._sqlite is not None:
-            if metadata is not None:
-                self._sqlite.mark_run_queued_from_running(request_id, updated_at=_utc_now_iso(), metadata=metadata)
-            else:
-                self._sqlite.update_run_status(request_id, status="queued", updated_at=_utc_now_iso())
+            self._sqlite.mark_run_queued_from_running(
+                request_id,
+                updated_at=updated_at or _utc_now_iso(),
+                metadata=metadata,
+            )
             return
         processing_path = self._request_path(request_id, state="processing")
         pending_path = self._request_path(request_id, state="pending")
@@ -3758,8 +3769,9 @@ class ScheduledTaskService:
           for restart recovery. Terminalizing one destroys work that was always going
           to run and prevents no duplicate prompt, because no prompt was ever sent.
         - ``watch_runtime`` rows: the waiter-process heartbeat, not an agent turn.
-        - rows carrying a deferred terminal intent: the Activity lifecycle owns their
-          terminal state, and the intent already records what they will settle as.
+        - rows carrying a deferred terminal intent are NOT exempt: the Activity still
+          owns settlement, but teardown must arbitrate its stronger intent into the
+          same parked unit (HFR-361).
 
         The last two are exactly the exemptions ``recover_processing_runs`` and
         ``sweep_stale_runs`` already honour. They are re-stated here rather than
@@ -3816,11 +3828,6 @@ class ScheduledTaskService:
                 # Leg 3a: queued work survives a teardown.
                 continue
             if str(row.get("run_type") or "") == "watch_runtime":
-                continue
-            result_payload = row.get("result_payload")
-            if isinstance(result_payload, dict) and result_payload.get(
-                "deferred_terminal_status"
-            ):
                 continue
             row_metadata = row.get("metadata")
             if isinstance(row_metadata, dict) and row_metadata.get(
@@ -3904,9 +3911,9 @@ class ScheduledTaskService:
           set — those rows are written by ``write_watch_runtime``, never enqueued as a
           request — and the check is kept anyway because this reads rows back from the
           DB and one comparison is cheaper than an assertion about a row class.
-        - rows carrying a deferred terminal intent: the Activity lifecycle owns their
-          terminal state and the intent already records the cause it will settle as, so
-          re-parking one here would overwrite that record with a coarser ``restarted``.
+        - rows carrying a deferred terminal intent are routed through the same atomic
+          arbitration as a fresh park. The Activity keeps settlement ownership, while
+          a stronger restart failure replaces a weaker canceled/succeeded unit.
         - the ``workbench_queue_holds_run`` metadata marker, for the same reason the
           teardown reconciler honours it: ``running`` there means "accepted, not yet
           started", so no prompt was sent and there is nothing to interrupt.
@@ -3971,11 +3978,6 @@ class ScheduledTaskService:
             if str(row.get("status") or "") != "running":
                 continue
             if str(row.get("run_type") or "") == "watch_runtime":
-                continue
-            result_payload = row.get("result_payload")
-            if isinstance(result_payload, dict) and result_payload.get(
-                "deferred_terminal_status"
-            ):
                 continue
             row_metadata = row.get("metadata")
             if isinstance(row_metadata, dict) and row_metadata.get(
@@ -4471,27 +4473,39 @@ class ScheduledTaskService:
             self._drain_dirty = True
             return
         queued = self.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
-        if not self._transport_ready_for_request(queued):
-            self._drain_dirty = True
-            return
         # The trigger's own door into the same lane (HFR-336): a cron/at firing claims
         # and spawns here without passing ``_drain_requests``' skip logic, so it needs
-        # the same refusal. Checked BEFORE the claim so the row simply stays queued —
-        # the capacity and session-busy branches below claim first and requeue, which
-        # is a status round-trip this case has no reason to spend. The drain picks it
-        # up once the hold clears, on the tick this re-arms.
-        if self._teardown_holds_request(queued):
-            self._drain_dirty = True
-            return
+        # the same refusal. HFR-362 requires the check after claim because claim is the
+        # transaction that refreshes a definition edited while the run was queued.
         request = self.request_store.claim(queued.id)
         if request is None:
             return
+        # The definition may have moved while queued; gate the claim-time snapshot.
+        if self._teardown_holds_request(request):
+            self.request_store.requeue(
+                request.id, updated_at=request.claimed_from_updated_at
+            )
+            self._drain_dirty = True
+            return
+        if not self._transport_ready_for_request(request):
+            self.request_store.requeue(
+                request.id, updated_at=request.claimed_from_updated_at
+            )
+            self.request_store.record_skip_reason(
+                request.id, reason=SKIP_REASON_TRANSPORT_UNAVAILABLE
+            )
+            self._drain_dirty = True
+            return
         lock_key = self._execution_lock_key(request)
         if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
-            self.request_store.requeue(request.id)
+            self.request_store.requeue(
+                request.id, updated_at=request.claimed_from_updated_at
+            )
             return
         if lock_key is not None and lock_key in self._inflight_sessions:
-            self.request_store.requeue(request.id)
+            self.request_store.requeue(
+                request.id, updated_at=request.claimed_from_updated_at
+            )
             return
         self._spawn_execution(request, lock_key)
         execution = self._inflight_executions.get(request.id)
@@ -4534,16 +4548,23 @@ class ScheduledTaskService:
                 break
             if pending.id in self._inflight_executions:
                 continue
-            if not self._transport_ready_for_request(pending):
-                # Record it: this is the only skip reason that eventually makes the row
-                # sweepable, and the sweep reads the reason rather than re-deriving
-                # readiness. Transition-only inside the store, so a transport that
-                # stays down does not turn this into a per-tick write.
+            # HFR-362. Claim refreshes the complete definition snapshot atomically.
+            # Every decision below must use THAT row, not the queued payload or this
+            # process's possibly stale task mirror.
+            request = self.request_store.claim(pending.id)
+            if request is None:
+                continue
+            lock_key = self._execution_lock_key(request)
+            if not self._transport_ready_for_request(request):
+                self.request_store.requeue(
+                    request.id, updated_at=request.claimed_from_updated_at
+                )
+                # This is the only skip reason that eventually makes a queued row
+                # sweepable; record it after the claim snapshot has been requeued.
                 self.request_store.record_skip_reason(
-                    pending.id, reason=SKIP_REASON_TRANSPORT_UNAVAILABLE
+                    request.id, reason=SKIP_REASON_TRANSPORT_UNAVAILABLE
                 )
                 continue
-            lock_key = self._execution_lock_key(pending)
             if lock_key is not None and lock_key in held_session_locks:
                 # THE THIRD DOOR (HFR-336). A teardown is dismantling this session's
                 # runtime, and the lock this drain gates on says nothing about that:
@@ -4554,10 +4575,8 @@ class ScheduledTaskService:
                 # against — and for an IM-targeted row it would go straight to
                 # ``handle_scheduled_message``, which never consults the manager at all.
                 #
-                # STAYS QUEUED, untouched: no claim, no requeue, and deliberately no
-                # skip reason. A recorded reason is a durable write, and this row is
-                # neither transport-blocked nor session-busy — it is waiting out a
-                # window measured in one teardown, after which it runs normally.
+                # Requeue with deliberately no skip reason. This row is neither
+                # transport-blocked nor session-busy; it is waiting out one teardown.
                 #
                 # RE-ARMED HERE, which is the other half of the refusal. ``_watch_store``
                 # drains only on a store reload or ``_drain_dirty``; the one dirty flag
@@ -4568,9 +4587,12 @@ class ScheduledTaskService:
                 # re-running it until the hold clears; the pass is one indexed read
                 # while it no-ops.
                 self._drain_dirty = True
+                self.request_store.requeue(
+                    request.id, updated_at=request.claimed_from_updated_at
+                )
                 logger.debug(
                     "Scheduler drain deferred request %s: session lock %s is held by a teardown",
-                    pending.id,
+                    request.id,
                     lock_key,
                 )
                 continue
@@ -4580,10 +4602,12 @@ class ScheduledTaskService:
                 # The next drain tick picks it up once the session frees.
                 # Recorded so it can clear a stale transport reason — this row is
                 # making progress and must not look sweepable.
-                self.request_store.record_skip_reason(pending.id, reason=SKIP_REASON_SESSION_BUSY)
-                continue
-            request = self.request_store.claim(pending.id)
-            if request is None:
+                self.request_store.requeue(
+                    request.id, updated_at=request.claimed_from_updated_at
+                )
+                self.request_store.record_skip_reason(
+                    request.id, reason=SKIP_REASON_SESSION_BUSY
+                )
                 continue
             self._spawn_execution(request, lock_key)
 
@@ -6115,9 +6139,8 @@ class ScheduledTaskService:
         key so any two requests targeting the same conversation serialize,
         regardless of which identifier form they carry:
 
-        - ``scheduled``/``task_run`` rows may carry only a ``task_id``; the
-          real target lives on the task definition (mirrors
-          ``_execute_claimed_request``).
+        - definition rows carry the routing snapshot enqueue/claim serialized; the
+          lock uses that same snapshot rather than a separately cached definition.
         - a ``session_id`` is resolved to its canonical session key, so it
           matches a legacy/watch run that only carries that ``session_key``.
 
@@ -6128,7 +6151,13 @@ class ScheduledTaskService:
         session_id = request.session_id
         session_key = request.session_key
         task_id = request.task_id
-        if request.request_type in {"task_run", "scheduled"} and task_id:
+        if (
+            request.request_type in {"task_run", "scheduled"}
+            and task_id
+            and request.prompt is None
+        ):
+            # Legacy file-store claims carry only ``task_id``; SQLite claims always
+            # carry the transactional definition prompt/snapshot (HFR-362).
             task = self.store.get_task(task_id)
             if task is not None:
                 session_policy = task.session_policy or session_policy
@@ -6149,14 +6178,17 @@ class ScheduledTaskService:
         session_id = request.session_id
         deliver_key = request.deliver_key
         metadata = request.metadata or {}
-        if request.request_type in {"task_run", "scheduled"} and request.task_id:
+        if (
+            request.request_type in {"task_run", "scheduled"}
+            and request.task_id
+            and request.prompt is None
+        ):
             task = self.store.get_task(request.task_id)
             if task is not None:
                 session_key = task.session_key or session_key
                 session_id = task.session_id or session_id
                 deliver_key = task.deliver_key or deliver_key
                 metadata = task.metadata or metadata
-
         if session_id:
             return resolve_session_id_target(session_id).session_key.platform
         if session_key:
@@ -6281,23 +6313,36 @@ class ScheduledTaskService:
                 if task is None:
                     raise ValueError(f"task '{request.task_id}' not found")
                 task_id = task.id
-                session_key = task.session_key
-                session_id = task.session_id
-                # The other task fields are the current definition, but Agent identity
-                # is the exact snapshot ``refresh_claimed_request`` durably recorded.
-                # A later edit may race this mirror reload; dispatching its newer name
-                # against the claimed row's older backend would recreate HFR-359.
-                task = ScheduledTask.from_dict(
-                    {
-                        **task.to_dict(),
-                        "agent_name": request.agent_name,
-                    }
-                )
+                task_agent_id = None
+                if request.prompt is not None:
+                    session_key = request.session_key
+                    session_id = request.session_id
+                    # SQLite claim owns the exact routing snapshot. A later edit may
+                    # race the mirror reload; dispatching that edit against the claimed
+                    # row would recreate HFR-359/362. File-store claims carry no prompt
+                    # and retain their legacy task-id lookup below.
+                    task = ScheduledTask.from_dict(
+                        {
+                            **task.to_dict(),
+                            "agent_name": request.agent_name,
+                            "session_policy": request.session_policy,
+                            "session_id": request.session_id,
+                            "session_key": request.session_key or "",
+                            "post_to": request.post_to,
+                            "deliver_key": request.deliver_key,
+                            "prompt": request.prompt,
+                            "metadata": request.metadata,
+                        }
+                    )
+                    task_agent_id = request.agent_id
+                else:
+                    session_key = task.session_key
+                    session_id = task.session_id
                 result = await self._execute_task(
                     task,
                     execution_id=request.id,
                     disable_one_shot=request.source_kind == "scheduler",
-                    agent_id=request.agent_id,
+                    agent_id=task_agent_id,
                 )
                 error = result.error
                 session_key = result.session_key

@@ -25,6 +25,7 @@ from core.message_output import MessageOutput, stop_output_for
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_EVICTED,
+    SETTLED_BY_RESTARTED,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
@@ -1354,6 +1355,111 @@ def test_claimed_definition_run_refreshes_the_complete_agent_identity(
     assert active_run["agent_name"] == new_agent.name
     assert active_run["agent_id"] == new_agent.id
     assert active_run["agent_backend"] == "claude"
+
+
+def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-362: a queued definition's session edit moves its run and its lock.
+
+    The drain can hold a stale definition mirror while a queued run is edited from
+    session A to B. Claim must refresh the durable binding, and the drain must derive
+    single-flight ownership from that claimed snapshot rather than the pre-claim row.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    stale_store = ScheduledTaskStore()
+    task = stale_store.add_task(
+        session_key="slack::channel::A",
+        prompt="run against the current session",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+
+    editor_view = ScheduledTaskStore()
+    current = editor_view.get_task(task.id)
+    assert current is not None
+    editor_view.update_task(
+        task.id,
+        name=current.name,
+        session_key="slack::channel::B",
+        session_id=current.session_id,
+        prompt=current.prompt,
+        schedule_type=current.schedule_type,
+        post_to=current.post_to,
+        deliver_key=current.deliver_key,
+        cron=current.cron,
+        run_at=current.run_at,
+        timezone_name=current.timezone,
+        agent_name=current.agent_name,
+        session_policy=current.session_policy,
+    )
+    assert stale_store.get_task(task.id).session_key == "slack::channel::A"
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=stale_store,
+        request_store=request_store,
+    )
+    service._requires_service_lease = False
+    observed: dict[str, Any] = {}
+
+    def _capture_spawn(request, lock_key):
+        observed["request"] = request
+        observed["lock_key"] = lock_key
+
+    service._spawn_execution = _capture_spawn  # type: ignore[method-assign]
+    asyncio.run(service._drain_requests())
+
+    claimed = observed["request"]
+    assert claimed.id == queued.id
+    assert claimed.session_key == "slack::channel::B"
+    assert observed["lock_key"] == service._normalize_session_key("slack::channel::B")
+    stored = request_store.get_run(queued.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["session_key"] == "slack::channel::B"
+
+    # A later definition edit cannot move dispatch away from the lock/row snapshot
+    # the claim already made authoritative.
+    post_claim = editor_view.get_task(task.id)
+    assert post_claim is not None
+    editor_view.update_task(
+        task.id,
+        name=post_claim.name,
+        session_key="slack::channel::C",
+        session_id=post_claim.session_id,
+        prompt=post_claim.prompt,
+        schedule_type=post_claim.schedule_type,
+        post_to=post_claim.post_to,
+        deliver_key=post_claim.deliver_key,
+        cron=post_claim.cron,
+        run_at=post_claim.run_at,
+        timezone_name=post_claim.timezone,
+        agent_name=post_claim.agent_name,
+        session_policy=post_claim.session_policy,
+    )
+    service.store = ScheduledTaskStore()
+    assert service.store.get_task(task.id).session_key == "slack::channel::C"
+
+    async def _capture_execute_task(
+        claimed_task, *, execution_id, disable_one_shot, agent_id=None
+    ):
+        observed["executed_session_key"] = claimed_task.session_key
+        return SimpleNamespace(
+            error=None,
+            session_key=claimed_task.session_key,
+            session_id=claimed_task.session_id,
+            failure_code=None,
+        )
+
+    service._execute_task = _capture_execute_task  # type: ignore[method-assign]
+    asyncio.run(service._execute_claimed_request(claimed))
+    assert observed["executed_session_key"] == "slack::channel::B"
 
 
 def test_dispatch_stamps_the_effective_backend_for_a_default_routed_run(
@@ -4108,6 +4214,67 @@ def test_teardown_reconciliation_parks_while_an_activity_still_owns_the_run(
     assert settled is not None
     assert settled["status"] == "failed"
     assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
+@pytest.mark.parametrize("reconciler", ["session", "abandoned"])
+def test_teardown_reconciliation_strengthens_an_existing_deferred_intent(
+    tmp_path: Path,
+    monkeypatch,
+    reconciler: str,
+) -> None:
+    """HFR-361: a weaker parked intent is not an exemption from teardown.
+
+    Another Activity may already have parked ``canceled`` while a blocker keeps the
+    row open. Eviction/restart still owns a stronger ``failed`` intent, and both
+    reconciliation paths must route it through the shared atomic arbitration instead
+    of skipping every row that already carries a deferred field.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    registry = SessionActivityRegistry()
+    controller = SimpleNamespace(agent_service=SimpleNamespace(activities=registry))
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+    session_id = f"session-teardown-361-{reconciler}"
+    run_id = _running_run_for_session(
+        request_store,
+        session_id=session_id,
+        prompt="a run whose Activity parked cancellation first",
+    )
+    _blocking_activity(registry, run_id, f"bg-361-{reconciler}")
+    assert request_store.defer_run_terminal(
+        run_id,
+        terminal_status="canceled",
+        error="an earlier Activity stopped",
+    )
+
+    if reconciler == "session":
+        reconciled = service.reconcile_session_teardown(
+            session_id,
+            settled_by=SETTLED_BY_EVICTED,
+            claimed_run_ids=frozenset({run_id}),
+        )
+        reason = SETTLED_BY_EVICTED
+    else:
+        reconciled = service.reconcile_abandoned_execution_stop(
+            frozenset({run_id}),
+            settled_by=SETTLED_BY_RESTARTED,
+        )
+        reason = SETTLED_BY_RESTARTED
+
+    assert reconciled == 0, "the blocking Activity still owns terminal settlement"
+    parked = request_store.get_run(run_id)
+    assert parked is not None
+    assert parked["status"] == "running"
+    assert parked["result_payload"]["deferred_terminal_status"] == "failed"
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": reason
+    }
 
 
 def test_self_evicting_execution_is_not_reconciled_mid_flight(

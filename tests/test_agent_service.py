@@ -172,6 +172,59 @@ def test_agent_service_turn_start_hooks_optional_and_guarded() -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("arrival", ["closed", "queued_before_close"])
+def test_agent_service_refuses_ordinary_turns_while_admission_is_closed(
+    arrival: str,
+) -> None:
+    """HFR-363: every ordinary IM turn honors teardown/shutdown admission.
+
+    The shared AgentService door must refuse both a message that arrives during the
+    hold and one already queued on the runtime gate when shutdown closes behind it.
+    Neither shape may create a runtime owner on the client being dismantled.
+    """
+
+    async def _run():
+        class _AdmissionManager:
+            closed = arrival == "closed"
+
+            def is_admission_closed_for_shutdown(self):
+                return self.closed
+
+            def is_teardown_admission_closed(self, session_id):
+                return self.closed and session_id == "ses-admission-363"
+
+            def on_running(self, _context):
+                raise AssertionError("a refused turn must never become running")
+
+        manager = _AdmissionManager()
+        controller = SimpleNamespace(
+            session_turns=manager,
+            _session_id_from_context=lambda _context: "ses-admission-363",
+        )
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+        request = _request("must not dispatch", "session:/admission-363")
+
+        gate = service._get_turn_gate("session:/admission-363")
+        if arrival == "queued_before_close":
+            await gate.lock.acquire()
+            turn = asyncio.create_task(service.handle_message("claude", request))
+            await asyncio.sleep(0)
+            manager.closed = True
+            gate.lock.release()
+        else:
+            turn = asyncio.create_task(service.handle_message("claude", request))
+
+        with pytest.raises(RuntimeError, match="admission is closed"):
+            await turn
+        assert agent.started == []
+        assert not gate.lock.locked()
+        assert not gate.token
+
+    asyncio.run(_run())
+
+
 class _FailingTurnManager:
     def on_running(self, _context):
         raise RuntimeError("status failed")

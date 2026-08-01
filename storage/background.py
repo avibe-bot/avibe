@@ -155,8 +155,8 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     }
 
 
-def _claimed_run_agent_identity(conn: Any, run: Any) -> dict[str, Optional[str]]:
-    """Resolve the complete Agent identity one run must use after claim."""
+def _claimed_run_snapshot(conn: Any, run: Any) -> dict[str, Any]:
+    """Resolve the definition-owned routing snapshot one run uses after claim."""
 
     agent_id = str(run["agent_id"] or "").strip()
     agent_name = str(run["agent_name"] or "").strip()
@@ -169,7 +169,18 @@ def _claimed_run_agent_identity(conn: Any, run: Any) -> dict[str, Optional[str]]
     # to follow its Session/default Agent must not retain the old pinned backend.
     if definition_id and str(run["run_type"] or "") in {"scheduled", "task_run"}:
         definition = conn.execute(
-            select(run_definitions.c.agent_name)
+            select(
+                run_definitions.c.agent_name,
+                run_definitions.c.session_policy,
+                run_definitions.c.session_id,
+                run_definitions.c.legacy_session_key,
+                run_definitions.c.post_to,
+                run_definitions.c.deliver_key,
+                run_definitions.c.prompt,
+                run_definitions.c.message,
+                run_definitions.c.message_payload_json,
+                run_definitions.c.metadata_json,
+            )
             .where(run_definitions.c.id == definition_id)
             .where(run_definitions.c.definition_type == "scheduled")
             .where(run_definitions.c.deleted_at.is_(None))
@@ -178,12 +189,37 @@ def _claimed_run_agent_identity(conn: Any, run: Any) -> dict[str, Optional[str]]
         if definition is not None:
             agent_name = str(definition["agent_name"] or "").strip()
             identity = _resolve_agent_identity_by_name(conn, agent_name)
+            message = definition["message"] or definition["prompt"]
+            metadata = _json_loads(definition["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
             return {
                 "agent_id": str(identity["id"]) if identity else None,
                 "agent_name": str(identity["name"]) if identity else agent_name or None,
                 "agent_backend": str(identity["backend"]) if identity else None,
+                # HFR-362. Session ownership and Agent ownership are one claim-time
+                # routing snapshot. Refresh every definition field the run/lock path
+                # consumes so it cannot dispatch in B while its row still names A.
+                "session_policy": definition["session_policy"],
+                "session_id": definition["session_id"],
+                "legacy_session_key": definition["legacy_session_key"],
+                "post_to": definition["post_to"],
+                "deliver_key": definition["deliver_key"],
+                "prompt": definition["prompt"] or message,
+                "message": message,
+                "message_payload_json": definition["message_payload_json"],
+                "metadata_json": _json_dumps(metadata),
             }
 
+    return _run_agent_identity(conn, run)
+
+
+def _run_agent_identity(conn: Any, run: Any) -> dict[str, Optional[str]]:
+    """Resolve the Agent identity already pinned on one run snapshot."""
+
+    agent_id = str(run["agent_id"] or "").strip()
+    agent_name = str(run["agent_name"] or "").strip()
+    agent_backend = str(run["agent_backend"] or "").strip()
     identity = None
     if agent_id:
         identity = conn.execute(
@@ -2824,7 +2860,12 @@ class SQLiteBackgroundTaskStore:
         }
 
     def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:
-        """Snapshot a claimed run's complete Agent identity under the write lock."""
+        """Refresh a claimed run's pinned Agent identity under the write lock.
+
+        Definition-owned routing is frozen by ``claim_pending_run``. This later
+        refresh exists only to follow an Agent row renamed by archival without
+        changing the Session/delivery snapshot used to choose the execution lock.
+        """
 
         cleaned_run_id = str(run_id or "").strip()
         if not cleaned_run_id:
@@ -2836,15 +2877,13 @@ class SQLiteBackgroundTaskStore:
                     agent_runs.c.agent_id,
                     agent_runs.c.agent_name,
                     agent_runs.c.agent_backend,
-                    agent_runs.c.definition_id,
-                    agent_runs.c.run_type,
                 )
                 .where(agent_runs.c.id == cleaned_run_id)
                 .limit(1)
             ).mappings().first()
             if run is None:
                 return None
-            identity = _claimed_run_agent_identity(conn, run)
+            identity = _run_agent_identity(conn, run)
             if any(run[field] != identity[field] for field in identity):
                 conn.execute(
                     update(agent_runs)
@@ -3382,7 +3421,8 @@ class SQLiteBackgroundTaskStore:
                 )
                 payload = None
             else:
-                identity = _claimed_run_agent_identity(conn, row)
+                snapshot = _claimed_run_snapshot(conn, row)
+                claimed_from_updated_at = row["updated_at"]
                 result = conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
@@ -3391,7 +3431,7 @@ class SQLiteBackgroundTaskStore:
                         status="running",
                         started_at=started_at,
                         updated_at=started_at,
-                        **identity,
+                        **snapshot,
                     )
                 )
                 if not result.rowcount:
@@ -3400,6 +3440,7 @@ class SQLiteBackgroundTaskStore:
                 if row:
                     row_to_publish = dict(row)
                     payload = self._run_from_row(row)
+                    payload["claimed_from_updated_at"] = claimed_from_updated_at
         _publish_run_rows_updated([row_to_publish])
         return payload
 
@@ -3784,6 +3825,10 @@ class SQLiteBackgroundTaskStore:
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
         with self.engine.begin() as conn:
+            # HFR-360. This method consumes and rewrites the same whole JSON payload
+            # as ``defer_run_terminal``. Become the writer BEFORE reading it so a
+            # teardown cannot park a stronger intent between this SELECT and UPDATE.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()

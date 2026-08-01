@@ -272,10 +272,12 @@ def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     )
 
 
-def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
+def test_a_cancel_waits_for_record_run_output_without_losing_its_request(
     tmp_path: Path,
 ) -> None:
-    """The backend output writer must re-decide a failed turn after Stop wins."""
+    """The first serialized terminal writer wins and a later Stop stays recorded."""
+
+    import threading
 
     sqlite, requests = _store(tmp_path)
     request = requests.enqueue_agent_run(
@@ -285,7 +287,36 @@ def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
     )
     assert requests.claim(request.id) is not None
 
-    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    fired: list[int] = []
+    cancel_started = threading.Event()
+    cancel_finished = threading.Event()
+    cancel_results: list[bool] = []
+    cancel_errors: list[BaseException] = []
+    cancel_thread: list[threading.Thread] = []
+
+    def _cancel() -> None:
+        other = SQLiteBackgroundTaskStore(sqlite.db_path)
+        cancel_started.set()
+        try:
+            cancel_results.append(other.cancel_run(request.id))
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            cancel_errors.append(exc)
+        finally:
+            other.close()
+            cancel_finished.set()
+
+    def listener(_conn, _cursor, statement, _parameters, _context, _many):
+        if fired or "UPDATE agent_runs" not in statement:
+            return
+        fired.append(1)
+        thread = threading.Thread(target=_cancel)
+        cancel_thread.append(thread)
+        thread.start()
+        assert cancel_started.wait(timeout=5)
+        assert not cancel_finished.wait(timeout=0.05), (
+            "Stop bypassed record_run_output's writer reservation"
+        )
+
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
         result = sqlite.record_run_output(
@@ -298,11 +329,17 @@ def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
-    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    assert cancel_thread
+    cancel_thread[0].join(timeout=5)
+
+    assert fired, "the serialized cancel never started; the race was not exercised"
+    assert not cancel_thread[0].is_alive()
+    assert cancel_errors == []
+    assert cancel_results == [True]
     saved = sqlite.get_run(request.id)
     assert result["terminal_transition"] is True
-    assert saved["status"] == "canceled"
-    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+    assert saved["status"] == "failed"
+    assert saved["cancel_requested"] is True
 
 
 def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
@@ -888,6 +925,108 @@ def test_deferred_intent_arbitration_is_atomic_across_connections(tmp_path: Path
         "interrupt_reason": "evicted"
     }
     assert "deferred_terminal_result_text" not in payload
+
+
+def test_terminal_output_arbitrates_against_a_concurrent_teardown_intent(
+    tmp_path: Path,
+) -> None:
+    """HFR-360: output reads the terminal payload only after reserving the writer.
+
+    Teardown already reserves SQLite's write lock before reading and parking its
+    intent. The backend-output consumer of that same JSON family must do the same: a
+    bare SELECT can otherwise read the pre-teardown blob and later erase the stronger
+    parked failure with its stale whole-payload update.
+    """
+
+    import threading
+
+    teardown_store, requests = _store(tmp_path)
+    output_store = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    _task(teardown_store, "task-output-arbitration", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-output-arbitration")
+    assert requests.claim(run.id) is not None
+
+    teardown_read = threading.Event()
+    output_read = threading.Event()
+    allow_teardown = threading.Event()
+    allow_output = threading.Event()
+    errors: list[BaseException] = []
+
+    def _pause_after_run_read(label, reached, allowed):
+        def _hook(_conn, _cursor, statement, _parameters, _context, _many):
+            normalized = " ".join(str(statement).lower().split())
+            if " from agent_runs " not in normalized or " where agent_runs.id" not in normalized:
+                return
+            if reached.is_set():
+                return
+            reached.set()
+            if not allowed.wait(timeout=5):
+                raise TimeoutError(f"{label} terminal-payload read was never released")
+
+        return _hook
+
+    teardown_hook = _pause_after_run_read("teardown", teardown_read, allow_teardown)
+    output_hook = _pause_after_run_read("output", output_read, allow_output)
+    event.listen(teardown_store.engine, "after_cursor_execute", teardown_hook)
+    event.listen(output_store.engine, "after_cursor_execute", output_hook)
+
+    def _park_teardown():
+        try:
+            teardown_store.defer_run_terminal(
+                run.id,
+                terminal_status="failed",
+                error="the session was evicted",
+                metadata={"interrupt_reason": "evicted"},
+            )
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+
+    def _record_output():
+        try:
+            output_store.record_run_output(
+                run.id,
+                output_id="terminal-output",
+                text="backend completed",
+                terminal_status="succeeded",
+            )
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+
+    teardown = threading.Thread(target=_park_teardown)
+    output = threading.Thread(target=_record_output)
+    try:
+        teardown.start()
+        assert teardown_read.wait(timeout=5), "the teardown parker never reached its read"
+        output.start()
+
+        if output_read.wait(timeout=0.25):
+            # Pre-fix: output read the stale blob while teardown held the writer slot.
+            allow_teardown.set()
+            teardown.join(timeout=5)
+            allow_output.set()
+        else:
+            # Fixed: output blocks on the writer reservation until teardown commits,
+            # then reads and consumes the parked failure.
+            allow_teardown.set()
+            teardown.join(timeout=5)
+            assert output_read.wait(timeout=5), "the serialized output never reached its read"
+            allow_output.set()
+        teardown.join(timeout=5)
+        output.join(timeout=5)
+    finally:
+        allow_teardown.set()
+        allow_output.set()
+        event.remove(teardown_store.engine, "after_cursor_execute", teardown_hook)
+        event.remove(output_store.engine, "after_cursor_execute", output_hook)
+
+    assert not teardown.is_alive() and not output.is_alive()
+    assert errors == []
+    settled = teardown_store.get_run(run.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["error"] == "the session was evicted"
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+    assert "deferred_terminal_status" not in settled["result_payload"]
 
 
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:

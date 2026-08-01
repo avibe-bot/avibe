@@ -637,7 +637,11 @@ def test_claim_refresh_normalizes_a_legacy_run_name_before_pinning_identity(tmp_
 
         pinned = background.refresh_run_agent_reference("run_legacy_spelling")
 
-        assert pinned == {"agent_id": agent.id, "agent_name": agent.name}
+        assert pinned == {
+            "agent_id": agent.id,
+            "agent_name": agent.name,
+            "agent_backend": agent.backend,
+        }
         stored = background.get_run("run_legacy_spelling")
         assert stored is not None
         assert stored["agent_id"] == agent.id

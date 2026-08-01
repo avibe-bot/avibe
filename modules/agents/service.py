@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 STALE_STOP_REASONS = {"not_active", "runtime_unavailable"}
 
 
+class TurnAdmissionClosedError(RuntimeError):
+    """The process/session teardown explicitly refused a new runtime turn."""
+
+
 class AgentService:
     """Registry and dispatcher for agent implementations."""
 
@@ -144,6 +148,11 @@ class AgentService:
         raise KeyError(target)
 
     async def handle_message(self, agent_name: str, request: AgentRequest):
+        # HFR-363. This is the shared user-initiated admission door for ordinary IM,
+        # Web, scheduled, and Show turns. Refuse explicitly before creating a gate;
+        # MessageHandler has already persisted/mirrored human inbound and will surface
+        # this exception as a terminal error instead of losing the message silently.
+        self._require_teardown_admission_open(request.context)
         agent = self.get(agent_name)
         runtime_key = self._runtime_turn_key(agent, request)
         gate = self._get_turn_gate(runtime_key)
@@ -193,8 +202,14 @@ class AgentService:
         # resolve the current adapter so the queued turn cannot enter the old
         # generation.
         try:
+            # A turn admitted before teardown may have waited behind the old owner.
+            # Re-check after acquire so releasing that owner cannot dispatch the
+            # queued successor onto the dying runtime.
+            self._require_teardown_admission_open(request.context)
             await self.wait_backend_ready(agent_name)
             agent = self.get(agent_name)
+            # Backend cutover can wait too; shutdown may close while it does.
+            self._require_teardown_admission_open(request.context)
         except BaseException:
             if queued_reaction_task is not None:
                 try:
@@ -574,7 +589,7 @@ class AgentService:
         return any(not w.cancelled() for w in waiters)
 
     def _teardown_admission_closed(self, context: Any) -> bool:
-        """True while a teardown (or the process exit) holds this session shut (HFR-343).
+        """True while a teardown (or process exit) holds this session shut.
 
         THE OUTER HALF of the fourth admission door; the inner half is
         ``SessionTurnManager.register_agent_initiated_turn``, which refuses the same
@@ -644,6 +659,14 @@ class AgentService:
                 exc_info=True,
             )
             return False
+
+    def _require_teardown_admission_open(self, context: Any) -> None:
+        """Explicitly refuse a new ordinary turn while teardown owns admission."""
+
+        if self._teardown_admission_closed(context):
+            raise TurnAdmissionClosedError(
+                "agent turn admission is closed during session teardown or shutdown"
+            )
 
     async def begin_agent_initiated_turn(
         self, agent_name: str, context: Any, runtime_key: str
