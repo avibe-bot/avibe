@@ -61,6 +61,7 @@ from vibe.logging_config import application_log_paths
 from vibe.message_types import types_with
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
+from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +70,6 @@ class _ShowEventDispatchOutcome(str, Enum):
     ACCEPTED = "accepted"
     IN_FLIGHT = "in_flight"
     FAILED = "failed"
-
-
-_SHOW_EVENT_ADMITTED_DELIVERY_STATES = {
-    "accepted",
-    "queued",
-    "claimed",
-    "pending_steer",
-    "steering",
-    "reconciling_steer",
-    "reconciling_migration",
-    "interrupt_waiting",
-}
 
 
 # Python's mimetypes map omits .webmanifest; register it so the PWA manifest is
@@ -8454,13 +8443,14 @@ def sessions_queue_remove(session_id: str, message_id: str):
 
 @app.route("/api/sessions/<session_id>/queue/<message_id>/send-now", methods=["POST"])
 async def sessions_queue_send_now(session_id: str, message_id: str):
-    """Run the queue now ("立即发送"): interrupt the running turn + flush. The
-    queue flushes as one merged turn, so ``message_id`` identifies the button's
-    item but the whole queue runs (the merge is the user's chosen behavior)."""
+    """Promote the exact queue head represented by the clicked row."""
     from vibe import internal_client
 
     try:
-        result = await internal_client.send_now(session_id)
+        result = await internal_client.send_now(
+            session_id,
+            expected_delivery_id=message_id,
+        )
     except internal_client.InternalServerUnavailable as exc:
         return jsonify({"ok": False, "code": "internal_unavailable", "detail": str(exc)}), 503
     status = result.get("status_code", 500)
@@ -9746,7 +9736,7 @@ async def _run_show_event_dispatch(
     if not isinstance(delivery, dict):
         return _ShowEventDispatchOutcome.FAILED
     delivery_state = str(delivery.get("state") or "")
-    if delivery_state in _SHOW_EVENT_ADMITTED_DELIVERY_STATES:
+    if delivery_state in ADMITTED_DELIVERY_STATES:
         return _ShowEventDispatchOutcome.ACCEPTED
     if delivery_state != "reserved":
         return _ShowEventDispatchOutcome.FAILED
@@ -9804,7 +9794,7 @@ async def _run_show_event_dispatch(
         return _ShowEventDispatchOutcome.FAILED
     settled = _settle_show_event_message(event_payload)
     state = str((settled or {}).get("state") or body.get("delivery_state") or "")
-    if state in _SHOW_EVENT_ADMITTED_DELIVERY_STATES:
+    if state in ADMITTED_DELIVERY_STATES:
         return _ShowEventDispatchOutcome.ACCEPTED
     return _ShowEventDispatchOutcome.FAILED
 

@@ -747,12 +747,18 @@ def create_app(controller: "Controller") -> FastAPI:
         return result
 
     @app.post("/internal/send-now/{session_id}")
-    async def _send_now(session_id: str) -> Any:
+    async def _send_now(
+        session_id: str,
+        expected_delivery_id: str | None = None,
+    ) -> Any:
         """HTTP adapter: delegate "立即发送" (run the send-while-busy queue now) to
         the turn owner (FSM, Phase 1b); typed failures remain HTTP failures."""
-        result = await manager.send_now(session_id)
+        result = await manager.send_now(
+            session_id,
+            expected_delivery_id=expected_delivery_id,
+        )
         code = result.get("code")
-        if code == "stop_failed":
+        if code in {"stop_failed", "stale_head", "ordering_fence"}:
             return JSONResponse(status_code=409, content=result)
         if code == "flush_failed":
             return JSONResponse(status_code=503, content=result)

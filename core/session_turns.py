@@ -316,6 +316,7 @@ class DeliveryRequest:
     # attachments. ``None`` preserves the public empty-P0/P1 control semantics.
     has_content: bool | None = None
     delivery_id: str | None = None
+    expected_delivery_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -1233,7 +1234,12 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         if request.content is None:
-            return await self._promote_fifo_head(request.session_id, backend, context)
+            return await self._promote_fifo_head(
+                request.session_id,
+                backend,
+                context,
+                expected_delivery_id=request.expected_delivery_id,
+            )
 
         observed, identity = self._observe_active_delivery_turn(request.session_id)
         observed_id = str((observed or {}).get("id") or "") or None
@@ -1373,6 +1379,8 @@ class SessionTurnManager:
         session_id: str,
         backend: str,
         context: "MessageContext",
+        *,
+        expected_delivery_id: str | None = None,
     ) -> DeliveryResult:
         with self._sqlite_engine().connect() as conn:
             observed_head = delivery_store.ordering_head(conn, session_id)
@@ -1382,6 +1390,13 @@ class SessionTurnManager:
         if observed_head is None:
             return DeliveryResult(None, None, "empty")
         observed_owner_id = str(observed_head["id"])
+        if expected_delivery_id and observed_owner_id != expected_delivery_id:
+            return DeliveryResult(
+                expected_delivery_id,
+                None,
+                "refused",
+                reason="stale_head",
+            )
         if observed_head["state"] != "queued":
             return DeliveryResult(
                 observed_owner_id,
@@ -1409,7 +1424,14 @@ class SessionTurnManager:
             if status != "active":
                 return DeliveryResult(observed_owner_id, None, "refused", reason="session_archived")
             current_head = delivery_store.ordering_head(conn, session_id)
-            if current_head is None or str(current_head["id"]) != observed_owner_id:
+            if (
+                current_head is None
+                or str(current_head["id"]) != observed_owner_id
+                or (
+                    expected_delivery_id
+                    and str(current_head["id"]) != expected_delivery_id
+                )
+            ):
                 return DeliveryResult(
                     delivery_id,
                     None,
@@ -3988,14 +4010,24 @@ class SessionTurnManager:
         turn.task.cancel()
         return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
 
-    async def send_now(self, session_id: str) -> dict:
+    async def send_now(
+        self,
+        session_id: str,
+        *,
+        expected_delivery_id: str | None = None,
+    ) -> dict:
         """Promote the exact Delivery ordering head through empty P1."""
         with self._sqlite_engine().connect() as conn:
             head = delivery_store.ordering_head(conn, session_id)
         if head is None:
             return {"ok": True, "session_id": session_id, "status": "empty"}
         result = await self.deliver(
-            DeliveryRequest(session_id=session_id, priority="p1", content=None),
+            DeliveryRequest(
+                session_id=session_id,
+                priority="p1",
+                content=None,
+                expected_delivery_id=expected_delivery_id,
+            ),
         )
         if result.state == "refused":
             return {

@@ -907,6 +907,31 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["connection"] == "connected"
 
 
+def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    send_now = AsyncMock(
+        return_value={
+            "status_code": 409,
+            "body": {"ok": False, "code": "stale_head"},
+        }
+    )
+    with patch("vibe.internal_client.send_now", send_now):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/queue/del_requested/send-now",
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "stale_head"
+    send_now.assert_awaited_once_with(
+        session_id,
+        expected_delivery_id="del_requested",
+    )
+
+
 def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_path):
     from vibe import internal_client
     from vibe.ui_server import app

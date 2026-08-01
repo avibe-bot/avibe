@@ -3049,14 +3049,15 @@ class SQLiteBackgroundTaskStore:
             if delivery_id:
                 from storage import message_deliveries
 
-                delivery = message_deliveries.get_delivery(conn, delivery_id)
-                if delivery is not None and delivery["state"] == "queued":
-                    retired_delivery = message_deliveries.retire_queued(
-                        conn,
-                        str(row["session_id"] or ""),
-                        delivery_id,
-                    )
-            if status == "queued" or retired_delivery:
+                retired_delivery = message_deliveries.retire_for_run_cancellation(
+                    conn,
+                    str(row["session_id"] or ""),
+                    delivery_id,
+                )
+            # Once a Delivery exists its matrix policy outranks a stale Run
+            # projection. A Turn-owned Delivery may have written natively and
+            # must settle through that Turn even if the Run still says queued.
+            if retired_delivery or (status == "queued" and not delivery_id):
                 values["status"] = "canceled"
                 values["completed_at"] = now
             result = conn.execute(

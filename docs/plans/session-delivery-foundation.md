@@ -25,6 +25,32 @@ producer returning from admission is not a terminal event: a queued Delivery
 keeps its Run nonterminal, exact queue removal cancels both, and accepted work is
 settled only from the Turn's terminal evidence.
 
+## Delivery State Matrix
+
+One runtime matrix defines the meaning of every Delivery state. It records five
+orthogonal facts: FIFO role, whether native work may have happened, whether the
+snapshot can still reach dispatch, and whether Run cancellation may retire the
+Delivery directly, plus whether durable admission has completed. Queue claiming,
+Run cancellation, Agent archive rewriting, Show admission, and recovery derive
+their state sets from those facts; they do not maintain local state lists.
+
+| State | Ordering | Native effect | May dispatch | Run cancel | Submission |
+| --- | --- | --- | --- | --- | --- |
+| `reserved` | fence | none | yes | retire | reserved |
+| `queued` | claimable | none | yes | retire | admitted |
+| `claimed` | Turn-owned | possible | yes | Turn owner | admitted |
+| `pending_steer` | fence | none | yes | retire | admitted |
+| `steering` | fence | possible | yes | Turn owner | admitted |
+| `interrupt_waiting` | Turn-owned | possible | yes | Turn owner | admitted |
+| `reconciling_steer` | fence | unknown | yes | Turn owner | admitted |
+| `reconciling_migration` | fence | unknown | no | Turn owner | admitted |
+| `accepted` | terminal | accepted | no | complete | admitted |
+| `retired` | terminal | none | no | complete | retired |
+
+An empty send-now request also carries the exact Delivery ID observed by its
+caller. The writer transaction may promote only that ID if it is still the FIFO
+head; it never substitutes a newer head.
+
 ## Queue Batching
 
 Queued Deliveries remain separate until a Turn is claimed. The claim transaction

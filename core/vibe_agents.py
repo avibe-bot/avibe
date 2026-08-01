@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from storage import message_deliveries as delivery_store
+from storage.delivery_states import DISPATCHABLE_SNAPSHOT_STATES
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -952,15 +953,19 @@ class VibeAgentStore:
                 .values(agent_name=new_name)
             )
 
-        queued_rows = conn.execute(
+        dispatchable_rows = conn.execute(
             select(
                 message_deliveries.c.id,
                 message_deliveries.c.snapshot_json,
                 message_deliveries.c.version,
                 message_deliveries.c.state,
-            ).where(message_deliveries.c.state.in_(("reserved", "queued")))
+            ).where(
+                message_deliveries.c.state.in_(
+                    DISPATCHABLE_SNAPSHOT_STATES
+                )
+            )
         ).mappings().all()
-        for row in queued_rows:
+        for row in dispatchable_rows:
             snapshot, changed = _rewrite_delivery_agent_provenance(
                 row["snapshot_json"],
                 reference_names,

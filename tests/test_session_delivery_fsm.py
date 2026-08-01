@@ -527,6 +527,89 @@ def test_two_empty_p1_requests_claim_exact_same_head_only(managers) -> None:
     assert _row(engine, str(results[0].delivery_id))["turn_id"] in {None, turn_id}
 
 
+def test_empty_p1_refuses_a_requested_delivery_that_is_not_the_head(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p3", content=text),
+                context=_context(),
+            )
+        )
+        for text in ("head-one", "head-two")
+    ]
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content=None,
+                expected_delivery_id=str(queued[1].delivery_id),
+            ),
+            context=_context(),
+        )
+    )
+
+    assert result.state == "refused"
+    assert result.reason == "stale_head"
+    assert result.delivery_id == queued[1].delivery_id
+    manager._steer.assert_not_awaited()
+    assert [row["state"] for row in _rows(engine) if row["id"] in {
+        queued[0].delivery_id,
+        queued[1].delivery_id,
+    }] == ["queued", "queued"]
+
+
+def test_run_cancellation_retires_every_pre_write_delivery_state(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    delivery_ids = [delivery_store.new_delivery_id() for _ in range(2)]
+    with engine.begin() as conn:
+        rows = []
+        for index, delivery_id in enumerate(delivery_ids):
+            rows.append(
+                delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id="ses_fsm",
+                    priority="p1",
+                    state="reserved",
+                    snapshot=delivery_store.message_snapshot(
+                        scope_id=None,
+                        session_id="ses_fsm",
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type="harness",
+                        text=f"cancel-{index}",
+                    ),
+                    dispatch_text=f"cancel-{index}",
+                )
+            )
+        pending = delivery_store.open_pending_steer_batch(
+            conn,
+            deliveries=[rows[1]],
+            turn_id=turn_id,
+            attempt_id=delivery_store.new_attempt_id(),
+        )
+        assert len(pending) == 1
+        assert delivery_store.retire_for_run_cancellation(
+            conn, "ses_fsm", delivery_ids[0]
+        )
+        assert delivery_store.retire_for_run_cancellation(
+            conn, "ses_fsm", delivery_ids[1]
+        )
+
+    with engine.connect() as conn:
+        retired = [delivery_store.get_delivery(conn, delivery_id) for delivery_id in delivery_ids]
+    assert [row["state"] for row in retired] == ["retired", "retired"]
+    assert all(row["current_attempt_id"] is None for row in retired)
+    assert all(row["current_target_turn_id"] is None for row in retired)
+
+
 @pytest.mark.anyio
 async def test_empty_p1_accepted_agent_run_joins_active_turn_ownership(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers

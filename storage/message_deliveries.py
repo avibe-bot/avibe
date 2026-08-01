@@ -10,6 +10,12 @@ from typing import Any, Iterable
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
+from storage.delivery_states import (
+    CLAIMABLE_QUEUE_STATES,
+    FENCE_STATES,
+    RUN_CANCEL_RETIRE_STATES,
+    policy_for,
+)
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -21,14 +27,6 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
-FENCE_STATES = (
-    "reserved",
-    "pending_steer",
-    "steering",
-    "reconciling_steer",
-    "reconciling_migration",
-)
-CLAIMABLE_QUEUE_STATES = ("queued",)
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 
@@ -1612,8 +1610,7 @@ def retire_not_written(conn: Connection, session_id: str, delivery_id: str, *, r
     if (
         delivery is None
         or delivery["session_id"] != session_id
-        or delivery["state"] not in {"reserved", "queued", "pending_steer"}
-        or delivery.get("current_attempt_id")
+        or policy_for(str(delivery["state"])).run_cancel != "retire"
     ):
         return False
     updated = cas_delivery(
@@ -1621,10 +1618,38 @@ def retire_not_written(conn: Connection, session_id: str, delivery_id: str, *, r
         delivery_id,
         expected_version=int(delivery["version"]),
         expected_states=(str(delivery["state"]),),
-        values={"state": "retired", "retired_at": utc_now_iso()},
+        values={
+            "state": "retired",
+            "retired_at": utc_now_iso(),
+            "turn_id": None,
+            "turn_role": None,
+            "turn_position": None,
+            "current_attempt_id": None,
+            "current_attempt_kind": None,
+            "current_target_turn_id": None,
+            "current_expected_native_turn_id": None,
+            "current_receipt_outcome": None,
+            "current_receipt_json": "{}",
+            "current_attempt_opened_at": None,
+        },
         history_event={"kind": "retire", "reason": reason},
     )
     return updated is not None
+
+
+def retire_for_run_cancellation(
+    conn: Connection,
+    session_id: str,
+    delivery_id: str,
+) -> bool:
+    """Retire an exact Run input only when its state proves no native side effect."""
+
+    return retire_not_written(
+        conn,
+        session_id,
+        delivery_id,
+        reason="agent_run_canceled_before_native_write",
+    )
 
 
 def retire_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
@@ -1635,11 +1660,7 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
         for row in conn.execute(
             select(message_deliveries)
             .where(message_deliveries.c.session_id == session_id)
-            .where(
-                message_deliveries.c.state.in_(
-                    ("reserved", "queued", "pending_steer")
-                )
-            )
+            .where(message_deliveries.c.state.in_(RUN_CANCEL_RETIRE_STATES))
         ).mappings()
     ]
     retired = 0

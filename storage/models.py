@@ -19,9 +19,15 @@ from sqlalchemy import (
     text,
 )
 
+from storage.delivery_states import DELIVERY_STATES
 from vibe.message_types import build_partial_index_predicate
 
 metadata = MetaData()
+
+
+def _sql_string_set(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{value}'" for value in values)
+
 
 state_meta = Table(
     "state_meta",
@@ -674,9 +680,7 @@ message_deliveries = Table(
     UniqueConstraint("dedupe_key", name="uq_message_deliveries_dedupe"),
     CheckConstraint("priority in ('p0', 'p1', 'p3')", name="ck_message_deliveries_priority"),
     CheckConstraint(
-        "state in ('reserved', 'queued', 'claimed', 'pending_steer', "
-        "'steering', 'interrupt_waiting', 'reconciling_steer', "
-        "'reconciling_migration', 'accepted', 'retired')",
+        f"state in ({_sql_string_set(DELIVERY_STATES)})",
         name="ck_message_deliveries_state",
     ),
     CheckConstraint(
