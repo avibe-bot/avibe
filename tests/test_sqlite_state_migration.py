@@ -26,7 +26,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260731_0043"
+HEAD_REVISION = "20260801_0044"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -600,6 +600,24 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
 
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
+    assert version == (HEAD_REVISION,)
+
+
+def test_agent_run_cwd_migration_upgrades_the_previous_head(tmp_path: Path) -> None:
+    """HFR-366: an installed 0043 database gains the claim-time cwd column."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260731_0043")
+    with sqlite3.connect(db_path) as conn:
+        before = {row[1] for row in conn.execute("pragma table_info(agent_runs)")}
+    assert "cwd" not in before
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        after = {row[1] for row in conn.execute("pragma table_info(agent_runs)")}
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert "cwd" in after
     assert version == (HEAD_REVISION,)
 
 

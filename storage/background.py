@@ -176,6 +176,7 @@ def _claimed_run_snapshot(conn: Any, run: Any) -> dict[str, Any]:
                 run_definitions.c.legacy_session_key,
                 run_definitions.c.post_to,
                 run_definitions.c.deliver_key,
+                run_definitions.c.cwd,
                 run_definitions.c.prompt,
                 run_definitions.c.message,
                 run_definitions.c.message_payload_json,
@@ -190,9 +191,16 @@ def _claimed_run_snapshot(conn: Any, run: Any) -> dict[str, Any]:
             agent_name = str(definition["agent_name"] or "").strip()
             identity = _resolve_agent_identity_by_name(conn, agent_name)
             message = definition["message"] or definition["prompt"]
-            metadata = _json_loads(definition["metadata_json"], {})
-            if not isinstance(metadata, dict):
-                metadata = {}
+            definition_metadata = _json_loads(definition["metadata_json"], {})
+            if not isinstance(definition_metadata, dict):
+                definition_metadata = {}
+            run_metadata = _json_loads(run["metadata_json"], {})
+            if not isinstance(run_metadata, dict):
+                run_metadata = {}
+            # HFR-367. Definition values are authoritative on collisions, while
+            # run-owned keys (skip age, queue ownership, interruption state, etc.)
+            # survive a claim refresh instead of being replaced wholesale.
+            metadata = {**run_metadata, **definition_metadata}
             return {
                 "agent_id": str(identity["id"]) if identity else None,
                 "agent_name": str(identity["name"]) if identity else agent_name or None,
@@ -205,6 +213,7 @@ def _claimed_run_snapshot(conn: Any, run: Any) -> dict[str, Any]:
                 "legacy_session_key": definition["legacy_session_key"],
                 "post_to": definition["post_to"],
                 "deliver_key": definition["deliver_key"],
+                "cwd": definition["cwd"],
                 "prompt": definition["prompt"] or message,
                 "message": message,
                 "message_payload_json": definition["message_payload_json"],
@@ -2802,6 +2811,7 @@ class SQLiteBackgroundTaskStore:
                     run_definitions.c.legacy_session_key,
                     run_definitions.c.post_to,
                     run_definitions.c.deliver_key,
+                    run_definitions.c.cwd,
                     run_definitions.c.prompt,
                     run_definitions.c.message,
                     run_definitions.c.message_payload_json,
@@ -2821,9 +2831,13 @@ class SQLiteBackgroundTaskStore:
                 current_name = str(definition["agent_name"] or "").strip() or None
                 identity = _resolve_agent_identity_by_name(conn, current_name)
                 message = definition["message"] or definition["prompt"]
-                metadata = _json_loads(definition["metadata_json"], {})
-                if not isinstance(metadata, dict):
-                    metadata = {}
+                definition_metadata = _json_loads(definition["metadata_json"], {})
+                if not isinstance(definition_metadata, dict):
+                    definition_metadata = {}
+                run_metadata = _json_loads(values["metadata_json"], {})
+                if not isinstance(run_metadata, dict):
+                    run_metadata = {}
+                metadata = {**run_metadata, **definition_metadata}
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
@@ -2838,6 +2852,7 @@ class SQLiteBackgroundTaskStore:
                     legacy_session_key=definition["legacy_session_key"],
                     post_to=definition["post_to"],
                     deliver_key=definition["deliver_key"],
+                    cwd=definition["cwd"],
                     prompt=definition["prompt"] or message,
                     message=message,
                     message_payload_json=definition["message_payload_json"],
@@ -2853,6 +2868,7 @@ class SQLiteBackgroundTaskStore:
             "session_key": values["legacy_session_key"],
             "post_to": values["post_to"],
             "deliver_key": values["deliver_key"],
+            "cwd": values["cwd"],
             "prompt": values["prompt"],
             "message": values["message"],
             "message_payload": _json_loads(values["message_payload_json"], None),
@@ -4306,6 +4322,10 @@ class SQLiteBackgroundTaskStore:
         row_to_publish = None
         transitioned = False
         with self.engine.begin() as conn:
+            # HFR-365. Settlement consumes the same whole deferred payload that
+            # terminal parking replaces. Reserve the writer before the first read so
+            # the read/consume/terminal transition is one unit with parking.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -6120,6 +6140,7 @@ class SQLiteBackgroundTaskStore:
             "legacy_session_key": payload.get("session_key") or payload.get("legacy_session_key"),
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
+            "cwd": payload.get("cwd"),
             "prompt": payload.get("prompt") or message,
             "message": message,
             "message_payload_json": self._message_payload_json(payload),
@@ -6240,6 +6261,7 @@ class SQLiteBackgroundTaskStore:
             "session_id": row["session_id"],
             "post_to": row["post_to"],
             "deliver_key": row["deliver_key"],
+            "cwd": row["cwd"],
             "prompt": row["prompt"],
             "message": row["message"] or row["prompt"],
             "message_payload": _json_loads(row["message_payload_json"], None),

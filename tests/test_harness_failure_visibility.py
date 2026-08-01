@@ -342,10 +342,12 @@ def test_a_cancel_waits_for_record_run_output_without_losing_its_request(
     assert saved["cancel_requested"] is True
 
 
-def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
+def test_a_cancel_waits_for_deferred_settlement_without_losing_its_request(
     tmp_path: Path,
 ) -> None:
-    """An Activity's deferred failure remains subordinate to a concurrent Stop."""
+    """Serialized deferred settlement completes first and a later Stop is retained."""
+
+    import threading
 
     sqlite, requests = _store(tmp_path)
     request = requests.enqueue_agent_run(
@@ -361,18 +363,52 @@ def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
         result_text="backend failed",
     )
 
-    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    fired: list[int] = []
+    cancel_started = threading.Event()
+    cancel_finished = threading.Event()
+    cancel_results: list[bool] = []
+    cancel_errors: list[BaseException] = []
+    cancel_thread: list[threading.Thread] = []
+
+    def _cancel() -> None:
+        other = SQLiteBackgroundTaskStore(sqlite.db_path)
+        cancel_started.set()
+        try:
+            cancel_results.append(other.cancel_run(request.id))
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            cancel_errors.append(exc)
+        finally:
+            other.close()
+            cancel_finished.set()
+
+    def listener(_conn, _cursor, statement, _parameters, _context, _many):
+        if fired or "UPDATE agent_runs" not in statement:
+            return
+        fired.append(1)
+        thread = threading.Thread(target=_cancel)
+        cancel_thread.append(thread)
+        thread.start()
+        assert cancel_started.wait(timeout=5)
+        assert not cancel_finished.wait(timeout=0.05), (
+            "Stop bypassed deferred settlement's writer reservation"
+        )
+
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
         transitioned = sqlite.settle_deferred_run(request.id)
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
-    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    assert cancel_thread
+    cancel_thread[0].join(timeout=5)
+    assert fired, "the serialized cancel never started; the race was not exercised"
+    assert not cancel_thread[0].is_alive()
+    assert cancel_errors == []
+    assert cancel_results == [True]
     saved = sqlite.get_run(request.id)
     assert transitioned is True
-    assert saved["status"] == "canceled"
-    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+    assert saved["status"] == "failed"
+    assert saved["cancel_requested"] is True
     assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
 
 
@@ -1027,6 +1063,100 @@ def test_terminal_output_arbitrates_against_a_concurrent_teardown_intent(
     assert settled["error"] == "the session was evicted"
     assert settled["metadata"]["interrupt_reason"] == "evicted"
     assert "deferred_terminal_status" not in settled["result_payload"]
+
+
+def test_deferred_settlement_serializes_with_a_concurrent_stronger_park(
+    tmp_path: Path,
+) -> None:
+    """HFR-365: settlement owns a write slot before consuming its parked unit."""
+
+    import threading
+
+    settlement_store, requests = _store(tmp_path)
+    parking_store = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    run = requests.enqueue_agent_run(
+        session_key="slack::channel::C365",
+        message="settle the parked result",
+        agent_name=None,
+    )
+    assert requests.claim(run.id) is not None
+    assert settlement_store.defer_run_terminal(
+        run.id,
+        terminal_status="canceled",
+        error="the Activity stopped",
+    )
+
+    settlement_read = threading.Event()
+    allow_settlement = threading.Event()
+    parking_done = threading.Event()
+    parking_results: list[bool] = []
+    errors: list[BaseException] = []
+
+    def _pause_after_settlement_read(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ):
+        normalized = " ".join(str(statement).lower().split())
+        if " from agent_runs " not in normalized or " where agent_runs.id" not in normalized:
+            return
+        if settlement_read.is_set():
+            return
+        settlement_read.set()
+        if not allow_settlement.wait(timeout=5):
+            raise TimeoutError("deferred settlement read was never released")
+
+    event.listen(
+        settlement_store.engine, "after_cursor_execute", _pause_after_settlement_read
+    )
+
+    def _settle():
+        try:
+            settlement_store.settle_deferred_run(run.id)
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+
+    def _park_stronger():
+        try:
+            parking_results.append(
+                parking_store.defer_run_terminal(
+                    run.id,
+                    terminal_status="failed",
+                    error="the session was evicted",
+                    metadata={"interrupt_reason": "evicted"},
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+        finally:
+            parking_done.set()
+
+    settlement = threading.Thread(target=_settle)
+    parking = threading.Thread(target=_park_stronger)
+    try:
+        settlement.start()
+        assert settlement_read.wait(timeout=5)
+        parking.start()
+        # With the fix, parking cannot read/write inside settlement's reserved unit.
+        parking_done.wait(timeout=0.25)
+        allow_settlement.set()
+        settlement.join(timeout=5)
+        parking.join(timeout=5)
+    finally:
+        allow_settlement.set()
+        event.remove(
+            settlement_store.engine,
+            "after_cursor_execute",
+            _pause_after_settlement_read,
+        )
+
+    assert not settlement.is_alive() and not parking.is_alive()
+    assert errors == []
+    assert parking_results == [False], (
+        "a stronger park reported success after settlement had already reserved ownership"
+    )
+    settled = settlement_store.get_run(run.id)
+    assert settled is not None
+    assert settled["status"] == "canceled"
+    assert settled["metadata"].get("interrupt_reason") is None
 
 
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:

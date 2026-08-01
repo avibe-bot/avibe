@@ -274,6 +274,10 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
+            # HFR-364. The status/reaction hooks above await platform I/O. Teardown
+            # can close admission and remove the runtime while one is suspended, so
+            # the last instruction before backend dispatch must revalidate the hold.
+            self._require_teardown_admission_open(request.context)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a

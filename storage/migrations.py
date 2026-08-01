@@ -96,6 +96,7 @@ HEAD_REQUIRED_COLUMNS = {
         "model",
         "reasoning_effort",
         "session_policy",
+        "cwd",
         "message",
         "message_payload_json",
         "result_text",

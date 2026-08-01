@@ -243,6 +243,7 @@ agent_runs = Table(
     Column("legacy_session_key", Text, nullable=True),
     Column("post_to", String, nullable=True),
     Column("deliver_key", Text, nullable=True),
+    Column("cwd", Text, nullable=True),
     Column("prompt", Text, nullable=True),
     Column("message", Text, nullable=True),
     Column("message_payload_json", Text, nullable=True),

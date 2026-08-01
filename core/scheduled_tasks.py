@@ -967,6 +967,7 @@ class TaskExecutionRequest:
     session_id: Optional[str] = None
     post_to: Optional[str] = None
     deliver_key: Optional[str] = None
+    cwd: Optional[str] = None
     prompt: Optional[str] = None
     message: Optional[str] = None
     message_payload: Any = None
@@ -1001,6 +1002,7 @@ class TaskExecutionRequest:
             session_id=payload.get("session_id"),
             post_to=payload.get("post_to"),
             deliver_key=payload.get("deliver_key"),
+            cwd=(str(payload["cwd"]).strip() if payload.get("cwd") else None),
             prompt=payload.get("prompt"),
             message=payload.get("message") or payload.get("prompt"),
             message_payload=payload.get("message_payload"),
@@ -1886,6 +1888,7 @@ class TaskExecutionStore:
             session_id=task.session_id,
             post_to=task.post_to,
             deliver_key=task.deliver_key,
+            cwd=task.cwd,
             prompt=task.prompt,
             agent_name=task.agent_name,
             session_policy=task.session_policy,
@@ -1905,6 +1908,7 @@ class TaskExecutionStore:
         prompt: str,
         agent_name: Optional[str],
         session_policy: Optional[str],
+        cwd: Optional[str] = None,
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
@@ -1917,6 +1921,7 @@ class TaskExecutionStore:
             session_id=session_id,
             post_to=post_to,
             deliver_key=deliver_key,
+            cwd=cwd,
             prompt=prompt,
             message=prompt,
             source_kind=source_kind,
@@ -1938,6 +1943,7 @@ class TaskExecutionStore:
             "session_key",
             "post_to",
             "deliver_key",
+            "cwd",
             "prompt",
             "message",
             "message_payload",
@@ -6330,6 +6336,7 @@ class ScheduledTaskService:
                             "session_key": request.session_key or "",
                             "post_to": request.post_to,
                             "deliver_key": request.deliver_key,
+                            "cwd": request.cwd,
                             "prompt": request.prompt,
                             "metadata": request.metadata,
                         }

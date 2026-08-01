@@ -225,6 +225,49 @@ def test_agent_service_refuses_ordinary_turns_while_admission_is_closed(
     asyncio.run(_run())
 
 
+def test_agent_service_rechecks_admission_after_the_final_predispatch_await() -> None:
+    """HFR-364: teardown may close while the starting-status bubble is awaited."""
+
+    async def _run():
+        class _AdmissionManager:
+            closed = False
+
+            def is_admission_closed_for_shutdown(self):
+                return self.closed
+
+            def is_teardown_admission_closed(self, _session_id):
+                return self.closed
+
+            def on_running(self, _context):
+                return None
+
+        manager = _AdmissionManager()
+
+        async def _close_during_status(_context):
+            manager.closed = True
+            await asyncio.sleep(0)
+
+        controller = SimpleNamespace(
+            session_turns=manager,
+            _session_id_from_context=lambda _context: "ses-admission-364",
+            message_dispatcher=SimpleNamespace(begin_status_bubble=_close_during_status),
+        )
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+        request = _request("must stop before backend dispatch", "session:/admission-364")
+
+        with pytest.raises(RuntimeError, match="admission is closed"):
+            await service.handle_message("claude", request)
+
+        gate = service._get_turn_gate("session:/admission-364")
+        assert agent.started == []
+        assert not gate.lock.locked()
+        assert not gate.token
+
+    asyncio.run(_run())
+
+
 class _FailingTurnManager:
     def on_running(self, _context):
         raise RuntimeError("status failed")

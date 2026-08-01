@@ -4468,6 +4468,53 @@ scenarios:
     # backend readiness, explicitly refusing both a new arrival and a turn that was
     # already queued when teardown closed.
     test: tests/test_agent_service.py::test_agent_service_refuses_ordinary_turns_while_admission_is_closed
+  - id: HFR-364
+    name: ordinary turn admission is rechecked after the final pre-dispatch await
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 29 (F1). Reaction promotion and the starting-status bubble
+    # await platform I/O after the earlier admission checks. End/eviction could close
+    # admission and remove the runtime during either await, then the resumed coroutine
+    # dispatched onto that removed runtime. The final instruction before backend
+    # handle_message now revalidates admission and releases the gate on refusal.
+    test: tests/test_agent_service.py::test_agent_service_rechecks_admission_after_the_final_predispatch_await
+  - id: HFR-365
+    name: deferred settlement serializes with concurrent terminal parking
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 29 (F2). settle_deferred_run consumed the same whole parked
+    # payload as defer_run_terminal after a bare SELECT. A stronger teardown park
+    # could commit inside that gap and then be erased by the stale settlement.
+    # Settlement now reserves SQLite's writer before reading, just like both other
+    # consumers/producers of the deferred terminal unit.
+    test: tests/test_harness_failure_visibility.py::test_deferred_settlement_serializes_with_a_concurrent_stronger_park
+  - id: HFR-366
+    name: claim freezes a scheduled definition's working directory with its inputs
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 29 (F3). Claim froze Agent, Session, prompt and delivery but
+    # execution inherited cwd from a later definition reload. Agent Runs now carry a
+    # dedicated cwd column; enqueue and claim snapshot it transactionally, and task
+    # execution overrides the reloaded mirror with that claimed value.
+    test: tests/test_scheduled_tasks.py::test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot
+  - id: HFR-367
+    name: claim preserves run-owned metadata while refreshing definition metadata
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 29 (F4). Replacing metadata_json at every definition claim
+    # erased last_skip_reason/last_skip_at, so an unavailable transport was freshly
+    # stamped every tick and never aged into the sweep TTL. Claim now overlays current
+    # definition values onto the existing run metadata, preserving skip age, queue
+    # ownership, interruption and other run-owned evidence.
+    test: tests/test_scheduled_tasks.py::test_definition_claim_preserves_run_owned_skip_metadata
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

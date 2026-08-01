@@ -1376,6 +1376,7 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
         schedule_type="cron",
         cron="0 2 * * *",
         timezone_name="UTC",
+        cwd="/work/a",
     )
     request_store = TaskExecutionStore()
     queued = request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
@@ -1397,6 +1398,8 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
         timezone_name=current.timezone,
         agent_name=current.agent_name,
         session_policy=current.session_policy,
+        cwd="/work/b",
+        update_cwd=True,
     )
     assert stale_store.get_task(task.id).session_key == "slack::channel::A"
 
@@ -1418,6 +1421,7 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
     claimed = observed["request"]
     assert claimed.id == queued.id
     assert claimed.session_key == "slack::channel::B"
+    assert claimed.cwd == "/work/b"
     assert observed["lock_key"] == service._normalize_session_key("slack::channel::B")
     stored = request_store.get_run(queued.id)
     assert stored is not None
@@ -1442,6 +1446,8 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
         timezone_name=post_claim.timezone,
         agent_name=post_claim.agent_name,
         session_policy=post_claim.session_policy,
+        cwd="/work/c",
+        update_cwd=True,
     )
     service.store = ScheduledTaskStore()
     assert service.store.get_task(task.id).session_key == "slack::channel::C"
@@ -1450,6 +1456,7 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
         claimed_task, *, execution_id, disable_one_shot, agent_id=None
     ):
         observed["executed_session_key"] = claimed_task.session_key
+        observed["executed_cwd"] = claimed_task.cwd
         return SimpleNamespace(
             error=None,
             session_key=claimed_task.session_key,
@@ -1460,6 +1467,7 @@ def test_drain_locks_and_dispatches_the_claimed_definition_session_snapshot(
     service._execute_task = _capture_execute_task  # type: ignore[method-assign]
     asyncio.run(service._execute_claimed_request(claimed))
     assert observed["executed_session_key"] == "slack::channel::B"
+    assert observed["executed_cwd"] == "/work/b"
 
 
 def test_dispatch_stamps_the_effective_backend_for_a_default_routed_run(
@@ -5813,6 +5821,64 @@ def test_stranded_queued_run_does_not_trigger_repeated_metadata_writes(
     after = request_store.get_run(run_id)
     assert after["metadata"]["last_skip_reason"] == "transport_unavailable"
     assert after["updated_at"] == before, "stamping a skip must not refresh the hold TTL"
+
+
+def test_definition_claim_preserves_run_owned_skip_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-367: refreshing definition metadata cannot reset an outage's age."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_store = ScheduledTaskStore()
+    task = task_store.add_task(
+        session_key="slack::channel::C367",
+        prompt="wait for transport",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+        metadata={"definition_marker": "current"},
+    )
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    existing = request_store.get_run(queued.id)
+    assert existing is not None
+    _force_run_columns(
+        request_store,
+        queued.id,
+        metadata_json=json.dumps({**existing["metadata"], "run_marker": "preserve"}),
+    )
+    service = ScheduledTaskService(
+        controller=_SweepControllerDouble(transport_ready=False),
+        store=task_store,
+        request_store=request_store,
+    )
+    service._requires_service_lease = False
+    wrote: list[bool] = []
+    original = request_store.record_skip_reason
+
+    def _record(target_id: str, *, reason: str) -> bool:
+        changed = original(target_id, reason=reason)
+        wrote.append(changed)
+        return changed
+
+    monkeypatch.setattr(request_store, "record_skip_reason", _record)
+
+    asyncio.run(service._drain_requests())
+    first = request_store.get_run(queued.id)
+    assert first is not None
+    first_skip_at = first["metadata"]["last_skip_at"]
+    for _ in range(3):
+        asyncio.run(service._drain_requests())
+
+    saved = request_store.get_run(queued.id)
+    assert saved is not None
+    assert wrote == [True, False, False, False]
+    assert saved["metadata"]["definition_marker"] == "current"
+    assert saved["metadata"]["run_marker"] == "preserve"
+    assert saved["metadata"]["last_skip_reason"] == "transport_unavailable"
+    assert saved["metadata"]["last_skip_at"] == first_skip_at
 
 
 def test_swept_run_notifies_the_session_that_launched_it(tmp_path: Path, monkeypatch) -> None:
