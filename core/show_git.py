@@ -258,16 +258,125 @@ def _run_id_from_native_message_id(value: Any) -> str | None:
     return run_id or None
 
 
+def _delivery_snapshot_text(value: Any) -> str:
+    try:
+        snapshot = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(snapshot, dict):
+        return ""
+    return _read_message_text(
+        snapshot.get("content_text"),
+        snapshot.get("content_json"),
+    )
+
+
 def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -> TurnCheckpointContext:
     """Read the driving message/run without changing the turn event payload."""
 
     try:
-        from sqlalchemy import select, tuple_
+        from sqlalchemy import func, select, tuple_
 
         from storage.db import get_cached_sqlite_engine
-        from storage.models import agent_runs, messages
+        from storage.models import (
+            agent_runs,
+            message_deliveries,
+            messages,
+            session_turns,
+        )
 
         with get_cached_sqlite_engine().connect() as conn:
+            turn_query = select(
+                session_turns.c.id,
+                session_turns.c.initial_delivery_id,
+                session_turns.c.created_at,
+                session_turns.c.started_at,
+            ).where(session_turns.c.session_id == session_id)
+            if after is None:
+                turn_query = (
+                    turn_query.where(session_turns.c.state.in_(("starting", "active")))
+                    .order_by(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        ).desc(),
+                        session_turns.c.id.desc(),
+                    )
+                    .limit(1)
+                )
+            else:
+                turn_query = (
+                    turn_query.where(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        )
+                        >= after
+                    )
+                    .order_by(
+                        func.coalesce(
+                            session_turns.c.started_at,
+                            session_turns.c.created_at,
+                        ).asc(),
+                        session_turns.c.id.asc(),
+                    )
+                    .limit(1)
+                )
+            turn = conn.execute(turn_query).first()
+            if turn is not None:
+                delivery = conn.execute(
+                    select(
+                        message_deliveries.c.id,
+                        message_deliveries.c.message_id,
+                        message_deliveries.c.snapshot_json,
+                    )
+                    .where(
+                        message_deliveries.c.id == turn.initial_delivery_id
+                    )
+                    .limit(1)
+                ).first()
+                if delivery is not None:
+                    run_id = conn.execute(
+                        select(agent_runs.c.id)
+                        .where(agent_runs.c.delivery_id == delivery.id)
+                        .where(agent_runs.c.run_type != "watch_runtime")
+                        .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if delivery.message_id:
+                        message_row = conn.execute(
+                            select(
+                                messages.c.id,
+                                messages.c.author,
+                                messages.c.type,
+                                messages.c.content_text,
+                                messages.c.content_json,
+                                messages.c.native_message_id,
+                            )
+                            .where(messages.c.id == delivery.message_id)
+                            .limit(1)
+                        ).first()
+                        if message_row is not None:
+                            return TurnCheckpointContext(
+                                message=_read_message_text(
+                                    message_row.content_text,
+                                    message_row.content_json,
+                                ),
+                                run_id=(
+                                    str(run_id)
+                                    if run_id is not None
+                                    else _run_id_from_native_message_id(
+                                        message_row.native_message_id
+                                    )
+                                ),
+                                message_id=str(message_row.id),
+                            )
+                    return TurnCheckpointContext(
+                        message=_delivery_snapshot_text(delivery.snapshot_json),
+                        run_id=str(run_id) if run_id is not None else None,
+                        message_id=str(delivery.id),
+                    )
+
             active_run = conn.execute(
                 select(agent_runs.c.id, agent_runs.c.message, agent_runs.c.prompt)
                 .where(agent_runs.c.session_id == session_id)

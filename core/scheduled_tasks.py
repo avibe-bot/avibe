@@ -431,6 +431,15 @@ class TaskExecutionResult:
     session_key: str
     session_id: Optional[str]
     failure_code: Optional[str] = None
+    complete_on_return: bool = True
+
+
+@dataclass(frozen=True)
+class TaskDispatchResult:
+    """Admission result for any Task/Watch/Hook input submission."""
+
+    error: Optional[str]
+    complete_on_return: bool = True
 
 
 @dataclass(frozen=True)
@@ -4894,6 +4903,7 @@ class ScheduledTaskService:
                 session_key = result.session_key
                 session_id = result.session_id
                 failure_code = result.failure_code
+                should_complete = result.complete_on_return
             elif request.request_type in {"hook_send", "watch", "webhook"}:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
@@ -4908,7 +4918,7 @@ class ScheduledTaskService:
                     session_key = ""
                 elif not (request.session_id or request.session_key):
                     raise ValueError("hook request requires session_id or session_key")
-                error = await self._execute_request(
+                dispatch_result = await self._execute_request(
                     session_key=session_key,
                     session_id=session_id,
                     post_to=request.post_to,
@@ -4918,8 +4928,14 @@ class ScheduledTaskService:
                     task_id=task_id,
                     trigger_kind=request.request_type if request.request_type != "hook_send" else "hook",
                     agent_name=request.agent_name,
+                    _capture_dispatch_result=True,
                     **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
+                if isinstance(dispatch_result, TaskDispatchResult):
+                    error = dispatch_result.error
+                    should_complete = dispatch_result.complete_on_return
+                else:
+                    error = dispatch_result
             elif request.request_type == "agent_run":
                 message = _agent_run_message_for_request(request)
                 if not message.strip():
@@ -5066,6 +5082,7 @@ class ScheduledTaskService:
         agent_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         error: Optional[str] = None
+        complete_on_return = True
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
@@ -5086,7 +5103,7 @@ class ScheduledTaskService:
                     workdir=task.cwd,
                 )
                 session_key = ""
-            error = await self._execute_request(
+            dispatch_result = await self._execute_request(
                 session_key=session_key,
                 session_id=session_id,
                 post_to=task.post_to,
@@ -5096,8 +5113,14 @@ class ScheduledTaskService:
                 task_id=task.id,
                 trigger_kind="scheduled",
                 agent_name=task.agent_name,
+                _capture_dispatch_result=True,
                 **({"agent_id": agent_id} if agent_id else {}),
             )
+            if isinstance(dispatch_result, TaskDispatchResult):
+                error = dispatch_result.error
+                complete_on_return = dispatch_result.complete_on_return
+            else:
+                error = dispatch_result
         except asyncio.CancelledError:
             self.reconcile_jobs()
             raise
@@ -5119,7 +5142,7 @@ class ScheduledTaskService:
                 session_id = binding_change.new_session_id
                 session_key = ""
                 try:
-                    error = await self._execute_request(
+                    dispatch_result = await self._execute_request(
                         session_key=session_key,
                         session_id=session_id,
                         post_to=task.post_to,
@@ -5129,12 +5152,18 @@ class ScheduledTaskService:
                         task_id=task.id,
                         trigger_kind="scheduled",
                         agent_name=task.agent_name,
+                        _capture_dispatch_result=True,
                         **(
                             {"agent_id": agent_id}
                             if agent_id and task.agent_name
                             else {}
                         ),
                     )
+                    if isinstance(dispatch_result, TaskDispatchResult):
+                        error = dispatch_result.error
+                        complete_on_return = dispatch_result.complete_on_return
+                    else:
+                        error = dispatch_result
                 except asyncio.CancelledError:
                     self.reconcile_jobs()
                     raise
@@ -5187,6 +5216,7 @@ class ScheduledTaskService:
             session_key=session_key,
             session_id=session_id,
             failure_code=failure_code if error else None,
+            complete_on_return=complete_on_return,
         )
 
     async def _execute_agent_run(
@@ -6492,7 +6522,8 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> Optional[str]:
+        _capture_dispatch_result: bool = False,
+    ) -> Optional[str] | TaskDispatchResult:
         target_info = resolve_session_id_target(session_id) if session_id else None
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
         delivery_target = self._resolve_delivery_target(
@@ -6529,13 +6560,24 @@ class ScheduledTaskService:
         # the direct ``handle_scheduled_message`` path byte-for-byte.
         gate = getattr(self.controller, "session_turn_gate", None)
         if target.platform == "avibe" and session_id and gate is not None:
-            await gate.submit_scheduled(session_id, context, prompt)
-            return None
-        return await self.controller.message_handler.handle_scheduled_message(
+            from core.session_turns import TurnSubmissionResult
+
+            submission = await gate.submit_scheduled(session_id, context, prompt)
+            if isinstance(submission, TurnSubmissionResult):
+                result = TaskDispatchResult(
+                    error=None,
+                    complete_on_return=not submission.delivery_owner_transferred,
+                )
+                return result if _capture_dispatch_result else result.error
+            result = TaskDispatchResult(error=None)
+            return result if _capture_dispatch_result else result.error
+        error = await self.controller.message_handler.handle_scheduled_message(
             context=context,
             message=prompt,
             parsed_session_key=target,
         )
+        result = TaskDispatchResult(error=error)
+        return result if _capture_dispatch_result else result.error
 
     async def _build_context(
         self,

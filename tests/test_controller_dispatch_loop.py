@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.controller import Controller
@@ -419,3 +421,29 @@ def test_terminal_checkpoint_runs_after_dispatcher_delivery() -> None:
 
     assert result == "result-1"
     assert order == ["checkpoint-start", "delivered", "checkpoint-end"]
+
+
+def test_terminal_delivery_failure_keeps_turn_owner_live() -> None:
+    controller = Controller.__new__(Controller)
+    completed: list[MessageContext] = []
+
+    class _Dispatcher:
+        @staticmethod
+        async def emit_agent_message(**_kwargs):
+            raise RuntimeError("Workbench run output was not durably persisted")
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.session_turns = SimpleNamespace(
+        on_terminal_delivery_complete=lambda context: completed.append(context)
+    )
+    context = MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="avibe",
+        platform_specific={"turn_token": "turn-live"},
+    )
+
+    with pytest.raises(RuntimeError, match="not durably persisted"):
+        asyncio.run(controller.emit_agent_message(context, "result", "done"))
+
+    assert completed == []

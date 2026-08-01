@@ -678,6 +678,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 def test_opencode_prompt_disables_question_tool_for_all_platforms():
     calls = []
     active_polls = []
+    recovery_order = []
 
     class _Server:
         async def ensure_running(self):
@@ -701,6 +702,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             }
 
         async def prompt_async(self, **kwargs):
+            recovery_order.append("prompt")
             calls.append(kwargs)
 
         async def mark_run_active(self, session_id):
@@ -733,6 +735,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            recovery_order.append("poll")
             active_polls.append(kwargs)
             return None
 
@@ -821,6 +824,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
     assert calls[0]["message_id"] == "atm_initial_start"
+    assert recovery_order[:2] == ["poll", "prompt"]
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
 

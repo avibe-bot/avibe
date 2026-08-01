@@ -141,6 +141,8 @@ def create_app(controller: "Controller") -> FastAPI:
         from storage.background import (
             agent_run_cancellation_won_in_connection,
             attach_agent_run_delivery_in_connection,
+            cancel_queued_agent_run_delivery_in_connection,
+            normalize_run_status,
             record_agent_run_delivery_outcome_in_connection,
             run_update_event_transaction,
         )
@@ -159,7 +161,7 @@ def create_app(controller: "Controller") -> FastAPI:
         with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
             from sqlalchemy import select
             from storage.agent_session_rows import reserve_write_lock
-            from storage.models import agent_sessions
+            from storage.models import agent_runs, agent_sessions
 
             reserve_write_lock(conn)
             existing = (
@@ -175,10 +177,59 @@ def create_app(controller: "Controller") -> FastAPI:
                     native_message_id=native_message_id,
                 )
             )
-            if existing is not None and (
-                existing["session_id"] != session_id
-                or existing["state"] != "reserved"
-            ):
+            target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
+            if existing is not None and existing["session_id"] != session_id:
+                return "duplicate"
+            if existing is not None and existing["state"] != "reserved":
+                if execution_id:
+                    run_owner = conn.execute(
+                        select(
+                            agent_runs.c.status,
+                            agent_runs.c.session_id,
+                            agent_runs.c.delivery_id,
+                        )
+                        .where(agent_runs.c.id == execution_id)
+                        .limit(1)
+                    ).mappings().first()
+                    if (
+                        run_owner is not None
+                        and normalize_run_status(run_owner["status"])
+                        in {"queued", "running"}
+                        and run_owner["session_id"] == session_id
+                        and run_owner["delivery_id"] == existing["id"]
+                    ):
+                        existing_state = str(existing["state"])
+                        if existing_state == "retired":
+                            cancel_queued_agent_run_delivery_in_connection(
+                                conn,
+                                execution_id,
+                                session_id=session_id,
+                                delivery_id=str(existing["id"]),
+                            )
+                            return TurnSubmissionResult(
+                                route="enqueued",
+                                queue_persisted=False,
+                                target_was_busy=target_was_busy,
+                                delivery_status="canceled",
+                            )
+                        return TurnSubmissionResult(
+                            route=(
+                                "enqueued"
+                                if existing_state
+                                in {
+                                    "queued",
+                                    "interrupt_waiting",
+                                    "waiting_terminal",
+                                    "reconciling_steer",
+                                    "reconciling_migration",
+                                }
+                                else "ran"
+                            ),
+                            queue_persisted=True,
+                            target_was_busy=target_was_busy,
+                            delivery_status=existing_state,
+                            delivery_owner_transferred=True,
+                        )
                 return "duplicate"
             if legacy_accepted:
                 return "duplicate"
@@ -187,7 +238,6 @@ def create_app(controller: "Controller") -> FastAPI:
             ).scalar_one_or_none()
             if status != "active":
                 raise ValueError("Session is archived")
-            target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
             if existing is not None:
                 delivery_id = str(existing["id"])
                 delivery_request = manager._request_from_delivery(existing)
@@ -295,10 +345,57 @@ def create_app(controller: "Controller") -> FastAPI:
                 "message_metadata": dict(delivery_request.metadata or {}),
             }
         )
-        result = await manager.deliver(
-            delivery_request,
-            context=context,
-        )
+        try:
+            result = await manager.deliver(
+                delivery_request,
+                context=context,
+            )
+        except Exception:
+            if not delivery_owner_transferred:
+                raise
+            logger.exception(
+                "Delivery admission deferred to recovery after Agent Run ownership "
+                "transfer: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            delivery_status = "reserved"
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    persisted = message_deliveries.get_delivery(conn, delivery_id)
+                    delivery_status = str(
+                        (persisted or {}).get("state") or delivery_status
+                    )
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": effective_delivery_intent,
+                            "status": delivery_status,
+                            "target_was_busy": target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "Agent Run deferred Delivery outcome lost its exact CAS: "
+                        "run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Agent Run deferred outcome projection failed; Delivery "
+                    "ownership remains authoritative: run=%s delivery=%s",
+                    execution_id,
+                    delivery_id,
+                )
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=True,
+                target_was_busy=target_was_busy,
+                delivery_status=delivery_status,
+                delivery_owner_transferred=True,
+            )
         route = "enqueued" if result.state in {
             "queued",
             "interrupt_waiting",
@@ -316,19 +413,33 @@ def create_app(controller: "Controller") -> FastAPI:
             delivery_owner_transferred=delivery_owner_transferred,
         )
         if effective_delivery_intent == "send_now":
-            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
-                if not record_agent_run_delivery_outcome_in_connection(
-                    conn,
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": "send_now",
+                            "status": result.state,
+                            "target_was_busy": submission.target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "send-now Agent Run outcome lost its exact CAS after Delivery "
+                        "ownership transfer: run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "send-now Agent Run outcome persistence deferred after Delivery "
+                    "ownership transfer: run=%s delivery=%s",
                     execution_id,
-                    {
-                        "intent": "send_now",
-                        "status": result.state,
-                        "target_was_busy": submission.target_was_busy,
-                    },
-                ):
-                    raise RuntimeError("send-now Agent Run delivery outcome could not be recorded")
+                    delivery_id,
+                )
             return submission
-        return route
+        return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:

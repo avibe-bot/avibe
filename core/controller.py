@@ -1414,30 +1414,29 @@ class Controller:
         delivery: Any = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
-        try:
-            return await self.message_dispatcher.emit_agent_message(
-                context=context,
-                message_type=message_type,
-                text=text,
-                parse_mode=parse_mode,
-                is_error=is_error,
-                level=level,
-                status_label=status_label,
-                result_footer=result_footer,
-                output=output,
-                terminal_error=terminal_error,
-                # Forwarded ONLY when a caller asked for it, for the same reason
-                # ``emit_backend_failure`` does: ``message_dispatcher`` is a
-                # substitutable collaborator (six test suites replace it), so passing
-                # an optional diagnostic unconditionally would change the required
-                # signature of every stand-in.
-                **({"delivery": delivery} if delivery is not None else {}),
-            )
-        finally:
-            manager = getattr(self, "session_turns", None)
-            complete = getattr(manager, "on_terminal_delivery_complete", None)
-            if callable(complete):
-                complete(context)
+        result = await self.message_dispatcher.emit_agent_message(
+            context=context,
+            message_type=message_type,
+            text=text,
+            parse_mode=parse_mode,
+            is_error=is_error,
+            level=level,
+            status_label=status_label,
+            result_footer=result_footer,
+            output=output,
+            terminal_error=terminal_error,
+            # Forwarded ONLY when a caller asked for it, for the same reason
+            # ``emit_backend_failure`` does: ``message_dispatcher`` is a
+            # substitutable collaborator (six test suites replace it), so passing
+            # an optional diagnostic unconditionally would change the required
+            # signature of every stand-in.
+            **({"delivery": delivery} if delivery is not None else {}),
+        )
+        manager = getattr(self, "session_turns", None)
+        complete = getattr(manager, "on_terminal_delivery_complete", None)
+        if callable(complete):
+            complete(context)
+        return result
 
     def note_session_tokens(self, context: MessageContext, *, total: int) -> None:
         """Report the session's current context-window occupancy for the status

@@ -4106,8 +4106,88 @@ def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tm
         assert delivery["message_id"] == delivery_id
 
 
-def test_scheduled_send_now_retry_resumes_transferred_reservation(monkeypatch, tmp_path):
-    """A pre-claim retry reuses both the reserved Delivery and held Agent Run."""
+def test_scheduled_gate_retry_preserves_existing_delivery_owner(monkeypatch, tmp_path):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        run_update_event_transaction,
+    )
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_sched_owned_retry",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="owned watch result",
+        run_type="watch",
+    )
+    assert request_store.claim(run.id) is not None
+    delivery_id = message_deliveries.new_delivery_id()
+    with run_update_event_transaction(engine) as conn:
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="queued",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="owned watch result",
+                native_message_id=f"watch:{run.id}",
+            ),
+            dispatch_text="owned watch result",
+            dedupe_key=f"avibe:watch:{run.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session_id,
+            delivery_id=delivery_id,
+        )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"watch:{run.id}",
+        platform_specific={
+            "task_execution_id": run.id,
+            "task_trigger_kind": "watch",
+        },
+    )
+
+    result = asyncio.run(
+        controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            "owned watch result",
+        )
+    )
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=False,
+        delivery_status="queued",
+        delivery_owner_transferred=True,
+    )
+    assert request_store.get_run(run.id)["status"] == "running"
+
+
+def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_path):
+    """After ownership transfer, a pre-claim failure belongs to Delivery recovery."""
     from core.scheduled_tasks import TaskExecutionStore
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -4161,37 +4241,36 @@ def test_scheduled_send_now_retry_resumes_transferred_reservation(monkeypatch, t
     )
 
     async def _go():
-        with pytest.raises(RuntimeError, match="temporarily unresolved"):
-            await submit_scheduled(
-                session_id,
-                ctx,
-                "original send-now prompt",
-                delivery_intent="send_now",
-            )
+        deferred = await submit_scheduled(
+            session_id,
+            ctx,
+            "original send-now prompt",
+            delivery_intent="send_now",
+        )
+        assert isinstance(deferred, session_turns.TurnSubmissionResult)
+        assert deferred.route == "enqueued"
+        assert deferred.delivery_status == "reserved"
+        assert deferred.delivery_owner_transferred is True
         held = request_store.get_run(run.id)
         assert held is not None
         assert held["status"] == "running"
         assert held["delivery_id"] is not None
         assert "workbench_queue_holds_run" not in held["metadata"]
 
-        resumed = await submit_scheduled(
-            session_id,
-            ctx,
-            "changed retry payload",
-            delivery_intent="send_now",
-        )
-        duplicate = await submit_scheduled(
+        await manager.recover_durable_delivery_state(session_id)
+        resumed_owner = await submit_scheduled(
             session_id,
             ctx,
             "duplicate",
             delivery_intent="send_now",
         )
-        return resumed, duplicate
+        return resumed_owner
 
-    resumed, duplicate = asyncio.run(_go())
-    assert isinstance(resumed, session_turns.TurnSubmissionResult)
-    assert resumed.route == "ran"
-    assert duplicate == "duplicate"
+    resumed_owner = asyncio.run(_go())
+    assert isinstance(resumed_owner, session_turns.TurnSubmissionResult)
+    assert resumed_owner.route == "ran"
+    assert resumed_owner.delivery_status == "claimed"
+    assert resumed_owner.delivery_owner_transferred is True
     assert dispatched == ["original send-now prompt"]
 
 

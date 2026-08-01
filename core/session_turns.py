@@ -2378,6 +2378,7 @@ class SessionTurnManager:
         settled_by: str | None = None,
         evidence_kind: str = "terminal_reconciliation",
         evidence: dict[str, Any] | None = None,
+        expected_start_attempt_id: str | None = None,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -2394,7 +2395,14 @@ class SessionTurnManager:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
-            if turn is None or turn["state"] == "terminal":
+            if (
+                turn is None
+                or turn["state"] == "terminal"
+                or (
+                    expected_start_attempt_id is not None
+                    and turn.get("start_attempt_id") != expected_start_attempt_id
+                )
+            ):
                 result = {
                     "changed": False,
                     "successor_turn_id": None,
@@ -2619,6 +2627,27 @@ class SessionTurnManager:
                 {"session_id": session_id, "agent_status": projected_status},
             )
         return result
+
+    def reconcile_start_attempt_not_written(
+        self,
+        turn_id: str,
+        attempt_id: str,
+        *,
+        backend: str,
+    ) -> bool:
+        """Consume exact adapter proof that a persisted start never reached native."""
+
+        if not turn_id or not attempt_id:
+            return False
+        result = self._terminalize_durable_turn(
+            turn_id,
+            "not_written",
+            settled_by="adapter_start_absent",
+            evidence_kind="native_start_attempt_absent",
+            evidence={"backend": backend, "attempt_id": attempt_id},
+            expected_start_attempt_id=attempt_id,
+        )
+        return bool(result.get("changed"))
 
     def _settle_durable_prewrite_failure(
         self,
@@ -4094,28 +4123,6 @@ class SessionTurnManager:
                 name=f"durable-result-resume:{session_id}",
             )
 
-    async def _finish_durable_terminal_after_release(
-        self,
-        session_id: str,
-        logical_turn_id: str,
-        sink: dict[str, Any],
-        *,
-        is_error: bool,
-        terminal_evidence: dict[str, Any] | None = None,
-    ) -> None:
-        """Settle only after the dispatcher has persisted/delivered and released its sink."""
-
-        done = sink.get("done_event")
-        if done is not None and not done.is_set():
-            await done.wait()
-        self._finish_durable_terminal_result(
-            session_id,
-            logical_turn_id,
-            is_error=is_error,
-            settled_by=str(sink.get("settled_by") or "") or None,
-            terminal_evidence=terminal_evidence,
-        )
-
     def on_terminal_result(
         self,
         context: "MessageContext",
@@ -4151,17 +4158,6 @@ class SessionTurnManager:
                     logger.debug("failed to inspect terminal Turn sink", exc_info=True)
             if isinstance(sink, dict):
                 sink["terminal_evidence"] = dict(terminal_evidence or {})
-            if isinstance(sink, dict) and sink.get("done_event") is not None:
-                asyncio.create_task(
-                    self._finish_durable_terminal_after_release(
-                        session_id,
-                        logical_turn_id,
-                        sink,
-                        is_error=is_error,
-                        terminal_evidence=terminal_evidence,
-                    ),
-                    name=f"durable-result-reconcile:{session_id}",
-                )
         payload = dict(getattr(context, "platform_specific", None) or {})
         payload[_TERMINAL_RESULT_LATCH_KEY] = {
             "session_id": session_id,

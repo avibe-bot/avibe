@@ -760,7 +760,7 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     from storage import messages_service
     from storage.db import get_cached_sqlite_engine
     from storage.importer import ensure_sqlite_state
-    from storage.models import agent_sessions, messages
+    from storage.models import agent_sessions, messages, session_turns
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(primary_platform="avibe")
@@ -812,17 +812,41 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
     assert show_git.load_turn_checkpoint_context(session_id) == TurnCheckpointContext()
 
     with get_cached_sqlite_engine().begin() as conn:
-        current = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="user",
-            message_type="user",
-            text="current driving message",
-        )
         from storage import message_deliveries
 
+        current = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=message_deliveries.new_delivery_id(),
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="current driving message",
+            ),
+            dispatch_text="current driving message",
+            now="2099-01-01T00:00:01+00:00",
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id="turn_storage_boundary",
+            session_id=session_id,
+            backend="codex",
+            deliveries=[current],
+            dispatch_text="current driving message",
+        )
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id == "turn_storage_boundary")
+            .values(
+                created_at="2099-01-01T00:00:01+00:00",
+                started_at="2099-01-01T00:00:01+00:00",
+            )
+        )
         later = message_deliveries.insert_delivery(
             conn,
             delivery_id=message_deliveries.new_delivery_id(),
@@ -840,9 +864,11 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
             dispatch_text="later pending message",
             now="2099-01-01T00:00:02+00:00",
         )
-        conn.execute(update(messages).where(messages.c.id == current["id"]).values(created_at="2099-01-01T00:00:01+00:00"))
         assert later["message_id"] is None
 
+    current_context = show_git.load_turn_checkpoint_context(session_id)
+    assert current_context.message == "current driving message"
+    assert current_context.message_id == current["id"]
     context = show_git.load_turn_checkpoint_context(session_id, after="2099-01-01T00:00:00+00:00")
     assert context.message == "current driving message"
     assert context.message_id == current["id"]

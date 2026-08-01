@@ -815,8 +815,54 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             except Exception:
                 logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
 
+            raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
+            platform_payload = request.context.platform_specific or {}
+            logical_turn_id = str(platform_payload.get("turn_token") or "").strip()
+            start_attempt_id = str(
+                platform_payload.get("delivery_start_attempt_id") or ""
+            ).strip()
+            processing_indicator = self.controller.processing_indicator.snapshot_request(
+                request
+            )
+            target_session_id = _target_agent_session_id(request)
+            if target_session_id and logical_turn_id:
+                processing_indicator[_STEERING_SNAPSHOT_KEY] = {
+                    "target_session_id": target_session_id,
+                    "logical_turn_id": logical_turn_id,
+                    "agent": agent_to_use,
+                    "system": system_prompt_injection,
+                }
+            if start_attempt_id:
+                processing_indicator["delivery_start_attempt_id"] = start_attempt_id
+            launch_identity = persisted_launch_identity(model_hub_launch)
+            if launch_identity is not None:
+                processing_indicator["model_hub_launch"] = launch_identity
+
             await server.mark_run_active(session_id)
             run_registered = True
+            # Persist the complete recovery address before the first native write.
+            # A crash after OpenCode accepts the exact message ID can now rebuild the
+            # poll and Turn owner even if no post-prompt Python statement ran.
+            self.sessions.add_active_poll(
+                opencode_session_id=session_id,
+                base_session_id=request.base_session_id,
+                channel_id=request.context.channel_id,
+                thread_id=request.context.thread_id,
+                settings_key=raw_settings_key,
+                working_path=request.working_path,
+                baseline_message_ids=list(baseline_message_ids),
+                ack_reaction_message_id=request.ack_reaction_message_id,
+                ack_reaction_emoji=request.ack_reaction_emoji,
+                typing_indicator_active=request.typing_indicator_active,
+                context_token=str(platform_payload.get("context_token") or ""),
+                processing_indicator=processing_indicator,
+                user_id=request.context.user_id or "",
+                platform=request.context.platform or platform_payload.get("platform") or "",
+                prompt_started_at=None,
+                model_dict=model_dict,
+                reasoning_effort=reasoning_effort,
+                session_key=request.session_key,
+            )
             await server.prompt_async(
                 session_id=session_id,
                 directory=request.working_path,
@@ -834,18 +880,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False},
             )
-            get_started_at = getattr(server, "get_last_prompt_started_at", None)
-            prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
             current_task = asyncio.current_task()
             if current_task is None:
                 raise RuntimeError("OpenCode runner task is unavailable")
             steer_state = _OpenCodeSteerState(
                 task=current_task,
                 base_session_id=request.base_session_id,
-                target_session_id=_target_agent_session_id(request),
-                logical_turn_id=str(
-                    (request.context.platform_specific or {}).get("turn_token") or ""
-                ),
+                target_session_id=target_session_id,
+                logical_turn_id=logical_turn_id,
                 native_session_id=session_id,
                 directory=request.working_path,
                 agent=agent_to_use,
@@ -867,43 +909,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_id,
                 request.base_session_id,
                 request.working_path,
-            )
-
-            # Keep both the raw settings key for legacy lookup and the complete
-            # scoped key so restored polls remain attached to typed scopes.
-            raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
-            platform_payload = request.context.platform_specific or {}
-            processing_indicator = self.controller.processing_indicator.snapshot_request(request)
-            if steer_state.target_session_id and steer_state.logical_turn_id:
-                processing_indicator[_STEERING_SNAPSHOT_KEY] = {
-                    "target_session_id": steer_state.target_session_id,
-                    "logical_turn_id": steer_state.logical_turn_id,
-                    "agent": steer_state.agent,
-                    "system": steer_state.system,
-                }
-            launch_identity = persisted_launch_identity(model_hub_launch)
-            if launch_identity is not None:
-                processing_indicator["model_hub_launch"] = launch_identity
-
-            self.sessions.add_active_poll(
-                opencode_session_id=session_id,
-                base_session_id=request.base_session_id,
-                channel_id=request.context.channel_id,
-                thread_id=request.context.thread_id,
-                settings_key=raw_settings_key,
-                working_path=request.working_path,
-                baseline_message_ids=list(baseline_message_ids),
-                ack_reaction_message_id=request.ack_reaction_message_id,
-                ack_reaction_emoji=request.ack_reaction_emoji,
-                typing_indicator_active=request.typing_indicator_active,
-                context_token=str(platform_payload.get("context_token") or ""),
-                processing_indicator=processing_indicator,
-                user_id=request.context.user_id or "",
-                platform=request.context.platform or platform_payload.get("platform") or "",
-                prompt_started_at=prompt_started_at,
-                model_dict=model_dict,
-                reasoning_effort=reasoning_effort,
-                session_key=request.session_key,
             )
 
             poll_server = _SteeringAwareOpenCodeServer(
@@ -1380,6 +1385,27 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 continue
 
             baseline_message_ids = set(poll_info.baseline_message_ids)
+            processing_snapshot = (
+                poll_info.processing_indicator
+                if isinstance(poll_info.processing_indicator, dict)
+                else {}
+            )
+            start_attempt_id = str(
+                processing_snapshot.get("delivery_start_attempt_id") or ""
+            ).strip()
+            steering_snapshot = processing_snapshot.get(_STEERING_SNAPSHOT_KEY)
+            logical_turn_id = (
+                str(steering_snapshot.get("logical_turn_id") or "").strip()
+                if isinstance(steering_snapshot, dict)
+                else ""
+            )
+            start_attempt_found = any(
+                start_attempt_id
+                and message.get("info", {}).get("role") == "user"
+                and str(message.get("info", {}).get("id") or "")
+                == start_attempt_id
+                for message in messages
+            )
             has_in_progress = False
             last_assistant_finish = None
             last_completed_assistant_index = -1
@@ -1439,8 +1465,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or has_in_progress
                 or last_assistant_finish == "tool-calls"
                 or has_post_assistant_user
+                or start_attempt_found
             )
             if not session_still_active:
+                if start_attempt_id and logical_turn_id:
+                    try:
+                        self.controller.session_turns.reconcile_start_attempt_not_written(
+                            logical_turn_id,
+                            start_attempt_id,
+                            backend="opencode",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist definitive missing OpenCode start "
+                            "attempt for Turn=%s",
+                            logical_turn_id,
+                        )
+                        continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)

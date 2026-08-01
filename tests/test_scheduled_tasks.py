@@ -6829,12 +6829,69 @@ def test_drain_requests_reserves_watch_create_per_run_before_session_validation(
             "task_id": "watch-1",
             "trigger_kind": "watch",
             "agent_name": "release-reviewer",
+            "_capture_dispatch_result": True,
         }
     ]
     payload = json.loads((request_store.completed_dir / f"{request.id}.json").read_text(encoding="utf-8"))
     assert payload["ok"] is True
     assert payload["session_id"] == "ses-created"
     assert payload["session_key"] == ""
+
+
+def test_claimed_watch_stays_nonterminal_after_delivery_ownership_transfer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="watch result",
+        agent_name="release-reviewer",
+        run_type="watch",
+    )
+    submitted: list[tuple[str, str, str]] = []
+
+    async def _submit_scheduled(sid, ctx, text):
+        from core.session_turns import TurnSubmissionResult
+
+        submitted.append(
+            (sid, text, str(ctx.platform_specific.get("task_execution_id") or ""))
+        )
+        return TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=True,
+            target_was_busy=True,
+            delivery_owner_transferred=True,
+        )
+
+    async def _handle_scheduled_message(*_args, **_kwargs):
+        raise AssertionError("Workbench Watch input must use the Delivery gate")
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=gate,
+            handle_scheduled_message=_handle_scheduled_message,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+
+    asyncio.run(_exercise())
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored.get("completed_at") is None
+    assert submitted == [(session_id, "watch result", request.id)]
 
 
 def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_path: Path) -> None:
@@ -6885,6 +6942,7 @@ def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_pa
             "task_id": task.id,
             "trigger_kind": "scheduled",
             "agent_name": "release-reviewer",
+            "_capture_dispatch_result": True,
         }
     ]
     payload = json.loads((request_store.completed_dir / f"{request.id}.json").read_text(encoding="utf-8"))
@@ -6989,6 +7047,7 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
                 "task_id": None,
                 "trigger_kind": "hook",
                 "agent_name": "pm",
+                "_capture_dispatch_result": True,
                 "agent_id": agent.id,
             }
         ]

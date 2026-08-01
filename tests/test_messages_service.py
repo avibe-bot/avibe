@@ -1192,6 +1192,7 @@ def test_remove_queued_cancels_only_its_exact_agent_run(isolated_state):
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import (
         attach_agent_run_delivery_in_connection,
+        claim_agent_runs_for_turn_in_connection,
         run_update_event_transaction,
     )
 
@@ -1229,6 +1230,9 @@ def test_remove_queued_cancels_only_its_exact_agent_run(isolated_state):
                 delivery_id=str(delivery["id"]),
             )
             deliveries.append(delivery)
+        assert claim_agent_runs_for_turn_in_connection(conn, [primary.id]) == [
+            primary.id
+        ]
 
     with run_update_event_transaction(engine) as conn:
         assert (

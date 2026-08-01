@@ -20,6 +20,11 @@ coherent before dispatch, during a native Turn, and after acceptance.
   Delivery, while one Turn may accept several Deliveries and therefore several
   Runs.
 
+Once a Run is bound to a Delivery, the Delivery/Turn owns its completion. A
+producer returning from admission is not a terminal event: a queued Delivery
+keeps its Run nonterminal, exact queue removal cancels both, and accepted work is
+settled only from the Turn's terminal evidence.
+
 ## Queue Batching
 
 Queued Deliveries remain separate until a Turn is claimed. The claim transaction
@@ -61,6 +66,15 @@ projection share one writer transaction. Result evidence is committed only after
 output persistence/delivery has settled. A post-native storage failure therefore
 keeps the prior Turn and running projection for recovery instead of exposing an
 idle gap.
+
+Every backend write must first persist enough identity to query that exact
+attempt after restart. OpenCode persists its poll/recovery address before the
+prompt call and restores even an already-completed exact start, so recovery can
+materialize and settle it without replaying native work.
+
+Turn-scoped consumers never infer the current input from transcript timestamps.
+They resolve `session_turns.initial_delivery_id`: before acceptance they read the
+Delivery snapshot, and afterward they read its linked Message.
 
 ## Product Policy
 

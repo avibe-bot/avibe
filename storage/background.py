@@ -1934,7 +1934,7 @@ def cancel_queued_agent_run_delivery_in_connection(
     session_id: str,
     delivery_id: str,
 ) -> bool:
-    """Cancel a Run only while it still owns the exact queued Delivery."""
+    """Cancel a nonterminal Run only while it owns the exact queued Delivery."""
 
     normalized_run_id = str(run_id or "").strip()
     normalized_session_id = str(session_id or "").strip()
@@ -1949,7 +1949,7 @@ def cancel_queued_agent_run_delivery_in_connection(
     if row is None:
         return True
     if (
-        normalize_run_status(row["status"]) != "queued"
+        normalize_run_status(row["status"]) not in {"queued", "running"}
         or str(row["session_id"] or "").strip() != normalized_session_id
         or str(row["delivery_id"] or "").strip() != normalized_delivery_id
     ):
@@ -1960,7 +1960,11 @@ def cancel_queued_agent_run_delivery_in_connection(
         .where(agent_runs.c.id == normalized_run_id)
         .where(agent_runs.c.session_id == normalized_session_id)
         .where(agent_runs.c.delivery_id == normalized_delivery_id)
-        .where(agent_runs.c.status.in_(_status_query_values("queued")))
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
         .values(
             status="canceled",
             cancel_requested=1,

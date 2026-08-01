@@ -1161,6 +1161,40 @@ def test_start_write_ambiguity_survives_restart_without_duplicate_dispatch(manag
         assert conn.execute(select(messages.c.id)).all() == []
 
 
+def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="retry exact"),
+            context=_context(),
+        )
+    )
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert turn is not None
+    attempt_id = str(turn["start_attempt_id"])
+
+    assert not manager.reconcile_start_attempt_not_written(
+        str(admitted.turn_id),
+        "different-attempt",
+        backend="opencode",
+    )
+    with engine.connect() as conn:
+        still_starting = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert still_starting is not None and still_starting["state"] == "starting"
+
+    assert manager.reconcile_start_attempt_not_written(
+        str(admitted.turn_id),
+        attempt_id,
+        backend="opencode",
+    )
+    assert _row(engine, str(admitted.delivery_id))["state"] == "queued"
+    with engine.connect() as conn:
+        terminal = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert terminal is not None
+    assert terminal["terminal_outcome"] == "not_written"
+
+
 def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) -> None:
     first, restarted, engine, _engine_b, starts = managers
 
@@ -2009,6 +2043,7 @@ async def test_terminal_commit_publishes_replyless_inbox_settlement(
 
     manager.on_terminal_result(context, is_error=False)
     done.set()
+    manager.on_terminal_delivery_complete(context)
     for _ in range(4):
         await asyncio.sleep(0)
 
