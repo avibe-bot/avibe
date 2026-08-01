@@ -2675,12 +2675,14 @@ class TaskExecutionStore:
         *,
         metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        clear_session_id: bool = False,
     ) -> None:
         if self._sqlite is not None:
             self._sqlite.mark_run_queued_from_running(
                 request_id,
                 updated_at=updated_at or _utc_now_iso(),
                 metadata=metadata,
+                clear_session_id=clear_session_id,
             )
             return
         processing_path = self._request_path(request_id, state="processing")
@@ -3697,8 +3699,20 @@ class ScheduledTaskService:
             # Not our own cancellation being swallowed: this is the cancelled task's
             # terminal state arriving, and it is the terminal ROW write we are here
             # to wait for.
-            with suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # HFR-375. A task may already have failed while its done callback is
+                # still queued. Its old exception is not a teardown failure and must
+                # not skip the manager lane or the reconciliation that follows.
+                logger.warning(
+                    "Session teardown for %s observed an already-failed claimed "
+                    "execution; continuing settlement",
+                    resolved,
+                    exc_info=True,
+                )
         if cancelled_tasks:
             # ``_on_execution_done`` is a done callback, i.e. ``call_soon``: without
             # one more loop pass the session lock is still held by a finished run.
@@ -6313,6 +6327,7 @@ class ScheduledTaskService:
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
+        reserved_session_id: Optional[str] = None
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
@@ -6368,6 +6383,7 @@ class ScheduledTaskService:
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
                         execution_id=request.id,
                     )
+                    reserved_session_id = session_id
                     session_key = ""
                 elif not (request.session_id or request.session_key):
                     raise ValueError("hook request requires session_id or session_key")
@@ -6452,25 +6468,40 @@ class ScheduledTaskService:
             )
             should_complete = False
             raise
-        except TurnAdmissionClosedError as exc:
-            if request.request_type in {"task_run", "scheduled"}:
-                # HFR-370. Admission refusal happened before backend dispatch, so
-                # this claim remains retryable work. Preserve its pre-claim clock;
-                # repeated teardown deferrals must not keep a stale row young.
-                self.request_store.requeue(
-                    request.id, updated_at=request.claimed_from_updated_at
+        except TurnAdmissionClosedError:
+            # HFR-370/HFR-374. Admission refusal is a structured guarantee that no
+            # backend saw the prompt, independent of which durable request type owns
+            # the claim. Return every shape to the queue with its pre-claim clock.
+            # A non-definition create-per-run path reserved its Session in this
+            # frame, so release and detach that unused binding before requeueing.
+            clear_session_id = False
+            if reserved_session_id:
+                release_reason = (
+                    f"teardown refused harness run {request.id} before dispatch"
                 )
-                self._drain_dirty = True
-                should_complete = False
-                settled_out_of_band = False
-                logger.debug(
-                    "Scheduled request %s deferred because teardown owns admission",
-                    request.id,
-                )
-            else:
-                error = str(exc)
-                should_complete = True
-                settled_out_of_band = False
+                if not self._release_reserved_session(
+                    reserved_session_id, reason=release_reason
+                ):
+                    logger.warning(
+                        "Harness run %s left unused reserved session %s for stale "
+                        "reservation cleanup",
+                        request.id,
+                        reserved_session_id,
+                    )
+                self._execution_session_ids.pop(request.id, None)
+                clear_session_id = True
+            self.request_store.requeue(
+                request.id,
+                updated_at=request.claimed_from_updated_at,
+                clear_session_id=clear_session_id,
+            )
+            self._drain_dirty = True
+            should_complete = False
+            settled_out_of_band = False
+            logger.debug(
+                "Harness request %s deferred because teardown owns admission",
+                request.id,
+            )
         except UnresolvableSessionTarget as exc:
             # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
             # than one more error string. #1060's field evidence is the case: a watch

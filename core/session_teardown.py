@@ -416,6 +416,9 @@ def resolve_teardown_session_ids(
     workdir: Optional[str] = None,
     agent_backend: Optional[str] = None,
     admission_holds: Optional[ExitStack] = None,
+    admission_hold_unambiguous: bool = True,
+    admission_drain_on_release: bool = True,
+    admission_drain_veto: bool = False,
 ) -> list[str]:
     """Resolve a RUNTIME identity to the Avibe session ids a teardown must settle.
 
@@ -476,10 +479,15 @@ def resolve_teardown_session_ids(
     # every plausible row as an admission-only owner for that removal window. The
     # optional stack lets Codex's two-phase multi-session eviction acquire every
     # hold before settling any row, while ordinary read-only resolution is unchanged.
-    for session_id in candidates:
-        hold_session_admission(
-            controller, session_id, admission_holds=admission_holds
-        )
+    if admission_hold_unambiguous or len(candidates) != 1:
+        for session_id in candidates:
+            hold_session_admission(
+                controller,
+                session_id,
+                admission_holds=admission_holds,
+                drain_on_release=admission_drain_on_release,
+                drain_veto=admission_drain_veto,
+            )
     return _unambiguous_teardown_session_ids(anchor, candidates)
 
 

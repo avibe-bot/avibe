@@ -3711,6 +3711,7 @@ class SQLiteBackgroundTaskStore:
         *,
         updated_at: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        clear_session_id: bool = False,
     ) -> bool:
         now = updated_at or _utc_now_iso()
         values: dict[str, Any] = {
@@ -3723,6 +3724,10 @@ class SQLiteBackgroundTaskStore:
             merged = dict(existing.get("metadata") or {})
             merged.update(metadata)
             values["metadata_json"] = _json_dumps(merged)
+        if clear_session_id:
+            # A create-per-run reservation refused before backend dispatch was
+            # released, so the queued run no longer executes in that session.
+            values["session_id"] = None
         row_to_publish = None
         with self.engine.begin() as conn:
             result = conn.execute(

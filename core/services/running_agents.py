@@ -864,6 +864,7 @@ def _teardown_session_id(
     composite_key: Optional[str],
     base_session_id: Optional[str],
     backend: Optional[str] = None,
+    admission_holds: Optional[ExitStack] = None,
 ) -> str:
     """The Avibe session id End must settle runs against.
 
@@ -922,9 +923,31 @@ def _teardown_session_id(
         session_anchor=anchor,
         workdir=split_workdir or None,
         agent_backend=str(backend or "").strip() or None,
+        admission_holds=admission_holds,
+        # Running-tab End owns the ordinary unique hold below. The shared
+        # resolver only needs to retain candidates when it refuses ambiguity.
+        admission_hold_unambiguous=False,
+        # This resolver is reached only by user End. Candidate-only holds must
+        # inherit End's Stop semantics just like the unique-session hold below:
+        # keep queued work queued and veto any overlapping teardown's owed drain.
+        admission_drain_on_release=False,
+        admission_drain_veto=True,
     )
     if supplied_session_id:
-        return supplied_session_id if candidates == [supplied_session_id] else ""
+        if candidates == [supplied_session_id]:
+            return supplied_session_id
+        if len(candidates) == 1:
+            # A unique-but-different candidate is still plausible enough to need
+            # admission closed while the shared runtime is removed, even though it
+            # is not proof enough to cancel that session's work.
+            hold_session_admission(
+                controller,
+                candidates[0],
+                admission_holds=admission_holds,
+                drain_on_release=False,
+                drain_veto=True,
+            )
+        return ""
     return candidates[0] if candidates else ""
 
 
@@ -1442,13 +1465,6 @@ async def end_running_agent(
     # behaviour, and is silent when nothing was active (its context sets
     # ``suppress_stop_no_active_notice``). Cancelling the turn here would leave that
     # path with nothing to stop and turn a successful End into an error.
-    teardown_session_id = _teardown_session_id(
-        controller,
-        session_id=session_id,
-        composite_key=composite_key,
-        base_session_id=base_session_id,
-        backend=backend,
-    )
     # THE TEARDOWN HOLDS THIS SESSION'S ADMISSION, AND DOES NOT DRAIN (HFR-334).
     #
     # End has the same reopen window every other runtime teardown has. The stop
@@ -1469,6 +1485,17 @@ async def end_running_agent(
     # gap. It also spans the scheduler-lane cancel, which is part of the same
     # settlement. Released on every path, including the early returns below.
     with ExitStack() as admission_holds:
+        # HFR-373. Resolution itself may discover several plausible sessions and
+        # refuse to cancel any. Run it inside this stack so those candidate-only
+        # admission holds still span the shared runtime removal.
+        teardown_session_id = _teardown_session_id(
+            controller,
+            session_id=session_id,
+            composite_key=composite_key,
+            base_session_id=base_session_id,
+            backend=backend,
+            admission_holds=admission_holds,
+        )
         hold_session_admission(
             controller,
             teardown_session_id,

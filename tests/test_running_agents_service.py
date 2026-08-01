@@ -3573,6 +3573,51 @@ def test_end_revalidates_a_supplied_session_id_against_ambiguous_runtime_identit
     assert probes == [(anchor, workdir, "claude")]
 
 
+def test_end_holds_ambiguous_candidates_through_running_tab_teardown(monkeypatch):
+    """HFR-373: ambiguity refuses cancellation but still closes every admission door."""
+
+    from core.session_turns import SessionTurnManager
+
+    manager = SessionTurnManager(types.SimpleNamespace())
+    controller = _make_controller()
+    controller.session_turns = manager
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda _anchor, **_kw: ["sess-a", "sess-b"]
+    )
+    observed = {}
+
+    async def _cleanup(*_args, **_kwargs):
+        observed["closed"] = {
+            session_id: manager.is_teardown_admission_closed(session_id)
+            for session_id in ("sess-a", "sess-b")
+        }
+
+    client = types.SimpleNamespace(interrupt=_AsyncFlag(), _fake_pid=4321)
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions={"slack_shared:/repo": client},
+        cleanup_session=_cleanup,
+    )
+    monkeypatch.setattr(
+        "modules.agents.claude_process_reaper._reap_pid_set", _AsyncFlag(ret=0)
+    )
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            session_id="sess-a",
+            composite_key="slack_shared:/repo",
+            base_session_id="slack_shared",
+        )
+    )
+
+    assert result["ok"] is True
+    assert observed["closed"] == {"sess-a": True, "sess-b": True}
+    assert manager.is_teardown_admission_closed("sess-a") is False
+    assert manager.is_teardown_admission_closed("sess-b") is False
+    assert manager._teardown_drain_owed == set()
+
+
 def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage():
     """HFR-335: End's fallback resolve is a settlement path, so its split is verified.
 

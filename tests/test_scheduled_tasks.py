@@ -5994,6 +5994,134 @@ def test_im_handler_preserves_scheduled_admission_refusal(
     assert service.controller.im_client.sent == []
 
 
+@pytest.mark.parametrize(
+    ("request_type", "session_policy"),
+    [
+        ("hook_send", None),
+        ("watch", "create_per_run"),
+        ("webhook", None),
+        ("agent_run", None),
+    ],
+)
+def test_every_pre_dispatch_admission_refusal_requeues(
+    tmp_path: Path,
+    monkeypatch,
+    request_type: str,
+    session_policy: Optional[str],
+) -> None:
+    """HFR-374: every durable claim refused before dispatch remains retryable."""
+
+    from modules.agents.service import TurnAdmissionClosedError
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    if request_type == "agent_run":
+        queued = request_store.enqueue_agent_run(
+            session_key="slack::channel::C374",
+            message="deliver after teardown",
+        )
+    else:
+        queued = request_store.enqueue_hook_send(
+            session_key=("" if session_policy == "create_per_run" else "slack::channel::C374"),
+            prompt="deliver after teardown",
+            deliver_key="slack::channel::C374",
+            session_policy=session_policy,
+            run_type=request_type,
+        )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(),
+        request_store=request_store,
+    )
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+    released: list[tuple[str, str]] = []
+
+    def _reserve(**kwargs):
+        session_id = "ses-unused-before-refusal"
+        service._record_execution_session(
+            kwargs["execution_id"], session_id, agent_backend="codex"
+        )
+        return session_id
+
+    service._reserve_runtime_session = _reserve  # type: ignore[method-assign]
+    service._release_reserved_session = (  # type: ignore[method-assign]
+        lambda session_id, *, reason: released.append((session_id, reason)) or True
+    )
+
+    async def _refuse(**_kwargs):
+        raise TurnAdmissionClosedError("teardown owns admission")
+
+    service._execute_request = _refuse  # type: ignore[method-assign]
+    service._execute_agent_run = _refuse  # type: ignore[method-assign]
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    saved = request_store.get_run(queued.id)
+    assert saved is not None
+    assert saved["status"] == "queued"
+    assert saved.get("error") is None
+    assert saved.get("session_id") is None
+    assert queued.id not in service._execution_session_ids
+    if session_policy == "create_per_run":
+        assert released == [
+            (
+                "ses-unused-before-refusal",
+                f"teardown refused harness run {queued.id} before dispatch",
+            )
+        ]
+    else:
+        assert released == []
+
+
+def test_teardown_continues_after_an_already_failed_execution(tmp_path: Path) -> None:
+    """HFR-375: one done-task exception cannot skip manager release and settlement."""
+
+    released: list[tuple[str, str]] = []
+
+    class _Manager:
+        @staticmethod
+        def owned_agent_run_ids():
+            return []
+
+        @staticmethod
+        def teardown_exempt_run_ids(_session_id):
+            return []
+
+        async def release_for_teardown(self, session_id, *, settled_by):
+            released.append((session_id, settled_by))
+            return True
+
+    controller = SimpleNamespace(session_turns=_Manager())
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    async def _already_failed():
+        raise RuntimeError("claim refresh failed")
+
+    async def _exercise():
+        failed = asyncio.create_task(_already_failed())
+        await asyncio.sleep(0)
+        assert failed.done() is True
+        service._inflight_executions["run-failed"] = failed
+        service._session_lock_cache["sess-failed"] = "sid:sess-failed"
+        service._session_lock_owners["sid:sess-failed"] = "run-failed"
+
+        result = await service.cancel_session_executions(
+            "sess-failed", settled_by=SETTLED_BY_EVICTED
+        )
+        return result
+
+    result = asyncio.run(_exercise())
+
+    assert result.cancelled_count == 2
+    assert result.claimed_run_ids == frozenset({"run-failed"})
+    assert released == [("sess-failed", SETTLED_BY_EVICTED)]
+
+
 def test_swept_run_notifies_the_session_that_launched_it(tmp_path: Path, monkeypatch) -> None:
     """An honest row nobody is told about is still a silent failure.
 

@@ -4573,6 +4573,39 @@ scenarios:
     # past-due DateTrigger and could send the prompt twice. The definition is now
     # disabled with the same interruption cause before scheduler reconciliation.
     test: tests/test_scheduled_tasks.py::test_cancelled_scheduler_one_shot_is_retired_before_reconcile
+  - id: HFR-373
+    name: Running-tab End holds every ambiguous session candidate
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 32 (F1). End resolved the runtime before opening its hold
+    # stack, so ambiguity correctly refused cancellation but acquired no candidate
+    # admission holds. Resolution now runs inside End's Stop-semantics stack and
+    # holds every plausible session through backend removal without draining.
+    test: tests/test_running_agents_service.py::test_end_holds_ambiguous_candidates_through_running_tab_teardown
+  - id: HFR-374
+    name: every pre-dispatch admission refusal returns its claim to the queue
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 32 (F2). The shared claim owner requeued task definitions but
+    # failed hook, watch, webhook and Agent Run claims even though no prompt reached a
+    # backend. Every structured refusal now requeues with its original clock; an
+    # unused create-per-run reservation is released and detached first.
+    test: tests/test_scheduled_tasks.py::test_every_pre_dispatch_admission_refusal_requeues
+  - id: HFR-375
+    name: teardown continues past an already-failed claimed execution
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 32 (F3). A done task could still occupy the execution map until
+    # its callback ran; awaiting it re-raised the earlier fault and skipped manager
+    # release plus reconciliation. Teardown now logs that ordinary exception and
+    # continues the shared settlement sequence.
+    test: tests/test_scheduled_tasks.py::test_teardown_continues_after_an_already_failed_execution
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
