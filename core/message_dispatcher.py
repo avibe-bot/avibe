@@ -1999,8 +1999,13 @@ class ConsolidatedMessageDispatcher:
                     and output_semantics.settles_run
                     and bool(run_provenance.get("run_id") or run_provenance.get("run_ids"))
                 )
+                workbench_terminal_waits_for_persistence = (
+                    target_context.platform == "avibe" and mutates_turn_lifecycle
+                )
                 settlement_waits_for_persistence = (
-                    output_semantics.requires_delivery_for_run_settlement or workbench_run_waits_for_persistence
+                    output_semantics.requires_delivery_for_run_settlement
+                    or workbench_run_waits_for_persistence
+                    or workbench_terminal_waits_for_persistence
                 )
 
                 if not settlement_waits_for_persistence:
@@ -2061,6 +2066,10 @@ class ConsolidatedMessageDispatcher:
                             and agent_message_exists(target_context, native_output_id)
                         )
                     )
+                    if workbench_terminal_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError(
+                            "Workbench terminal output was not durably persisted"
+                        )
                     if workbench_run_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError("Workbench run output was not durably persisted")
                     if (

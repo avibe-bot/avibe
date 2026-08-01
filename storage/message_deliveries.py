@@ -260,6 +260,24 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_MESSAGE_MERGE_IDENTITY_FIELDS = (
+    "scope_id",
+    "platform",
+    "author",
+    "type",
+    "source",
+    "author_id",
+    "author_name",
+    "parent_native_message_id",
+)
+
+
+def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
+    """Return the Message fields that must stay singular after batching."""
+
+    return tuple(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS)
+
+
 def list_queued_page(conn: Connection, session_id: str, *, page_request: Any) -> Any:
     from storage.pagination import page_result_from_limit_plus_one
 
@@ -859,6 +877,9 @@ def _insert_message(
 
 def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]:
     snapshots = [_verified_snapshot(delivery) for delivery in deliveries]
+    expected_identity = message_merge_identity(snapshots[0])
+    if any(message_merge_identity(snapshot) != expected_identity for snapshot in snapshots[1:]):
+        raise RuntimeError("Delivery batch contains incompatible Message identities")
     first = dict(snapshots[0])
     first["created_at"] = deliveries[0]["submitted_at"]
     contents = [_json_object(snapshot.get("content_json")) for snapshot in snapshots]

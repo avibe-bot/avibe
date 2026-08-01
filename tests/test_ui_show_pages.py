@@ -2208,12 +2208,10 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert dispatch_kwargs == {"timeout": None}
 
 
-def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_502(
+def test_private_show_page_definitive_dispatch_rejection_retires_and_returns_502(
     monkeypatch,
     tmp_path,
 ):
-    from vibe import internal_client
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -2227,7 +2225,7 @@ def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_50
     )
 
     async def fake_dispatch_async(payload, **kwargs):
-        raise internal_client.InternalServerUnavailable("controller unavailable")
+        return {"status_code": 500, "body": {"ok": False}}
 
     with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
         response = app.test_client().post(
@@ -2252,10 +2250,10 @@ def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_50
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    # No turn started, so the reservation remains outside the transcript.
+    # No turn started, so the retired submission remains outside the transcript.
     assert body["event"]["message"] is None
     assert body["event"]["message_id"] is None
-    assert body["event"]["delivery"]["state"] == "reserved"
+    assert body["event"]["delivery"]["state"] == "retired"
     assert body["event"]["delivery"]["author_name"] == "show_annotation"
     assert [event_type for event_type, _data in published] == ["show.event"]
 
@@ -3012,12 +3010,13 @@ def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
         event = store.append(
             "ses123",
             {
-                "type": "assistant.mark.created",
-                "mark": {
-                    "target": "summary",
-                    "body": "body",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "body",
+                    "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -3027,12 +3026,14 @@ def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
     assert response.status_code == 200
     public_event = response.get_json()["events"][0]
     assert public_event["id"] == event["id"]
-    assert public_event["type"] == "assistant.mark.created"
-    assert public_event["payload"]["body"] == "body"
+    assert public_event["type"] == "human.annotation.created"
+    assert public_event["payload"]["comment"] == "body"
     assert "session_id" not in public_event
     assert "scope_id" not in public_event
     assert "message_id" not in public_event
     assert "message" not in public_event
+    assert "delivery_id" not in public_event
+    assert "delivery" not in public_event
 
 
 def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
@@ -3049,12 +3050,13 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
             "ses123",
             {
                 "id": "show_evt_public",
-                "type": "assistant.mark.created",
-                "mark": {
-                    "target": "summary",
-                    "body": "body",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "body",
+                    "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -3078,6 +3080,8 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
     assert '"scope_id"' not in body
     assert '"message_id"' not in body
     assert '"message"' not in body
+    assert '"delivery_id"' not in body
+    assert '"delivery"' not in body
 
 
 def test_public_show_events_stream_redacts_screenshot_path(monkeypatch, tmp_path):

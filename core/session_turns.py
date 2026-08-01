@@ -247,6 +247,7 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     if not rows:
         return []
+    message_identity = delivery_store.message_merge_identity(rows[0])
     scheduled_key = _scheduled_merge_key(rows[0])
     if _scheduled_provenance(rows[0]) is not None and scheduled_key is None:
         return [rows[0]]
@@ -256,7 +257,12 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         for row in rows[1:]:
             previous = _parse_queue_timestamp(latest.get("submitted_at"))
             current = _parse_queue_timestamp(row.get("submitted_at"))
-            if _scheduled_merge_key(row) != scheduled_key or previous is None or current is None:
+            if (
+                delivery_store.message_merge_identity(row) != message_identity
+                or _scheduled_merge_key(row) != scheduled_key
+                or previous is None
+                or current is None
+            ):
                 break
             delta = (current - previous).total_seconds()
             if delta < 0 or delta > SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS:
@@ -268,6 +274,8 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     segment: list[dict[str, Any]] = []
     for row in rows:
         if _scheduled_provenance(row) is not None:
+            break
+        if delivery_store.message_merge_identity(row) != message_identity:
             break
         native_message_id = str(row.get("native_message_id") or "").strip()
         if native_message_id:

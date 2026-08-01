@@ -9743,6 +9743,7 @@ async def _run_show_event_dispatch(
 
     dispatch_text = _show_event_dispatch_text(event_payload)
     if not dispatch_text.strip():
+        _retire_show_event_reservation(event_payload, reason="empty_dispatch")
         return _ShowEventDispatchOutcome.FAILED
 
     dispatch_payload = {
@@ -9777,6 +9778,7 @@ async def _run_show_event_dispatch(
             session_id,
             exc,
         )
+        _retire_show_event_reservation(event_payload, reason="dispatch_unavailable")
         return _ShowEventDispatchOutcome.FAILED
     except Exception:  # pragma: no cover - defensive
         logger.exception("show event dispatch acceptance is unknown")
@@ -9791,12 +9793,49 @@ async def _run_show_event_dispatch(
             status,
             body,
         )
+        _retire_show_event_reservation(
+            event_payload,
+            reason=f"dispatch_rejected_{status}",
+        )
         return _ShowEventDispatchOutcome.FAILED
     settled = _settle_show_event_message(event_payload)
     state = str((settled or {}).get("state") or body.get("delivery_state") or "")
     if state in ADMITTED_DELIVERY_STATES:
         return _ShowEventDispatchOutcome.ACCEPTED
-    return _ShowEventDispatchOutcome.FAILED
+    return _ShowEventDispatchOutcome.IN_FLIGHT
+
+
+def _retire_show_event_reservation(
+    event_payload: dict[str, Any],
+    *,
+    reason: str,
+) -> bool:
+    from storage import message_deliveries
+
+    session_id = str(event_payload.get("session_id") or "").strip()
+    delivery = event_payload.get("delivery")
+    delivery_id = str(delivery.get("id") or "").strip() if isinstance(delivery, dict) else ""
+    referenced_delivery_id = str(event_payload.get("delivery_id") or "").strip()
+    if (
+        not session_id
+        or not delivery_id
+        or referenced_delivery_id != delivery_id
+    ):
+        return False
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            retired = message_deliveries.retire_reserved(
+                conn,
+                session_id,
+                delivery_id,
+                reason=reason,
+            )
+    finally:
+        engine.dispose()
+    if retired:
+        _settle_show_event_message(event_payload)
+    return retired
 
 
 def _settle_show_event_message(
@@ -9900,7 +9939,15 @@ def _show_event_response_payload(
     public_event = {
         key: value
         for key, value in event_payload.items()
-        if key not in {"session_id", "scope_id", "message_id", "message"}
+        if key
+        not in {
+            "session_id",
+            "scope_id",
+            "message_id",
+            "message",
+            "delivery_id",
+            "delivery",
+        }
     }
     payload = public_event.get("payload")
     if isinstance(payload, dict):

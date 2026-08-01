@@ -1641,7 +1641,7 @@ def test_record_local_show_event_uses_synchronous_unified_entry(
     assert [name for name, _data in published] == ["show.event"]
 
 
-def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
+def test_definitive_local_show_dispatch_failure_retires_without_replay(
     isolated_state,
     monkeypatch,
 ):
@@ -1683,19 +1683,19 @@ def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
         )
     assert stranded["messages"] == []
 
-    replay = ui_server.record_local_show_event("ses_show", payload)
+    store = ui_server._show_session_event_store()
+    try:
+        failed_event = store.get_event("ses_show", "show_evt_failed_once")
+    finally:
+        store.close()
+    assert failed_event is not None
+    assert failed_event["delivery"]["state"] == "retired"
 
-    assert attempts == 2
-    assert replay["message"]["type"] == messages_service.ANNOTATION_TYPE
-    with create_sqlite_engine().connect() as conn:
-        visible = messages_service.list_session_messages(
-            conn,
-            session_id="ses_show",
-            limit=50,
-            types=messages_service.TRANSCRIPT_TYPES,
-            tail=True,
-        )
-    assert [row["id"] for row in visible["messages"]] == [replay["message_id"]]
+    with pytest.raises(ShowSessionEventError) as replay_error:
+        ui_server.record_local_show_event("ses_show", payload)
+
+    assert replay_error.value.code == "show_event_dispatch_failed"
+    assert attempts == 1
 
 
 def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(

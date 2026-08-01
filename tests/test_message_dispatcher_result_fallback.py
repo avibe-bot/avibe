@@ -668,6 +668,30 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
+    async def test_visible_workbench_terminal_result_requires_durable_message(self):
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "ses-1",
+                "turn_token": "turn-1",
+            },
+        )
+        dispatcher._is_current_runtime_turn = mock.Mock(return_value=True)
+
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Workbench terminal output was not durably persisted",
+            ):
+                await dispatcher.emit_agent_message(context, "result", "done")
+
     async def test_workbench_run_settles_only_after_result_persistence(self):
         """A callback child stays pending until its Workbench receipt exists."""
 

@@ -253,6 +253,42 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
+def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    author_id=author_id,
+                    author_name=author_name,
+                ),
+                context=_context(),
+            )
+        )
+        for text, author_id, author_name in (
+            ("from Alice", "remote:alice", "Alice"),
+            ("from Bob", "remote:bob", "Bob"),
+        )
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    alice_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "from Alice"
+
+    alice = _row(engine, str(queued[0].delivery_id))
+    bob = _row(engine, str(queued[1].delivery_id))
+    assert alice["turn_id"] == alice_turn_id
+    assert alice["state"] == "claimed"
+    assert bob["turn_id"] is None
+    assert bob["state"] == "queued"
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
