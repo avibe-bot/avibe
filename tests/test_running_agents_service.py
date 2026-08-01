@@ -1507,6 +1507,13 @@ def test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_noti
         ),
     )
     controller = _make_controller()
+    # HFR-357 makes the supplied display id prove it is the unique runtime owner
+    # before settlement.  This scenario is the ordinary unambiguous direction.
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda anchor, **_kw: (
+            ["ses-end-107"] if anchor == "slack_x" else []
+        )
+    )
     controller.scheduled_task_service = service
     controller.session_turns = types.SimpleNamespace(
         is_in_flight=lambda sid: sid == "ses-end-107",
@@ -1649,6 +1656,11 @@ def test_end_awaits_the_stopped_turn_before_reconciling_and_teardown(tmp_path, m
     monkeypatch.setattr(running_agents, "_claude_pid_for", lambda *a, **k: 4242)
 
     controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda anchor, **_kw: (
+            ["ses-end-333"] if anchor == "slack_x" else []
+        )
+    )
     controller.scheduled_task_service = service
     controller.command_handler = types.SimpleNamespace(handle_stop=_AsyncFlag(ret=True))
     controller.session_handler = types.SimpleNamespace(
@@ -3127,6 +3139,14 @@ def _end_with_scheduler_lane_owner(
         _transport_last_activity={"/w": 0.0},
     )
     controller = _make_controller(codex=codex)
+    session_backend = lane_session_backend or clicked_backend
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda anchor, *, agent_backend=None, **_kw: (
+            ["chat-1"]
+            if anchor == "codex-base" and agent_backend == session_backend
+            else []
+        )
+    )
     controller.session_turns = types.SimpleNamespace(
         is_in_flight=lambda sid: False,
         cancel=_AsyncFlag(),
@@ -3420,6 +3440,42 @@ def test_end_holds_admission_through_the_backend_teardown_without_draining(monke
     # ...and nothing was drained: Stop does not flush the queue it left behind.
     assert manager._teardown_drain_owed == set()
     assert manager._teardown_drain_tasks == {}
+
+
+def test_end_revalidates_a_supplied_session_id_against_ambiguous_runtime_identity():
+    """HFR-357: display enrichment cannot turn an ambiguous runtime into an owner.
+
+    The Running tab enriches a live runtime row from ``agent_sessions`` and supplies
+    the chosen row's id back to End.  Two conversations may legitimately share the
+    same anchor, backend, and workdir, though, and ``_choose_session_meta`` can only
+    pick the newer one for display.  That preference is not teardown ownership.
+
+    A supplied id used to bypass the ambiguity refusal in
+    ``resolve_teardown_session_ids`` completely.  Pin the dangerous shape at the
+    settlement boundary: even when the supplied id is one of the exact matches, End
+    must resolve the runtime identity again and refuse to speak for either session.
+    """
+    anchor = "slack_shared"
+    workdir = "/repo"
+    probes = []
+
+    def _find(probe_anchor, *, workdir=None, agent_backend=None):
+        probes.append((probe_anchor, workdir, agent_backend))
+        return ["sess-picked-for-display", "sess-other-conversation"]
+
+    controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+
+    resolved = running_agents._teardown_session_id(
+        controller,
+        session_id="sess-picked-for-display",
+        composite_key=f"{anchor}:{workdir}",
+        base_session_id=anchor,
+        backend="claude",
+    )
+
+    assert resolved == ""
+    assert probes == [(anchor, workdir, "claude")]
 
 
 def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage():

@@ -4373,6 +4373,22 @@ scenarios:
     # old-Agent definition in one store, edits it to a different-backend Agent through
     # a second store, and enqueues from the stale object.
     test: tests/test_scheduled_tasks.py::test_definition_run_snapshot_refreshes_the_agent_backend
+  - id: HFR-357
+    name: End revalidates a supplied session id against ambiguous runtime ownership
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 25. Running-tab enrichment must pick one agent_sessions row for
+    # display when several rows share the live runtime's anchor, backend, and workdir;
+    # the most-recent preference does not prove teardown ownership. The selected id
+    # was sent back to End and _teardown_session_id returned it immediately, bypassing
+    # HFR-323's ambiguity refusal and allowing the scheduler/manager settlement lanes
+    # to cancel an arbitrary healthy conversation. End now re-resolves the runtime
+    # identity even when an id was supplied and accepts that id only when it is the
+    # sole candidate. An ambiguous result, or a unique result different from the stale
+    # supplied id, fails closed while the backend-specific runtime cleanup proceeds.
+    test: tests/test_running_agents_service.py::test_end_revalidates_a_supplied_session_id_against_ambiguous_runtime_identity
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

@@ -867,12 +867,19 @@ def _teardown_session_id(
 ) -> str:
     """The Avibe session id End must settle runs against.
 
-    The Running tab usually supplies it (the row carries ``session_id``), but a row
-    built purely from live runtime state may not — and a session with no id resolved
-    is a session whose runs cannot be found, which is the failure this whole path
-    exists to remove. Fall back to the runtime identity the row always has: the
-    session anchor, narrowed by the working directory when the composite key carries
-    one.
+    The Running tab usually supplies it (the row carries ``session_id``), but that id
+    is DISPLAY enrichment rather than proof of runtime ownership (HFR-357).
+    ``_choose_session_meta`` necessarily picks one row when several conversations
+    share an anchor; End must therefore re-resolve the runtime identity and accept
+    the supplied id only when it is the ONE candidate.  Otherwise the supplied id
+    would bypass HFR-323's ambiguity refusal and let End cancel whichever
+    conversation happened to be most recent.
+
+    A row built purely from live runtime state may carry no id at all — and a session
+    with no id resolved is a session whose runs cannot be found, which is the failure
+    this whole path exists to remove. Resolve from the runtime identity the row always
+    has: the session anchor, narrowed by the working directory when the composite key
+    carries one.
 
     The row's ``backend`` narrows the fallback further (HFR-128). End resolves a
     session it is about to cancel work in, and an anchor can be shared across scopes;
@@ -882,6 +889,8 @@ def _teardown_session_id(
     ``candidates[0]`` is never an arbitrary pick: the resolve refuses an ambiguous
     answer outright and returns nothing (HFR-323), so the list is one id or empty,
     and empty means End settles no runs rather than ending somebody else's session.
+    When a supplied id exists, a unique DIFFERENT candidate is also a refusal: stale
+    display metadata is not permission to substitute another conversation.
 
     THE SPLIT IS STORAGE-VERIFIED HERE, unlike the display path (HFR-335). This
     fallback is a SETTLEMENT resolve, so a composite key whose anchor embeds a
@@ -894,9 +903,7 @@ def _teardown_session_id(
     split could not promise once the two disagree.
     """
 
-    resolved = str(session_id or "").strip()
-    if resolved:
-        return resolved
+    supplied_session_id = str(session_id or "").strip()
     anchor_hint = str(base_session_id or "").strip()
     split_anchor, split_workdir = resolve_composite_teardown_split(
         controller,
@@ -906,13 +913,18 @@ def _teardown_session_id(
     )
     anchor = anchor_hint or split_anchor
     if not anchor:
-        return ""
+        # Some callers genuinely have only a persisted session id and no runtime
+        # anchor.  There is no identity set to re-resolve in that shape, so preserve
+        # the exact id rather than pretending an empty resolve disproved it.
+        return supplied_session_id
     candidates = resolve_teardown_session_ids(
         controller,
         session_anchor=anchor,
         workdir=split_workdir or None,
         agent_backend=str(backend or "").strip() or None,
     )
+    if supplied_session_id:
+        return supplied_session_id if candidates == [supplied_session_id] else ""
     return candidates[0] if candidates else ""
 
 
