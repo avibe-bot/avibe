@@ -142,13 +142,17 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     except ValueError:
         return None
     row = conn.execute(
-        select(agents.c.id, agents.c.name)
+        select(agents.c.id, agents.c.name, agents.c.backend)
         .where(agents.c.normalized_name == normalized_name)
         .limit(1)
     ).mappings().first()
     if row is None:
         return None
-    return {"id": str(row["id"]), "name": str(row["name"])}
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
 
 
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
@@ -2736,6 +2740,12 @@ class SQLiteBackgroundTaskStore:
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
+                    # HFR-356. ``payload`` was built from the scheduler's cached
+                    # definition before this transaction acquired its authoritative
+                    # snapshot. Agent name, id, and backend are one identity: refresh
+                    # all three from the same row, including clearing a stale backend
+                    # when the current name no longer resolves.
+                    agent_backend=identity["backend"] if identity else None,
                     session_policy=definition["session_policy"],
                     session_id=definition["session_id"],
                     legacy_session_key=definition["legacy_session_key"],
@@ -2750,6 +2760,7 @@ class SQLiteBackgroundTaskStore:
         return {
             "agent_name": values["agent_name"],
             "agent_id": values["agent_id"],
+            "agent_backend": values["agent_backend"],
             "session_policy": values["session_policy"],
             "session_id": values["session_id"],
             "session_key": values["legacy_session_key"],

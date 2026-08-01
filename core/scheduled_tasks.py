@@ -1927,6 +1927,7 @@ class TaskExecutionStore:
         for field_name in (
             "agent_name",
             "agent_id",
+            "agent_backend",
             "session_policy",
             "session_id",
             "session_key",
@@ -2891,7 +2892,8 @@ class ScheduledTaskService:
         return run_ids
 
     def _activity_registry(self) -> Any:
-        return getattr(getattr(self.controller, "agent_service", None), "activities", None)
+        controller = getattr(self, "controller", None)
+        return getattr(getattr(controller, "agent_service", None), "activities", None)
 
     def _park_or_settle_run(
         self,
@@ -2938,10 +2940,13 @@ class ScheduledTaskService:
         )
         registry = self._activity_registry()
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
-        if callable(has_blocker) and has_blocker(run_id):
+        # The registry contract returns ``bool``. Require the positive fact rather
+        # than generic truthiness so a partial controller double (or another proxy
+        # with dynamically-created attributes) cannot invent Activity ownership.
+        if callable(has_blocker) and has_blocker(run_id) is True:
             return False
         has_pending_output = getattr(registry, "has_pending_run_output", None)
-        if callable(has_pending_output) and has_pending_output(run_id):
+        if callable(has_pending_output) and has_pending_output(run_id) is True:
             return False
         return bool(self.request_store.settle_deferred_run(run_id))
 

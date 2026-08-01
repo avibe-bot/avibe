@@ -412,7 +412,10 @@ def test_teardown_reconcile_loses_to_a_terminal_status_that_lands_first(tmp_path
     fired: list[int] = []
 
     def _settle_mid_write(conn, cursor, statement, parameters, context, executemany):
-        if fired or "UPDATE agent_runs SET status" not in statement:
+        # HFR-355 moved the deferred-intent decision under BEGIN IMMEDIATE. Race the
+        # terminal winner immediately BEFORE that lock is acquired: once acquired,
+        # the defer read/decide/write unit is intentionally no longer interleavable.
+        if fired or not statement.strip().upper().startswith("BEGIN IMMEDIATE"):
             return
         fired.append(1)
         other = SQLiteBackgroundTaskStore(sqlite.db_path)

@@ -4357,6 +4357,22 @@ scenarios:
     # read/decide/write unit. The regression forces the former two-reader interleaving
     # across independent store connections and proves the eviction failure wins.
     test: tests/test_harness_failure_visibility.py::test_deferred_intent_arbitration_is_atomic_across_connections
+  - id: HFR-356
+    name: definition enqueue derives its backend from the transactional Agent snapshot
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 24. The scheduler built a run payload from its cached definition
+    # and stamped that cached Agent's backend before enqueue_definition_run acquired the
+    # write lock and read the authoritative definition. That transaction refreshed the
+    # Agent name and id after an edit but retained the stale backend, creating one run
+    # whose dispatch identity and teardown ownership identity disagreed. The snapshot
+    # now resolves name, id, and backend from the same Agents row, overwrites all three
+    # in the queued row, and returns all three to the caller. The regression holds the
+    # old-Agent definition in one store, edits it to a different-backend Agent through
+    # a second store, and enqueues from the stale object.
+    test: tests/test_scheduled_tasks.py::test_definition_run_snapshot_refreshes_the_agent_backend
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

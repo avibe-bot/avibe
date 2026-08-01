@@ -1197,6 +1197,73 @@ def test_definition_run_enqueue_stamps_the_agent_backend(tmp_path: Path, monkeyp
     assert (store.get_run(pinned.id) or {})["agent_backend"] == "claude"
 
 
+def test_definition_run_snapshot_refreshes_the_agent_backend(tmp_path: Path, monkeypatch) -> None:
+    """HFR-356: the transactional definition snapshot owns the whole Agent identity.
+
+    The scheduler can hold a cached definition while a user edits its Agent. Enqueue
+    first builds a payload from that stale object, then the SQLite transaction refreshes
+    the definition fields under its write lock. Before HFR-356 it refreshed only the
+    Agent name and id, leaving the already-stamped backend from the stale object behind.
+    That mixed identity makes teardown ownership target the wrong runtime.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore()
+    try:
+        old_agent = agent_store.create(name="old-runner", backend="codex")
+        new_agent = agent_store.create(name="new-runner", backend="claude")
+    finally:
+        agent_store.close()
+
+    scheduler_view = ScheduledTaskStore()
+    task = scheduler_view.add_task(
+        session_key="slack::channel::C123",
+        prompt="run the nightly report",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+        agent_name=old_agent.name,
+        expected_enabled_agent_id=old_agent.id,
+    )
+    stale_task = scheduler_view.get_task(task.id)
+    assert stale_task is not None and stale_task.agent_name == old_agent.name
+
+    editor_view = ScheduledTaskStore()
+    current = editor_view.get_task(task.id)
+    assert current is not None
+    editor_view.update_task(
+        task.id,
+        name=current.name,
+        session_key=current.session_key,
+        session_id=current.session_id,
+        prompt=current.prompt,
+        schedule_type=current.schedule_type,
+        post_to=current.post_to,
+        deliver_key=current.deliver_key,
+        cron=current.cron,
+        run_at=current.run_at,
+        timezone_name=current.timezone,
+        agent_name=new_agent.name,
+        session_policy=current.session_policy,
+        expected_enabled_agent_id=new_agent.id,
+    )
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(task.id, source_kind="scheduler", task=stale_task)
+    stored = request_store.get_run(request.id)
+
+    assert stored is not None
+    assert stored["agent_name"] == new_agent.name
+    assert stored["agent_id"] == new_agent.id
+    assert stored["agent_backend"] == "claude"
+    assert request.agent_name == new_agent.name
+    assert request.agent_id == new_agent.id
+    assert request.agent_backend == "claude"
+
+
 def test_dispatch_stamps_the_effective_backend_for_a_default_routed_run(
     tmp_path: Path, monkeypatch
 ) -> None:
