@@ -2153,6 +2153,118 @@ def test_admission_closes_before_the_scheduler_stop(tmp_path, monkeypatch):
     assert manager.is_admission_closed_for_shutdown() is True
 
 
+def test_loop_thread_cleanup_defers_without_blocking_then_runs_after_stop(
+    tmp_path, monkeypatch
+):
+    """HFR-348: signal cleanup must not synchronously wait on its own running loop.
+
+    ``main`` installs a synchronous SIGTERM/SIGINT handler on the same main thread
+    that drives ``Controller._loop``. Calling ``cleanup_sync`` there used
+    ``run_coroutine_threadsafe`` and then blocked in ``future.result``. No submitted
+    stop could run because its executor was the blocked thread itself, so admission
+    close, scheduler stop, settlement and every later async cleanup each burned its
+    full deadline before ``SystemExit`` let ``Controller.run`` reach the stopped-loop
+    cleanup in ``finally``.
+
+    This is the real single-thread loop shape: the first cleanup call runs inside an
+    event-loop callback (the same running-loop identity a Python signal handler sees),
+    and no collaborator is allowed to run there. It must stop and return immediately.
+    The second call is made only after ``run_forever`` has unwound and proves the
+    deferred cleanup is not dropped: all async stops and the backend teardown execute
+    on the now-stopped loop in the ordinary order.
+    """
+
+    import time
+
+    from core import session_turns
+    from core.controller import Controller
+    from modules.agents.opencode import OpenCodeServerManager
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(OpenCodeServerManager, "terminate_instance_sync", lambda: None)
+
+    events: list[str] = []
+    observed: dict = {}
+    loop = asyncio.new_event_loop()
+
+    async def _record(label: str):
+        events.append(label)
+
+    class _Scheduler:
+        def _teardown_owned_run_id_lanes(self):
+            return set(), set()
+
+        async def stop(self):
+            await _record("scheduler_stop")
+
+    async def _codex_shutdown():
+        await _record("codex_teardown")
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(stop=lambda: None)
+    controller.scheduled_task_service = _Scheduler()
+    controller.watch_service = types.SimpleNamespace(
+        stop=lambda: _record("watch_stop")
+    )
+    controller.runtime_command_watcher = types.SimpleNamespace(
+        stop=lambda: _record("runtime_watcher_stop")
+    )
+    controller.model_hub_turn_gateway = types.SimpleNamespace(
+        close=lambda: _record("model_hub_close")
+    )
+    controller.show_git_checkpoint_service = types.SimpleNamespace(
+        stop=lambda: events.append("show_checkpoint_stop")
+    )
+    controller.agent_service = types.SimpleNamespace(
+        agents={"codex": types.SimpleNamespace(shutdown_runtime=_codex_shutdown)}
+    )
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    _bind_cleanup_sync_methods(controller)
+
+    def _signal_shaped_cleanup():
+        started = time.monotonic()
+        Controller.cleanup_sync(controller)
+        observed["elapsed"] = time.monotonic() - started
+        observed["events_at_return"] = list(events)
+
+    try:
+        loop.call_soon(_signal_shaped_cleanup)
+        loop.run_forever()
+
+        assert observed["elapsed"] < 0.5, (
+            "loop-thread cleanup waited on work its own blocked loop had to execute"
+        )
+        assert observed["events_at_return"] == [], (
+            "loop-thread cleanup partially ran instead of deferring atomically"
+        )
+        assert manager.is_admission_closed_for_shutdown() is False
+
+        # ``Controller.run`` reaches this call from its ``finally`` after
+        # ``run_forever`` returns. The deferred cleanup must execute, not disappear.
+        Controller.cleanup_sync(controller)
+    finally:
+        if loop.is_running():
+            loop.stop()
+        loop.close()
+
+    assert manager.is_admission_closed_for_shutdown() is True
+    assert events == [
+        "scheduler_stop",
+        "watch_stop",
+        "runtime_watcher_stop",
+        "model_hub_close",
+        "show_checkpoint_stop",
+        "codex_teardown",
+    ]
+
+
 def test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind(
     tmp_path, monkeypatch
 ):

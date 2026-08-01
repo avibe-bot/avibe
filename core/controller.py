@@ -1943,6 +1943,36 @@ class Controller:
 
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""
+        # A Python signal handler runs on the main thread, including when that same
+        # thread is currently driving ``self._loop`` (HFR-348). In that shape every
+        # ``run_coroutine_threadsafe(...).result()`` below deadlocks its OWN executor:
+        # the loop cannot advance until this synchronous call returns, while this call
+        # waits for work only that loop can run. Before HFR-348 each stop consequently
+        # spent its full deadline doing no work, delaying SIGTERM long enough for a
+        # supervisor to escalate before run settlement reached durable storage.
+        #
+        # Defer the real cleanup to ``run()``'s ``finally``. ``loop.stop()`` makes the
+        # same rule safe for a loop-thread caller that is not about to raise
+        # ``SystemExit``; once ``run_forever`` unwinds, asyncio clears the running-loop
+        # marker and the second call below takes the bounded stopped-loop path. Detect
+        # by loop identity, not by a remembered thread id: the event loop is the
+        # authority on which thread is driving it, and this also covers tests or future
+        # embedders that run the controller loop on a different thread.
+        loop = getattr(self, "_loop", None)
+        try:
+            called_from_own_running_loop = (
+                loop is not None and asyncio.get_running_loop() is loop
+            )
+        except RuntimeError:
+            called_from_own_running_loop = False
+        if called_from_own_running_loop:
+            logger.info(
+                "Controller cleanup requested on its event-loop thread; "
+                "deferring until the loop has stopped"
+            )
+            loop.stop()
+            return
+
         logger.info("Cleaning up controller resources (sync, best-effort)...")
 
         # Tasks that missed their shutdown deadline and were cancelled WITHOUT an

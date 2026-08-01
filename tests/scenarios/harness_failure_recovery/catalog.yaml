@@ -4175,6 +4175,37 @@ scenarios:
     # makes submit take the durable queue -- is already pinned by HFR-330's and
     # HFR-339's tests; this supplies the missing half by composition.
     test: tests/test_running_agents_service.py::test_admission_closes_before_the_scheduler_stop
+  - id: HFR-348
+    name: >-
+      signal cleanup defers off the event-loop thread instead of blocking its own
+      executor
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 22 (F1). Python delivers SIGTERM/SIGINT on the main thread,
+    # which is also the thread driving Controller._loop. The synchronous signal
+    # handler calls cleanup_sync there; its running-loop branch submitted each stop
+    # with run_coroutine_threadsafe and immediately blocked on future.result. The
+    # submitted coroutine could not take one step while its only executor was blocked,
+    # so admission close, scheduler stop and settlement each consumed their whole
+    # deadlines without running, followed by the same delay for every later stop.
+    # A supervisor could escalate to SIGKILL before durable convergence began.
+    #
+    # THE FIX IS AN ATOMIC DEFER at cleanup_sync's boundary. When
+    # asyncio.get_running_loop() is the controller's own loop, cleanup_sync stops that
+    # loop and returns without constructing or submitting any cleanup coroutine.
+    # Controller.run's existing finally then calls cleanup_sync again after
+    # run_forever has unwound and asyncio has cleared the running-loop marker; that
+    # second call uses the already-bounded stopped-loop path (HFR-341/342) and performs
+    # the complete cleanup before the loop is closed. Loop identity is the authority,
+    # so no brittle stored thread id or platform-specific signal assumption is needed.
+    #
+    # The test drives the real method from inside a real loop callback, proves the
+    # first call returns promptly without partially running any collaborator, then
+    # drives the exact finally-shaped second call and proves admission, scheduler,
+    # watcher, gateway and Codex cleanup all execute in order.
+    test: tests/test_running_agents_service.py::test_loop_thread_cleanup_defers_without_blocking_then_runs_after_stop
   - id: HFR-349
     name: >-
       Codex eviction holds every session sharing a transport before settling the
