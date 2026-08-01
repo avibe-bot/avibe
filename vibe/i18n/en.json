@@ -254,6 +254,7 @@
       "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
     },
     "processMessageFailed": "Error: {error}",
+    "turnAdmissionClosed": "This session is being stopped. Please try again in a moment.",
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
     "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",

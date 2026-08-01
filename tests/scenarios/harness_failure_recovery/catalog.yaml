@@ -4606,6 +4606,51 @@ scenarios:
     # release plus reconciliation. Teardown now logs that ordinary exception and
     # continues the shared settlement sequence.
     test: tests/test_scheduled_tasks.py::test_teardown_continues_after_an_already_failed_execution
+  - id: HFR-376
+    name: admission refusal bypasses the terminal result writer
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 33 (F1). A final pre-dispatch refusal was caught as a generic
+    # backend error and terminalized before the scheduler could requeue its claim.
+    test: tests/test_agent_service.py::test_admission_refusal_bypasses_terminal_emit_after_predispatch_await
+  - id: HFR-377
+    name: teardown anchor lookup returns every ambiguous candidate
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 33 (F2). The scope-free teardown lookup capped its result at
+    # four, so later candidates never received admission holds during runtime removal.
+    test: tests/test_sqlite_sessions_store.py::test_teardown_anchor_lookup_returns_every_ambiguous_candidate
+  - id: HFR-378
+    name: human admission refusal follows the configured language
+    status: covered
+    kind: behavior
+    layer: contract
+    backend: shared
+    # PR2 review round 33 (F3). MessageHandler exposed AgentService's English
+    # exception text verbatim to Chinese users instead of translating at the boundary.
+    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_human_admission_refusal_is_localized
+  - id: HFR-379
+    name: shutdown admission closes after a loop-side timeout
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 33 (F4). A blocked running loop timed out and cancelled the
+    # only admission-close coroutine, then continued dismantling open backends.
+    test: tests/test_running_agents_service.py::test_shutdown_admission_closes_when_loop_submission_times_out
+  - id: HFR-380
+    name: Codex cwd eviction blocks sessions created after its snapshot
+    status: covered
+    kind: safety
+    layer: contract
+    backend: codex
+    # PR2 review round 33 (F5). Per-session phase-one holds missed a new base session
+    # created on the same cwd before the shared transport was stopped.
+    test: tests/test_codex_agent.py::CodexAgentStopTests::test_codex_eviction_blocks_sessions_created_after_its_snapshot
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

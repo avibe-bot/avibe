@@ -864,6 +864,90 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             "ctx-1", "result", "", is_error=True, level="silent", output=ANY
         )
 
+    async def test_codex_eviction_blocks_sessions_created_after_its_snapshot(self):
+        """HFR-380: cwd eviction closes admission beyond its initial session list."""
+
+        from modules.agents.service import AgentService
+
+        dispatched = []
+
+        class _DispatchAgent:
+            name = "codex"
+
+            async def handle_message(self, request):
+                dispatched.append(request.message)
+
+        controller = SimpleNamespace(
+            session_turns=None,
+            model_hub_runtime=SimpleNamespace(retire_process_scope=lambda *_args: None),
+            sessions=SimpleNamespace(
+                find_session_ids_for_anchor=lambda anchor, **_kwargs: (
+                    ["ses-old"] if anchor == "base-old" else []
+                )
+            ),
+        )
+        dispatch_service = AgentService(controller)
+        dispatch_service.register(_DispatchAgent())
+        controller.agent_service = dispatch_service
+
+        cwd_sessions = ["base-old"]
+        newcomer_task = None
+        newcomer_request = None
+
+        async def _teardown(_controller, _session_id, **_kwargs):
+            nonlocal newcomer_task, newcomer_request
+            cwd_sessions.append("base-new")
+            context = SimpleNamespace(platform_specific={"turn_source": "scheduled"})
+            newcomer_request = SimpleNamespace(
+                context=context,
+                message="new cwd turn",
+                composite_session_id="base-new:/tmp/work",
+                base_session_id="base-new",
+            )
+            newcomer_task = asyncio.create_task(
+                dispatch_service.handle_message("codex", newcomer_request)
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(dispatched, [])
+            self.assertFalse(newcomer_task.done())
+            return 0
+
+        async def _stop_transport():
+            self.assertEqual(dispatched, [])
+            self.assertIsNotNone(newcomer_task)
+            self.assertFalse(newcomer_task.done())
+
+        agent = object.__new__(CodexAgent)
+        agent.controller = controller
+        agent._transports = {"/tmp/work": SimpleNamespace(stop=_stop_transport)}
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        agent._session_locks = {}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda resolved_cwd: (
+                list(cwd_sessions) if resolved_cwd == "/tmp/work" else []
+            ),
+            invalidate_thread=lambda _base: None,
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda _base: None,
+            has_pending_turn_start=lambda _base: False,
+            get_request_for_turn=lambda _turn: None,
+            get_latest_request=lambda _base: None,
+            clear_session=lambda _base: None,
+        )
+        agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+
+        with patch.object(_MODULE, "teardown_session_runs", _teardown):
+            with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+                evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 1)
+        self.assertIsNotNone(newcomer_task)
+        await asyncio.wait_for(newcomer_task, timeout=3)
+        self.assertEqual(dispatched, ["new cwd turn"])
+        dispatch_service.release_runtime_turn(newcomer_request.context)
+
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
         lock = asyncio.Lock()

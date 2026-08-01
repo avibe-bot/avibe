@@ -2260,6 +2260,86 @@ def test_admission_closes_before_the_scheduler_stop(tmp_path, monkeypatch):
     assert manager.is_admission_closed_for_shutdown() is True
 
 
+def test_shutdown_admission_closes_when_loop_submission_times_out(
+    tmp_path, monkeypatch
+):
+    """HFR-379: a blocked controller loop cannot abandon the shutdown barrier."""
+
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from core import session_turns
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    submitted = []
+
+    class _Loop:
+        @staticmethod
+        def is_running():
+            return True
+
+        @staticmethod
+        def is_closed():
+            return False
+
+    class _Future:
+        def __init__(self, coro, *, times_out):
+            self.coro = coro
+            self.times_out = times_out
+
+        def result(self, timeout=None):
+            if self.times_out:
+                raise FuturesTimeoutError()
+            self.coro.close()
+            return None
+
+        def cancel(self):
+            self.coro.close()
+            return True
+
+    def _submit(coro, _loop):
+        future = _Future(coro, times_out=not submitted)
+        submitted.append(future)
+        return future
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _submit)
+    observed = {}
+
+    async def _noop():
+        return None
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = _Loop()
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(
+        stop=lambda: observed.setdefault(
+            "closed_before_next_cleanup",
+            manager.is_admission_closed_for_shutdown(),
+        )
+        and None
+    )
+    controller.scheduled_task_service = types.SimpleNamespace(stop=_noop)
+    controller.watch_service = types.SimpleNamespace(stop=_noop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(agents={})
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    _bind_cleanup_sync_methods(controller)
+
+    assert manager.is_admission_closed_for_shutdown() is False
+    Controller.cleanup_sync(controller)
+
+    assert submitted, "the running-loop admission close was never submitted"
+    assert observed["closed_before_next_cleanup"] is True
+    assert manager.is_admission_closed_for_shutdown() is True
+
+
 def test_admission_closes_before_update_checker_drives_the_stopped_loop(
     tmp_path, monkeypatch
 ):

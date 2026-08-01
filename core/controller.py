@@ -2234,7 +2234,11 @@ class Controller:
             _close_admission_for_shutdown_now()
         else:
             _stop_loop_coroutine(
-                _close_admission_for_shutdown(), "Shutdown admission close"
+                _close_admission_for_shutdown(),
+                "Shutdown admission close",
+                # HFR-379. A blocked running loop can miss even this tiny setter;
+                # close synchronously before proceeding to any destructive stop.
+                on_timeout=_close_admission_for_shutdown_now,
             )
 
         # Stop the update checker only AFTER global admission is closed (HFR-354).

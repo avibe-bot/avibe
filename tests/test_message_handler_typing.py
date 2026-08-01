@@ -1258,6 +1258,38 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
 
+    async def test_human_admission_refusal_is_localized(self):
+        """HFR-378: teardown refusal copy follows the user's configured language."""
+
+        from modules.agents.service import TurnAdmissionClosedError
+
+        controller = _StubController(
+            platform="wechat", ack_mode="message", typing_result=True
+        )
+        controller._get_lang = lambda: "zh"
+        controller.agent_service.error = TurnAdmissionClosedError(
+            "agent turn admission is closed during session teardown or shutdown"
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            message_id="m378",
+            platform="wechat",
+        )
+
+        await handler.handle_user_message(context, "继续")
+
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "出错：会话正在停止，请稍后重试。")],
+        )
+        self.assertNotIn(
+            "agent turn admission is closed",
+            controller.im_client.sent_messages[0][1],
+        )
+
     async def test_resume_session_callback_preserves_platform(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         setattr(

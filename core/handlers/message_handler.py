@@ -612,7 +612,14 @@ class MessageHandler(BaseHandler):
                     )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
-            error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
+            error_detail = (
+                self._t("error.turnAdmissionClosed")
+                if isinstance(e, TurnAdmissionClosedError)
+                else str(e)
+            )
+            error_text = self.formatter.format_error(
+                self._t("error.processMessageFailed", error=error_detail)
+            )
             await self._get_im_client(context).send_message(context, error_text)
             # Surface the failure into the live web-Chat SSE stream first...
             await self._stream_terminal_error(context, error_text)

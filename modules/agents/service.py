@@ -56,6 +56,7 @@ class AgentService:
         # event loop doesn't GC them before they run (asyncio only weak-refs tasks).
         self._background_tasks: set[asyncio.Task] = set()
         self._backend_ready: dict[str, asyncio.Event] = {}
+        self._backend_drain_depth: dict[str, int] = {}
 
     def _backend_ready_event(self, backend: str) -> asyncio.Event:
         event = self._backend_ready.get(backend)
@@ -66,9 +67,15 @@ class AgentService:
         return event
 
     def begin_backend_drain(self, backend: str) -> None:
+        self._backend_drain_depth[backend] = self._backend_drain_depth.get(backend, 0) + 1
         self._backend_ready_event(backend).clear()
 
     def end_backend_drain(self, backend: str) -> None:
+        depth = self._backend_drain_depth.get(backend, 0)
+        if depth > 1:
+            self._backend_drain_depth[backend] = depth - 1
+            return
+        self._backend_drain_depth.pop(backend, None)
         self._backend_ready_event(backend).set()
 
     async def wait_backend_ready(self, backend: str) -> None:
@@ -279,6 +286,16 @@ class AgentService:
             # the last instruction before backend dispatch must revalidate the hold.
             self._require_teardown_admission_open(request.context)
             await agent.handle_message(request)
+        except TurnAdmissionClosedError:
+            # HFR-376. This is a pre-dispatch refusal, not a terminal backend
+            # failure. Emitting terminal output here would settle a scheduled
+            # execution before its claim owner can requeue it. Human IM turns keep
+            # the token until MessageHandler emits their localized terminal reply;
+            # scheduled and direct callers have no such owner, so release now.
+            platform_specific = getattr(request.context, "platform_specific", None) or {}
+            if platform_specific.get("turn_source") != "human":
+                self.release_runtime_turn(request.context)
+            raise
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a
             # terminal emit the concise status bubble stays stuck on its last
@@ -668,9 +685,7 @@ class AgentService:
         """Explicitly refuse a new ordinary turn while teardown owns admission."""
 
         if self._teardown_admission_closed(context):
-            raise TurnAdmissionClosedError(
-                "agent turn admission is closed during session teardown or shutdown"
-            )
+            raise TurnAdmissionClosedError()
 
     async def begin_agent_initiated_turn(
         self, agent_name: str, context: Any, runtime_key: str

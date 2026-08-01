@@ -10,7 +10,7 @@ import pytest
 
 from core.message_output import terminal_turn_output
 from core.session_activities import SessionActivityRegistry
-from modules.agents.service import AgentService
+from modules.agents.service import AgentService, TurnAdmissionClosedError
 from modules.agents.codex.transport import CodexTransport
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -216,7 +216,7 @@ def test_agent_service_refuses_ordinary_turns_while_admission_is_closed(
         else:
             turn = asyncio.create_task(service.handle_message("claude", request))
 
-        with pytest.raises(RuntimeError, match="admission is closed"):
+        with pytest.raises(TurnAdmissionClosedError):
             await turn
         assert agent.started == []
         assert not gate.lock.locked()
@@ -257,10 +257,56 @@ def test_agent_service_rechecks_admission_after_the_final_predispatch_await() ->
         service.register(agent)
         request = _request("must stop before backend dispatch", "session:/admission-364")
 
-        with pytest.raises(RuntimeError, match="admission is closed"):
+        with pytest.raises(TurnAdmissionClosedError):
             await service.handle_message("claude", request)
 
         gate = service._get_turn_gate("session:/admission-364")
+        assert agent.started == []
+        assert not gate.lock.locked()
+        assert not gate.token
+
+    asyncio.run(_run())
+
+
+def test_admission_refusal_bypasses_terminal_emit_after_predispatch_await() -> None:
+    """HFR-376: a pre-backend refusal cannot terminalize retryable scheduled work."""
+
+    async def _run():
+        class _AdmissionManager:
+            closed = False
+
+            def is_admission_closed_for_shutdown(self):
+                return self.closed
+
+            def is_teardown_admission_closed(self, _session_id):
+                return self.closed
+
+            def on_running(self, _context):
+                return None
+
+        manager = _AdmissionManager()
+
+        async def _close_during_status(_context):
+            manager.closed = True
+            await asyncio.sleep(0)
+
+        controller = SimpleNamespace(
+            session_turns=manager,
+            _session_id_from_context=lambda _context: "ses-admission-376",
+            message_dispatcher=SimpleNamespace(begin_status_bubble=_close_during_status),
+            emit_agent_message=AsyncMock(),
+        )
+        service = AgentService(controller=controller)
+        agent = _RuntimeAgent()
+        service.register(agent)
+        request = _request("retry after teardown", "session:/admission-376")
+        request.context.platform_specific["turn_source"] = "scheduled"
+
+        with pytest.raises(TurnAdmissionClosedError):
+            await service.handle_message("claude", request)
+
+        controller.emit_agent_message.assert_not_awaited()
+        gate = service._get_turn_gate("session:/admission-376")
         assert agent.started == []
         assert not gate.lock.locked()
         assert not gate.token
@@ -447,6 +493,24 @@ def test_agent_service_restart_wait_releases_gate_when_backend_disappears() -> N
         with pytest.raises(KeyError):
             await task
         assert gate.lock.locked() is False
+
+    asyncio.run(_run())
+
+
+def test_agent_service_backend_drain_waits_for_every_owner() -> None:
+    async def _run():
+        service = AgentService(controller=_Controller())
+        service.begin_backend_drain("codex")
+        service.begin_backend_drain("codex")
+
+        waiter = asyncio.create_task(service.wait_backend_ready("codex"))
+        await asyncio.sleep(0)
+        service.end_backend_drain("codex")
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        service.end_backend_drain("codex")
+        await asyncio.wait_for(waiter, timeout=3)
 
     asyncio.run(_run())
 

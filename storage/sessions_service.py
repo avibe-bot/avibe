@@ -288,7 +288,7 @@ class SQLiteSessionsService:
         *,
         workdir: str | None = None,
         agent_backend: str | None = None,
-        limit: int = 4,
+        limit: int | None = None,
         workdir_match: str = WORKDIR_MATCH_EXACT_OR_FALLBACK,
     ) -> list[str]:
         """Session ids for one anchor, WITHOUT a scope key. For teardown only.
@@ -338,14 +338,15 @@ class SQLiteSessionsService:
         named there is no second tier to suppress and both values mean the same thing.
 
         Archived rows are excluded: they are terminal and inert, so nothing is
-        executing in them.
+        executing in them. The teardown lookup is complete by default; callers may
+        still request an explicit positive limit for diagnostic uses.
         """
 
         resolved_match = str(workdir_match or "").strip() or WORKDIR_MATCH_EXACT_OR_FALLBACK
         if resolved_match not in WORKDIR_MATCH_MODES:
             raise ValueError(f"unknown workdir_match: {workdir_match!r}")
         resolved_anchor = str(session_anchor or "").strip()
-        if not resolved_anchor or limit <= 0:
+        if not resolved_anchor or (limit is not None and limit <= 0):
             return []
         resolved_workdir = str(workdir or "").strip()
         resolved_backend = str(agent_backend or "").strip()
@@ -382,7 +383,7 @@ class SQLiteSessionsService:
             session_ids = exact
         else:
             session_ids = exact or unset_workdir
-        return session_ids[:limit]
+        return session_ids if limit is None else session_ids[:limit]
 
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:
         with self.engine.connect() as conn:

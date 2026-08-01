@@ -254,6 +254,7 @@
       "generic": "请在 Agent 设置里选择一个已启用的 Agent，或启用该 Agent 使用的 backend。"
     },
     "processMessageFailed": "出错：{error}",
+    "turnAdmissionClosed": "会话正在停止，请稍后重试。",
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",
     "sessionConnectionLost": "与 Claude 的连接已断开，请重试。",

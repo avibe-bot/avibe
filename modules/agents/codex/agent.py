@@ -712,6 +712,23 @@ class CodexAgent(BaseAgent):
                 # registers owes the drain (HFR-332): by then the transport is gone
                 # and a replacement can be created for this cwd.
                 with ExitStack() as admission_holds:
+                    # HFR-380. The per-session snapshot below cannot cover a session
+                    # that is created while its awaits are in flight. Close Codex
+                    # backend admission first, so every post-snapshot cwd turn waits
+                    # for this transport and its mappings to be fully removed. Drain
+                    # ownership is counted in AgentService, so an overlapping rolling
+                    # refresh cannot be reopened by this eviction's callback.
+                    agent_service = getattr(
+                        getattr(self, "controller", None), "agent_service", None
+                    )
+                    begin_backend_drain = getattr(
+                        agent_service, "begin_backend_drain", None
+                    )
+                    end_backend_drain = getattr(agent_service, "end_backend_drain", None)
+                    if callable(begin_backend_drain) and callable(end_backend_drain):
+                        begin_backend_drain("codex")
+                        admission_holds.callback(end_backend_drain, "codex")
+
                     # SETTLE BEFORE STOPPING THE TRANSPORT. Everything below this point
                     # dismantles the runtime, and once the app-server is gone no run
                     # executing through it can ever be settled by its own turn — the

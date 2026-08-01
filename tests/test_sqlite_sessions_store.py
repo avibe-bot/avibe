@@ -7402,3 +7402,44 @@ def test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier(
             ) == [exact_id]
     finally:
         store.close()
+
+
+def test_teardown_anchor_lookup_returns_every_ambiguous_candidate(
+    tmp_path: Path,
+) -> None:
+    """HFR-377: admission holds cannot inherit a four-session lookup cap."""
+
+    service = SQLiteSessionsService(tmp_path / "sessions.sqlite")
+    anchor = "shared-runtime-anchor"
+    workdir = str(tmp_path / "repo")
+    expected: set[str] = set()
+    try:
+        with service.engine.begin() as conn:
+            for index in range(6):
+                scope_id = resolve_scope_from_legacy_key(
+                    conn,
+                    f"slack::channel::C377{index}",
+                    now="2026-08-01T00:00:00Z",
+                )
+                expected.add(
+                    create_agent_session_row(
+                        conn,
+                        scope_id=scope_id,
+                        agent_backend="codex",
+                        agent_variant="codex",
+                        session_anchor=anchor,
+                        native_session_id=f"native-{index}",
+                        workdir=workdir,
+                        require_workdir=False,
+                    )
+                )
+
+        assert set(
+            service.find_session_ids_for_anchor(
+                anchor,
+                workdir=workdir,
+                agent_backend="codex",
+            )
+        ) == expected
+    finally:
+        service.close()
