@@ -625,7 +625,15 @@ class VibeAgentStore:
                     new_name=raw_new_name,
                     revision=now,
                 )
-                if self._default_agent_name(conn) == agent.name:
+                default_name = self._default_agent_name(conn)
+                try:
+                    default_matches = (
+                        default_name is not None
+                        and normalize_agent_name(default_name) == agent.normalized_name
+                    )
+                except ValueError:
+                    default_matches = False
+                if default_matches:
                     self._write_default_agent_name(conn, raw_new_name, now=now)
                 updated = conn.execute(
                     select(agents).where(agents.c.id == agent.id).limit(1)

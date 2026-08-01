@@ -1244,12 +1244,18 @@ def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatc
 
 def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_path):
     from core.vibe_agents import VibeAgentStore
+    from core.services import settings as settings_service
     from sqlalchemy import select
     from storage.db import create_sqlite_engine
     from storage.models import scope_settings
     from storage.projects_service import create_project, update_project
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     folder = tmp_path / "project"
@@ -1272,7 +1278,17 @@ def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_
         )
 
         assert response.status_code == 400
-        assert response.get_json() == {"error": "Agent is unavailable: pm"}
+        assert response.get_json() == {
+            "ok": False,
+            "code": "project_agent_unavailable",
+            "message": "Agent `pm` 无法用于此项目。",
+            "error": {
+                "code": "project_agent_unavailable",
+                "message": "Agent `pm` 无法用于此项目。",
+            },
+            "hint": "请选择一个已启用的 Agent 后重新保存项目设置。",
+            "details": {"agent_name": "pm"},
+        }
         with engine.connect() as conn:
             stored_name = conn.execute(
                 select(scope_settings.c.agent_name).where(

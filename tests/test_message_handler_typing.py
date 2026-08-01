@@ -676,6 +676,67 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         agent_name, _ = controller.agent_service.requests[0]
         self.assertEqual(agent_name, "codex")
 
+    async def test_existing_im_thread_resolves_agent_by_stable_id(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.find_session_for_anchor = lambda *_args: {
+            "id": "ses_preserved",
+            "agent_id": "agent-original",
+            "agent_name": "pm",
+            "agent_backend": "claude",
+            "visibility": "foreground",
+        }
+        observed = {}
+
+        def _resolve_agent(
+            _context,
+            *,
+            override_agent_id=None,
+            override_agent_name=None,
+            required=False,
+        ):
+            observed.update(
+                agent_id=override_agent_id,
+                agent_name=override_agent_name,
+                required=required,
+            )
+            return type(
+                "VibeAgent",
+                (),
+                {
+                    "id": "agent-original",
+                    "name": "_pm-ab12",
+                    "backend": "claude",
+                    "model": "claude-opus",
+                    "reasoning_effort": None,
+                    "system_prompt": None,
+                },
+            )()
+
+        controller.resolve_vibe_agent_for_context = _resolve_agent
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "continue")
+
+        self.assertEqual(
+            observed,
+            {
+                "agent_id": "agent-original",
+                "agent_name": "pm",
+                "required": True,
+            },
+        )
+        agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(agent_name, "claude")
+        self.assertEqual(request.vibe_agent_id, "agent-original")
+        self.assertEqual(request.vibe_agent_name, "_pm-ab12")
+
     async def test_unusable_durable_session_agent_does_not_fallback_to_backend(self):
         controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
         observed = {}

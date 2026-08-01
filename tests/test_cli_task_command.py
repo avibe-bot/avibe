@@ -3213,6 +3213,42 @@ def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Pat
     assert cli._agent_write_guard_ids(resolution) == (None, original.id)
 
 
+def test_session_derived_agent_target_prefers_the_stable_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli.resolve_session_id_target",
+            return_value=SimpleNamespace(
+                agent_id=original.id,
+                agent_name=replacement.name,
+                agent_backend=original.backend,
+            ),
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id="ses_preserved",
+            session_key="",
+            help_command="vibe agent run --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
+
+
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
     tmp_path: Path,
 ) -> None:

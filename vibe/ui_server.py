@@ -4124,6 +4124,20 @@ def _project_agent_conflict_response(exc):
     )
 
 
+def _project_agent_unavailable_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.projectAgentUnavailable"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang, agent=exc.agent_name),
+        400,
+        hint=t(f"{key}.hint", lang),
+        details={"agent_name": exc.agent_name},
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
@@ -5976,6 +5990,8 @@ def projects_update(project_id: str):
             )
     except projects_service.StaleProjectAgentBindingError as err:
         return _project_agent_conflict_response(err)
+    except projects_service.ProjectAgentUnavailableError as err:
+        return _project_agent_unavailable_response(err)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except (FileNotFoundError, NotADirectoryError, ValueError) as err:

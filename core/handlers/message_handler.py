@@ -255,9 +255,11 @@ class MessageHandler(BaseHandler):
                     except Exception:
                         logger.debug("find_session_for_anchor failed; falling back to routing", exc_info=True)
                 if existing_thread:
+                    existing_agent_id = existing_thread.get("agent_id")
                     existing_agent_name = existing_thread.get("agent_name")
+                    requested_vibe_agent_id = existing_agent_id or requested_vibe_agent_id
                     requested_vibe_agent = existing_agent_name or requested_vibe_agent
-                    if existing_agent_name:
+                    if existing_agent_id or existing_agent_name:
                         durable_agent_identity = True
                     session_agent_backend = existing_thread.get("agent_backend") or session_agent_backend
                     # Scope is only placement. A persisted session's visibility is

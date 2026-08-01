@@ -30,6 +30,7 @@ from storage.models import (
     run_definitions,
     scope_settings,
     scopes,
+    state_meta,
 )
 from storage.sessions_service import SQLiteSessionsService
 
@@ -857,6 +858,31 @@ def test_rename_moves_references_and_default_without_changing_agent_identity(tmp
             for row in runs
             if row["status"] in {"succeeded", "failed", "canceled"}
         } == {"pm"}
+    finally:
+        store.close()
+
+
+def test_rename_updates_normalized_equivalent_legacy_default(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        original = store.create(name="Project Manager", backend="claude")
+        with store.engine.begin() as conn:
+            conn.execute(
+                state_meta.insert().values(
+                    key="default_agent_name",
+                    value_json=json.dumps("PROJECT-MANAGER"),
+                    updated_at=NOW,
+                )
+            )
+        assert store.get_default_agent() is not None
+        assert store.get_default_agent().id == original.id
+
+        renamed = store.rename(original.name, "review-lead")
+
+        assert renamed.id == original.id
+        assert store.get_default_agent_name() == renamed.name
+        assert store.get_default_agent() is not None
+        assert store.get_default_agent().id == original.id
     finally:
         store.close()
 

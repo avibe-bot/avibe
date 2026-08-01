@@ -173,6 +173,10 @@
       "message": "The project's Agent changed while Project Settings was open.",
       "hint": "Reload Project Settings and apply your change again."
     },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this project.",
+      "hint": "Choose an enabled Agent and apply the project setting again."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",

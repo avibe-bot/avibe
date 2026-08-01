@@ -2534,7 +2534,13 @@ def _resolve_agent_target(
             )
         if session_id:
             target = resolve_session_id_target(session_id)
-            session_agent = store.require_reference(target.agent_name) if target.agent_name else None
+            session_agent = (
+                store.require_reference_by_id(target.agent_id)
+                if target.agent_id
+                else store.require_reference(target.agent_name)
+                if target.agent_name
+                else None
+            )
             if requested is not None and session_agent is not None and requested.name != session_agent.name:
                 raise TaskCliError(
                     "agent does not match the existing session agent",

@@ -125,6 +125,16 @@ class StaleProjectAgentBindingError(ValueError):
         }
 
 
+class ProjectAgentUnavailableError(ValueError):
+    """The requested Agent cannot be selected for a new project route."""
+
+    code = "project_agent_unavailable"
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = agent_name
+
+
 # Single source of truth for the columns every project payload reads, so
 # ``list_projects`` and ``_project_payload`` can never select different shapes.
 _PROJECT_COLUMNS = (
@@ -381,12 +391,12 @@ def update_project(
             .limit(1)
         ).mappings().first()
         if selected_agent is None:
-            raise ValueError(f"Agent is unavailable: {cleaned_agent_id}")
+            raise ProjectAgentUnavailableError(agent_name=cleaned_agent_id)
         preserves_current_identity = cleaned_agent_id == current_agent_id
         if not preserves_current_identity and (
             not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None
         ):
-            raise ValueError(f"Agent is unavailable: {selected_agent['name']}")
+            raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
         agent_name = selected_agent["name"]
     elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
@@ -396,7 +406,7 @@ def update_project(
             try:
                 normalized_agent = normalize_agent_name(requested_agent)
             except ValueError as exc:
-                raise ValueError(f"Agent is unavailable: {requested_agent}") from exc
+                raise ProjectAgentUnavailableError(agent_name=requested_agent) from exc
             available_agent = conn.execute(
                 select(agents.c.name)
                 .where(agents.c.normalized_name == normalized_agent)
@@ -405,7 +415,7 @@ def update_project(
                 .limit(1)
             ).scalar_one_or_none()
             if available_agent is None:
-                raise ValueError(f"Agent is unavailable: {requested_agent}")
+                raise ProjectAgentUnavailableError(agent_name=requested_agent)
             agent_name = available_agent
     for field_name, value in (
         ("agent_name", agent_name),

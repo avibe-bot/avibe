@@ -173,6 +173,10 @@
       "message": "项目设置打开后，该项目的 Agent 已发生变化。",
       "hint": "请重新加载项目设置后再次修改。"
     },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此项目。",
+      "hint": "请选择一个已启用的 Agent 后重新保存项目设置。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",

@@ -389,8 +389,10 @@ def test_project_agent_save_serializes_with_archive_and_rejects_stale_route(engi
         assert preserved["default_agent"]["agent_name"] == archived.archived_name
 
         with engine.begin() as conn:
-            with pytest.raises(ValueError, match="Agent is unavailable: pm"):
+            with pytest.raises(projects_service.ProjectAgentUnavailableError) as exc:
                 projects_service.update_project(conn, created["id"], agent_name="pm")
+        assert exc.value.code == "project_agent_unavailable"
+        assert exc.value.agent_name == "pm"
         with engine.connect() as conn:
             stored_name = conn.execute(
                 select(scope_settings.c.agent_name).where(
