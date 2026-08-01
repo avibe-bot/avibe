@@ -25,11 +25,13 @@ from storage.db import escape_sql_like
 from storage.models import (
     agent_runs,
     agent_sessions,
+    agents,
     messages,
     scope_settings,
     scopes,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sessions_service import session_agent_display_label
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 from vibe.message_types import types_with, types_without
 
@@ -185,11 +187,35 @@ def _attach_agent_run_provenance(
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
     for row in conn.execute(
-        select(agent_sessions.c.id, agent_sessions.c.title, agent_sessions.c.agent_name).where(
+        select(
+            agent_sessions.c.id,
+            agent_sessions.c.title,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_backend,
+            agents.c.name.label("catalog_agent_name"),
+            agents.c.archived_at.label("catalog_agent_archived_at"),
+            agents.c.metadata_json.label("catalog_agent_metadata_json"),
+        )
+        .select_from(
+            agent_sessions.outerjoin(
+                agents,
+                or_(
+                    agents.c.id == agent_sessions.c.agent_id,
+                    and_(
+                        agent_sessions.c.agent_id.is_(None),
+                        agents.c.name == agent_sessions.c.agent_name,
+                    ),
+                ),
+            )
+        )
+        .where(
             agent_sessions.c.id.in_(set(source_by_exec.values()))
         )
     ).mappings():
-        meta_by_session[row["id"]] = {"title": row["title"], "agent_name": row["agent_name"]}
+        meta_by_session[row["id"]] = {
+            "title": row["title"],
+            "agent_name": session_agent_display_label(row),
+        }
 
     for payload in payloads:
         source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))

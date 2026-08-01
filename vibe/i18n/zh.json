@@ -165,7 +165,63 @@
     }
   },
   "error": {
+    "settingsConflict": {
+      "message": "这些设置打开后，Agent 路由已发生变化。",
+      "hint": "请重新加载设置后再次修改。"
+    },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此路由。",
+      "hint": "请选择一个已启用的 Agent 后重新保存。"
+    },
+    "projectAgentConflict": {
+      "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+      "hint": "请重新加载项目设置后再次修改。"
+    },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` 无法用于此项目。",
+      "hint": "请选择一个已启用的 Agent 后重新保存项目设置。"
+    },
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
+        "hint": "请选择使用相同 backend 的已启用 Agent 作为覆盖项。"
+      }
+    },
     "sessionArchived": "该会话已归档，无法再修改。",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` 是内置 Agent，无法删除。",
+        "hint": "内置默认 Agent 由已启用的 Backend 创建，无法删除。"
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` 已归档。",
+        "hint": "已归档 Agent 的内部名称仅供现有持久引用继续使用。"
+      },
+      "agent_no_default_replacement": {
+        "message": "没有其他已启用 Agent 时，无法归档默认 Agent `{agent}`。",
+        "hint": "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+      }
+    },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` 已归档，无法编辑。",
+        "hint": "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。",
+        "hint": "请修复或删除元数据异常的任务或监控，然后重试。"
+      }
+    },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。",
+        "hint": "请选择不以下划线 `_` 开头的 Agent 名称。"
+      },
+      "agent_name_path_separator": {
+        "message": "Agent 名称不能包含 `/` 或 `\\`。",
+        "hint": "请选择不含路径分隔符的 Agent 名称。"
+      }
+    },
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",

@@ -113,6 +113,66 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "--deliver-key" not in captured.out
 
 
+def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="codex")
+        agent_store.create(name="zz-fallback", backend="codex")
+        store = ManagedWatchStore()
+        watch = store.add_watch(
+            name="Review watch",
+            session_key="slack::channel::C123",
+            agent_name=agent.name,
+            command=["python3", "wait.py"],
+            shell_command=None,
+            prefix=None,
+            cwd=None,
+            mode="once",
+            timeout_seconds=600,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=30,
+            post_to=None,
+            deliver_key=None,
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+        runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+
+        args = _parse_watch_update([watch.id, "--name", "Renamed watch"])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=store),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_watch_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert ManagedWatchStore().get_watch(watch.id).agent_name == archived.archived_name
+
+        explicit = _parse_watch_update([watch.id, "--agent", archived.archived_name])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_watch_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
 def test_watch_list_help_describes_bounded_history(capsys) -> None:
     parser = cli.build_parser()
 
@@ -242,12 +302,26 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
             "echo done",
         ]
     )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    original_add_watch = store.add_watch
+    captured: dict[str, object] = {}
+
+    def add_watch(**kwargs):
+        captured.update(kwargs)
+        return original_add_watch(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2])),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(store, "add_watch", side_effect=add_watch),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2]),
+        ),
     ):
         result = cli.cmd_watch_add(args)
 
@@ -255,6 +329,63 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
+
+
+def test_watch_add_releases_create_once_session_when_definition_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    args = _parse_watch_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-watch",
+            "--cwd",
+            str(tmp_path),
+            "--shell",
+            "true",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-watch",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=str(tmp_path)),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-watch"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._watch_store",
+            return_value=SimpleNamespace(
+                add_watch=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_cli_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-watch",
+            "watch creation failed before its Session reservation was adopted",
+        )
+    ]
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:

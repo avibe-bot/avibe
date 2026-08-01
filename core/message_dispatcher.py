@@ -1630,15 +1630,12 @@ class ConsolidatedMessageDispatcher:
                             include_quick_replies=quick_replies_on,
                             keep_file_links=True,
                         )
-                        recorded_text = self._fold_footer(
-                            background_enhanced.text or persist_text,
-                            result_footer,
-                        )
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            recorded_text,
+                            background_enhanced.text or persist_text,
                             quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1647,6 +1644,7 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             recorded_text,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1789,14 +1787,15 @@ class ConsolidatedMessageDispatcher:
                 #     grey subtext — and in concise mode it supersedes the bubble's
                 #     own ``✅ done · …`` line so the terminal footer stays
                 #     consistent (grey, one line, no head text);
-                #   * platforms WITHOUT subtext rendering (Telegram/WeChat/Avibe)
+                #   * IM platforms WITHOUT subtext rendering (Telegram/WeChat)
                 #     fold it onto the body as a trailing line, so the footnote
                 #     stays visible AND their senders (which don't accept the
                 #     ``subtext`` kwarg) are never handed it.
-                # ``folded_footer`` is the footnote to APPEND to the stored text so
-                # a reloaded transcript / inbox / agent-run record keeps the
-                # duration/token info (it used to live in the result body). It is
-                # set for BOTH platform kinds; only the DELIVERY form differs.
+                #   * Avibe carries it as structured message content; the Web
+                #     transcript renders it beside the timestamp.
+                # ``folded_footer`` is the canonical footnote carried to IM
+                # delivery, agent-run records, and structured Web message content.
+                # It is set for every platform; only the presentation differs.
                 folded_footer: Optional[str] = result_footer if mutates_turn_lifecycle else None
                 if folded_footer:
                     # Gate on the DELIVERY TARGET's capabilities, not the source
@@ -1807,7 +1806,7 @@ class ConsolidatedMessageDispatcher:
                         # Subtext-capable: deliver as the grey subtext footer (body
                         # stays clean); persistence still folds it in below.
                         done_footer = folded_footer
-                    else:
+                    elif target_context.platform != "avibe":
                         # No subtext rendering: fold onto the delivered body too.
                         display_text = self._fold_footer(display_text, folded_footer)
                 # Pass subtext to RAW send_message calls only when set, so an adapter
@@ -1975,12 +1974,9 @@ class ConsolidatedMessageDispatcher:
                     else:
                         await self._clear_consolidated_state(context)
 
-                # The stored text keeps the footnote for BOTH platform kinds:
-                # ``display_text`` already carries it on non-subtext platforms (folded
-                # above), while subtext platforms delivered it out-of-band — folding
-                # ``folded_footer`` onto the clean ``persist_text`` reconstructs the
-                # same body+footer without double-appending (persist_text is never
-                # mutated) and is a no-op when there is no footer.
+                # Agent-run records keep the complete body+footer text for every
+                # platform. The Web message row separately persists a clean body
+                # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
                 run_provenance = output_semantics.provenance(context)
                 workbench_run_waits_for_persistence = (
@@ -2023,12 +2019,12 @@ class ConsolidatedMessageDispatcher:
                         avibe_enhanced = process_reply(
                             raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
                         )
-                        avibe_text = self._fold_footer(avibe_enhanced.text or persist_text, folded_footer)
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            avibe_text,
+                            avibe_enhanced.text or persist_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -2037,6 +2033,7 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             persisted_result_text,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )

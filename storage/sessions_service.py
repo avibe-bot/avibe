@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import Connection, case, func, or_, select
+from sqlalchemy import Connection, and_, case, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -57,6 +57,79 @@ SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 logger = logging.getLogger(__name__)
 
 
+def _require_enabled_agent_identity(
+    conn: Connection,
+    *,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> None:
+    cleaned_id = str(agent_id or "").strip()
+    cleaned_name = str(agent_name or "").strip()
+    if not cleaned_id or not cleaned_name:
+        raise ValueError("an enabled Agent identity is required for this session")
+    row = conn.execute(
+        select(agents.c.id)
+        .where(agents.c.id == cleaned_id)
+        .where(agents.c.name == cleaned_name)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+        .limit(1)
+    ).first()
+    if row is None:
+        raise ValueError(
+            f"agent '{cleaned_name}' was archived, disabled, renamed, or replaced before session creation"
+        )
+
+
+def _require_agent_reference_identity(
+    conn: Connection,
+    *,
+    expected_agent_id: str | None,
+) -> dict[str, str]:
+    cleaned_id = str(expected_agent_id or "").strip()
+    if not cleaned_id:
+        raise ValueError("an Agent identity is required for this session reference")
+    row = conn.execute(
+        select(
+            agents.c.id,
+            agents.c.name,
+            agents.c.backend,
+            agents.c.enabled,
+            agents.c.archived_at,
+            agents.c.metadata_json,
+        )
+        .where(agents.c.id == cleaned_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        raise ValueError(f"agent reference '{cleaned_id}' no longer exists")
+    from core.vibe_agents import agent_reference_is_usable
+
+    if not agent_reference_is_usable(
+        enabled=bool(row["enabled"]),
+        archived_at=row["archived_at"],
+        metadata=_json_loads(row["metadata_json"], {}),
+    ):
+        raise ValueError(f"agent reference '{row['name']}' is disabled")
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "backend": str(row["backend"]),
+    }
+
+
+def _catalog_agent_name_value(agent_id: str | None, fallback_name: str) -> Any:
+    """Resolve an Agent's current routing name in the statement that persists it."""
+
+    cleaned_id = str(agent_id or "").strip()
+    if not cleaned_id:
+        return fallback_name
+    return func.coalesce(
+        select(agents.c.name).where(agents.c.id == cleaned_id).limit(1).scalar_subquery(),
+        fallback_name,
+    )
+
+
 def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> bool:
     """Return True iff a row's ``native_session_id`` should be written now.
 
@@ -83,6 +156,23 @@ def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> 
 _BACKEND_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
+def session_agent_display_label(row: Mapping[str, Any]) -> str | None:
+    agent_name = str(row["agent_name"] or "").strip()
+    catalog_name = str(row["catalog_agent_name"] or "").strip()
+    if row["catalog_agent_archived_at"]:
+        try:
+            metadata_json = json.loads(row["catalog_agent_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata_json = {}
+        archive = metadata_json.get("_avibe_archive") if isinstance(metadata_json, dict) else None
+        if isinstance(archive, dict):
+            original_name = str(archive.get("original_name") or "").strip()
+            if original_name:
+                return original_name
+    backend = str(row["agent_backend"] or "").strip()
+    return catalog_name or agent_name or _BACKEND_LABELS.get(backend, backend or None)
+
+
 def read_session_display_meta(
     session_ids: list[str], *, db_path: Path | None = None
 ) -> dict[str, dict[str, str | None]]:
@@ -106,10 +196,25 @@ def read_session_display_meta(
                         agent_sessions.c.title,
                         agent_sessions.c.agent_name,
                         agent_sessions.c.agent_backend,
+                        agents.c.name.label("catalog_agent_name"),
+                        agents.c.archived_at.label("catalog_agent_archived_at"),
+                        agents.c.metadata_json.label("catalog_agent_metadata_json"),
                         scopes.c.platform,
                     )
                     .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        agent_sessions
+                        .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                        .join(
+                            agents,
+                            or_(
+                                agents.c.id == agent_sessions.c.agent_id,
+                                and_(
+                                    agent_sessions.c.agent_id.is_(None),
+                                    agents.c.name == agent_sessions.c.agent_name,
+                                ),
+                            ),
+                            isouter=True,
+                        )
                     )
                     .where(agent_sessions.c.id.in_(ids))
                 )
@@ -122,9 +227,7 @@ def read_session_display_meta(
     for row in rows:
         title = str(row["title"] or "").strip() or None
         platform = str(row["platform"] or "").strip() or None
-        agent_name = str(row["agent_name"] or "").strip()
-        backend = str(row["agent_backend"] or "").strip()
-        agent = agent_name or _BACKEND_LABELS.get(backend, backend or None)
+        agent = session_agent_display_label(row)
         meta[str(row["id"])] = {"title": title, "platform": platform, "agent": agent}
     return meta
 
@@ -301,10 +404,28 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "foreground",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
@@ -338,11 +459,29 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         visibility: str = "background",
         metadata: dict[str, Any] | None = None,
+        require_enabled_agent: bool = False,
+        expected_reference_agent_id: str | None = None,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
         with self.engine.begin() as conn:
+            if require_enabled_agent:
+                reserve_write_lock(conn)
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
+            elif expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                backend = identity["backend"]
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:
@@ -625,6 +764,11 @@ class SQLiteSessionsService:
     ) -> str | None:
         """Bind a backend-native session id to the stable Vibe session row."""
         now = _utc_now_iso()
+        persisted_agent_name = (
+            _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            if vibe_agent_name is not None
+            else None
+        )
         with self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
@@ -651,7 +795,7 @@ class SQLiteSessionsService:
                     native_session_id=encoded_session_id,
                     workdir=requested_workdir,
                     agent_id=vibe_agent_id,
-                    agent_name=vibe_agent_name,
+                    agent_name=persisted_agent_name,
                     model=None,
                     reasoning_effort=None,
                     metadata={"legacy_scope_key": str(scope_key)},
@@ -690,7 +834,14 @@ class SQLiteSessionsService:
             if vibe_agent_id is not None:
                 values["agent_id"] = vibe_agent_id
             if vibe_agent_name is not None:
-                values["agent_name"] = vibe_agent_name
+                values["agent_name"] = (
+                    case(
+                        (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                        else_=persisted_agent_name,
+                    )
+                    if vibe_agent_id is not None
+                    else persisted_agent_name
+                )
             # WRITE-ONCE: a row's native_session_id is bound exactly once and never
             # changed. Never let a recapture, fork, subagent, or any fallback
             # overwrite an existing native (product invariant — one agent session ↔
@@ -821,7 +972,15 @@ class SQLiteSessionsService:
         if vibe_agent_id is not None:
             values["agent_id"] = vibe_agent_id
         if vibe_agent_name is not None:
-            values["agent_name"] = vibe_agent_name
+            persisted_agent_name = _catalog_agent_name_value(vibe_agent_id, vibe_agent_name)
+            values["agent_name"] = (
+                case(
+                    (agent_sessions.c.agent_id == vibe_agent_id, agent_sessions.c.agent_name),
+                    else_=persisted_agent_name,
+                )
+                if vibe_agent_id is not None
+                else persisted_agent_name
+            )
         requested_backend = (
             str(vibe_agent_backend or "") if vibe_agent_backend is not None else None
         )

@@ -8,10 +8,10 @@ import { describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import { selectApiErrorFields } from '../../context/ApiContext';
-import type { VaultRequest, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ToastProvider } from '../../context/ToastContext';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
-import { ChatHeaderBar, MessageRow } from './ChatPage';
+import { ChatHeaderBar, MessageRow, ThinkingBubble, sessionAgentDisplayName } from './ChatPage';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
@@ -67,6 +67,21 @@ const session = (over: Partial<WorkbenchSession> = {}): WorkbenchSession =>
     metadata: {},
     ...over,
   }) as WorkbenchSession;
+
+const archivedPm = {
+  id: 'agt-pm',
+  name: '_pm-8dd7',
+  display_name: 'pm',
+  description: null,
+  backend: 'codex',
+  model: null,
+  reasoning_effort: null,
+  enabled: false,
+  archived: true,
+  archived_at: '2026-07-31T14:00:00Z',
+  source: 'user',
+  updated_at: '2026-07-31T14:00:00Z',
+} satisfies VibeAgentBrief;
 
 // An agent reply carrying a quick-reply group, which is the transcript control
 // that POSTs a new message when clicked.
@@ -205,6 +220,37 @@ describe('read-only transcript withdraws session writes', () => {
     expect(archived).toContain('Ship it');
     expect(archived).toContain('Ship it now, or wait for review?');
     expect(countDisabledButtons(archived)).toBe(2);
+  });
+});
+
+describe('archived Agent display names', () => {
+  it('keeps the display name when a mounted catalog still has the pre-archive name', () => {
+    const staleCatalogAgent = { ...archivedPm, name: 'pm' };
+    const archivedSession = session({ agent_id: archivedPm.id, agent_name: archivedPm.name });
+
+    expect(sessionAgentDisplayName(archivedSession, [staleCatalogAgent])).toBe('pm');
+  });
+
+  it('uses the catalog display name in thinking and transcript bubbles', () => {
+    const archivedSession = session({ agent_name: archivedPm.name });
+    const displayName = archivedPm.display_name;
+
+    const thinking = render(
+      <ThinkingBubble session={archivedSession} agentDisplayName={displayName} />,
+    );
+    const message = render(
+      <MessageRow
+        message={agentWithQuickReplies()}
+        session={archivedSession}
+        agentDisplayName={displayName}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(thinking).toContain('>pm</span>');
+    expect(message).toContain('>pm</span>');
+    expect(thinking).not.toContain(archivedPm.name);
+    expect(message).not.toContain(archivedPm.name);
   });
 });
 
@@ -704,6 +750,71 @@ describe('read-only transcript locks the secret-request cards', () => {
       expect(markup).not.toContain(en.vaults.request.provide);
       expect(countButtons(markup)).toBe(0);
     }
+  });
+});
+
+describe('Agent result metrics tail', () => {
+  const footer = '✅ ⏱️ 5s · 🪙 1.2k tok';
+
+  it('renders structured duration and token usage once, after the timestamp', () => {
+    const markup = render(
+      <MessageRow
+        message={agentWithQuickReplies({ result_footer: footer })}
+        session={session()}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).toContain('opacity-100');
+    expect(markup).toContain('flex-wrap');
+  });
+
+  it('moves a legacy folded footer out of the Markdown body', () => {
+    const legacy = {
+      ...agentWithQuickReplies(),
+      text: `Answer body\n\n${footer}`,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={legacy} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('Answer body');
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+  });
+
+  it('renders a footer-only completion in metadata without an empty bubble', () => {
+    const footerOnly = {
+      ...agentWithQuickReplies(),
+      text: footer,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={footerOnly} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
+    expect(markup).not.toContain('vr-markdown--inherit-size');
+  });
+
+  it('removes a legacy folded footer from an error status pill', () => {
+    const legacyError = {
+      ...agentWithQuickReplies(),
+      type: 'error',
+      text: `Failed to finish\n\n${footer}`,
+      content: {},
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={legacyError} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('Failed to finish');
+    expect(markup.split(footer)).toHaveLength(2);
+    expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(footer));
   });
 });
 

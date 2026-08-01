@@ -145,10 +145,11 @@ describe('AgentCard model list', () => {
     expect(html).toContain('当前已自动换到 OpenAI API Key');
   });
 
-  it('renders an honest row-zero state when no model is selected', () => {
+  it('does not turn an absent selection into a Models-page state', () => {
     const html = render([agent({ selected_model_id: null })], chains(chain('claude-opus-4-6')));
-    expect(html).toContain(zh.settings.models.emptySelection.title);
-    expect(html).toContain(zh.settings.models.emptySelection.action);
+    expect(html).toContain('claude-opus-4-6');
+    expect(html).not.toContain('尚未选择型号');
+    expect(html).not.toContain('href="/agents"');
   });
 
   it('gives an interrupted model its route door', () => {
@@ -244,7 +245,7 @@ describe('AgentCard model list', () => {
     const footer = render([open], {}, false, undefined, pending);
     expect(footer).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?管理型号<\/button>/);
 
-    const rowZero = render([
+    const emptyMenu = render([
       agent({
         backend: 'opencode',
         menu_kind: 'open',
@@ -255,7 +256,8 @@ describe('AgentCard model list', () => {
         builtin_models: null,
       }),
     ], {}, false, undefined, pending);
-    expect(rowZero).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?选择型号<\/button>/);
+    expect(emptyMenu).toContain(zh.settings.models.agents.emptyModels);
+    expect(emptyMenu).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?管理型号<\/button>/);
   });
 
   it('filters to affected rows without leaving healthy siblings behind', () => {

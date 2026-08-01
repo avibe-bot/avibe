@@ -3522,7 +3522,7 @@ def _vibe_agent_result_response(result: dict):
     status = 200
     if not result.get("ok", True):
         code = result.get("code")
-        if code == "agent_in_use":
+        if code in {"agent_in_use", "agent_archived_read_only"}:
             status = 409
         elif code in {"agent_not_found", "agent_import_source_not_found"}:
             status = 404
@@ -3546,7 +3546,18 @@ def vibe_agents_get():
             "true",
             "yes",
         }
-        return jsonify(api.get_vibe_agents(backend=request.args.get("backend") or None, include_disabled=include_disabled))
+        include_archived = str(request.args.get("include_archived") or "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        return jsonify(
+            api.get_vibe_agents(
+                backend=request.args.get("backend") or None,
+                include_disabled=include_disabled,
+                include_archived=include_archived,
+            )
+        )
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 
@@ -3651,7 +3662,7 @@ def vibe_agents_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vibe_agent(request.json or {}))
+        return _vibe_agent_result_response(api.create_vibe_agent(request.json or {}))
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 
@@ -3682,7 +3693,7 @@ def vibe_agent_patch(name):
     from vibe import api
 
     try:
-        return jsonify(api.update_vibe_agent(name, request.json or {}))
+        return _vibe_agent_result_response(api.update_vibe_agent(name, request.json or {}))
     except ValueError as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4068,6 +4079,62 @@ def _coded_error_response(code: str, message: str, status: int, **extra: Any):
     return (
         jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message, **extra}),
         status,
+    )
+
+
+def _settings_conflict_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.settingsConflict"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang),
+        409,
+        hint=t(f"{key}.hint", lang),
+        details={"scope_id": exc.scope_id},
+    )
+
+
+def _scope_agent_unavailable_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.scopeAgentUnavailable"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang, agent=exc.agent_name),
+        400,
+        hint=t(f"{key}.hint", lang),
+        details={"agent_name": exc.agent_name},
+    )
+
+
+def _project_agent_conflict_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.projectAgentConflict"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang),
+        409,
+        hint=t(f"{key}.hint", lang),
+        details=exc.details,
+    )
+
+
+def _project_agent_unavailable_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    key = "error.projectAgentUnavailable"
+    return _coded_error_response(
+        exc.code,
+        t(f"{key}.message", lang, agent=exc.agent_name),
+        400,
+        hint=t(f"{key}.hint", lang),
+        details={"agent_name": exc.agent_name},
     )
 
 
@@ -5007,19 +5074,31 @@ def ui_reload():
 @app.route("/api/settings", methods=["POST"])
 def settings_post():
     from vibe import api
+    from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
     payload = request.json or {}
-    return jsonify(api.save_settings(payload))
+    try:
+        return jsonify(api.save_settings(payload))
+    except StaleScopeAgentBindingError as exc:
+        return _settings_conflict_response(exc)
+    except ScopeAgentUnavailableError as exc:
+        return _scope_agent_unavailable_response(exc)
 
 
 @app.post("/api/settings/thread", include_in_schema=False)
 async def thread_settings_post(starlette_request: FastAPIRequest):
     async def handler():
         from vibe import api
+        from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
         body = await starlette_request.body()
         payload = await starlette_request.json() if body else {}
-        return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+        try:
+            return api.save_thread_settings(payload if isinstance(payload, dict) else {})
+        except StaleScopeAgentBindingError as exc:
+            return _settings_conflict_response(exc)
+        except ScopeAgentUnavailableError as exc:
+            return _scope_agent_unavailable_response(exc)
 
     return await _dispatch_native_ui_request(starlette_request, handler)
 
@@ -5887,7 +5966,14 @@ def projects_update(project_id: str):
     # (see ``projects_service.update_project`` and its ``_UNSET`` sentinel).
     agent_kwargs = {
         field: payload[field]
-        for field in ("agent_name", "agent_variant", "model", "reasoning_effort")
+        for field in (
+            "agent_id",
+            "expected_agent_id",
+            "agent_name",
+            "agent_variant",
+            "model",
+            "reasoning_effort",
+        )
         if field in payload
     }
     if display_name is None and folder_path is None and not agent_kwargs:
@@ -5902,9 +5988,13 @@ def projects_update(project_id: str):
                 folder_path=folder_path,
                 **agent_kwargs,
             )
+    except projects_service.StaleProjectAgentBindingError as err:
+        return _project_agent_conflict_response(err)
+    except projects_service.ProjectAgentUnavailableError as err:
+        return _project_agent_unavailable_response(err)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    except (FileNotFoundError, NotADirectoryError) as err:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as err:
         return jsonify({"error": str(err)}), 400
     return jsonify(project)
 
@@ -6302,6 +6392,8 @@ def sessions_create():
     payload = request.json or {}
     project_id = (payload.get("project_id") or "").strip()
     agent_backend = (payload.get("agent_backend") or "").strip()
+    agent_id = payload.get("agent_id")
+    agent_name = payload.get("agent_name")
     if not project_id:
         return jsonify({"error": "project_id is required"}), 400
     # When the caller doesn't pin a backend/agent (a plain "new chat"), leave
@@ -6317,12 +6409,24 @@ def sessions_create():
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
+            if agent_id or agent_name:
+                identity = workbench_sessions_service.require_enabled_agent_identity(
+                    conn,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                )
+                agent_id = identity["id"]
+                agent_name = identity["name"]
+                agent_backend = identity["backend"]
             session = workbench_sessions_service.create_session(
                 conn,
                 scope_id=scope_id,
                 agent_backend=agent_backend,
-                agent_id=payload.get("agent_id"),
-                agent_name=payload.get("agent_name"),
+                agent_id=agent_id,
+                agent_name=agent_name,
                 agent_variant=payload.get("agent_variant"),
                 model=payload.get("model"),
                 reasoning_effort=payload.get("reasoning_effort"),
@@ -6347,7 +6451,23 @@ def _session_fork_error_response(err: Exception):
     permanent refusal. See ``_coded_error_response`` — every code here needs the same
     treatment, so the whole mapping goes through it rather than one patched branch.
     """
+    from core.services import settings as settings_service
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+    )
+
     message = str(err)
+    if getattr(err, "code", None) == SESSION_AGENT_UNAVAILABLE_CODE:
+        lang = settings_service.load_config_or_default().language
+        key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
+        return _coded_error_response(
+            SESSION_AGENT_UNAVAILABLE_CODE,
+            t(f"{key}.message", lang),
+            409,
+            hint=t(f"{key}.hint", lang),
+            **getattr(err, "details", {}),
+        )
     if "id not found" in message:
         return _coded_error_response("session_not_found", message, 404)
     if "is archived" in message:
@@ -6532,7 +6652,7 @@ async def sessions_bootstrap(session_id: str):
         draft = messages_service.get_draft(conn, session_id)
 
     try:
-        agents_payload = vibe_api.get_vibe_agents(include_disabled=False)
+        agents_payload = vibe_api.get_vibe_agents(include_disabled=False, include_archived=True)
     except Exception:
         logger.exception("sessions_bootstrap: failed to load Vibe Agents")
         agents_payload = {"agents": [], "default_agent_name": None}
@@ -6747,13 +6867,22 @@ async def sessions_update(session_id: str):
             return _session_archived_response()
     should_check_backend_lock = "agent_backend" in updatable
     requested_backend = updatable.get("agent_backend")
-    if "agent_name" in updatable and "agent_backend" not in updatable:
+    identity_requested = "agent_id" in updatable or "agent_name" in updatable
+    if identity_requested and not (updatable.get("agent_id") or updatable.get("agent_name")):
+        updatable["agent_id"] = None
+        updatable["agent_name"] = None
+    if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
         try:
-            with engine.connect() as conn:
-                requested_backend = workbench_sessions_service.derive_backend_for_agent_name(
+            with engine.begin() as conn:
+                from storage.agent_session_rows import reserve_write_lock
+
+                reserve_write_lock(conn)
+                identity = workbench_sessions_service.require_enabled_agent_identity(
                     conn,
-                    str(updatable.get("agent_name") or ""),
+                    agent_id=updatable.get("agent_id"),
+                    agent_name=updatable.get("agent_name"),
                 )
+                requested_backend = identity["backend"]
             should_check_backend_lock = True
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
@@ -6787,6 +6916,19 @@ async def sessions_update(session_id: str):
 
     try:
         with engine.begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
+            if identity_requested and (updatable.get("agent_id") or updatable.get("agent_name")):
+                identity = workbench_sessions_service.require_enabled_agent_identity(
+                    conn,
+                    agent_id=updatable.get("agent_id"),
+                    agent_name=updatable.get("agent_name"),
+                )
+                updatable["agent_id"] = identity["id"]
+                updatable["agent_name"] = identity["name"]
+                updatable["agent_backend"] = identity["backend"]
+                updatable.setdefault("agent_variant", identity["backend"])
             previous_session = (
                 workbench_sessions_service.get_session(conn, session_id)
                 if {"visibility", "scope_id"}.intersection(updatable)
@@ -8969,9 +9111,15 @@ def users_get():
 @app.route("/api/users", methods=["POST"])
 def users_post():
     from vibe import api
+    from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
     payload = request.json or {}
-    return jsonify(api.save_users(payload))
+    try:
+        return jsonify(api.save_users(payload))
+    except StaleScopeAgentBindingError as exc:
+        return _settings_conflict_response(exc)
+    except ScopeAgentUnavailableError as exc:
+        return _scope_agent_unavailable_response(exc)
 
 
 @app.route("/api/users/<user_id>/admin", methods=["POST"])

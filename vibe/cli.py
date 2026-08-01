@@ -47,7 +47,7 @@ from core.scheduled_tasks import (
     session_anchor_for_target,
 )
 from core.caller_context import caller_context_from_env
-from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
@@ -76,7 +76,7 @@ from storage.background import (
     compute_next_run_at,
     normalize_run_status,
 )
-from storage.models import scope_settings, scopes
+from storage.models import agents, scope_settings, scopes
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -2457,32 +2457,56 @@ def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
 
 class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
+    agent_id: Optional[str]
+
+
+class _AgentTargetResolution(NamedTuple):
+    agent: Optional[VibeAgent]
+    requires_enabled_write_guard: bool
+    preserves_existing_reference: bool = False
+
+
+def _agent_write_guard_ids(
+    resolution: _AgentTargetResolution,
+) -> tuple[Optional[str], Optional[str]]:
+    agent = resolution.agent
+    if agent is None:
+        return None, None
+    if resolution.requires_enabled_write_guard:
+        return agent.id, None
+    if getattr(resolution, "preserves_existing_reference", False):
+        return None, agent.id
+    return None, None
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
-        return _ScopeRoutingTarget(None)
+        return _ScopeRoutingTarget(None, None)
     try:
         parsed = parse_scope_id(session_key)
     except ValueError:
         try:
             parsed = parse_session_key(session_key)
         except ValueError:
-            return _ScopeRoutingTarget(None)
+            return _ScopeRoutingTarget(None, None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(scope_settings.c.agent_name)
+                select(scope_settings.c.agent_name, agents.c.id.label("agent_id"))
+                .select_from(
+                    scope_settings.outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+                )
                 .where(scope_settings.c.scope_id == scope_id)
                 .limit(1)
             ).first()
             if row is None:
-                return _ScopeRoutingTarget(None)
+                return _ScopeRoutingTarget(None, None)
             agent_name = str(row.agent_name).strip() if row.agent_name else None
-            return _ScopeRoutingTarget(agent_name)
+            agent_id = str(row.agent_id).strip() if row.agent_id else None
+            return _ScopeRoutingTarget(agent_name, agent_id)
     finally:
         engine.dispose()
 
@@ -2491,19 +2515,32 @@ def _resolve_scope_agent_name(session_key: str) -> Optional[str]:
     return _resolve_scope_routing_target(session_key).agent_name
 
 
-def _resolve_agent_for_target(
+def _resolve_agent_target(
     *,
     agent_name: Optional[str],
     session_id: Optional[str],
     session_key: str,
     help_command: str,
-):
+    existing_agent_reference: bool = False,
+) -> _AgentTargetResolution:
     store = _agent_store()
     try:
-        requested = store.require_enabled(agent_name) if agent_name else None
+        requested = None
+        if agent_name:
+            requested = (
+                store.require_reference(agent_name)
+                if existing_agent_reference
+                else store.require_enabled(agent_name)
+            )
         if session_id:
             target = resolve_session_id_target(session_id)
-            session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            session_agent = (
+                store.require_reference_by_id(target.agent_id)
+                if target.agent_id
+                else store.require_reference(target.agent_name)
+                if target.agent_name
+                else None
+            )
             if requested is not None and session_agent is not None and requested.name != session_agent.name:
                 raise TaskCliError(
                     "agent does not match the existing session agent",
@@ -2529,37 +2566,76 @@ def _resolve_agent_for_target(
                     },
                     help_command=help_command,
                 )
-            return session_agent or requested
+            return _AgentTargetResolution(
+                session_agent or requested,
+                requested is not None and not existing_agent_reference,
+                requested is None or existing_agent_reference,
+            )
 
         if requested is not None:
-            return requested
+            return _AgentTargetResolution(
+                requested,
+                not existing_agent_reference,
+                existing_agent_reference,
+            )
 
         if session_key:
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
-                return store.require_enabled(scope_target.agent_name)
+                return _AgentTargetResolution(
+                    (
+                        store.require_reference_by_id(scope_target.agent_id)
+                        if scope_target.agent_id
+                        else store.require_reference(scope_target.agent_name)
+                    ),
+                    False,
+                    True,
+                )
 
-        return store.get_default_agent()
+        default_agent = store.get_default_agent()
+        return _AgentTargetResolution(default_agent, default_agent is not None)
     finally:
         store.close()
+
+
+def _resolve_agent_for_target(
+    *,
+    agent_name: Optional[str],
+    session_id: Optional[str],
+    session_key: str,
+    help_command: str,
+    existing_agent_reference: bool = False,
+):
+    return _resolve_agent_target(
+        agent_name=agent_name,
+        session_id=session_id,
+        session_key=session_key,
+        help_command=help_command,
+        existing_agent_reference=existing_agent_reference,
+    ).agent
 
 
 def _resolve_agent_for_session_reservation(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
-    scope_target = _ScopeRoutingTarget(None)
+    scope_target = _ScopeRoutingTarget(None, None)
     if not resolved_agent_name:
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
 
     store = _agent_store()
     try:
+        if agent_id:
+            return store.require_reference_by_id(agent_id)
+        if scope_target.agent_id:
+            return store.require_reference_by_id(scope_target.agent_id)
         if resolved_agent_name:
-            return store.require_enabled(resolved_agent_name)
+            return store.require_reference(resolved_agent_name)
         return store.get_default_agent()
     finally:
         store.close()
@@ -2730,10 +2806,13 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
         return {
             "id": payload["id"],
             "name": payload["name"],
+            "display_name": payload["display_name"],
             "backend": payload["backend"],
             "model": payload["model"],
             "reasoning_effort": payload["reasoning_effort"],
             "enabled": payload["enabled"],
+            "archived": payload["archived"],
+            "archived_at": payload["archived_at"],
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
@@ -2876,6 +2955,7 @@ def _wait_for_watch_startup(
 
 
 def cmd_task_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         session_default_notice = _apply_caller_session_default(
@@ -2908,20 +2988,28 @@ def cmd_task_add(args):
             scoped_session=_has_modern_scope_target(args),
             help_command="vibe task add --help",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe task add --help",
         )
+        agent = agent_resolution.agent
         agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key or "",
                 workdir=cwd,
                 help_command="vibe task add --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -2971,6 +3059,8 @@ def cmd_task_add(args):
                 cron=args.cron,
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
         else:
             try:
@@ -2998,7 +3088,10 @@ def cmd_task_add(args):
                 run_at=run_at,
                 timezone_name=timezone_name,
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(task)
         payload_fields = {
@@ -3009,6 +3102,11 @@ def cmd_task_add(args):
         _print_definition_payload(task_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task add --help")
         return 1
 
@@ -3108,6 +3206,7 @@ def cmd_task_remove(task_id: str):
 
 
 def cmd_task_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _task_store()
         task = store.get_task(args.task_id)
@@ -3350,6 +3449,7 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -3358,30 +3458,40 @@ def cmd_task_update(args):
             # future fire onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe task update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe task update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
                 workdir=cwd,
                 help_command="vibe task update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_policy == "existing":
             metadata.pop("session_workdir", None)
@@ -3457,12 +3567,20 @@ def cmd_task_update(args):
             run_at=run_at,
             timezone_name=timezone_name,
             metadata=metadata,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
+        reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -3472,6 +3590,11 @@ def cmd_task_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="task update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
 
@@ -3531,12 +3654,13 @@ def cmd_hook_send(args):
             help_command="vibe hook send --help",
             example_command="vibe hook send --session-id sesk8m4q2p7x",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key,
             help_command="vibe hook send --help",
         )
+        agent = agent_resolution.agent
         request = _task_request_store().enqueue_hook_send(
             session_key=session_key,
             session_id=session_id,
@@ -3544,8 +3668,20 @@ def cmd_hook_send(args):
             deliver_key=args.deliver_key,
             prompt=message,
             agent_name=agent.name if agent else None,
+            agent_id=agent.id if agent else None,
             run_type="agent_run",
             source_kind="cli",
+            expected_enabled_agent_id=(
+                agent.id
+                if agent is not None and agent_resolution.requires_enabled_write_guard
+                else None
+            ),
+            expected_reference_agent_id=(
+                agent.id
+                if agent is not None
+                and getattr(agent_resolution, "preserves_existing_reference", False)
+                else None
+            ),
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         _print_cli_payload(
@@ -3838,6 +3974,21 @@ def cmd_agent_create(args):
         )
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentNameValidationError as exc:
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        key = f"error.agentNameValidation.{exc.code}"
+        _print_task_error(
+            TaskCliError(
+                i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+                details={"agent": exc.agent_name},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -3879,6 +4030,9 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
@@ -3889,34 +4043,76 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
+    except AgentArchivedEditError as exc:
+        _print_task_error(_agent_archived_edit_cli_error(exc))
+        return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
 
 
+def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+        details={"agent": exc.agent_name},
+    )
+
+
+def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskCliError:
+    try:
+        lang = V2Config.load().language
+    except Exception:
+        lang = "en"
+    key = f"error.agentLifecycle.{exc.code}"
+    return TaskCliError(
+        i18n_t(f"{key}.message", lang),
+        code=exc.code,
+        hint=i18n_t(f"{key}.hint", lang),
+    )
+
+
 def cmd_agent_remove(args):
     try:
         store = _agent_store()
-        counts = store.reference_counts(args.name)
-        if any(counts.values()):
-            raise TaskCliError(
-                f"agent '{args.name}' is still referenced",
-                code="agent_in_use",
-                hint="Reassign or remove the referencing scopes, sessions, tasks, or watches before deleting this Agent.",
-                details={"agent": args.name, "references": counts},
-            )
         try:
-            removed = store.remove(args.name)
-        except ValueError as exc:
+            archived = store.archive(args.name)
+        except AgentArchiveError as exc:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
             raise TaskCliError(
-                str(exc),
-                code="agent_builtin",
-                hint="Built-in default Agents are created from enabled Backends and cannot be deleted.",
+                i18n_t(
+                    f"error.agentArchive.{exc.code}.message",
+                    lang,
+                    agent=exc.agent_name,
+                ),
+                code=exc.code,
+                hint=i18n_t(
+                    f"error.agentArchive.{exc.code}.hint",
+                    lang,
+                    agent=exc.agent_name,
+                ),
                 details={"agent": args.name},
             ) from exc
-        if not removed:
+        except AgentReferenceRewriteError as exc:
+            raise _agent_reference_rewrite_cli_error(exc) from exc
+        if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
-        _print_cli_payload("agent", removed_agent=args.name)
+        _print_cli_payload(
+            "agent",
+            removed_agent=archived.original_name,
+            archived_agent=_agent_payload(archived.agent, brief=True),
+            references=archived.references,
+            default_agent_name=archived.default_agent_name,
+        )
         return 0
     except Exception as exc:
         _print_task_error(exc)
@@ -4481,6 +4677,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
+            require_enabled_agent=True,
         )
     else:
         session_anchor = f"standalone_{uuid4().hex[:12]}"
@@ -4494,6 +4691,7 @@ def _reserve_cli_session(
             workdir=workdir,
             visibility=visibility,
             metadata=metadata,
+            require_enabled_agent=True,
         )
     if not session_id:
         raise TaskCliError(
@@ -4525,7 +4723,12 @@ def _reserve_forked_cli_session(
     scope_key: Optional[str],
     visibility: str,
 ):
-    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+        reserve_forked_session,
+    )
 
     try:
         return reserve_forked_session(
@@ -4538,6 +4741,19 @@ def _reserve_forked_cli_session(
             db_path=paths.get_sqlite_state_path(),
         )
     except SessionForkError as exc:
+        if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
+            try:
+                lang = V2Config.load().language
+            except Exception:
+                lang = "en"
+            key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
+            raise TaskCliError(
+                i18n_t(f"{key}.message", lang),
+                code=exc.code,
+                hint=i18n_t(f"{key}.hint", lang),
+                help_command="vibe agent run --help",
+                details={"source_session_id": source_session_id, **exc.details},
+            ) from exc
         raise TaskCliError(
             str(exc),
             code="session_fork_failed",
@@ -4550,9 +4766,12 @@ def _reserve_forked_cli_session(
 def _reserve_definition_session(
     *,
     agent_name: Optional[str],
+    agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
     workdir: Optional[str] = None,
+    require_enabled_agent: bool = False,
+    expected_reference_agent_id: Optional[str] = None,
 ) -> str:
     from core.services import sessions as sessions_service
 
@@ -4562,6 +4781,7 @@ def _reserve_definition_session(
         target = _parse_validated_session_key(deliver_key, help_command=help_command)
     agent = _resolve_agent_for_session_reservation(
         agent_name=agent_name,
+        agent_id=agent_id,
         deliver_key=deliver_key,
         help_command=help_command,
     )
@@ -4584,6 +4804,8 @@ def _reserve_definition_session(
         reasoning_effort=agent.reasoning_effort if agent else None,
         workdir=workdir,
         visibility="foreground",
+        require_enabled_agent=require_enabled_agent,
+        expected_reference_agent_id=expected_reference_agent_id,
     )
     if not session_id:
         raise TaskCliError(
@@ -4594,7 +4816,34 @@ def _reserve_definition_session(
     return session_id
 
 
+def _release_cli_session_reservation(session_id: str, *, reason: str) -> bool:
+    """Release only the unadopted Session reserved by a failed CLI mutation."""
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    service: Optional[SQLiteSessionsService] = None
+    try:
+        service = SQLiteSessionsService(paths.get_sqlite_state_path())
+        return service.release_reserved_agent_session(session_id, reason=reason)
+    except Exception:
+        logger.exception(
+            "Could not release the reserved Agent Session %s after a failed CLI mutation",
+            session_id,
+        )
+        return False
+    finally:
+        if service is not None:
+            try:
+                service.close()
+            except Exception:
+                logger.exception(
+                    "Could not close the Session store after releasing reservation %s",
+                    session_id,
+                )
+
+
 def cmd_agent_run(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         visibility = (getattr(args, "visibility", None) or "background").strip()
@@ -4732,6 +4981,7 @@ def cmd_agent_run(args):
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "none":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -4740,6 +4990,7 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 visibility=visibility,
             )
+            reserved_session_id = session_id
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=source_session_id or "",
@@ -4750,6 +5001,7 @@ def cmd_agent_run(args):
                 visibility=visibility,
             )
             session_id = fork_result.session_id
+            reserved_session_id = session_id
             if agent_name:
                 agent = _agent_store().require_enabled(agent_name)
         if session_id and not session_key:
@@ -4797,7 +5049,9 @@ def cmd_agent_run(args):
             callback_active=run_async,
             delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
+            expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
+        reserved_session_id = None
         resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {
             "accepted": True,
@@ -4847,6 +5101,11 @@ def cmd_agent_run(args):
         _print_cli_payload("agent_run", **payload)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="Agent Run enqueue failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe agent run --help")
         return 1
 
@@ -8371,6 +8630,7 @@ def cmd_vault_key_import(args):
 
 
 def cmd_watch_add(args):
+    reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
         session_default_notice = _apply_caller_session_default(
@@ -8391,13 +8651,17 @@ def cmd_watch_add(args):
             required=session_policy == "existing",
             help_command="vibe watch add --help",
         )
-        agent = _resolve_agent_for_target(
+        agent_resolution = _resolve_agent_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe watch add --help",
         )
+        agent = agent_resolution.agent
         agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         session_workdir = (
             _resolve_definition_session_cwd(
@@ -8413,10 +8677,14 @@ def cmd_watch_add(args):
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key or "",
                 workdir=session_workdir,
                 help_command="vibe watch add --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -8464,7 +8732,10 @@ def cmd_watch_add(args):
             agent_name=agent_name,
             session_policy=session_policy,
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
+        reserved_session_id = None
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -8477,6 +8748,11 @@ def cmd_watch_add(args):
         _print_definition_payload(watch_payload, **payload_fields)
         return 0
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch creation failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch add --help")
         return 1
 
@@ -8556,6 +8832,7 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
 
 
 def cmd_watch_update(args):
+    reserved_session_id: Optional[str] = None
     try:
         store = _watch_store()
         watch = store.get_watch(args.watch_id)
@@ -8773,6 +9050,7 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
+        agent_resolution = _AgentTargetResolution(None, False)
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
@@ -8781,30 +9059,40 @@ def cmd_watch_update(args):
             # future watch hook onto a different Agent.
             pass
         elif agent_name is None and session_policy != "existing":
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=None,
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe watch update --help",
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
-            agent = _resolve_agent_for_target(
+            agent_resolution = _resolve_agent_target(
                 agent_name=agent_name,
                 session_id=session_id,
                 session_key=session_key,
                 help_command="vibe watch update --help",
+                existing_agent_reference=not explicit_agent_requested,
             )
+            agent = agent_resolution.agent
             agent_name = agent.name if agent else None
+        expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
+            agent_resolution
+        )
         if session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
+                agent_id=agent.id if agent else None,
                 deliver_key=scope_key,
                 workdir=session_workdir,
                 help_command="vibe watch update --help",
+                require_enabled_agent=expected_enabled_agent_id is not None,
+                expected_reference_agent_id=expected_reference_agent_id,
             )
+            reserved_session_id = session_id
             session_key = ""
         if session_workdir:
             metadata["session_workdir"] = session_workdir
@@ -8869,13 +9157,24 @@ def cmd_watch_update(args):
                 details={"watch_id": args.watch_id},
             )
 
-        updated = store.update_watch(args.watch_id, **changes)
+        updated = store.update_watch(
+            args.watch_id,
+            **changes,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        )
+        reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(
             _definition_conflict_cli_error(
                 exc,
@@ -8885,6 +9184,11 @@ def cmd_watch_update(args):
         )
         return 1
     except Exception as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1
 

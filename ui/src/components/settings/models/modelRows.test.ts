@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  agentNeedsModelSelection,
   listedModelIds,
   manualModelSources,
   modelChainKey,
@@ -162,11 +161,10 @@ describe('model row projection', () => {
     expect(modelSupplierCounts([first, second]).get('shared-model')).toBe(2);
   });
 
-  it('counts an interrupted model and the honest row-zero state independently', () => {
+  it('counts an interrupted model without treating absent selection as another issue', () => {
     const row = read({ supply_state: 'interrupted', chain: [] });
     const a = agent({ selected_model_id: null, builtin_models: ['builtin-model'], model_supply: [] });
-    expect(agentNeedsModelSelection(a)).toBe(true);
-    expect(modelIssueCount([a], { [modelChainKey('claude', 'builtin-model')]: row })).toBe(2);
+    expect(modelIssueCount([a], { [modelChainKey('claude', 'builtin-model')]: row })).toBe(1);
   });
 
   it('attributes runtime failure only to a model whose current head uses the managed channel', () => {

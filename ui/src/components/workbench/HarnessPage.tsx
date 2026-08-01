@@ -79,6 +79,7 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
@@ -188,6 +189,7 @@ export const HarnessPage: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<HarnessRun | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
   // Per-id pending state so the row's toggle / delete buttons can show a
   // spinner without disabling siblings.
   const [pendingMutation, setPendingMutation] = useState<Record<string, boolean>>({});
@@ -209,6 +211,7 @@ export const HarnessPage: React.FC = () => {
   const [runTypeFilter, setRunTypeFilter] = useState<RunTypeFilter>('default');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
+  const agentRefreshSeq = useRef(0);
   // URL scope from the background-work banner (spec req 4): ?tab / ?session /
   // ?run deep-link into a session-scoped tab (removable "只看本会话" chip) or a
   // specific run. One-way URL -> state, keyed per-param so a user's tab click
@@ -385,32 +388,32 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  const refreshAgents = useCallback(async () => {
+    const seq = agentRefreshSeq.current + 1;
+    agentRefreshSeq.current = seq;
+    try {
+      const agents = await loadHarnessAgentCatalog(api);
+      if (agentRefreshSeq.current === seq) setAgentsByName(agents);
+    } catch {
+      // Harness data remains usable when the optional Agent metadata lookup fails.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshAgents();
+    return () => {
+      agentRefreshSeq.current += 1;
+    };
+  }, [refreshAgents]);
+
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onRunsUpdated: () => {
         void refresh();
+        void refreshAgents();
       },
     });
-  }, [api, refresh]);
-
-  // Resolve agent_name → backend/model/effort for the detail panels: the
-  // task/watch payload stores only the name. Fetched once on mount.
-  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: true })
-      .then((res) => {
-        if (cancelled) return;
-        const map: Record<string, VibeAgentBrief> = {};
-        for (const a of res.agents) map[a.name] = a;
-        setAgentsByName(map);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+  }, [api, refresh, refreshAgents]);
 
   const markPending = useCallback((id: string, value: boolean) => {
     setPendingMutation((prev) => {
@@ -816,6 +819,7 @@ export const HarnessPage: React.FC = () => {
           {tab === 'runs' && (
             <RunsList
               runs={runs}
+              agentsByName={agentsByName}
               loading={loading}
               hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
@@ -858,7 +862,7 @@ export const HarnessPage: React.FC = () => {
                 pending={!!pendingMutation[selectedWatch.id]}
               />
             ) : selectedRun ? (
-              <RunDetail run={selectedRun} />
+              <RunDetail run={selectedRun} agent={agentsByName[selectedRun.agent_name ?? '']} />
             ) : null}
           </div>
         )}
@@ -1414,6 +1418,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
 
 interface RunsListProps {
   runs: HarnessRun[];
+  agentsByName: Record<string, VibeAgentBrief>;
   loading: boolean;
   hasStoredRows: boolean;
   selectedId: string | null;
@@ -1426,6 +1431,7 @@ interface RunsListProps {
 
 const RunsList: React.FC<RunsListProps> = ({
   runs,
+  agentsByName,
   loading,
   hasStoredRows,
   selectedId,
@@ -1480,7 +1486,9 @@ const RunsList: React.FC<RunsListProps> = ({
                   {run.agent_name && (
                     <span className="inline-flex min-w-0 items-center gap-1">
                       <Bot className="size-3 shrink-0" />
-                      <span className="truncate">{run.agent_name}</span>
+                      <span className="truncate">
+                        {agentDisplayName(run.agent_name, agentsByName[run.agent_name])}
+                      </span>
                     </span>
                   )}
                   <RunSessionLabel run={run} />
@@ -1558,9 +1566,17 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 
 interface RunDetailProps {
   run: HarnessRun;
+  agent?: VibeAgentBrief;
 }
 
-export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+export function agentDisplayName(
+  agentName: string | null | undefined,
+  agent?: Pick<VibeAgentBrief, 'display_name'>,
+): string {
+  return agent?.display_name || agentName || '—';
+}
+
+export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
@@ -1594,7 +1610,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         <span className="text-[12px] text-foreground">{typeLabel}</span>
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
-        <span className="text-[12px] text-foreground">{run.agent_name || '—'}</span>
+        <span className="text-[12px] text-foreground">{agentDisplayName(run.agent_name, agent)}</span>
         {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>
@@ -1790,15 +1806,17 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   return (
     <div className="flex min-w-0 items-center gap-2">
       <Bot className="size-3.5 shrink-0 text-violet" />
-      <span className="shrink-0 text-[12px] font-medium text-foreground">{agentName}</span>
+      <span className="shrink-0 text-[12px] font-medium text-foreground">{agent?.display_name || agentName}</span>
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
-      <Link
-        to="/agents"
-        className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
-      >
-        {t('harness.detail.openInAgents')}
-        <ArrowUpRight className="size-3" />
-      </Link>
+      {!agent?.archived && (
+        <Link
+          to="/agents"
+          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
+        >
+          {t('harness.detail.openInAgents')}
+          <ArrowUpRight className="size-3" />
+        </Link>
+      )}
     </div>
   );
 };

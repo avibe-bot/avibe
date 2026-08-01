@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_settings import RoutingSettings, SettingsStore, UserSettings
 from core.controller import Controller
+from core.vibe_agents import VibeAgentStore
 from modules.im import MessageContext
 from modules.settings_manager import SettingsManager
 from vibe import api
@@ -86,9 +87,12 @@ def test_toggle_admin_is_scoped_per_platform(monkeypatch, tmp_path):
     assert store.get_user("U1", platform="wechat").is_admin is True
 
 
-def test_controller_codex_overrides_resolve_dm_user_scope(monkeypatch, tmp_path):
+def test_controller_codex_overrides_resolve_dm_user_scope(monkeypatch, tmp_path, request):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
+    agent_store = VibeAgentStore()
+    request.addfinalizer(agent_store.close)
+    agent_store.create(name="codex", backend="codex")
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
         "slack",

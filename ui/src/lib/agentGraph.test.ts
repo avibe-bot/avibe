@@ -89,6 +89,11 @@ describe('nodeDisplayTitle', () => {
   it('prefers the title, else agent + session suffix', () => {
     expect(nodeDisplayTitle(node('ses_abc', { title: 'Root' }))).toBe('Root');
     expect(nodeDisplayTitle(node('ses_123456', { title: null, agent_name: 'pm' }))).toBe('pm · 123456');
+    expect(nodeDisplayTitle(node('ses_123456', {
+      title: null,
+      agent_name: '_pm-8dd7',
+      agent_display_name: 'pm',
+    }))).toBe('pm · 123456');
   });
 });
 

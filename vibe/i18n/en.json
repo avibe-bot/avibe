@@ -165,7 +165,63 @@
     }
   },
   "error": {
+    "settingsConflict": {
+      "message": "Agent routing changed while these settings were open.",
+      "hint": "Reload the settings and apply your change again."
+    },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this route.",
+      "hint": "Choose an enabled Agent and apply the setting again."
+    },
+    "projectAgentConflict": {
+      "message": "The project's Agent changed while Project Settings was open.",
+      "hint": "Reload Project Settings and apply your change again."
+    },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this project.",
+      "hint": "Choose an enabled Agent and apply the project setting again."
+    },
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "The source session's Agent is no longer available for a new fork.",
+        "hint": "Choose an enabled Agent override that uses the same backend."
+      }
+    },
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` is built in and cannot be deleted.",
+        "hint": "Built-in default Agents are created from enabled Backends and cannot be deleted."
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` is already archived.",
+        "hint": "Use the archived Agent's internal name only for existing durable references."
+      },
+      "agent_no_default_replacement": {
+        "message": "The default Agent `{agent}` cannot be archived without another enabled Agent.",
+        "hint": "Keep another enabled Agent available when archiving the current default."
+      }
+    },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` is archived and cannot be edited.",
+        "hint": "Archived Agents are read-only and remain available only to existing durable references."
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "Avibe cannot update Agent references because a task or watch contains invalid metadata.",
+        "hint": "Repair or remove the malformed task or watch metadata, then try again."
+      }
+    },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent names starting with `_` are reserved for Avibe.",
+        "hint": "Choose an Agent name that does not start with `_`."
+      },
+      "agent_name_path_separator": {
+        "message": "Agent names cannot contain `/` or `\\`.",
+        "hint": "Choose an Agent name without path separators."
+      }
+    },
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",

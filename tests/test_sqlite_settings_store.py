@@ -4,17 +4,24 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from config import paths
 from config import v2_settings
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore, UserSettings
+from core.vibe_agents import VibeAgentStore
 from storage import projects_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
 from storage.models import scope_settings, scopes
 from storage.sessions_service import SQLiteSessionsService
-from storage.settings_service import SQLiteSettingsService, upsert_scope
+from storage.settings_service import (
+    SQLiteSettingsService,
+    ScopeAgentUnavailableError,
+    StaleScopeAgentBindingError,
+    upsert_scope,
+)
 from modules.settings_manager import SettingsManager
 
 
@@ -63,6 +70,8 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
 
 def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    agent_store.create(name="reviewer", backend="codex")
     store = SettingsStore(settings_path)
     parent = ChannelSettings(enabled=True, require_mention=True, require_bind=False)
     topic = ChannelSettings(
@@ -95,6 +104,7 @@ def test_telegram_thread_settings_round_trip_and_parent_fallback(tmp_path: Path)
         assert reloaded.find_effective_channel("-1001", thread_id="42", platform="telegram").require_mention is True
     finally:
         reloaded.close()
+        agent_store.close()
 
 
 def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
@@ -434,6 +444,251 @@ def test_save_state_preserves_project_scope_settings(tmp_path: Path) -> None:
 
     assert row is not None, "project scope_settings was deleted by a settings save"
     assert row[0] == str(folder.resolve())
+
+
+def test_settings_save_serializes_and_reconciles_stale_agent_bindings(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agents_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    conflicting_store = None
+    try:
+        agents_store.create(name="pm", backend="claude")
+        agents_store.create(name="zz-fallback", backend="claude")
+        route = RoutingSettings(agent_name="pm")
+        store.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=route),
+            platform="slack",
+        )
+        store.update_thread(
+            "C1",
+            "T1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+        store.update_user(
+            "U1",
+            UserSettings(display_name="Pat", routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+
+        race: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+        @event.listens_for(agents_store.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(store._service.engine, "after_cursor_execute")
+        def _archive_on_binding_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            normalized = " ".join(statement.split())
+            if race["fired"] or "SELECT scope_settings.agent_name" not in normalized:
+                return
+            race["fired"] = 1
+            try:
+                agents_store.archive("pm")
+            except OperationalError as exc:
+                race["refused"].append(str(exc))
+            else:
+                race["committed"] = 1
+
+        store.save()
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+
+        conflicting_store = SettingsStore(settings_path)
+        archived = agents_store.archive("pm")
+        assert archived is not None
+        replacement = agents_store.create(name="pm", backend="codex")
+
+        conflicting = conflicting_store.find_channel("C1", platform="slack")
+        assert conflicting is not None
+        conflicting.routing.agent_name = "codex"
+        with pytest.raises(StaleScopeAgentBindingError) as exc:
+            conflicting_store.update_channel("C1", conflicting, platform="slack")
+        assert exc.value.code == "settings_conflict"
+        assert exc.value.scope_id == "slack::channel::C1"
+        refreshed_conflict = conflicting_store.find_channel("C1", platform="slack")
+        assert refreshed_conflict is not None
+        assert refreshed_conflict.routing.agent_name == archived.archived_name
+
+        store.settings.channels["slack::C1"].custom_cwd = "/stale-channel"
+        store.settings.threads["slack::C1/T1"].custom_cwd = "/stale-thread"
+        store.settings.users["slack::U1"].custom_cwd = "/stale-user"
+        store.save()
+        assert store.settings.channels["slack::C1"].routing.agent_name == archived.archived_name
+        assert store.settings.threads["slack::C1/T1"].routing.agent_name == archived.archived_name
+        assert store.settings.users["slack::U1"].routing.agent_name == archived.archived_name
+
+        with agents_store.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    scopes.c.scope_type,
+                    scope_settings.c.agent_name,
+                    scope_settings.c.workdir,
+                    scope_settings.c.settings_json,
+                )
+                .select_from(scopes.join(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id.in_(("slack::channel::C1", "slack::thread::C1/T1", "slack::user::U1")))
+                .order_by(scopes.c.scope_type)
+            ).mappings().all()
+        assert len(rows) == 3
+        assert {row["agent_name"] for row in rows} == {archived.archived_name}
+        assert {row["workdir"] for row in rows} == {
+            "/stale-channel",
+            "/stale-thread",
+            "/stale-user",
+        }
+        assert {
+            json.loads(row["settings_json"])["routing"]["agent_name"] for row in rows
+        } == {archived.archived_name}
+
+        store.close()
+        fresh = SettingsStore(settings_path)
+        try:
+            channel = fresh.find_channel("C1", platform="slack")
+            assert channel is not None
+            channel.routing.agent_name = replacement.name
+            fresh.update_channel("C1", channel, platform="slack")
+        finally:
+            fresh.close()
+
+        with agents_store.engine.connect() as conn:
+            rebound = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).scalar_one()
+        assert rebound == replacement.name
+    finally:
+        if conflicting_store is not None:
+            conflicting_store.close()
+        store.close()
+        agents_store.close()
+
+
+def test_client_binding_expectation_survives_server_reload_before_scope_save(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    initial = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    reloaded = None
+    try:
+        original = agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
+        initial.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name=original.name)),
+            platform="slack",
+        )
+
+        archived = agent_store.archive(original.name)
+        assert archived is not None
+        replacement = agent_store.create(name="pm", backend="codex")
+        reloaded = SettingsStore(settings_path)
+        stale_form = ChannelSettings(
+            enabled=True,
+            custom_cwd="/saved-after-reload",
+            routing=RoutingSettings(agent_name="pm"),
+            _agent_name_at_load="pm",
+        )
+
+        reloaded.set_channels_for_platform("slack", {"C1": stale_form})
+        reloaded.save()
+
+        assert stale_form.routing.agent_name == archived.archived_name
+        with agent_store.engine.connect() as conn:
+            stored = conn.execute(
+                select(scope_settings.c.agent_name, scope_settings.c.workdir).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).one()
+        assert stored == (archived.archived_name, "/saved-after-reload")
+        assert stored.agent_name != replacement.name
+    finally:
+        if reloaded is not None:
+            reloaded.close()
+        initial.close()
+        agent_store.close()
+
+
+def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="zz-fallback", backend="claude")
+        store.update_channel(
+            "C1",
+            ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="pm")),
+            platform="slack",
+        )
+        archived = agent_store.archive("pm")
+        assert archived is not None
+
+        reloaded = SettingsStore(settings_path)
+        try:
+            existing = reloaded.find_channel("C1", platform="slack")
+            assert existing is not None
+            assert existing.routing.agent_name == archived.archived_name
+            existing.custom_cwd = "/preserved"
+            reloaded.save()
+
+            with pytest.raises(ScopeAgentUnavailableError) as unavailable:
+                reloaded.update_channel(
+                    "C2",
+                    ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(agent_name=archived.archived_name),
+                    ),
+                    platform="slack",
+                )
+            assert unavailable.value.code == "agent_unavailable"
+            assert unavailable.value.agent_name == archived.archived_name
+            assert reloaded.find_channel("C2", platform="slack") is None
+        finally:
+            reloaded.close()
+
+        with agent_store.engine.connect() as conn:
+            rows = conn.execute(
+                select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.workdir)
+                .where(scope_settings.c.scope_id.in_(("slack::channel::C1", "slack::channel::C2")))
+                .order_by(scope_settings.c.scope_id)
+            ).all()
+        assert rows == [("slack::channel::C1", archived.archived_name, "/preserved")]
+    finally:
+        agent_store.close()
+        store.close()
+
+
+def test_settings_save_canonicalizes_normalized_agent_binding(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agent_store.create(name="Project Manager", backend="claude")
+
+        settings = ChannelSettings(
+            enabled=True,
+            routing=RoutingSettings(agent_name="PROJECT-MANAGER"),
+        )
+        store.update_channel("C1", settings, platform="slack")
+
+        assert settings.routing.agent_name == "Project Manager"
+        with agent_store.engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == "slack::channel::C1"
+                )
+            ).scalar_one()
+        assert stored_name == "Project Manager"
+    finally:
+        agent_store.close()
+        store.close()
 
 
 def test_settings_save_preserves_observed_scope_metadata(tmp_path: Path) -> None:

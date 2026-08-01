@@ -101,6 +101,151 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     assert payload["error"] == "agent 'worker' is disabled"
 
 
+def test_task_update_preserves_archived_agent_reference(capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent = agent_store.create(name="pm", backend="codex")
+        store = cli.ScheduledTaskStore()
+        task = store.add_task(
+            name="Daily review",
+            session_key="slack::channel::C123",
+            prompt="review",
+            schedule_type="cron",
+            agent_name=agent.name,
+            cron="0 9 * * *",
+            timezone_name="UTC",
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+
+        args = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--name", "Renamed review"]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_task_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert cli.ScheduledTaskStore().get_task(task.id).agent_name == archived.archived_name
+
+        explicit = cli.build_parser().parse_args(
+            ["task", "update", task.id, "--agent", archived.archived_name]
+        )
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore()),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_task_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent_store.create(name="worker", backend="codex")
+        with patch("vibe.cli._agent_store", return_value=agent_store):
+            assert cli.cmd_agent_remove(_parse_agent(["remove", "worker"])) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed_agent"] == "worker"
+        assert payload["archived_agent"]["name"].startswith("_worker-")
+        assert payload["archived_agent"]["display_name"] == "worker"
+        assert agent_store.get("worker") is None
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="only-agent", backend="codex")
+        agent_store.set_default_agent_name("only-agent")
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch(
+                "vibe.cli.V2Config.load",
+                return_value=SimpleNamespace(language="zh"),
+            ),
+        ):
+            result, payload = _capture_stderr_json(
+                cli.cmd_agent_remove,
+                _parse_agent(["remove", "only-agent"]),
+            )
+
+        assert result == 1
+        assert payload["code"] == "agent_no_default_replacement"
+        assert payload["error"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
+        assert payload["hint"] == "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+    finally:
+        agent_store.close()
+
+
+def test_agent_remove_cli_localizes_invalid_reference_metadata() -> None:
+    def refuse_archive(_name):
+        raise cli.AgentReferenceRewriteError()
+
+    store = SimpleNamespace(archive=refuse_archive)
+    with (
+        patch("vibe.cli._agent_store", return_value=store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_agent_remove,
+            _parse_agent(["remove", "worker"]),
+        )
+
+    assert result == 1
+    assert payload["code"] == "agent_reference_metadata_invalid"
+    assert payload["error"] == "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。"
+    assert payload["hint"] == "请修复或删除元数据异常的任务或监控，然后重试。"
+
+
+def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        agent_store.create(name="archive-fallback", backend="codex")
+        agent_store.create(name="worker", backend="codex")
+        archived = agent_store.archive("worker")
+        assert archived is not None
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        ):
+            update_result, update_payload = _capture_stderr_json(
+                cli.cmd_agent_update,
+                _parse_agent(["update", archived.archived_name, "--description", "changed"]),
+            )
+            enable_result, enable_payload = _capture_stderr_json(
+                lambda parsed: cli.cmd_agent_set_enabled(parsed, enabled=True),
+                _parse_agent(["enable", archived.archived_name]),
+            )
+
+        for result, payload in ((update_result, update_payload), (enable_result, enable_payload)):
+            assert result == 1
+            assert payload["code"] == "agent_archived_read_only"
+            assert payload["error"] == f"Agent `{archived.archived_name}` 已归档，无法编辑。"
+            assert payload["hint"] == "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+    finally:
+        agent_store.close()
+
+
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     for index in range(25):
@@ -799,6 +944,59 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert payload["definition"]["cwd"] is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
+
+
+def test_task_add_releases_create_once_session_when_definition_write_fails(monkeypatch) -> None:
+    _no_caller_context(monkeypatch)
+    args = _parse_task_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-task",
+            "--at",
+            "2026-08-02T00:00:00+00:00",
+            "--message",
+            "hello",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-task",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=None),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-task"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._task_store",
+            return_value=SimpleNamespace(
+                add_task=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_cli_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-task",
+            "task creation failed before its Session reservation was adopted",
+        )
+    ]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:
@@ -1725,6 +1923,77 @@ def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, cap
     assert "vibe hook send is deprecated" in payload["deprecation_warning"]
     assert "--no-callback" in payload["deprecation_warning"]
     assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
+
+
+def test_hook_send_guards_an_explicit_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--agent",
+            "worker",
+            "--message",
+            "hello",
+        ]
+    )
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent = agent_store.create(name="worker", backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == agent.name
+    assert captured["expected_enabled_agent_id"] == agent.id
+
+
+def test_hook_send_guards_the_implicit_default_agent_inside_enqueue(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--message",
+            "hello",
+        ]
+    )
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    default_agent = agent_store.ensure_default_agent(backend="codex")
+    captured: dict[str, object] = {}
+
+    def enqueue_hook_send(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id="run-hook", request_type="agent_run")
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._task_request_store",
+            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
+        ),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
+    assert captured["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
@@ -2694,6 +2963,22 @@ def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:
     assert payload["agent"]["reasoning_effort"] == "high"
 
 
+def test_agent_create_localizes_reserved_name_error(tmp_path: Path) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    args = _parse_agent(["create", "_hidden", "--backend", "codex"])
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_agent_create, args)
+
+    assert result == 1
+    assert payload["code"] == "agent_name_reserved"
+    assert payload["error"] == "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。"
+    assert payload["hint"] == "请选择不以下划线 `_` 开头的 Agent 名称。"
+
+
 def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
@@ -2860,6 +3145,108 @@ def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Pat
     assert row[0] is None
     assert row[1] == "codex"
     assert "agent_name" not in json.loads(row[2])["routing"]
+
+
+def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-08-01T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=None,
+                agent_name=original.name,
+                agent_backend=original.backend,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with (
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        captured_scope = cli._resolve_scope_routing_target("slack::channel::C123")
+
+    assert captured_scope == cli._ScopeRoutingTarget(original.name, original.id)
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli._resolve_scope_routing_target",
+            return_value=captured_scope,
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id=None,
+            session_key="slack::channel::C123",
+            help_command="vibe task add --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
+
+
+def test_session_derived_agent_target_prefers_the_stable_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    original = agent_store.create(name="pm", backend="claude")
+    agent_store.create(name="archive-fallback", backend="codex")
+    archived = agent_store.archive(original.name)
+    assert archived is not None
+    replacement = agent_store.create(name="pm", backend="claude")
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch(
+            "vibe.cli.resolve_session_id_target",
+            return_value=SimpleNamespace(
+                agent_id=original.id,
+                agent_name=replacement.name,
+                agent_backend=original.backend,
+            ),
+        ),
+    ):
+        resolution = cli._resolve_agent_target(
+            agent_name=None,
+            session_id="ses_preserved",
+            session_key="",
+            help_command="vibe agent run --help",
+        )
+
+    assert resolution.agent is not None
+    assert resolution.agent.id == original.id
+    assert resolution.agent.id != replacement.id
+    assert resolution.agent.name == archived.archived_name
+    assert resolution.requires_enabled_write_guard is False
+    assert resolution.preserves_existing_reference is True
+    assert cli._agent_write_guard_ids(resolution) == (None, original.id)
 
 
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
@@ -3101,11 +3488,20 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
             "hello",
         ]
     )
+    task_store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    original_add_task = task_store.add_task
+    captured: dict[str, object] = {}
+
+    def add_task(**kwargs):
+        captured.update(kwargs)
+        return original_add_task(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=task_store),
+        patch.object(task_store, "add_task", side_effect=add_task),
     ):
         result = cli.cmd_task_add(args)
 
@@ -3113,6 +3509,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:
