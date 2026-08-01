@@ -4691,6 +4691,109 @@ def test_cancel_retires_exact_agent_run_delivery_without_reordering_survivors(
     assert published.count(("queue.updated", {"session_id": session_id})) >= 1
 
 
+@pytest.mark.parametrize("cancel_index", [0, 1])
+def test_cancel_rebuilds_coalesced_agent_run_delivery_without_canceled_input(
+    tmp_path,
+    monkeypatch,
+    cancel_index,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from sqlalchemy import update
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs
+
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    messages: list[dict[str, str]] = []
+    for index in range(3):
+        text = f"coalesced prompt {index + 1}"
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=text,
+            agent_name="codex",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(
+            request.id,
+            metadata={"workbench_queue_holds_run": True},
+        )
+        run_ids.append(request.id)
+        messages.append({"execution_id": request.id, "message": text})
+
+    coalesced = {
+        "execution_ids": run_ids,
+        "messages": messages,
+        "prompt": "\n\n---\n\n".join(item["message"] for item in messages),
+    }
+    provenance = {
+        "message_id": f"agent_run:{run_ids[0]}",
+        "platform_specific": {
+            "task_execution_id": run_ids[0],
+            "task_trigger_kind": "agent_run",
+            "coalesced_queue": coalesced,
+        },
+    }
+    session_id = _seed_avibe_session_with_queue([(coalesced["prompt"], provenance)])
+
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id.in_(run_ids))
+            .values(session_id=session_id)
+        )
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        assert bg.cancel_run(run_ids[cancel_index]) is True
+    finally:
+        bg.close()
+
+    remaining_ids = [run_id for run_id in run_ids if run_id != run_ids[cancel_index]]
+    remaining_text = "\n\n---\n\n".join(
+        item["message"]
+        for item in messages
+        if item["execution_id"] in remaining_ids
+    )
+    with create_sqlite_engine().connect() as conn:
+        queued_rows = message_deliveries.list_queued(conn, session_id)
+    assert len(queued_rows) == 1
+    assert queued_rows[0]["dispatch_text"] == remaining_text
+    assert queued_rows[0]["text"] == remaining_text
+    queued_spec = queued_rows[0]["metadata"]["scheduled_provenance"][
+        "platform_specific"
+    ]
+    assert queued_spec["task_execution_id"] == remaining_ids[0]
+    assert queued_spec["coalesced_queue"]["execution_ids"] == remaining_ids
+
+    mgr, runs = _manager_capturing_runs()
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, source, context = runs[0]
+    assert text == remaining_text
+    assert source == SOURCE_SCHEDULED
+    assert context.platform_specific["task_execution_id"] == remaining_ids[0]
+    assert context.platform_specific["coalesced_queue"]["execution_ids"] == remaining_ids
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
+    finally:
+        bg.close()
+    assert stored[run_ids[cancel_index]]["status"] == "canceled"
+    assert stored[run_ids[cancel_index]]["metadata"].get(
+        "workbench_queue_holds_run"
+    ) is None
+    assert stored[remaining_ids[0]]["status"] == "running"
+    assert stored[remaining_ids[0]]["metadata"]["effective_run_id"] == remaining_ids[0]
+    assert stored[remaining_ids[0]]["metadata"]["coalesced_queue"][
+        "execution_ids"
+    ] == remaining_ids
+    assert stored[remaining_ids[1]]["metadata"]["coalesced_into_run_id"] == remaining_ids[0]
+
+
 def test_agent_run_claim_refusal_requeues_exact_head_without_dispatch(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

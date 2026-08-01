@@ -1191,30 +1191,144 @@ def terminal_turn_agent_run_owners(
     return list(owners.values())
 
 
-def retire_queued_agent_run(
+def reconcile_queued_agent_run_cancellation(
     conn: Connection,
     *,
     session_id: str,
     run_id: str,
-) -> int:
-    """Retire the queued Delivery owned by one canceled Workbench Agent Run."""
+) -> dict[str, Any] | None:
+    """Remove one canceled Run from the exact queued Delivery that represents it.
+
+    A coalesced Delivery owns the immutable dispatch snapshot for every represented
+    Run. Cancellation therefore has to rewrite that snapshot under the same writer
+    transaction; changing only ``agent_runs`` would still dispatch the canceled
+    instruction later. The Delivery keeps its FIFO identity and position while any
+    represented Run remains, and retires only when the canceled Run was its last
+    member.
+    """
 
     normalized_session_id = str(session_id or "").strip()
     normalized_run_id = str(run_id or "").strip()
     if not normalized_session_id or not normalized_run_id:
-        return 0
-    rows = conn.execute(
-        select(message_deliveries)
-        .where(message_deliveries.c.session_id == normalized_session_id)
-        .where(message_deliveries.c.state == "queued")
-        .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
-    ).mappings()
-    removed = 0
-    for raw_row in rows:
-        row = dict(raw_row)
-        if owned_agent_run_id(row) == normalized_run_id:
-            removed += int(retire_queued(conn, normalized_session_id, str(row["id"])))
-    return removed
+        return None
+    matches = [
+        dict(row)
+        for row in conn.execute(
+            select(message_deliveries)
+            .where(message_deliveries.c.session_id == normalized_session_id)
+            .where(message_deliveries.c.state == "queued")
+            .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
+        ).mappings()
+        if normalized_run_id in agent_run_ids_for_delivery(conn, dict(row))
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise RuntimeError("Agent Run is represented by multiple queued Deliveries")
+
+    delivery = matches[0]
+    represented_run_ids = agent_run_ids_for_delivery(conn, delivery)
+    remaining_run_ids = [
+        represented_run_id
+        for represented_run_id in represented_run_ids
+        if represented_run_id != normalized_run_id
+    ]
+    delivery_id = str(delivery["id"])
+    if not remaining_run_ids:
+        if not retire_queued(conn, normalized_session_id, delivery_id):
+            raise RuntimeError("queued Delivery changed during Agent Run cancellation")
+        return {
+            "delivery_id": delivery_id,
+            "remaining_run_ids": [],
+            "coalesced_queue": None,
+            "retired": True,
+        }
+
+    snapshot = _json_object(delivery.get("snapshot_json"))
+    metadata = _json_object(snapshot.get("metadata_json"))
+    provenance = metadata.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("coalesced Agent Run Delivery is missing provenance")
+    provenance = dict(provenance)
+    spec = provenance.get("platform_specific")
+    if not isinstance(spec, dict):
+        raise RuntimeError("coalesced Agent Run Delivery is missing platform provenance")
+    spec = dict(spec)
+    coalesced = spec.get("coalesced_queue")
+    if not isinstance(coalesced, dict):
+        raise RuntimeError("multi-Run Delivery is missing its coalesced snapshot")
+    raw_messages = coalesced.get("messages")
+    if not isinstance(raw_messages, list):
+        raise RuntimeError("coalesced Agent Run Delivery is missing message snapshots")
+    message_by_run_id: dict[str, dict[str, Any]] = {}
+    for item in raw_messages:
+        if not isinstance(item, dict):
+            continue
+        execution_id = str(item.get("execution_id") or "").strip()
+        if execution_id:
+            message_by_run_id[execution_id] = dict(item)
+    if any(run_id not in message_by_run_id for run_id in remaining_run_ids):
+        raise RuntimeError("coalesced Agent Run Delivery cannot rebuild exact dispatch text")
+
+    remaining_messages = [message_by_run_id[run_id] for run_id in remaining_run_ids]
+    dispatch_parts = [
+        str(item.get("message") or item.get("prompt") or "")
+        for item in remaining_messages
+    ]
+    dispatch_text = "\n\n---\n\n".join(part for part in dispatch_parts if part)
+    if not dispatch_text:
+        raise RuntimeError("coalesced Agent Run Delivery has no remaining dispatch text")
+
+    new_primary_run_id = remaining_run_ids[0]
+    next_coalesced: dict[str, Any] | None = None
+    if len(remaining_run_ids) > 1:
+        next_coalesced = dict(coalesced)
+        next_coalesced["execution_ids"] = remaining_run_ids
+        next_coalesced["messages"] = remaining_messages
+        next_coalesced["prompt"] = dispatch_text
+        spec["coalesced_queue"] = next_coalesced
+    else:
+        spec.pop("coalesced_queue", None)
+    spec["task_execution_id"] = new_primary_run_id
+    provenance["task_execution_id"] = new_primary_run_id
+    provenance["message_id"] = f"agent_run:{new_primary_run_id}"
+    provenance["platform_specific"] = spec
+    metadata["scheduled_provenance"] = provenance
+    snapshot["metadata_json"] = _canonical_json(metadata)
+    snapshot["native_message_id"] = f"agent_run:{new_primary_run_id}"
+    snapshot["content_text"] = dispatch_text
+    content = _json_object(snapshot.get("content_json"))
+    content["text"] = dispatch_text
+    snapshot["content_json"] = _canonical_json(content)
+    serialized_snapshot = _canonical_json(snapshot)
+
+    values: dict[str, Any] = {
+        "snapshot_json": serialized_snapshot,
+        "snapshot_sha256": _sha256_text(serialized_snapshot),
+        "dispatch_text": dispatch_text,
+        "dispatch_sha256": _sha256_text(dispatch_text),
+    }
+    updated = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("queued",),
+        values=values,
+        history_event={
+            "kind": "retire",
+            "reason": "coalesced_agent_run_canceled",
+            "run_id": normalized_run_id,
+            "remaining_run_ids": remaining_run_ids,
+        },
+    )
+    if updated is None:
+        raise RuntimeError("queued Delivery changed during Agent Run cancellation")
+    return {
+        "delivery_id": delivery_id,
+        "remaining_run_ids": remaining_run_ids,
+        "coalesced_queue": next_coalesced,
+        "retired": False,
+    }
 
 
 def retire_reserved(

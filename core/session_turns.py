@@ -3963,6 +3963,8 @@ class SessionTurnManager:
                     sink = get_sink(get_key(context))
                 except Exception:
                     logger.debug("failed to inspect terminal Turn sink", exc_info=True)
+            if isinstance(sink, dict):
+                sink["terminal_evidence"] = dict(terminal_evidence or {})
             if isinstance(sink, dict) and sink.get("done_event") is not None:
                 asyncio.create_task(
                     self._finish_durable_terminal_after_release(
@@ -4169,6 +4171,7 @@ class SessionTurnManager:
             finally:
                 sink = self.get_turn_sink(session_key)
                 settled_by = str((sink or {}).get("settled_by") or "")
+                terminal_evidence = (sink or {}).get("terminal_evidence")
                 self.pop_turn_sink(session_key, done)
                 current = self.in_flight.get(session_id)
                 turn = current if current is not None and current.task is asyncio.current_task() else None
@@ -4197,6 +4200,11 @@ class SessionTurnManager:
                                 else settled_by or SETTLED_BY_TERMINAL_RESULT
                             ),
                             evidence_kind="agent_initiated_terminal",
+                            evidence=(
+                                dict(terminal_evidence)
+                                if isinstance(terminal_evidence, dict)
+                                else None
+                            ),
                             hold_queue=bool(
                                 (cancelled or settled_by == SETTLED_BY_STOPPED)
                                 and turn is not None

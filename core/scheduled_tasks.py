@@ -5437,7 +5437,7 @@ class ScheduledTaskService:
                 settled_by=str(settled_by),
             )
             return
-        if evidence.get("settles_run") is False:
+        if evidence.get("settles_run") is not True:
             return
         store = self.request_store.sqlite_backend
         if store is None:

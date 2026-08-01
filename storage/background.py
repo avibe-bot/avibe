@@ -2039,6 +2039,90 @@ def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now:
         processed.update(run_ids)
 
 
+def _rebind_queued_agent_runs_after_delivery_cancel(
+    conn: Any,
+    *,
+    session_id: str,
+    canceled_run_id: str,
+    remaining_run_ids: list[str],
+    coalesced_queue: dict[str, Any] | None,
+    now: str,
+) -> list[dict[str, Any]]:
+    """Keep Run projections aligned with one rewritten queued Delivery."""
+
+    all_run_ids = [canceled_run_id, *remaining_run_ids]
+    rows = {
+        str(row["id"]): row
+        for row in conn.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(all_run_ids))
+        ).mappings()
+    }
+    canceled = rows.get(canceled_run_id)
+    if canceled is not None:
+        canceled_metadata = _json_loads(canceled["metadata_json"], {})
+        if not isinstance(canceled_metadata, dict):
+            canceled_metadata = {}
+        for key in (
+            "workbench_queue_holds_run",
+            "effective_run_id",
+            "coalesced_into_run_id",
+            "coalesced_queue",
+        ):
+            canceled_metadata.pop(key, None)
+        result = conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == canceled_run_id)
+            .where(agent_runs.c.metadata_json == canceled["metadata_json"])
+            .values(metadata_json=_json_dumps(canceled_metadata), updated_at=now)
+        )
+        if not result.rowcount:
+            raise RuntimeError("canceled Agent Run ownership changed during Delivery rewrite")
+
+    if remaining_run_ids:
+        missing = [run_id for run_id in remaining_run_ids if run_id not in rows]
+        if missing:
+            raise RuntimeError(f"queued Delivery references missing Agent Runs: {missing}")
+        primary_run_id = remaining_run_ids[0]
+        for index, run_id in enumerate(remaining_run_ids):
+            row = rows[run_id]
+            if (
+                normalize_run_status(row["status"]) != "queued"
+                or bool(row["cancel_requested"])
+                or str(row["session_id"] or "").strip() != session_id
+            ):
+                raise RuntimeError("remaining Agent Run is no longer owned by the queued Delivery")
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["workbench_queue_holds_run"] = True
+            metadata["effective_run_id"] = primary_run_id
+            if index == 0:
+                metadata.pop("coalesced_into_run_id", None)
+                if coalesced_queue is not None:
+                    metadata["coalesced_queue"] = dict(coalesced_queue)
+                else:
+                    metadata.pop("coalesced_queue", None)
+            else:
+                metadata["coalesced_into_run_id"] = primary_run_id
+                metadata.pop("coalesced_queue", None)
+            result = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                .where(agent_runs.c.cancel_requested == 0)
+                .where(agent_runs.c.metadata_json == row["metadata_json"])
+                .values(metadata_json=_json_dumps(metadata), updated_at=now)
+            )
+            if not result.rowcount:
+                raise RuntimeError("queued Agent Run ownership changed during Delivery rewrite")
+    return [
+        dict(row)
+        for row in conn.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(all_run_ids))
+        ).mappings()
+    ]
+
+
 def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str]) -> tuple[list[str], list[str]]:
     normalized_run_ids: list[str] = []
     seen: set[str] = set()
@@ -2917,6 +3001,7 @@ class SQLiteBackgroundTaskStore:
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
+        rows_to_publish: list[dict[str, Any]] = []
         queue_session_id = ""
         with self.engine.begin() as conn:
             # Cancellation and Workbench queue retirement are one ownership
@@ -2957,13 +3042,22 @@ class SQLiteBackgroundTaskStore:
                     from storage import message_deliveries
 
                     session_id = str(row["session_id"] or "").strip()
-                    if message_deliveries.retire_queued_agent_run(
+                    reconciled = message_deliveries.reconcile_queued_agent_run_cancellation(
                         conn,
                         session_id=session_id,
                         run_id=run_id,
-                    ):
+                    )
+                    if reconciled is not None:
+                        rows_to_publish = _rebind_queued_agent_runs_after_delivery_cancel(
+                            conn,
+                            session_id=session_id,
+                            canceled_run_id=run_id,
+                            remaining_run_ids=list(reconciled["remaining_run_ids"]),
+                            coalesced_queue=reconciled.get("coalesced_queue"),
+                            now=now,
+                        )
                         queue_session_id = session_id
-        _publish_run_rows_updated([row_to_publish])
+        _publish_run_rows_updated(rows_to_publish or [row_to_publish])
         _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 

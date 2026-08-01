@@ -1445,6 +1445,59 @@ def test_restart_settles_agent_run_after_late_acceptance_commit(managers) -> Non
         run_store.close()
 
 
+def test_terminal_turn_without_positive_result_evidence_keeps_late_run_unsettled(
+    managers,
+) -> None:
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _restarted, engine, _engine_b, _starts = managers
+    run_id = "run-missing-terminal-result-evidence"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=db_path.parent / "unused-no-evidence-store")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    try:
+        scheduled.settle_agent_runs_from_terminal_turn(
+            [run_id],
+            turn_id="turn-without-result-evidence",
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="agent_initiated_terminal",
+            evidence={},
+        )
+        stored = request_store.get_run(run_id)
+        assert stored is not None
+        assert stored["status"] == "running"
+        assert stored["result_text"] in {None, ""}
+        assert scheduled._drain_dirty is False
+    finally:
+        run_store.close()
+
+
 def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) -> None:
     manager, other, engine, _engine_b, _starts = managers
     t1, _ = asyncio.run(_activate(manager, text="t1"))
@@ -1653,6 +1706,24 @@ async def test_agent_initiated_continuation_materializes_in_configured_language(
 
     sink = manager.get_turn_sink(manager.controller._get_session_key(context))
     assert sink is not None
+    manager.on_terminal_result(
+        context,
+        is_error=False,
+        terminal_evidence={
+            "result_text": "agent-initiated terminal body",
+            "settles_run": True,
+        },
+    )
     sink["done_event"].set()
     for _ in range(4):
         await asyncio.sleep(0)
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(
+            conn,
+            str((context.platform_specific or {})["turn_token"]),
+        )
+    assert turn is not None
+    assert json.loads(turn["terminal_evidence_json"]) == {
+        "result_text": "agent-initiated terminal body",
+        "settles_run": True,
+    }
