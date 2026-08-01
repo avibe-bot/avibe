@@ -72,7 +72,7 @@ export const AgentGraphNodeCard: React.FC<AgentGraphNodeCardProps> = ({
       <div className="flex min-w-0 items-center gap-1.5">
         <StatusGlyph node={node} />
         <span className="truncate text-[12px] font-semibold text-foreground">
-          {node.agent_name ?? '—'}
+          {node.agent_display_name ?? node.agent_name ?? '—'}
         </span>
         {node.agent_backend && (
           <span

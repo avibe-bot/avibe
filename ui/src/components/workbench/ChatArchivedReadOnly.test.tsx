@@ -8,10 +8,10 @@ import { describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import { selectApiErrorFields } from '../../context/ApiContext';
-import type { VaultRequest, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { ToastProvider } from '../../context/ToastContext';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
-import { ChatHeaderBar, MessageRow } from './ChatPage';
+import { ChatHeaderBar, MessageRow, ThinkingBubble, sessionAgentDisplayName } from './ChatPage';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
@@ -67,6 +67,21 @@ const session = (over: Partial<WorkbenchSession> = {}): WorkbenchSession =>
     metadata: {},
     ...over,
   }) as WorkbenchSession;
+
+const archivedPm = {
+  id: 'agt-pm',
+  name: '_pm-8dd7',
+  display_name: 'pm',
+  description: null,
+  backend: 'codex',
+  model: null,
+  reasoning_effort: null,
+  enabled: false,
+  archived: true,
+  archived_at: '2026-07-31T14:00:00Z',
+  source: 'user',
+  updated_at: '2026-07-31T14:00:00Z',
+} satisfies VibeAgentBrief;
 
 // An agent reply carrying a quick-reply group, which is the transcript control
 // that POSTs a new message when clicked.
@@ -205,6 +220,37 @@ describe('read-only transcript withdraws session writes', () => {
     expect(archived).toContain('Ship it');
     expect(archived).toContain('Ship it now, or wait for review?');
     expect(countDisabledButtons(archived)).toBe(2);
+  });
+});
+
+describe('archived Agent display names', () => {
+  it('keeps the display name when a mounted catalog still has the pre-archive name', () => {
+    const staleCatalogAgent = { ...archivedPm, name: 'pm' };
+    const archivedSession = session({ agent_id: archivedPm.id, agent_name: archivedPm.name });
+
+    expect(sessionAgentDisplayName(archivedSession, [staleCatalogAgent])).toBe('pm');
+  });
+
+  it('uses the catalog display name in thinking and transcript bubbles', () => {
+    const archivedSession = session({ agent_name: archivedPm.name });
+    const displayName = archivedPm.display_name;
+
+    const thinking = render(
+      <ThinkingBubble session={archivedSession} agentDisplayName={displayName} />,
+    );
+    const message = render(
+      <MessageRow
+        message={agentWithQuickReplies()}
+        session={archivedSession}
+        agentDisplayName={displayName}
+        messageFontSize={13}
+      />,
+    );
+
+    expect(thinking).toContain('>pm</span>');
+    expect(message).toContain('>pm</span>');
+    expect(thinking).not.toContain(archivedPm.name);
+    expect(message).not.toContain(archivedPm.name);
   });
 });
 

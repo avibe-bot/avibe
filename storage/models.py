@@ -44,6 +44,7 @@ agents = Table(
     Column("source", String, nullable=False),
     Column("source_ref", Text, nullable=True),
     Column("metadata_json", Text, nullable=False),
+    Column("archived_at", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     UniqueConstraint("normalized_name", name="uq_agents_normalized_name"),

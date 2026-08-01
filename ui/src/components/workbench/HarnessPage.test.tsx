@@ -6,16 +6,24 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
+import type {
+  ApiContextType,
+  HarnessRun,
+  HarnessSessionSummary,
+  HarnessWatch,
+  VibeAgentBrief,
+} from '../../context/ApiContext';
 import {
   DetailSession,
   HealthBadge,
   RunDetail,
   RunTriggerChip,
   WatchDetail,
+  agentDisplayName,
   harnessEmptyStateKey,
   harnessTabFromParam,
 } from './HarnessPage';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -129,6 +137,36 @@ describe('harnessEmptyStateKey', () => {
   });
 });
 
+describe('loadHarnessAgentCatalog', () => {
+  it('bypasses the read cache and indexes a newly archived Agent by its internal name', async () => {
+    const archived = {
+      id: 'agent-pm',
+      name: '_pm-a1b2',
+      display_name: 'pm',
+      description: null,
+      backend: 'codex',
+      model: null,
+      reasoning_effort: null,
+      enabled: false,
+      archived: true,
+      archived_at: '2026-07-31T21:00:00Z',
+      source: 'custom',
+      updated_at: '2026-07-31T21:00:00Z',
+    } satisfies VibeAgentBrief;
+    let params: Parameters<ApiContextType['listVibeAgents']>[0] = undefined;
+
+    const catalog = await loadHarnessAgentCatalog({
+      listVibeAgents: async (nextParams) => {
+        params = nextParams;
+        return { ok: true, agents: [archived], default_agent_name: 'codex' };
+      },
+    });
+
+    expect(params).toEqual({ includeDisabled: true, includeArchived: true, cache: false });
+    expect(catalog).toEqual({ '_pm-a1b2': archived });
+  });
+});
+
 describe('runRowTitle', () => {
   it("uses the message's first non-empty line, whitespace collapsed", () => {
     expect(
@@ -167,6 +205,28 @@ describe('RunDetail title', () => {
     expect(html).toContain('break-words');
     expect(html).toContain(`title="${message.trim()}"`);
     expect(html).toContain(message);
+  });
+
+  it('uses the archived Agent display name instead of its routing name', () => {
+    const agent: VibeAgentBrief = {
+      id: 'agent-pm',
+      name: '_pm-8dd7',
+      display_name: 'pm',
+      description: null,
+      backend: 'codex',
+      model: null,
+      reasoning_effort: null,
+      enabled: false,
+      archived: true,
+      archived_at: '2026-07-31T00:00:00Z',
+      source: 'user',
+      updated_at: '2026-07-31T00:00:00Z',
+    };
+    const html = render(<RunDetail run={run({ agent_name: agent.name })} agent={agent} />);
+
+    expect(agentDisplayName(agent.name, agent)).toBe('pm');
+    expect(html).toContain('>pm<');
+    expect(html).not.toContain('_pm-8dd7');
   });
 });
 

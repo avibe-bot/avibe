@@ -43,10 +43,13 @@ from storage.migrations import (
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agent_runs, agent_sessions, messages, run_definitions, scopes
+from storage.models import agents, agent_runs, agent_sessions, messages, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
-from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+from storage.session_reclaim import (
+    DEFINITION_AGENT_BINDING_REVISION_KEY,
+    SESSION_SETTINGS_SNAPSHOT_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,86 @@ def _json_loads(value: Optional[str], default: Any) -> Any:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _require_enabled_agent_identity(
+    conn: Any,
+    *,
+    agent_name: Optional[str],
+    expected_agent_id: Optional[str],
+) -> None:
+    """Validate one direct Agent selection inside its durable write transaction."""
+
+    name = str(agent_name or "").strip()
+    agent_id = str(expected_agent_id or "").strip()
+    if not name or not agent_id:
+        raise ValueError("an enabled Agent identity is required for this write")
+    row = conn.execute(
+        select(agents.c.id)
+        .where(agents.c.id == agent_id)
+        .where(agents.c.name == name)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+        .limit(1)
+    ).first()
+    if row is None:
+        raise ValueError(f"agent '{name}' was archived, disabled, renamed, or replaced before the write")
+
+
+def _require_agent_reference_identity(
+    conn: Any,
+    *,
+    expected_agent_id: Optional[str],
+) -> dict[str, str]:
+    """Resolve an existing durable Agent reference by ID inside its write."""
+
+    agent_id = str(expected_agent_id or "").strip()
+    if not agent_id:
+        raise ValueError("an Agent identity is required for this reference write")
+    row = conn.execute(
+        select(
+            agents.c.id,
+            agents.c.name,
+            agents.c.enabled,
+            agents.c.archived_at,
+            agents.c.metadata_json,
+        )
+        .where(agents.c.id == agent_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        raise ValueError(f"agent reference '{agent_id}' no longer exists")
+    from core.vibe_agents import agent_reference_is_usable
+
+    if not agent_reference_is_usable(
+        enabled=bool(row["enabled"]),
+        archived_at=row["archived_at"],
+        metadata=_json_loads(row["metadata_json"], {}),
+    ):
+        raise ValueError(f"agent reference '{row['name']}' is disabled")
+    return {"id": str(row["id"]), "name": str(row["name"])}
+
+
+def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict[str, str]]:
+    """Resolve legacy spelling to the catalog's canonical durable identity."""
+
+    cleaned_name = str(agent_name or "").strip()
+    if not cleaned_name:
+        return None
+    from core.vibe_agents import normalize_agent_name
+
+    try:
+        normalized_name = normalize_agent_name(cleaned_name)
+    except ValueError:
+        return None
+    row = conn.execute(
+        select(agents.c.id, agents.c.name)
+        .where(agents.c.normalized_name == normalized_name)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    return {"id": str(row["id"]), "name": str(row["name"])}
 
 
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
@@ -260,6 +343,10 @@ class DefinitionWriteExpectation:
       snapshot is what a later ``create_once`` rebind reads to carry the old
       workdir / agent / model forward, so restoring the pre-teardown metadata sends
       the task back on the wrong route (D3) with every other guard satisfied.
+    * the Agent binding revision -- rename/archive stamps this dedicated marker
+      whenever it rewrites either the direct Agent or the reclaim snapshot. It
+      catches stale pre-rewrite payloads without treating ordinary internal
+      rebinds or run-result stamps as conflicts.
 
     DELIBERATELY NOT ``updated_at``, and not the whole row. A row-version guard
     would refuse every benign concurrent write -- a run result landing while the
@@ -274,6 +361,7 @@ class DefinitionWriteExpectation:
     #: ``session_settings_snapshot.captured_at`` as read, ``None``/"" when the
     #: definition carried no reclaim snapshot.
     snapshot_captured_at: Optional[str] = None
+    agent_binding_revision: Optional[str] = None
 
     @classmethod
     def from_read(
@@ -291,6 +379,7 @@ class DefinitionWriteExpectation:
             enabled=bool(enabled),
             deleted_at=str(deleted_at) if deleted_at else None,
             snapshot_captured_at=reclaim_snapshot_marker(metadata),
+            agent_binding_revision=definition_agent_binding_revision(metadata),
         )
 
 
@@ -311,6 +400,15 @@ def reclaim_snapshot_marker(metadata: Any) -> Optional[str]:
     return str(captured_at) if captured_at else None
 
 
+def definition_agent_binding_revision(metadata: Any) -> Optional[str]:
+    """Rename/archive revision carried by definition metadata, if present."""
+
+    if not isinstance(metadata, dict):
+        return None
+    revision = metadata.get(DEFINITION_AGENT_BINDING_REVISION_KEY)
+    return str(revision) if revision else None
+
+
 #: ``captured_at`` of the reclaim snapshot, read in SQL. Guarded by ``json_valid``
 #: because ``metadata_json`` is user-visible text on legacy rows: a bare
 #: ``json_extract`` over a malformed blob raises, which would turn "this row has no
@@ -321,6 +419,17 @@ _RECLAIM_SNAPSHOT_MARKER_SQL = case(
         func.json_extract(
             run_definitions.c.metadata_json,
             f"$.{SESSION_SETTINGS_SNAPSHOT_KEY}.captured_at",
+        ),
+    ),
+    else_=None,
+)
+
+_AGENT_BINDING_REVISION_SQL = case(
+    (
+        func.json_valid(run_definitions.c.metadata_json) == 1,
+        func.json_extract(
+            run_definitions.c.metadata_json,
+            f"$.{DEFINITION_AGENT_BINDING_REVISION_KEY}",
         ),
     ),
     else_=None,
@@ -342,6 +451,7 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
         run_definitions.c.enabled == (1 if expect.enabled else 0),
         unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
         unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+        unchanged_text(_AGENT_BINDING_REVISION_SQL, expect.agent_binding_revision),
     ]
 
 
@@ -2114,7 +2224,8 @@ def upsert_definition_in_connection(
     # best-effort runtime stamp).
     logger.warning(
         "Refused a stale full-row write for %s %s: its Session binding, enabled "
-        "state, deletion or reclaim snapshot changed after the payload was read",
+        "state, deletion, reclaim snapshot or Agent binding revision changed after "
+        "the payload was read",
         definition_type,
         values["id"],
     )
@@ -2224,7 +2335,12 @@ class SQLiteBackgroundTaskStore:
             )[0]
 
     def upsert_scheduled_task(
-        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -2235,7 +2351,11 @@ class SQLiteBackgroundTaskStore:
         """
 
         return self._upsert_definition(
-            self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
+            self._scheduled_task_values(payload),
+            expect=expect,
+            definition_type="scheduled task",
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def upsert_scheduled_task_with_binding_notice(
@@ -2381,7 +2501,12 @@ class SQLiteBackgroundTaskStore:
             return self._enrich_definitions([self._watch_from_row(row)], conn, definition_type="watch")[0]
 
     def upsert_watch(
-        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Write a whole watch row. ``False`` means the write was REFUSED.
 
@@ -2391,7 +2516,11 @@ class SQLiteBackgroundTaskStore:
         """
 
         return self._upsert_definition(
-            self._watch_values(payload), expect=expect, definition_type="watch"
+            self._watch_values(payload),
+            expect=expect,
+            definition_type="watch",
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def _upsert_definition(
@@ -2400,10 +2529,26 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None,
         definition_type: str,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
         with self.engine.begin() as conn:
+            if expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+            if expected_enabled_agent_id is not None:
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_name=values.get("agent_name"),
+                    expected_agent_id=expected_enabled_agent_id,
+                )
+            elif expected_reference_agent_id is not None:
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                values["agent_name"] = identity["name"]
             return upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type=definition_type
             )
@@ -2451,10 +2596,137 @@ class SQLiteBackgroundTaskStore:
             enqueue_run_in_connection(conn, run_values)
         return True
 
-    def enqueue_run(self, payload: dict[str, Any]) -> None:
+    def enqueue_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+    ) -> None:
         values = self._run_values(payload)
         with run_update_event_transaction(self.engine) as conn:
+            if expected_enabled_agent_id is not None or expected_reference_agent_id is not None:
+                reserve_write_lock(conn)
+            if expected_enabled_agent_id is not None:
+                _require_enabled_agent_identity(
+                    conn,
+                    agent_name=values.get("agent_name"),
+                    expected_agent_id=expected_enabled_agent_id,
+                )
+            elif expected_reference_agent_id is not None:
+                identity = _require_agent_reference_identity(
+                    conn,
+                    expected_agent_id=expected_reference_agent_id,
+                )
+                values["agent_id"] = identity["id"]
+                values["agent_name"] = identity["name"]
             enqueue_run_in_connection(conn, values)
+
+    def enqueue_definition_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Enqueue one internally consistent snapshot of a live definition."""
+
+        values = self._run_values(payload)
+        definition_id = str(values.get("definition_id") or "").strip()
+        if not definition_id:
+            raise ValueError("definition id is required")
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            definition = conn.execute(
+                select(
+                    run_definitions.c.agent_name,
+                    run_definitions.c.session_policy,
+                    run_definitions.c.session_id,
+                    run_definitions.c.legacy_session_key,
+                    run_definitions.c.post_to,
+                    run_definitions.c.deliver_key,
+                    run_definitions.c.prompt,
+                    run_definitions.c.message,
+                    run_definitions.c.message_payload_json,
+                    run_definitions.c.metadata_json,
+                    run_definitions.c.enabled,
+                    run_definitions.c.deleted_at,
+                )
+                .where(run_definitions.c.id == definition_id)
+                .limit(1)
+            ).mappings().first()
+            if definition is not None:
+                if definition["deleted_at"] is not None:
+                    raise ValueError(f"definition '{definition_id}' not found")
+                if not bool(definition["enabled"]):
+                    raise ValueError(f"definition '{definition_id}' is disabled")
+
+                current_name = str(definition["agent_name"] or "").strip() or None
+                identity = _resolve_agent_identity_by_name(conn, current_name)
+                message = definition["message"] or definition["prompt"]
+                metadata = _json_loads(definition["metadata_json"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                values.update(
+                    agent_name=identity["name"] if identity else current_name,
+                    agent_id=identity["id"] if identity else None,
+                    session_policy=definition["session_policy"],
+                    session_id=definition["session_id"],
+                    legacy_session_key=definition["legacy_session_key"],
+                    post_to=definition["post_to"],
+                    deliver_key=definition["deliver_key"],
+                    prompt=definition["prompt"] or message,
+                    message=message,
+                    message_payload_json=definition["message_payload_json"],
+                    metadata_json=_json_dumps(metadata),
+                )
+            enqueue_run_in_connection(conn, values)
+        return {
+            "agent_name": values["agent_name"],
+            "agent_id": values["agent_id"],
+            "session_policy": values["session_policy"],
+            "session_id": values["session_id"],
+            "session_key": values["legacy_session_key"],
+            "post_to": values["post_to"],
+            "deliver_key": values["deliver_key"],
+            "prompt": values["prompt"],
+            "message": values["message"],
+            "message_payload": _json_loads(values["message_payload_json"], None),
+            "metadata": _json_loads(values["metadata_json"], {}),
+        }
+
+    def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:
+        """Pin a claimed run to an Agent id while serialized with archive/rename."""
+
+        cleaned_run_id = str(run_id or "").strip()
+        if not cleaned_run_id:
+            return None
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            run = conn.execute(
+                select(agent_runs.c.agent_id, agent_runs.c.agent_name)
+                .where(agent_runs.c.id == cleaned_run_id)
+                .limit(1)
+            ).mappings().first()
+            if run is None:
+                return None
+            agent_id = str(run["agent_id"] or "").strip()
+            agent_name = str(run["agent_name"] or "").strip()
+            agent = None
+            if agent_id:
+                agent = conn.execute(
+                    select(agents.c.id, agents.c.name)
+                    .where(agents.c.id == agent_id)
+                    .limit(1)
+                ).mappings().first()
+            elif agent_name:
+                agent = _resolve_agent_identity_by_name(conn, agent_name)
+            if agent is None:
+                return {"agent_id": agent_id or None, "agent_name": agent_name or None}
+            canonical_id = str(agent["id"])
+            canonical_name = str(agent["name"])
+            if canonical_id != agent_id or canonical_name != agent_name:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == cleaned_run_id)
+                    .values(agent_id=canonical_id, agent_name=canonical_name)
+                )
+                _defer_run_ids_updated_from_connection(conn, [cleaned_run_id])
+            return {"agent_id": canonical_id, "agent_name": canonical_name}
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)

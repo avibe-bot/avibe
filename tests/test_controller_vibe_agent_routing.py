@@ -174,7 +174,7 @@ def test_avibe_run_target_agent_does_not_read_im_routing() -> None:
     controller._get_settings_key = lambda context: context.channel_id
     controller.agent_service = SimpleNamespace(agents={"codex": object(), "claude": object()})
     controller.vibe_agent_store = SimpleNamespace(
-        require_enabled=lambda name: reviewer if name == "reviewer" else None,
+        require_reference=lambda name: reviewer if name == "reviewer" else None,
         get_builtin_default_agent_for_backend=lambda backend: None,
         get_default_agent=lambda: SimpleNamespace(name="default", backend="claude"),
     )

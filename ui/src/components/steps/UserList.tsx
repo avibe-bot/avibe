@@ -26,6 +26,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 
 interface UserConfig {
+  expected_agent_name?: string | null;
   display_name: string;
   is_admin: boolean;
   bound_at: string;
@@ -763,7 +764,7 @@ export const UserList: React.FC = () => {
               const displayName = displayNameForUser(u);
               const metaPrefix = userConfig.enabled
                 ? selectedAgent
-                  ? `${selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
+                  ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
                   : `${backendLabel(effectiveBackend)}${backendModel ? `/${backendModel}` : ''}`
                 : t('userList.disabled', { defaultValue: 'Disabled' });
 

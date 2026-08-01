@@ -47,6 +47,10 @@ ReclaimMode = Literal["delete", "pause"]
 #: workdir / agent / model forward instead of resetting to scope defaults.
 SESSION_SETTINGS_SNAPSHOT_KEY = "session_settings_snapshot"
 
+#: Compare-and-set marker stamped when Agent rename/archive rewrites a
+#: definition's direct or snapshotted Agent reference.
+DEFINITION_AGENT_BINDING_REVISION_KEY = "_avibe_agent_binding_revision"
+
 #: Durable SESSION-metadata key listing the settings this session pins
 #: EXPLICITLY, so a stored NULL can be told apart from an absent value.
 #:

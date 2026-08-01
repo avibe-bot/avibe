@@ -204,11 +204,26 @@ class MessageHandler(BaseHandler):
                 else self._get_settings_manager(context).get_channel_routing(settings_key)
             )
             requested_vibe_agent = platform_payload.get("vibe_agent_name")
+            requested_vibe_agent_id = platform_payload.get("vibe_agent_id")
             session_target = platform_payload.get("agent_session_target")
+            scope_agent_name = getattr(routing, "agent_name", None) if routing else None
+            durable_agent_identity = bool(requested_vibe_agent_id or scope_agent_name)
+            if not requested_vibe_agent_id and isinstance(session_target, dict):
+                requested_vibe_agent_id = session_target.get("agent_id")
             if not requested_vibe_agent and isinstance(session_target, dict):
                 requested_vibe_agent = session_target.get("agent_name")
+            if isinstance(session_target, dict) and (
+                session_target.get("agent_id") or session_target.get("agent_name")
+            ):
+                durable_agent_identity = True
             if not requested_vibe_agent:
                 requested_vibe_agent = resolved_target.get("agent_name")
+            if not requested_vibe_agent_id:
+                requested_vibe_agent_id = resolved_target.get("agent_id")
+            if resolved_target and (
+                resolved_target.get("agent_id") or resolved_target.get("agent_name")
+            ):
+                durable_agent_identity = True
             session_agent_backend = (
                 str(session_target["agent_backend"])
                 if isinstance(session_target, dict) and session_target.get("agent_backend")
@@ -240,7 +255,12 @@ class MessageHandler(BaseHandler):
                     except Exception:
                         logger.debug("find_session_for_anchor failed; falling back to routing", exc_info=True)
                 if existing_thread:
-                    requested_vibe_agent = existing_thread.get("agent_name") or requested_vibe_agent
+                    existing_agent_id = existing_thread.get("agent_id")
+                    existing_agent_name = existing_thread.get("agent_name")
+                    requested_vibe_agent_id = existing_agent_id or requested_vibe_agent_id
+                    requested_vibe_agent = existing_agent_name or requested_vibe_agent
+                    if existing_agent_id or existing_agent_name:
+                        durable_agent_identity = True
                     session_agent_backend = existing_thread.get("agent_backend") or session_agent_backend
                     # Scope is only placement. A persisted session's visibility is
                     # the single outward-delivery gate, including ordinary IM turns
@@ -251,14 +271,18 @@ class MessageHandler(BaseHandler):
                     context.platform_specific = platform_payload
             resolve_vibe_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
             vibe_agent = None
-            if requested_vibe_agent and callable(resolve_vibe_agent):
-                vibe_agent = resolve_vibe_agent(
-                    context,
-                    override_agent_name=requested_vibe_agent,
-                    required=False,
-                )
-            elif callable(resolve_vibe_agent) and not session_agent_backend:
-                vibe_agent = resolve_vibe_agent(context, required=False)
+            if (requested_vibe_agent_id or requested_vibe_agent) and callable(resolve_vibe_agent):
+                resolve_kwargs = {
+                    "override_agent_name": requested_vibe_agent,
+                    "required": durable_agent_identity,
+                }
+                if requested_vibe_agent_id:
+                    resolve_kwargs["override_agent_id"] = requested_vibe_agent_id
+                vibe_agent = resolve_vibe_agent(context, **resolve_kwargs)
+            elif callable(resolve_vibe_agent) and (
+                durable_agent_identity or not session_agent_backend
+            ):
+                vibe_agent = resolve_vibe_agent(context, required=durable_agent_identity)
             if vibe_agent:
                 agent_name = vibe_agent.backend
             elif session_agent_backend:
