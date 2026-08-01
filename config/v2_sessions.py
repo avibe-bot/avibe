@@ -400,32 +400,13 @@ class SessionsStore:
         *,
         workdir: str | None = None,
         agent_backend: str | None = None,
-        workdir_match: str = "exact_or_fallback",
     ) -> list[str]:
-        """Read-through to the scope-free anchor lookup used by session teardown.
-
-        ``workdir_match`` selects HFR-128's workdir tier and is forwarded only when it
-        is not the default, so a service predating the keyword still answers the
-        ordinary resolve and refuses (``TypeError``) an ``exact_only`` request instead
-        of quietly answering it with the lenient tier (HFR-345).
-
-        The mode strings are defined once in ``storage.agent_session_rows``
-        (``WORKDIR_MATCH_*``) and spelled literally here only because no module in
-        ``config/`` imports ``storage`` at module scope; the default is pinned against
-        that module by ``test_sqlite_sessions_store.py``.
-        """
+        """Read-through to the scope-free anchor lookup used by session teardown."""
 
         self._ensure_service()
         finder = getattr(self._service, "find_session_ids_for_anchor", None)
         if not callable(finder):
             return []
-        if str(workdir_match or "") != "exact_or_fallback":
-            return finder(
-                session_anchor,
-                workdir=workdir,
-                agent_backend=agent_backend,
-                workdir_match=workdir_match,
-            )
         return finder(session_anchor, workdir=workdir, agent_backend=agent_backend)
 
     def find_session_for_anchor(self, user_id: str, session_anchor: str):

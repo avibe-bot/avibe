@@ -469,7 +469,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         from core.run_settlement import SETTLED_BY_STOPPED
         from core.scheduled_tasks import ScheduledTaskService
-        from core.session_teardown import teardown_composite_session_runs
+        from core.runtime_anchor import RuntimeAnchor
+        from core.session_teardown import teardown_anchor_session_runs
         from core.session_turns import SessionTurnManager, Turn
         from modules.im import MessageContext
 
@@ -504,9 +505,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             settle_runs=True,
         ):
             if settle_runs:
-                await teardown_composite_session_runs(
+                await teardown_anchor_session_runs(
                     controller,
-                    composite_key,
+                    RuntimeAnchor.parse(composite_key),
                     settled_by=settled_by,
                     include_manager_lane=include_manager_lane,
                 )
@@ -599,7 +600,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         launch inputs no longer match — here the avibe system prompt, one of four
         equivalent branches with Model Hub channel, caller env and Git PATH — and
         calls ``cleanup_session`` so a replacement can be built. That reaches
-        ``teardown_composite_session_runs`` with the manager lane INCLUDED (the
+        ``teardown_anchor_session_runs`` with the manager lane INCLUDED (the
         default; only the stop path opts out, HFR-126), so the turn
         ``release_for_teardown`` finds in ``in_flight`` for this session is the
         dispatching task itself.

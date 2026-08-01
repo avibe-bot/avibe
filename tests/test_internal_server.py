@@ -2516,7 +2516,7 @@ def test_release_for_teardown_skips_the_callers_own_turn():
     ``_reuse_cached_claude_session_if_available`` finds a cached client whose launch
     inputs (system prompt, caller env, Git PATH, Model Hub channel) no longer match
     and tears the runtime down so a replacement can be created —
-    ``cleanup_session`` -> ``teardown_composite_session_runs`` (manager lane
+    ``cleanup_session`` -> ``teardown_anchor_session_runs`` (manager lane
     included by default) -> ``cancel_session_executions`` ->
     ``release_for_teardown``. The turn it finds in ``in_flight`` for that session is
     the caller's OWN task.
@@ -2711,7 +2711,7 @@ def test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_run
     instant is enough.
 
     The caller is modelled by its real parts, not simulated: ``hold_session_admission``
-    is the call ``teardown_runtime_session_runs`` makes once a runtime identity has
+    is the call ``teardown_anchor_session_runs`` makes once a runtime identity has
     been resolved to a session id, and the ``ExitStack`` is the one
     ``SessionHandler.cleanup_session`` (and the idle-eviction loop) wraps around its
     settle-then-drop pair. The racer is launched from the ``turn.end`` subscriber —
@@ -3150,7 +3150,7 @@ def test_codex_eviction_holds_admission_and_drains_after_transport_removal(
     Every OTHER runtime-removing teardown already carries the HFR-330/332 stack —
     ``SessionHandler.cleanup_session`` and the Claude idle-eviction loop both wrap an
     ``ExitStack`` around "settle, then drop the runtime" and hand it to
-    ``teardown_runtime_session_runs``. Codex's ``evict_idle_transports`` called the
+    ``teardown_anchor_session_runs``. Codex's ``evict_idle_transports`` called the
     same helper with NO stack, so the only guard left was
     ``release_for_teardown``'s own narrower hold, which ends inside the awaited
     cancel — while the transport is still registered and the mappings still stand.
@@ -3174,7 +3174,7 @@ def test_codex_eviction_holds_admission_and_drains_after_transport_removal(
     and the message dispatches onto the app-server being killed.
 
     Driven through the REAL ``CodexAgent.evict_idle_transports``, the real
-    ``teardown_runtime_session_runs`` / ``hold_session_admission`` pair, and a real
+    ``teardown_anchor_session_runs`` / ``hold_session_admission`` pair, and a real
     ``SessionTurnManager`` over a real durable queue. Only the settlement service is
     a double, and a faithful one: its ``teardown_session_runs`` performs the manager
     release the real service performs, which is the act that opens the window. The
@@ -3390,7 +3390,7 @@ def test_codex_eviction_holds_every_shared_session_before_the_first_teardown(
     multiplicity the design has all along: ``_transports`` is keyed by CWD, and
     ``sessions_for_cwd`` returns every anchor that cwd's single app-server serves.
     The teardown loop acquired each session's hold only when ITS OWN iteration began
-    (inside ``teardown_runtime_session_runs``), so while the FIRST session's teardown
+    (inside ``teardown_anchor_session_runs``), so while the FIRST session's teardown
     was being awaited the second session's admission was still WIDE OPEN.
 
     WHAT THAT COSTS THE SECOND SESSION, and why it is worse than a plain missed
@@ -3401,8 +3401,8 @@ def test_codex_eviction_holds_every_shared_session_before_the_first_teardown(
     transport had it simply been refused into the durable queue.
 
     THE FIX IS TWO-PHASE, and phase 1 REUSES the resolution rather than repeating it:
-    ``resolve_teardown_session_ids`` (the same call ``teardown_runtime_session_runs``
-    makes, so HFR-323's ambiguity refusal and the HFR-335/345 split ranking are
+    ``resolve_teardown_session_ids`` (the same call ``teardown_anchor_session_runs``
+    makes, so HFR-323's ambiguity refusal is
     unchanged) maps every anchor to session ids and ``hold_session_admission``
     registers all of them on the per-cwd stack; phase 2 then settles each id through
     ``teardown_session_runs``. Because phase 1 owns every hold, phase 2 takes none —

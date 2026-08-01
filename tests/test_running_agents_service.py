@@ -30,8 +30,11 @@ class _AsyncFlag:
 
 
 class _FakeClaudeClient:
-    def __init__(self, base, native, model):
+    def __init__(self, base, native, model, workdir=""):
+        # Both halves, as ``bind_claude_runtime_session`` writes them: the snapshot
+        # reads the pair off the client instead of splitting the composite key.
         self._vibe_runtime_base_session_id = base
+        self._vibe_runtime_workdir = workdir
         self._vibe_native_session_id = native
         self._vibe_current_model = model
 
@@ -157,9 +160,9 @@ def test_safe_call_retries_runtime_error_then_falls_back():
 
 
 def test_claude_active_and_idle_rows():
-    c_active = _FakeClaudeClient("slack_111", "nat-a", "opus")
+    c_active = _FakeClaudeClient("slack_111", "nat-a", "opus", "/home/u/proj")
     c_active._fake_pid = 4242
-    c_idle = _FakeClaudeClient("slack_222", "nat-b", None)
+    c_idle = _FakeClaudeClient("slack_222", "nat-b", None, "/home/u/other")
     controller = _make_controller(
         claude={
             "sessions": {
@@ -187,7 +190,7 @@ def test_claude_active_and_idle_rows():
 def test_subagent_composite_key_base_parsing():
     # Subagent composite keys are `{platform}_{thread}:{agent}:{workdir}` — the
     # base must be everything before the LAST colon (the abs workdir).
-    client = _FakeClaudeClient("slack_999:reviewer", "nat-x", None)
+    client = _FakeClaudeClient("slack_999:reviewer", "nat-x", None, "/srv/app")
     controller = _make_controller(
         claude={
             "sessions": {"slack_999:reviewer:/srv/app": client},
@@ -3698,19 +3701,42 @@ def test_end_holds_ambiguous_candidates_through_running_tab_teardown(monkeypatch
     assert manager._teardown_drain_owed == set()
 
 
-def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage():
-    """HFR-335: End's fallback resolve is a settlement path, so its split is verified.
+def _controller_with_live_claude_runtime(anchor: str, workdir: str, find):
+    """A controller whose live Claude client carries the pair it was bound with.
+
+    ``runtime_anchor_for`` is the REAL ``SessionHandler`` method, bound to a stub that
+    only supplies ``claude_sessions`` — the one attribute it reads — so this pins the
+    production lookup rather than a re-implementation of it.
+    """
+
+    from core.handlers.session_handler import SessionHandler
+
+    controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=find)
+    handler = types.SimpleNamespace(
+        claude_sessions={
+            f"{anchor}:{workdir}": _FakeClaudeClient(anchor, "nat-x", None, workdir)
+        }
+    )
+    handler.runtime_anchor_for = SessionHandler.runtime_anchor_for.__get__(handler)
+    controller.session_handler = handler
+    return controller
+
+
+def test_end_fallback_reads_a_path_shaped_agent_anchor_off_the_live_runtime():
+    """HFR-335: End's fallback resolve takes the pair, it does not re-derive it.
 
     ``_teardown_session_id`` falls back to the runtime identity whenever the
     Running-tab row carries no ``session_id`` — a row built purely from live state. A
     composite key whose anchor embeds a path-looking routing-agent name
-    (``base:/review:/repo``) splits lexically into an anchor that matches no row, so
-    the fallback would resolve NOTHING and End would tear the runtime down with its
-    runs still ``running``.
+    (``slack_T1:/review:/repo``) has TWO well-formed readings and the string does not
+    record which one the producer meant; guess wrong and the anchor matches no row, so
+    End settles nothing and tears the runtime down with its runs still ``running``.
 
-    Both halves matter: the anchor must be the stored one, and the workdir must be its
-    complement — a teardown that resolves the right anchor against ``/review:/repo``
-    matches nothing either.
+    There is nothing to guess. The live client was bound with the two halves separate
+    and still holds them, so the resolve asks it — one storage read, with the anchor
+    and the workdir guaranteed to be each other's complement rather than two
+    independently-split strings that may disagree.
     """
     anchor = "slack_T1:/review"
     workdir = "/repo"
@@ -3718,12 +3744,9 @@ def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage(
 
     def _find(probe_anchor, *, workdir=None, agent_backend=None):
         probes.append((probe_anchor, workdir, agent_backend))
-        if probe_anchor == anchor and workdir == "/repo":
-            return ["sess-review"]
-        return []
+        return ["sess-review"] if (probe_anchor, workdir) == (anchor, "/repo") else []
 
-    controller = _make_controller()
-    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+    controller = _controller_with_live_claude_runtime(anchor, workdir, _find)
 
     resolved = running_agents._teardown_session_id(
         controller,
@@ -3734,20 +3757,18 @@ def test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage(
     )
 
     assert resolved == "sess-review"
-    # Longest anchor first, so the stored one is the FIRST thing tried — the lexical
-    # reading (``slack_T1`` + ``/review:/repo``) is never used.
-    assert probes[0][:2] == (anchor, "/repo")
-    assert all(probe[1] != "/review:/repo" for probe in probes)
+    # Exactly one read, and the lexical reading (``slack_T1`` + ``/review:/repo``) is
+    # never tried — there is no candidate walk left to try it with.
+    assert probes == [(anchor, "/repo", "claude")]
 
 
-def test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads():
-    """HFR-335: a row that already knows its anchor short-circuits the candidate walk.
+def test_end_fallback_prefers_the_rows_own_base_session_id_for_the_anchor_half():
+    """HFR-335: a row that already knows its anchor keeps it, and the workdir matches.
 
-    ``preferred_anchor`` exists so the common End case pays nothing for the
-    disambiguation: the Running-tab row carries ``base_session_id``, which IS the
-    anchor, so the matching candidate is picked outright. It also fixes the workdir
-    half — pairing the row's anchor with a lexically-split workdir would resolve
-    nothing even though the anchor was right.
+    The Running-tab row carries ``base_session_id``, which IS the anchor and is the
+    identity the user asked to end, so it wins over the runtime lookup. The WORKDIR
+    half still comes from the same live pair — pairing the row's anchor with a
+    lexically-split workdir would resolve nothing even though the anchor was right.
     """
     anchor = "slack_T1:/review"
     probes = []
@@ -3756,8 +3777,7 @@ def test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads()
         probes.append((probe_anchor, workdir, agent_backend))
         return ["sess-review"] if workdir == "/repo" else []
 
-    controller = _make_controller()
-    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+    controller = _controller_with_live_claude_runtime(anchor, "/repo", _find)
 
     resolved = running_agents._teardown_session_id(
         controller,
@@ -3768,5 +3788,4 @@ def test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads()
     )
 
     assert resolved == "sess-review"
-    # Exactly one read: the real resolve. The candidate probe never ran.
     assert probes == [(anchor, "/repo", "claude")]

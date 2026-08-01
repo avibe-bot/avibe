@@ -955,7 +955,7 @@ class SessionTurnManager:
         is not coming back. Same word, opposite contract.
 
         REENTRANT (counted, not a set) because the teardown chain nests: the idle
-        eviction loop holds this across ``teardown_composite_session_runs`` AND the
+        eviction loop holds this across ``teardown_anchor_session_runs`` AND the
         ``cleanup_session`` that follows it, and ``cleanup_session`` holds it again for
         its own settle-then-drop pair. A set would be released by the inner exit while
         the outer teardown was still running.
@@ -2283,7 +2283,7 @@ class SessionTurnManager:
         ``_reuse_cached_claude_session_if_available`` finds a cached client whose
         launch inputs no longer match (system prompt, caller env, Git PATH, Model Hub
         channel) and tears the runtime down so a replacement can be created —
-        ``cleanup_session`` -> ``teardown_composite_session_runs`` (manager lane
+        ``cleanup_session`` -> ``teardown_anchor_session_runs`` (manager lane
         included by default; only the stop path opts out) -> here. The turn found in
         ``in_flight`` for that session is the calling task itself.
 

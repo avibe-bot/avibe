@@ -2716,7 +2716,7 @@ scenarios:
     # PR2 review round 1. find_session_ids_for_anchor drops the scope predicate --
     # a runtime teardown has no scope to offer -- so (scope, anchor) collapses to
     # anchor and two unrelated conversations can answer to the same one.
-    # teardown_runtime_session_runs then tore down EVERY id it returned, justified by
+    # teardown_anchor_session_runs then tore down EVERY id it returned, justified by
     # the reconciler's ownership intersection. That justification covers the RECONCILE
     # leg only: cancel_session_executions and release_for_teardown interrupt whatever
     # each candidate is running with no ownership check at all, so one scope's
@@ -2726,8 +2726,8 @@ scenarios:
     # FIX, narrowing by what a runtime genuinely owns rather than guessing a winner:
     # (a) agent_backend (NOT NULL on agent_sessions, previously unused here) becomes
     # an optional exact predicate, plumbed through SessionsFacade / SessionsStore /
-    # resolve_teardown_session_ids / teardown_runtime_session_runs /
-    # teardown_composite_session_runs, and passed by every caller that owns a runtime:
+    # resolve_teardown_session_ids / teardown_anchor_session_runs /
+    # teardown_anchor_session_runs, and passed by every caller that owns a runtime:
     # "claude" from SessionHandler.cleanup_session and evict_idle_sessions, "codex"
     # from the Codex transport eviction, the row's own backend from End's
     # _teardown_session_id fallback.
@@ -2763,14 +2763,15 @@ scenarios:
     # the superseded:<row_id> suffix) stay left of it because an agent name is not an
     # absolute path. With no path marker anywhere the historical rpartition split is
     # kept unchanged, so non-path keys ("a:b") answer exactly as before.
-    # REUSE: promoted to THE composite splitter -- core/services/running_agents.py
-    # _base_from_composite, _workdir_from_composite and the Claude snapshot row's
-    # inline split all delegate to it, so the Running tab's displayed workdir and
-    # End's teardown resolve agree with eviction's.
-    # A second test carries this same id, pinning the splitter itself against the
+    # SCOPE, narrowed by HFR-335/345: this rule now governs RuntimeAnchor.parse ONLY,
+    # the LEGACY reader for a persisted key with no structured origin. Every live
+    # teardown carries the pair in a RuntimeAnchor built where both halves were still
+    # separate, so no settlement decision depends on the rule -- but a key that was
+    # written by joining still has to read back the way it was written.
+    # A second test carries this same id, pinning the parse itself against the
     # Windows drive-letter and UNC forms that os.path.abspath cannot round-trip on a
     # POSIX test host:
-    # tests/test_session_teardown.py::test_composite_key_split_preserves_windows_drive_paths
+    # tests/test_session_teardown.py::test_legacy_key_parse_preserves_windows_drive_paths
     test: tests/test_session_teardown.py::test_teardown_settles_a_session_whose_workdir_contains_a_colon
   - id: HFR-320
     name: in-dispatch runtime recreation is not killed by its own session teardown
@@ -2786,7 +2787,7 @@ scenarios:
     # _reuse_cached_claude_session_if_available finds a cached client whose launch
     # inputs no longer match (system prompt / caller env / Git PATH / Model Hub
     # channel) and tears the runtime down so a replacement can be built --
-    # cleanup_session -> teardown_composite_session_runs (manager lane included by
+    # cleanup_session -> teardown_anchor_session_runs (manager lane included by
     # default; only the stop path opts out, HFR-126) -> cancel_session_executions ->
     # _release_manager_turn -> release_for_teardown. The turn it finds in in_flight
     # for that session is THE CALLING TASK.
@@ -2879,7 +2880,7 @@ scenarios:
     # never pre-empted by an interruption story.
     # FIX: settle_runs: bool = True threaded through
     # ClaudeAgent._cleanup_runtime_session / _cleanup_runtime_session_state ->
-    # SessionHandler.cleanup_session; False skips the teardown_composite_session_runs
+    # SessionHandler.cleanup_session; False skips the teardown_anchor_session_runs
     # preamble (both lanes and the reconcile) and changes nothing else -- receiver,
     # client and runtime state are still dropped, which the regression asserts so the
     # opt-out cannot degrade into "skip the cleanup". Only the
@@ -2900,7 +2901,7 @@ scenarios:
     # find_session_ids_for_anchor returns the whole exact-match list, and the unique
     # key is (scope_id, session_anchor) -- so several live scopes can share
     # anchor + backend + workdir (shared default workdirs make this ordinary), and
-    # teardown_runtime_session_runs cancels EVERY id returned. Backend and workdir
+    # teardown_anchor_session_runs cancels EVERY id returned. Backend and workdir
     # equality is not evidence of runtime ownership, so a two-candidate answer means
     # interrupting a healthy turn in a conversation that had nothing to do with the
     # eviction. The reconcile leg is protected by the ownership snapshot; the cancel
@@ -3027,7 +3028,7 @@ scenarios:
     layer: contract
     backend: codex
     # PR2 review round 6. Inside evict_idle_transports' per-cwd lock the teardown
-    # (teardown_runtime_session_runs(..., evicted): settles the runs, cancels the
+    # (teardown_anchor_session_runs(..., evicted): settles the runs, cancels the
     # manager turns) runs BEFORE await transport.stop(). The failure branch was
     # `except Exception: continue`, which preserved _transports,
     # _transport_last_activity, the cwd inode map, the thread mappings, _turn_registry
@@ -3253,7 +3254,7 @@ scenarios:
     # (entered AFTER the HFR-320 self-turn guard, which cancels nothing and whose
     # caller's own dispatch must proceed); and the hold is handed OUTWARD to the caller
     # on an ExitStack threaded through core.session_teardown -- registered by
-    # hold_session_admission inside teardown_runtime_session_runs, the one place a
+    # hold_session_admission inside teardown_anchor_session_runs, the one place a
     # runtime identity has already become a session id, so nothing resolves twice. The
     # stack is owned by cleanup_session and by the eviction loop (whose settle-then-drop
     # pair opens a WIDER window than cleanup_session's own, and starts earlier than
@@ -3421,11 +3422,11 @@ scenarios:
     # found four, and only two carried the stack.
     # HAD IT: SessionHandler.cleanup_session and the Claude idle-eviction loop -- an
     # ExitStack spanning runtime removal, with hold_session_admission(admission_holds=
-    # stack) registering the drain-on-release hold inside teardown_runtime_session_runs.
+    # stack) registering the drain-on-release hold inside teardown_anchor_session_runs.
     # LACKED IT: (1) modules/agents/codex/agent.py evict_idle_transports -- THE FINDING;
     # (2) core/controller.py's shutdown settlement; (3) End's teardown leg in
     # core/services/running_agents.py, which uses the split cancel/reconcile pieces.
-    # THE BUG (1): the eviction called teardown_runtime_session_runs with NO stack, so
+    # THE BUG (1): the eviction called teardown_anchor_session_runs with NO stack, so
     # the only guard was release_for_teardown's own narrow hold, which ends when the
     # awaited cancel returns. The transport is still registered at that moment and the
     # window that follows is the WIDEST of any teardown: transport.stop() (a real
@@ -3472,8 +3473,8 @@ scenarios:
     test: tests/test_internal_server.py::test_codex_eviction_holds_admission_and_drains_after_transport_removal
   - id: HFR-335
     name: >-
-      the composite split is disambiguated against stored anchors when an agent name
-      looks like a path
+      an agent name that looks like a path cannot be split out of a composite key,
+      so the pair is carried instead
     status: covered
     kind: safety
     layer: contract
@@ -3481,62 +3482,35 @@ scenarios:
     # PR2 review round 11, and the other side of HFR-129. Subagent and routing-agent
     # names are accepted as arbitrary non-empty strings, and the composite anchor
     # embeds them ({platform}_{thread}:{agent_name}) BEFORE the working path is
-    # appended -- see _base_from_composite's docstring and core/handlers/
-    # message_handler.py:434/438.
+    # appended -- see core/handlers/message_handler.py:434/438.
     # THE BUG: an agent named "/review" yields base:/review:/repo, in which TWO colons
-    # are followed by something matching _WORKING_PATH_HEAD. HFR-129's FIRST-match rule
-    # takes the earlier one -> anchor "base", workdir "/review:/repo" -> no
-    # agent_sessions row matches -> resolve_teardown_session_ids returns empty -> every
-    # caller (Claude eviction, cleanup, shutdown, End) reads empty as "no runs to
-    # settle" and dismantles the runtime with its runs still running. Exactly the
-    # silent teardown skip HFR-129 was written to remove, reached from the other side.
+    # are followed by something matching a path head. HFR-129's FIRST-match rule takes
+    # the earlier one -> anchor "base", workdir "/review:/repo" -> no agent_sessions
+    # row matches -> resolve_teardown_session_ids returns empty -> every caller (Claude
+    # eviction, cleanup, shutdown, End) reads empty as "no runs to settle" and
+    # dismantles the runtime with its runs still running. Exactly the silent teardown
+    # skip HFR-129 was written to remove, reached from the other side.
     # PURE LEXICAL INFERENCE IS UNWINNABLE once anchor suffixes can match the path
     # head: both readings are well-formed and the key no longer records which colon it
-    # added.
-    # FIX, scoped to where settlement correctness lives and NOT to how keys are built:
-    # iter_composite_split_candidates(key) yields every path-shaped reading LONGEST
-    # ANCHOR FIRST (the reverse of the lexical rule -- the longer reading takes more of
-    # the key at face value, and the short one only ever won by default), and
-    # resolve_composite_teardown_split walks them, taking the first whose anchor names
-    # a real row. Wired into teardown_composite_session_runs and into End's
-    # _teardown_session_id fallback.
-    # SUPERSEDED IN PART BY HFR-345: "the first whose anchor names a real row" was one
-    # walk over one bit, and that let HFR-128's lenient null-workdir tier decide split
-    # races. The walk now runs twice -- every candidate for an EXACT workdir match
-    # first, the fallback tier only if none matched anywhere -- so "names a real row"
-    # means "names one at this tier". Longest-anchor-first still orders each pass, and
-    # everything else this entry states holds; the CONSERVATISM paragraph's Windows
-    # "one wasted read" is now at most two, bounded at 2N for a key with N readings.
-    # THE PROBE IS NOT resolve_teardown_session_ids, deliberately: that answers [] both
-    # for "no such anchor" and for HFR-323's ambiguity refusal, which are opposite facts
-    # here. _anchor_names_any_row calls the finder directly, so AN AMBIGUOUS RESOLUTION
-    # COUNTS AS RESOLVING -- that split wins and the refusal stands on it. Walking on
-    # would take a wrong split and hand it to a resolve with no live rows to protect,
-    # converting a deliberate no-op into a teardown against the wrong identity. The
-    # refusal is about scope safety, not about split validity.
-    # CONSERVATISM: single-candidate keys (every ordinary anchor) take the fast path
-    # with ZERO extra reads, and End's rows short-circuit via preferred_anchor. Windows
-    # drive keys (base:C:/repo) do become two-candidate and pay one wasted read; the
-    # answer is unchanged. When NO candidate resolves the lexical first-match answer
-    # stands, so HFR-129 is preserved byte-for-byte, as is every caller with no
-    # sessions facade at all.
-    # RESIDUAL, and why the fallback is safe FOR SETTLEMENT: an anchor that resolves
-    # nowhere has no runs to settle, so a wrong split among unresolvable candidates is
-    # a wrong ANSWER and never a wrong ACTION. Second residual: the snapshot's
-    # display-only split (_base_from_composite / the snapshot loop) stays lexical, so a
-    # Running-tab row for such a session can render a truncated base/workdir. Nothing
-    # is settled on the strength of it and a DB read per rendered row is the wrong
-    # trade; both sites carry a comment saying so.
-    # Companions: tests/test_session_teardown.py::
-    # test_composite_split_candidates_enumerate_the_path_shaped_readings (extends the
-    # HFR-129 unit family with the /review case),
-    # ::test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone
-    # (resolver spy: no reads on single-candidate keys, first-match on unresolvable
-    # ones), ::test_composite_split_takes_an_ambiguous_resolution_and_lets_the_refusal
-    # _stand (HFR-323 interaction), and tests/test_running_agents_service.py::
-    # test_end_fallback_resolve_splits_a_path_shaped_agent_anchor_against_storage /
-    # ::test_end_fallback_prefers_the_rows_own_base_session_id_without_extra_reads.
-    test: tests/test_session_teardown.py::test_composite_split_disambiguates_against_stored_anchors
+    # added. The first fix therefore probed storage to rank the readings; HFR-345 then
+    # had to rank the TIERS within each probe, which is where guarding stopped scaling.
+    # THE FIX THAT SHIPS: nothing splits the key on a settlement path, because nothing
+    # joins it first. core/runtime_anchor.py:RuntimeAnchor carries the anchor and the
+    # workdir as separate fields from the producer (SessionHandler.
+    # bind_claude_runtime_session records BOTH onto the live client; CodexAgent already
+    # held them apart) to resolve_teardown_session_ids, which hands them to the two
+    # separate agent_sessions columns. The composite string is rendered only for the
+    # in-process cache keys that need one hashable value, and
+    # SessionHandler.runtime_anchor_for reads the pair BACK off the client rather than
+    # re-deriving it. See HFR-345 for the full closure and what it deleted.
+    # RESIDUAL: a key whose client is already gone (a repeat cleanup, a restart-recovery
+    # row) falls back to RuntimeAnchor.parse, which applies HFR-129's rule and does not
+    # disambiguate. Safe for settlement in the same way as before: an anchor that
+    # resolves nowhere has no runs to settle, so a wrong reading is a wrong ANSWER and
+    # never a wrong ACTION. The DISPLAY residual is gone -- the Running-tab snapshot
+    # reads the same pair off the same client, so a path-shaped anchor no longer renders
+    # a truncated base/workdir.
+    test: tests/test_running_agents_service.py::test_end_fallback_reads_a_path_shaped_agent_anchor_off_the_live_runtime
   - id: HFR-336
     name: >-
       the scheduler drain is the third door, and it defers a queued run while a
@@ -4008,57 +3982,48 @@ scenarios:
     test: tests/test_claude_agent_initiated_turn.py::AgentInitiatedTurnTeardownAdmissionTests::test_shutdown_refuses_agent_initiated_turns_without_a_session_id
   - id: HFR-345
     name: >-
-      an exact-workdir split candidate outranks a candidate that only matches a
-      null-workdir row
+      the anchor/workdir pair is carried from where both halves are known, so no
+      split has to be ranked
     status: covered
     kind: safety
     layer: contract
     backend: shared
-    # PR2 review round 19. HFR-335 x HFR-128, and neither is wrong on its own.
-    # HFR-335 walks the path-shaped readings of a composite key LONGEST ANCHOR FIRST
-    # and takes the first whose anchor "names a real row". HFR-128 had already ruled
-    # that naming a row is TWO facts once a workdir is named, because
-    # agent_sessions.workdir is nullable: rows naming this workdir, or -- only when
-    # none exist -- legacy rows naming none. The probe (_anchor_names_any_row) read
-    # that as one bit, so the lenient tier got to decide split races.
-    # THE BUG: composite base:C:/repo whose real session is (anchor "base", workdir
-    # "C:/repo"). Candidates longest-first are (base:C, /repo) then (base, C:/repo).
-    # An UNRELATED legacy row anchored "base:C" with a NULL workdir and the same
-    # backend answers the first probe through HFR-128's exact-or-unset fallback, so
-    # the wrong reading wins: the teardown cancels that stranger's live turn AND
-    # leaves its own run running with no backend left to settle it -- both halves of
-    # the failure HFR-129 and HFR-323 each fixed one side of.
-    # FIX -- HFR-128's rule lifted from WITHIN one candidate to ACROSS candidates.
-    # The storage read now reports the tier instead of only applying it:
-    # find_session_ids_for_anchor gains workdir_match="exact_or_fallback" (the
-    # unchanged default) | "exact_only", threaded through both wrappers the probe can
-    # reach it by (config/v2_sessions.py SessionsStore, modules/sessions_facade.py),
-    # each forwarding the keyword ONLY when it is not the default so a store predating
-    # it still answers the ordinary resolve and REFUSES the exact question rather than
-    # widening it. resolve_composite_teardown_split then walks twice: pass one takes
-    # the first EXACT candidate at any anchor length, pass two runs only if no reading
-    # matched exactly and accepts the fallback tier. Longest-first is the tiebreak
-    # within a tier, never across them.
-    # PRESERVED, all three deliberately: single-candidate keys (every ordinary anchor)
-    # still take the ZERO-READ fast path and issue no probe at all; preferred_anchor
-    # still short-circuits; and HFR-323's ambiguity-refusal-counts-as-resolving applies
-    # WITHIN each tier -- an exact-tier anchor naming several rows wins pass one and the
-    # refusal stands on it, because demoting it to pass two is the same walking-on
-    # mistake through the ranking instead of the walk. HFR-335's residual is intact:
-    # with no exact match anywhere, the null-workdir reading still wins and settles.
-    # COST: at most 2N indexed reads instead of N for a multi-candidate key, and only
-    # when nothing matched exactly. N is the count of colons followed by a path head --
-    # two in every observed case. A store that cannot rank (a double predating the
-    # keyword) reports so and gets HFR-335's untiered single walk, not a mis-tiered one.
-    # RED: pre-fix the finding's shape returned (owner settled=False, cause=None,
-    # legacy turn cancelled=True, cause='evicted') -- the stranger torn down, the real
-    # run stranded.
-    # Companions: tests/test_session_teardown.py::
-    # test_null_workdir_fallback_still_wins_when_no_exact_match_exists (the residual),
-    # and tests/test_sqlite_sessions_store.py::
-    # test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier (the tier
-    # contract at the service and at both wrapper layers).
-    test: tests/test_session_teardown.py::test_exact_workdir_split_outranks_a_legacy_null_workdir_reading
+    # PR2 review round 19, then CLOSED BY CONSTRUCTION in the refactor that follows.
+    # THE ORIGINAL BUG (HFR-335 x HFR-128, neither wrong on its own): HFR-335 walked
+    # the path-shaped readings of a composite key longest-anchor-first and took the
+    # first whose anchor "named a real row". HFR-128 had already ruled that naming a
+    # row is TWO facts once a workdir is named, because agent_sessions.workdir is
+    # nullable. The probe read that as one bit, so an unrelated legacy row with a NULL
+    # workdir could answer for a WRONG reading of the key: composite base:C:/repo
+    # resolved to (base:C, /repo), cancelling a stranger's live turn AND leaving its
+    # own run running with no backend left to settle it.
+    # THE FIRST FIX ranked the tiers -- find_session_ids_for_anchor grew a
+    # workdir_match mode, threaded through both wrappers, and the split walked twice.
+    # It was correct and it was a guard: every new way to spell an anchor was another
+    # reading to rank, and ranking guesses cannot be made to stop guessing.
+    # THE FIX THAT SHIPS removes the question. core/runtime_anchor.py:RuntimeAnchor
+    # holds the anchor and the workdir as SEPARATE fields, is constructed where both
+    # halves are still in hand (SessionHandler binds them onto the live client;
+    # CodexAgent already had them apart), and is carried into
+    # resolve_teardown_session_ids intact. agent_sessions stores the two in separate
+    # columns, so the pair never has to be recovered from a joined string on any
+    # settlement path -- there is no split to rank, no tier to expose, and
+    # workdir_match, the two-pass walk, the candidate enumerator and the storage probe
+    # are all deleted rather than made more careful.
+    # RuntimeAnchor.parse survives for LEGACY strings with no structured origin (a
+    # persisted key, a restart-recovery row). It applies HFR-129's rule and makes no
+    # attempt to disambiguate, because a caller that reached for it has already lost
+    # the information that would decide -- and such a key resolves nowhere, so it has
+    # no runs to strand.
+    # PRESERVED: HFR-128's leniency inside one anchor (a null-workdir row is still the
+    # fallback when nothing matches exactly) and HFR-323's ambiguity refusal, both
+    # untouched. GAINED: the Running-tab snapshot reads the pair off the same client,
+    # so HFR-335's display residual (a truncated base/workdir on a path-shaped anchor)
+    # is gone too, at zero extra reads.
+    # RED, at the shape the tier fix was written for: the anchor half comes from the
+    # row and the workdir half from the same live pair, resolved in ONE read with no
+    # candidate walk to rank -- pre-refactor this needed the two-pass tiered probe.
+    test: tests/test_running_agents_service.py::test_end_fallback_prefers_the_rows_own_base_session_id_for_the_anchor_half
   - id: HFR-346
     name: >-
       a timed-out scheduler stop converges the executions it abandoned, by run id

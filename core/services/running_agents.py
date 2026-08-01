@@ -35,14 +35,13 @@ from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, Optional
 
 from core.run_settlement import SETTLED_BY_STOPPED
+from core.runtime_anchor import RuntimeAnchor
 from core.session_teardown import (
     SchedulerLaneCancellation,
     cancel_session_scheduler_lane,
     hold_session_admission,
     reconcile_session_runs,
-    resolve_composite_teardown_split,
     resolve_teardown_session_ids,
-    split_composite_session_key,
 )
 
 if TYPE_CHECKING:
@@ -80,28 +79,26 @@ def _safe_items(mapping: Any) -> list:
     return _safe_call(lambda: list(mapping.items()), [])
 
 
-def _base_from_composite(composite_key: str) -> str:
-    """Recover ``base_session_id`` from a Claude composite key.
+def _runtime_anchor(controller: "Controller", composite_key: Optional[str]) -> RuntimeAnchor:
+    """The (anchor, workdir) pair behind a Claude composite key.
 
-    Composite keys are ``f"{base_session_id}:{working_path}"``; subagent bases
-    themselves contain a colon (``{platform}_{thread}:{agent_name}``) and the
-    working path may too (``C:\\repo``, ``/tmp/a:b``), so neither end of the key
-    can be found by counting colons. ``split_composite_session_key`` owns that
-    boundary for every caller; this snapshot must agree with it, because the
-    base it recovers is what End hands to the teardown resolve.
-
-    LEXICAL, AND KNOWINGLY SO (HFR-335). A path-looking agent name makes the boundary
-    genuinely ambiguous, and only storage can break the tie — but this helper feeds
-    the snapshot's DISPLAY fields and, through ``_effective_base_session_id``, the
-    anchor End passes down as a HINT. Where the answer decides what gets settled,
-    ``_teardown_session_id`` re-derives it through
-    ``resolve_composite_teardown_split`` instead. Residual, accepted: a Running-tab
-    row for such a session can show a truncated base/workdir. Nothing is settled on
-    the strength of it, and paying a database read per row to render a label is the
-    wrong trade.
+    Composite keys are ``f"{base_session_id}:{working_path}"`` and BOTH halves may
+    contain a colon — a subagent base is ``{platform}_{thread}:{agent_name}`` and a
+    working path can be ``C:\\repo`` or ``/tmp/a:b`` — so the boundary cannot be
+    found by counting colons in the key. It does not have to be: the live client was
+    bound with the two values separately, and ``SessionHandler.runtime_anchor_for``
+    hands them back. This is the ONE place the snapshot and the End teardown both
+    read the pair from, so a Running-tab row and the settlement it triggers can never
+    disagree about which session they mean.
     """
-    base, _workdir = split_composite_session_key(composite_key)
-    return base
+    handler = getattr(controller, "session_handler", None)
+    resolver = getattr(handler, "runtime_anchor_for", None)
+    if composite_key and callable(resolver):
+        try:
+            return resolver(composite_key)
+        except Exception:  # noqa: BLE001
+            logger.debug("end: runtime anchor lookup failed for %s", composite_key, exc_info=True)
+    return RuntimeAnchor.parse(composite_key)
 
 
 def _split_scope_id(scope_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -176,14 +173,16 @@ def _collect_claude(
     turn_started = getattr(controller, "session_turn_started", {}) or {}
 
     for composite_key, client in _safe_items(sessions):
-        # composite_key is ``{base}:{abs_workdir}``; split once for both halves,
-        # through the shared splitter so a colon inside the path (``C:\repo``,
-        # ``/tmp/a:b``) does not truncate the workdir this row displays.
-        # DISPLAY ONLY, so the lexical split stands (HFR-335): the storage-verified
-        # one costs a read per ambiguous row and buys a label, and every settlement
-        # decision re-derives the split for itself in ``_teardown_session_id``.
-        ck_base, ck_workdir = split_composite_session_key(composite_key)
-        base = getattr(client, "_vibe_runtime_base_session_id", None) or ck_base
+        # Both halves come off the client that was bound with them (HFR-335), so a
+        # colon inside the agent name or the path cannot truncate either one — the
+        # row displays exactly the identity End will later resolve against.
+        ck_base = str(getattr(client, "_vibe_runtime_base_session_id", "") or "")
+        if ck_base:
+            ck_workdir = str(getattr(client, "_vibe_runtime_workdir", "") or "")
+        else:
+            parsed = RuntimeAnchor.parse(composite_key)
+            ck_base, ck_workdir = parsed.session_anchor, parsed.workdir
+        base = ck_base
         native = getattr(client, "_vibe_native_session_id", None)
         model = getattr(client, "_vibe_current_model", None)
         pid = get_claude_client_pid(client)
@@ -593,7 +592,7 @@ def _find_claude_composite_for_base(session_handler: Any, base_session_id: Optio
         return None
     sessions = getattr(session_handler, "claude_sessions", {}) or {}
     for composite_key, client in _safe_items(sessions):
-        client_base = getattr(client, "_vibe_runtime_base_session_id", None) or _base_from_composite(composite_key)
+        client_base = getattr(client, "_vibe_runtime_base_session_id", None) or RuntimeAnchor.parse(composite_key).session_anchor
         if client_base == base_session_id:
             return composite_key
     return None
@@ -893,26 +892,21 @@ def _teardown_session_id(
     When a supplied id exists, a unique DIFFERENT candidate is also a refusal: stale
     display metadata is not permission to substitute another conversation.
 
-    THE SPLIT IS STORAGE-VERIFIED HERE, unlike the display path (HFR-335). This
-    fallback is a SETTLEMENT resolve, so a composite key whose anchor embeds a
-    path-looking subagent or routing-agent name (``base:/review:/repo``) must not be
-    split lexically into an anchor that matches no row — End would then settle
-    nothing and tear the runtime down anyway. When the row already carries its
-    ``base_session_id`` that anchor is handed down as ``preferred_anchor``, which
-    picks the matching candidate outright and costs no extra read; it also keeps the
-    WORKDIR half consistent with the anchor End is actually using, which the lexical
-    split could not promise once the two disagree.
+    THE PAIR IS NEVER RE-DERIVED FROM THE KEY (HFR-335). This is a SETTLEMENT
+    resolve, and a composite key whose anchor embeds a path-looking subagent or
+    routing-agent name (``base:/review:/repo``) has no unique reading — split it
+    wrong and the anchor matches no row, so End settles nothing and tears the runtime
+    down anyway. :func:`_runtime_anchor` reads both halves back off the live client
+    that was bound with them, which is not a better guess but the actual answer. A
+    ``base_session_id`` the row already carries still wins, since it is the identity
+    the caller is ending; the workdir then comes from the same pair, so the two halves
+    cannot drift apart.
     """
 
     supplied_session_id = str(session_id or "").strip()
     anchor_hint = str(base_session_id or "").strip()
-    split_anchor, split_workdir = resolve_composite_teardown_split(
-        controller,
-        composite_key,
-        agent_backend=str(backend or "").strip() or None,
-        preferred_anchor=anchor_hint,
-    )
-    anchor = anchor_hint or split_anchor
+    runtime_anchor = _runtime_anchor(controller, composite_key)
+    anchor = anchor_hint or runtime_anchor.session_anchor
     if not anchor:
         # Some callers genuinely have only a persisted session id and no runtime
         # anchor.  There is no identity set to re-resolve in that shape, so preserve
@@ -920,8 +914,7 @@ def _teardown_session_id(
         return supplied_session_id
     candidates = resolve_teardown_session_ids(
         controller,
-        session_anchor=anchor,
-        workdir=split_workdir or None,
+        RuntimeAnchor(anchor, runtime_anchor.workdir),
         agent_backend=str(backend or "").strip() or None,
         admission_holds=admission_holds,
         # Running-tab End owns the ordinary unique hold below. The shared
@@ -1036,26 +1029,13 @@ def _scheduler_lane_is_this_rows_business(
     return False
 
 
-def _workdir_from_composite(composite_key: Optional[str]) -> Optional[str]:
-    """The working path half of a composite key, or ``None`` when it names none.
-
-    Delegates the boundary to :func:`split_composite_session_key`: this feeds End's
-    ``resolve_teardown_session_ids`` call, which matches ``agent_sessions.workdir``
-    exactly, so a truncated path here is a teardown that settles nothing.
-    """
-    if not composite_key:
-        return None
-    _base, workdir = split_composite_session_key(composite_key)
-    return workdir or None
-
-
 def _live_workdir_for_backend(
     controller: "Controller",
     backend: Optional[str],
     base_session_id: Optional[str],
     composite_key: Optional[str],
 ) -> Optional[str]:
-    workdir = _workdir_from_composite(composite_key)
+    workdir = _runtime_anchor(controller, composite_key).workdir or None
     if workdir or not base_session_id:
         return workdir
     if backend == "codex":
@@ -1081,8 +1061,10 @@ def _live_workdir_for_backend(
     return None
 
 
-def _effective_base_session_id(base_session_id: Optional[str], composite_key: Optional[str]) -> Optional[str]:
-    return base_session_id or (_base_from_composite(composite_key) if composite_key else None)
+def _effective_base_session_id(
+    controller: "Controller", base_session_id: Optional[str], composite_key: Optional[str]
+) -> Optional[str]:
+    return base_session_id or (_runtime_anchor(controller, composite_key).session_anchor or None)
 
 
 def _resolve_session_key_context(
@@ -1209,7 +1191,7 @@ def _build_stop_context(
         context.platform_specific = {}
     payload = context.platform_specific
     payload["suppress_stop_no_active_notice"] = True
-    effective_base_session_id = _effective_base_session_id(base_session_id, composite_key)
+    effective_base_session_id = _effective_base_session_id(controller, base_session_id, composite_key)
     if effective_base_session_id:
         payload["backend_base_session_id"] = effective_base_session_id
     if composite_key:
@@ -1263,7 +1245,7 @@ async def _stop_active_agent(
         sink_binding = bind_sink(
             context,
             agent_session_id=session_id,
-            backend_base_session_id=_effective_base_session_id(base_session_id, composite_key),
+            backend_base_session_id=_effective_base_session_id(controller, base_session_id, composite_key),
         )
     try:
         handled = bool(await handle_stop(context))

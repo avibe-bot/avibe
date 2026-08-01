@@ -14,16 +14,6 @@ from config.v2_sessions import ActivePollInfo, SessionsStore
 
 logger = logging.getLogger(__name__)
 
-#: ``storage.agent_session_rows.WORKDIR_MATCH_EXACT_OR_FALLBACK``, spelled as a
-#: literal for the same reason ``config.v2_sessions`` spells it: this module must
-#: not import ``storage`` at module level — ``storage/__init__`` pulls ``sqlite3``,
-#: which the lightweight native-session import contract blocks
-#: (``tests/test_native_session_providers.py``). Drift is pinned by
-#: ``tests/test_sqlite_sessions_store.py`` asserting this literal equals the
-#: storage constant.
-_WORKDIR_MATCH_EXACT_OR_FALLBACK = "exact_or_fallback"
-
-
 class SessionsFacade:
     """High-level APIs for session and runtime state operations."""
 
@@ -85,7 +75,6 @@ class SessionsFacade:
         *,
         workdir: Optional[str] = None,
         agent_backend: Optional[str] = None,
-        workdir_match: str = _WORKDIR_MATCH_EXACT_OR_FALLBACK,
     ) -> list[str]:
         """Session ids for a runtime anchor with no scope key — teardown's resolve.
 
@@ -95,24 +84,11 @@ class SessionsFacade:
         cancels every id it is handed, so a candidate from another backend is work
         this caller has no right to interrupt.
 
-        ``workdir_match`` selects HFR-128's workdir tier (see
-        ``storage.sessions_service.SessionsService.find_session_ids_for_anchor``). The
-        keyword is forwarded ONLY when it is not the default, so a store predating it
-        keeps answering the ordinary teardown resolve — and raises ``TypeError`` for an
-        ``exact_only`` request rather than silently widening it into the lenient tier,
-        which is the one degradation that would put HFR-345's bug back.
         """
 
         finder = getattr(self.sessions_store, "find_session_ids_for_anchor", None)
         if not callable(finder):
             return []
-        if str(workdir_match or "") != _WORKDIR_MATCH_EXACT_OR_FALLBACK:
-            return finder(
-                session_anchor,
-                workdir=workdir,
-                agent_backend=agent_backend,
-                workdir_match=workdir_match,
-            )
         return finder(session_anchor, workdir=workdir, agent_backend=agent_backend)
 
     def find_session_for_anchor(self, user_id: Union[int, str], session_anchor: str) -> Optional[dict]:

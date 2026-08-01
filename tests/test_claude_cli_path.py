@@ -1641,11 +1641,11 @@ def _record_teardowns(monkeypatch) -> list[tuple[str, str]]:
 
     recorded: list[tuple[str, str]] = []
 
-    async def _teardown(_controller, composite_key, *, settled_by, **_kwargs) -> int:
-        recorded.append((composite_key, settled_by))
+    async def _teardown(_controller, anchor, *, settled_by, **_kwargs) -> int:
+        recorded.append((anchor.key, settled_by))
         return 0
 
-    monkeypatch.setattr(session_handler_module, "teardown_composite_session_runs", _teardown)
+    monkeypatch.setattr(session_handler_module, "teardown_anchor_session_runs", _teardown)
     return recorded
 
 

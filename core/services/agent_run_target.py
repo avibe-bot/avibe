@@ -24,6 +24,7 @@ from core.message_context import (
     resolve_context_settings_key,
     resolve_context_thread_id,
 )
+from core.runtime_anchor import normalize_workdir
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
 from storage.agent_session_rows import (
@@ -253,7 +254,7 @@ def resolve_agent_run_target(
             settings_key=settings_key,
         )
         resolved_new_workdir = _resolve_workdir(
-            _normalize_workdir(scope_row.get("workdir")) if scope_row else None,
+            normalize_workdir(scope_row.get("workdir")) if scope_row else None,
             controller=controller,
             platform=platform,
             settings_key=settings_key,
@@ -362,7 +363,7 @@ def _cached_target(
         return None
     if create_session and cached.get("scope_id") and not cached.get("agent_session_id"):
         return None
-    workdir = _normalize_workdir(cached.get("workdir"))
+    workdir = normalize_workdir(cached.get("workdir"))
     if not workdir:
         return None
     return AgentRunTarget(
@@ -664,7 +665,7 @@ def _authoritative_session_workdir(
 
     session_id = _optional_str(row.get("id")) or "<unknown>"
     try:
-        stored = _normalize_workdir(row.get("workdir"))
+        stored = normalize_workdir(row.get("workdir"))
     except OSError as exc:
         raise RuntimeError(f"agent session {session_id} has invalid workdir") from exc
     if not stored:
@@ -726,7 +727,7 @@ def _unpersisted_target(
     agent_target: Optional[ResolvedAgentTarget] = None,
 ) -> AgentRunTarget:
     resolved_workdir = workdir or _resolve_workdir(
-        _normalize_workdir(scope_row.get("workdir")) if scope_row else None,
+        normalize_workdir(scope_row.get("workdir")) if scope_row else None,
         controller=controller,
         platform=platform,
         settings_key=settings_key,
@@ -749,13 +750,6 @@ def _unpersisted_target(
         model=agent_target.model if agent_target else None,
         reasoning_effort=agent_target.reasoning_effort if agent_target else None,
     )
-
-
-def _normalize_workdir(value: Any) -> Optional[str]:
-    text = _optional_str(value)
-    if not text:
-        return None
-    return os.path.abspath(os.path.expanduser(text))
 
 
 def _resolve_workdir(

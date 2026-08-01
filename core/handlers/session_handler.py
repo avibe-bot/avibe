@@ -43,13 +43,14 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
+from core.runtime_anchor import RuntimeAnchor
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_EVICTED,
     SETTLED_BY_INTERRUPTED,
 )
 from core.services.session_fork import pending_native_fork_source
-from core.session_teardown import teardown_composite_session_runs
+from core.session_teardown import teardown_anchor_session_runs
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
 
@@ -149,9 +150,21 @@ class SessionHandler(BaseHandler):
         base_session_id: str,
         composite_key: str,
         native_session_id: Optional[str] = None,
+        *,
+        working_path: str = "",
     ) -> None:
-        """Attach the resolved Claude runtime keys to the connected client."""
+        """Attach the resolved Claude runtime keys to the connected client.
+
+        Both halves of the identity are recorded, not just the joined
+        ``composite_key``: ``composite_key`` is ``f"{base_session_id}:{working_path}"``
+        and either half may legally contain a colon (a subagent named ``/review``, a
+        Windows ``C:\\repo``), so the key alone cannot say where the boundary is.
+        Teardown needs the anchor half to match ``agent_sessions.session_anchor``, and
+        it reads the pair back from here rather than re-deriving it — see
+        :meth:`runtime_anchor_for`.
+        """
         setattr(client, "_vibe_runtime_base_session_id", base_session_id)
+        setattr(client, "_vibe_runtime_workdir", working_path)
         setattr(client, "_vibe_runtime_session_key", composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
@@ -160,6 +173,24 @@ class SessionHandler(BaseHandler):
             native_session_id=native_session_id,
             owner=AVIBE_CLAUDE_SESSION_OWNER,
         )
+
+    def runtime_anchor_for(self, composite_key: str) -> RuntimeAnchor:
+        """The (anchor, workdir) pair this cache entry was bound with.
+
+        Read back from the live client instead of split out of ``composite_key``,
+        because the join is not invertible by rule and a wrong anchor matches no
+        ``agent_sessions`` row — which reads as "nothing to settle" and drops a
+        runtime with its runs still ``running``.
+
+        :meth:`RuntimeAnchor.parse` is the fallback for a key whose client is already
+        gone from the cache (a repeat cleanup, a restart-recovery entry). Nothing is
+        left to settle on that path, so its best-effort split cannot strand a run.
+        """
+        client = self.claude_sessions.get(composite_key)
+        base_session_id = str(getattr(client, "_vibe_runtime_base_session_id", "") or "")
+        if not base_session_id:
+            return RuntimeAnchor.parse(composite_key)
+        return RuntimeAnchor(base_session_id, getattr(client, "_vibe_runtime_workdir", "") or "")
 
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
@@ -286,6 +317,7 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             stored_claude_session_id,
+            working_path=working_path,
         )
         self.touch_session_activity(composite_key)
         return client
@@ -369,6 +401,7 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             native_session_id,
+            working_path=working_path,
         )
         self.touch_session_activity(composite_key)
         return client
@@ -1261,6 +1294,7 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             None if fork_session else stored_claude_session_id,
+            working_path=working_path,
         )
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
@@ -1595,9 +1629,9 @@ class SessionHandler(BaseHandler):
 
         with ExitStack() as admission_holds:
             if settle_runs:
-                await teardown_composite_session_runs(
+                await teardown_anchor_session_runs(
                     self.controller,
-                    composite_key,
+                    self.runtime_anchor_for(composite_key),
                     settled_by=settled_by,
                     # This handler owns Claude runtimes and nothing else, so a candidate
                     # row on another backend is another runtime's session that happens to
@@ -1790,9 +1824,9 @@ class SessionHandler(BaseHandler):
             # ``cleanup_session``'s own, and one its inner hold cannot cover because it
             # starts after this returns. The hold nests, so both are held here.
             with ExitStack() as admission_holds:
-                await teardown_composite_session_runs(
+                await teardown_anchor_session_runs(
                     self.controller,
-                    composite_key,
+                    self.runtime_anchor_for(composite_key),
                     settled_by=SETTLED_BY_EVICTED,
                     agent_backend="claude",
                     admission_holds=admission_holds,

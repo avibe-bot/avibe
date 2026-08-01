@@ -19,9 +19,6 @@ from config.v2_settings import _split_scoped_key
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.agent_session_rows import (
     SUPERSEDED_ANCHOR_INFIX,
-    WORKDIR_MATCH_EXACT_ONLY,
-    WORKDIR_MATCH_EXACT_OR_FALLBACK,
-    WORKDIR_MATCH_MODES,
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
@@ -289,7 +286,6 @@ class SQLiteSessionsService:
         workdir: str | None = None,
         agent_backend: str | None = None,
         limit: int | None = None,
-        workdir_match: str = WORKDIR_MATCH_EXACT_OR_FALLBACK,
     ) -> list[str]:
         """Session ids for one anchor, WITHOUT a scope key. For teardown only.
 
@@ -325,26 +321,11 @@ class SQLiteSessionsService:
           null-workdir row in an unrelated scope sharing the anchor was torn down
           alongside the row the caller actually meant.
 
-        ``workdir_match`` EXPOSES THAT RANKING INSTEAD OF ONLY APPLYING IT (HFR-345).
-        The default ``"exact_or_fallback"`` is the behaviour above, unchanged: exact
-        rows if there are any, the lenient null-workdir rows otherwise, and the caller
-        cannot tell which tier it was handed. That is enough when the anchor is known
-        to be the right one — but the composite-split probe in ``core.session_teardown``
-        is asking a different question, "is THIS reading of the key the real one", and
-        for it the two tiers are not interchangeable: a null-workdir row is precisely
-        what lets a WRONG anchor look real. ``"exact_only"`` answers with the first
-        tier alone (empty rather than lenient), so a caller can rank exact readings
-        above fallback readings across several candidate anchors. With no ``workdir``
-        named there is no second tier to suppress and both values mean the same thing.
-
         Archived rows are excluded: they are terminal and inert, so nothing is
         executing in them. The teardown lookup is complete by default; callers may
         still request an explicit positive limit for diagnostic uses.
         """
 
-        resolved_match = str(workdir_match or "").strip() or WORKDIR_MATCH_EXACT_OR_FALLBACK
-        if resolved_match not in WORKDIR_MATCH_MODES:
-            raise ValueError(f"unknown workdir_match: {workdir_match!r}")
         resolved_anchor = str(session_anchor or "").strip()
         if not resolved_anchor or (limit is not None and limit <= 0):
             return []
@@ -377,12 +358,8 @@ class SQLiteSessionsService:
             elif row_workdir == resolved_workdir and session_id not in exact:
                 exact.append(session_id)
         # A row that NAMES this workdir outranks one that names none; the lenient
-        # rows are the fallback, not a supplement — and a caller ranking several
-        # candidate anchors can ask for the first tier on its own.
-        if resolved_match == WORKDIR_MATCH_EXACT_ONLY:
-            session_ids = exact
-        else:
-            session_ids = exact or unset_workdir
+        # rows are the fallback, not a supplement.
+        session_ids = exact or unset_workdir
         return session_ids if limit is None else session_ids[:limit]
 
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:

@@ -35,6 +35,7 @@ from core.system_prompt_injection import (
 )
 from core.resource_governance import governor_from_controller
 from core.run_settlement import SETTLED_BY_EVICTED
+from core.runtime_anchor import RuntimeAnchor
 from core.session_teardown import (
     resolve_teardown_session_ids,
     teardown_session_runs,
@@ -742,7 +743,7 @@ class CodexAgent(BaseAgent):
                     # covers; the shared helpers it calls own everything after that.
                     #
                     # TWO PHASES, BECAUSE ONE TRANSPORT SERVES A CWD AND A CWD SERVES
-                    # MANY SESSIONS (HFR-349). ``teardown_runtime_session_runs`` resolves
+                    # MANY SESSIONS (HFR-349). ``teardown_anchor_session_runs`` resolves
                     # and holds per call, so a single loop over the anchors acquired each
                     # session's hold only when ITS iteration began — leaving every LATER
                     # session admissible for the whole of the earlier ones' awaited
@@ -757,16 +758,15 @@ class CodexAgent(BaseAgent):
                     # PHASE 1 — resolve every session this transport serves and hold them
                     # ALL, before anything is settled. The resolution is
                     # ``resolve_teardown_session_ids``, i.e. the SAME call
-                    # ``teardown_runtime_session_runs`` makes, so HFR-323's ambiguity
-                    # refusal and the HFR-335/345 split ranking apply per anchor exactly
-                    # as before — reused rather than reimplemented.
+                    # ``teardown_anchor_session_runs`` makes, so HFR-323's ambiguity
+                    # refusal applies per anchor exactly as before — reused rather than
+                    # reimplemented.
                     torn_down_session_ids: list[str] = []
                     seen_session_ids: set[str] = set()
                     for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
                         for resolved_session_id in resolve_teardown_session_ids(
                             getattr(self, "controller", None),
-                            session_anchor=base_session_id,
-                            workdir=cwd,
+                            RuntimeAnchor(base_session_id, cwd),
                             # The transport being evicted is a Codex one, so a candidate
                             # row on another backend is not this runtime's to cancel
                             # (HFR-128).
@@ -787,7 +787,7 @@ class CodexAgent(BaseAgent):
                             torn_down_session_ids.append(resolved_session_id)
 
                     # PHASE 2 — settle each held session. ``teardown_session_runs`` is the
-                    # body of ``teardown_runtime_session_runs``' loop minus the resolve
+                    # body of ``teardown_anchor_session_runs``' loop minus the resolve
                     # and the hold, so phase 1 keeps ONE resolve per anchor (HFR-334's
                     # pin) and owns EVERY hold. Nothing double-holds: the manager's hold
                     # is counted and would tolerate it, but not needing that is cleaner

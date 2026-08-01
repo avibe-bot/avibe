@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Connection, func, select, update
 
+from core.runtime_anchor import normalize_workdir
 from storage.models import agent_sessions, scope_settings
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
@@ -111,29 +111,6 @@ def snapshot_scope_workdir(conn: Connection, scope_id: str | None) -> str | None
         select(scope_settings.c.workdir).where(scope_settings.c.scope_id == str(scope_id))
     ).scalar_one_or_none()
     return normalize_workdir(value)
-
-
-def normalize_workdir(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    return os.path.abspath(os.path.expanduser(text))
-
-
-#: How a scope-free anchor lookup treats rows whose ``workdir`` is NULL when the
-#: caller named one. ``agent_sessions.workdir`` is nullable, so absence is not a
-#: mismatch — but it is not a tie either (HFR-128): rows naming the caller's workdir
-#: outrank rows naming none, and the lenient tier exists only for rows bound before
-#: workdirs were recorded. ``exact_or_fallback`` applies that ranking and hides it;
-#: ``exact_only`` reports the top tier alone, which is what a caller ranking several
-#: candidate ANCHORS against each other needs (HFR-345) — otherwise a lenient row
-#: makes a wrong anchor indistinguishable from the right one. Defined here, next to
-#: ``normalize_workdir``, because every layer of the read path (the SQLite service,
-#: ``config.v2_sessions``, ``modules.sessions_facade``) must name the same modes and
-#: this module is the one all of them may import without a cycle.
-WORKDIR_MATCH_EXACT_OR_FALLBACK = "exact_or_fallback"
-WORKDIR_MATCH_EXACT_ONLY = "exact_only"
-WORKDIR_MATCH_MODES = (WORKDIR_MATCH_EXACT_OR_FALLBACK, WORKDIR_MATCH_EXACT_ONLY)
 
 
 #: A write that changes nothing, used ONLY to reserve SQLite's writer slot inside a
