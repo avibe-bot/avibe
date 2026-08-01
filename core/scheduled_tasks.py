@@ -2646,7 +2646,7 @@ class TaskExecutionStore:
         return TaskExecutionRequest.from_dict(payload)
 
     def refresh_claimed_request(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
-        """Refresh the Agent name that a catalog rename may rewrite after claim."""
+        """Refresh the complete Agent identity serialized at claim."""
 
         if self._sqlite is None:
             return request
@@ -2655,6 +2655,7 @@ class TaskExecutionStore:
             return request
         request.agent_name = payload.get("agent_name")
         request.agent_id = payload.get("agent_id")
+        request.agent_backend = payload.get("agent_backend")
         return request
 
     def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
@@ -6282,16 +6283,21 @@ class ScheduledTaskService:
                 task_id = task.id
                 session_key = task.session_key
                 session_id = task.session_id
-                task_agent_id = (
-                    request.agent_id
-                    if task.agent_name and task.agent_name == request.agent_name
-                    else None
+                # The other task fields are the current definition, but Agent identity
+                # is the exact snapshot ``refresh_claimed_request`` durably recorded.
+                # A later edit may race this mirror reload; dispatching its newer name
+                # against the claimed row's older backend would recreate HFR-359.
+                task = ScheduledTask.from_dict(
+                    {
+                        **task.to_dict(),
+                        "agent_name": request.agent_name,
+                    }
                 )
                 result = await self._execute_task(
                     task,
                     execution_id=request.id,
                     disable_one_shot=request.source_kind == "scheduler",
-                    agent_id=task_agent_id,
+                    agent_id=request.agent_id,
                 )
                 error = result.error
                 session_key = result.session_key

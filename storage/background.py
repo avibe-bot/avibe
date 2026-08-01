@@ -155,6 +155,57 @@ def _resolve_agent_identity_by_name(conn: Any, agent_name: Any) -> Optional[dict
     }
 
 
+def _claimed_run_agent_identity(conn: Any, run: Any) -> dict[str, Optional[str]]:
+    """Resolve the complete Agent identity one run must use after claim."""
+
+    agent_id = str(run["agent_id"] or "").strip()
+    agent_name = str(run["agent_name"] or "").strip()
+    agent_backend = str(run["agent_backend"] or "").strip()
+    definition_id = str(run["definition_id"] or "").strip()
+
+    # HFR-359. A scheduled run may wait in the queue while its definition's Agent
+    # changes. Claim is the last serialized boundary before dispatch, so the live
+    # definition owns this snapshot. Clearing is deliberate too: a definition edited
+    # to follow its Session/default Agent must not retain the old pinned backend.
+    if definition_id and str(run["run_type"] or "") in {"scheduled", "task_run"}:
+        definition = conn.execute(
+            select(run_definitions.c.agent_name)
+            .where(run_definitions.c.id == definition_id)
+            .where(run_definitions.c.definition_type == "scheduled")
+            .where(run_definitions.c.deleted_at.is_(None))
+            .limit(1)
+        ).mappings().first()
+        if definition is not None:
+            agent_name = str(definition["agent_name"] or "").strip()
+            identity = _resolve_agent_identity_by_name(conn, agent_name)
+            return {
+                "agent_id": str(identity["id"]) if identity else None,
+                "agent_name": str(identity["name"]) if identity else agent_name or None,
+                "agent_backend": str(identity["backend"]) if identity else None,
+            }
+
+    identity = None
+    if agent_id:
+        identity = conn.execute(
+            select(agents.c.id, agents.c.name, agents.c.backend)
+            .where(agents.c.id == agent_id)
+            .limit(1)
+        ).mappings().first()
+    elif agent_name:
+        identity = _resolve_agent_identity_by_name(conn, agent_name)
+    if identity is None:
+        return {
+            "agent_id": agent_id or None,
+            "agent_name": agent_name or None,
+            "agent_backend": agent_backend or None,
+        }
+    return {
+        "agent_id": str(identity["id"]),
+        "agent_name": str(identity["name"]),
+        "agent_backend": str(identity["backend"]),
+    }
+
+
 def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
     """The instant a one-shot ``run_at`` names, in the task's own timezone.
 
@@ -2773,7 +2824,7 @@ class SQLiteBackgroundTaskStore:
         }
 
     def refresh_run_agent_reference(self, run_id: str) -> Optional[dict[str, Any]]:
-        """Pin a claimed run to an Agent id while serialized with archive/rename."""
+        """Snapshot a claimed run's complete Agent identity under the write lock."""
 
         cleaned_run_id = str(run_id or "").strip()
         if not cleaned_run_id:
@@ -2781,35 +2832,27 @@ class SQLiteBackgroundTaskStore:
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
             run = conn.execute(
-                select(agent_runs.c.agent_id, agent_runs.c.agent_name)
+                select(
+                    agent_runs.c.agent_id,
+                    agent_runs.c.agent_name,
+                    agent_runs.c.agent_backend,
+                    agent_runs.c.definition_id,
+                    agent_runs.c.run_type,
+                )
                 .where(agent_runs.c.id == cleaned_run_id)
                 .limit(1)
             ).mappings().first()
             if run is None:
                 return None
-            agent_id = str(run["agent_id"] or "").strip()
-            agent_name = str(run["agent_name"] or "").strip()
-            agent = None
-            if agent_id:
-                agent = conn.execute(
-                    select(agents.c.id, agents.c.name)
-                    .where(agents.c.id == agent_id)
-                    .limit(1)
-                ).mappings().first()
-            elif agent_name:
-                agent = _resolve_agent_identity_by_name(conn, agent_name)
-            if agent is None:
-                return {"agent_id": agent_id or None, "agent_name": agent_name or None}
-            canonical_id = str(agent["id"])
-            canonical_name = str(agent["name"])
-            if canonical_id != agent_id or canonical_name != agent_name:
+            identity = _claimed_run_agent_identity(conn, run)
+            if any(run[field] != identity[field] for field in identity):
                 conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == cleaned_run_id)
-                    .values(agent_id=canonical_id, agent_name=canonical_name)
+                    .values(**identity)
                 )
                 _defer_run_ids_updated_from_connection(conn, [cleaned_run_id])
-            return {"agent_id": canonical_id, "agent_name": canonical_name}
+            return identity
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)
@@ -3321,6 +3364,10 @@ class SQLiteBackgroundTaskStore:
         row_to_publish = None
         payload = None
         with self.engine.begin() as conn:
+            # Claim status and its Agent ownership snapshot must become visible in the
+            # same transaction. Otherwise teardown can observe a newly-running row
+            # carrying the stale backend from before a definition edit (HFR-359).
+            reserve_write_lock(conn)
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
                 return None
@@ -3335,11 +3382,17 @@ class SQLiteBackgroundTaskStore:
                 )
                 payload = None
             else:
+                identity = _claimed_run_agent_identity(conn, row)
                 result = conn.execute(
                     update(agent_runs)
                     .where(agent_runs.c.id == run_id)
                     .where(agent_runs.c.status.in_(_status_query_values("queued")))
-                    .values(status="running", started_at=started_at, updated_at=started_at)
+                    .values(
+                        status="running",
+                        started_at=started_at,
+                        updated_at=started_at,
+                        **identity,
+                    )
                 )
                 if not result.rowcount:
                     return None

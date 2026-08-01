@@ -4405,6 +4405,20 @@ scenarios:
     # stop succeeds; backend cleanup remains best-effort and may still clear a stale
     # runtime without inventing interruption evidence for the refused turn.
     test: tests/test_running_agents_service.py::test_end_does_not_reconcile_manager_runs_when_the_canonical_stop_fails
+  - id: HFR-359
+    name: claim refreshes a queued definition run's complete Agent identity
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 27. A scheduled run could remain queued while its definition
+    # moved to an Agent on another backend. Execution reloaded the new Agent name, but
+    # claim preserved the name/id/backend stamped at enqueue, so Running-tab teardown
+    # saw stale ownership while the live turn ran elsewhere. Claim now snapshots the
+    # current definition Agent under the run write lock, updates all three durable
+    # identity columns together (including clears), and dispatches through that exact
+    # snapshot even if another edit races the subsequent definition mirror reload.
+    test: tests/test_scheduled_tasks.py::test_claimed_definition_run_refreshes_the_complete_agent_identity
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

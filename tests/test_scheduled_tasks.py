@@ -1264,6 +1264,98 @@ def test_definition_run_snapshot_refreshes_the_agent_backend(tmp_path: Path, mon
     assert request.agent_backend == "claude"
 
 
+def test_claimed_definition_run_refreshes_the_complete_agent_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-359: a post-enqueue definition edit owns claim-time dispatch identity.
+
+    A scheduled run can sit queued while its definition moves to another Agent. Claim
+    must update the durable ownership row and the dispatch snapshot together; otherwise
+    the runtime starts on the new backend while Running-tab End still sees the backend
+    stamped when the run was enqueued.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.vibe_agents import VibeAgentStore
+
+    agent_store = VibeAgentStore()
+    try:
+        old_agent = agent_store.create(name="old-runner", backend="codex")
+        new_agent = agent_store.create(name="new-runner", backend="claude")
+    finally:
+        agent_store.close()
+
+    task_store = ScheduledTaskStore()
+    task = task_store.add_task(
+        session_key="slack::channel::C123",
+        prompt="run the nightly report",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+        agent_name=old_agent.name,
+        expected_enabled_agent_id=old_agent.id,
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    assert (request_store.get_run(request.id) or {})["agent_backend"] == "codex"
+
+    editor_view = ScheduledTaskStore()
+    current = editor_view.get_task(task.id)
+    assert current is not None
+    editor_view.update_task(
+        task.id,
+        name=current.name,
+        session_key=current.session_key,
+        session_id=current.session_id,
+        prompt=current.prompt,
+        schedule_type=current.schedule_type,
+        post_to=current.post_to,
+        deliver_key=current.deliver_key,
+        cron=current.cron,
+        run_at=current.run_at,
+        timezone_name=current.timezone,
+        agent_name=new_agent.name,
+        session_policy=current.session_policy,
+        expected_enabled_agent_id=new_agent.id,
+    )
+
+    claimed = request_store.claim(request.id)
+    assert claimed is not None
+    assert claimed.agent_name == new_agent.name
+    assert claimed.agent_id == new_agent.id
+    assert claimed.agent_backend == "claude"
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=ScheduledTaskStore(),
+        request_store=request_store,
+    )
+    observed: dict[str, Any] = {}
+
+    async def _execute_task(claimed_task, *, execution_id, disable_one_shot, agent_id=None):
+        observed.update(
+            task_agent_name=claimed_task.agent_name,
+            agent_id=agent_id,
+            active_run=request_store.get_run(execution_id),
+        )
+        return SimpleNamespace(
+            error=None,
+            session_key=claimed_task.session_key,
+            session_id=claimed_task.session_id,
+            failure_code=None,
+        )
+
+    service._execute_task = _execute_task  # type: ignore[method-assign]
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    active_run = observed["active_run"]
+    assert observed["task_agent_name"] == new_agent.name
+    assert observed["agent_id"] == new_agent.id
+    assert active_run["agent_name"] == new_agent.name
+    assert active_run["agent_id"] == new_agent.id
+    assert active_run["agent_backend"] == "claude"
+
+
 def test_dispatch_stamps_the_effective_backend_for_a_default_routed_run(
     tmp_path: Path, monkeypatch
 ) -> None:
