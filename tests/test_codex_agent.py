@@ -827,13 +827,24 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
-        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
+        agent.controller = SimpleNamespace(
+            emit_agent_message=AsyncMock(),
+            sessions=SimpleNamespace(
+                find_session_ids_for_anchor=lambda anchor, **_kwargs: (
+                    ["session-1"] if anchor == "session-1" else []
+                )
+            ),
+        )
 
         async def _teardown(*_args, **kwargs):
             calls.append(("teardown", kwargs.get("settled_by")))
             return 1
 
-        with patch.object(_MODULE, "teardown_runtime_session_runs", _teardown):
+        # HFR-349 split Codex eviction into resolve/hold-all and settle-all phases, so
+        # patch the phase-two helper this path now owns rather than the old combined
+        # helper. The real resolver above still proves the runtime anchor reaches the
+        # expected Avibe session before settlement.
+        with patch.object(_MODULE, "teardown_session_runs", _teardown):
             with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
                 evicted = await agent.evict_idle_transports(600)
 
