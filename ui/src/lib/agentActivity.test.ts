@@ -247,9 +247,9 @@ describe('shouldShowRunningCard', () => {
 });
 
 describe('isActivityMessageType', () => {
-  it('is true only for assistant + tool_call', () => {
+  it('recognizes only Message-backed assistant activity', () => {
     expect(isActivityMessageType('assistant')).toBe(true);
-    expect(isActivityMessageType('tool_call')).toBe(true);
+    expect(isActivityMessageType('tool_call')).toBe(false);
     expect(isActivityMessageType('result')).toBe(false);
     expect(isActivityMessageType('user')).toBe(false);
   });

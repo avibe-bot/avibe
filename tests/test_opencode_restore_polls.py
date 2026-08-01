@@ -1,11 +1,10 @@
-"""Tests for ``OpenCodeAgent.restore_active_polls`` status recovery.
+"""Tests for ``OpenCodeAgent.restore_active_polls`` durable identity recovery.
 
-On a controller restart mid-OpenCode-turn, ``_reset_stale_agent_status`` flips
-every ``running`` workbench session to ``idle``. ``restore_active_polls`` then
-RESUMES the still-active OpenCode poll — but the resumed poll does NOT re-enter
-``AgentService.handle_message`` (the inbound status chokepoint), so the avibe
-sidebar dot would stay idle/gray for a backend turn that is still live unless the
-restore path re-marks the session ``running`` itself. These tests lock that:
+On controller restart, durable Turn ownership stays running while OpenCode
+rebuilds its logical/runtime/native mapping. The restored poll must publish that
+mapping before Delivery reconciliation and then wait for the recovery-complete
+barrier. Legacy polls without durable Turn history still restore their status
+projection. These tests lock that:
 
 * an avibe poll → ``controller.set_agent_status(session_id, "running")``;
 * an IM poll → NO status write (only avibe sessions get a dot).
@@ -151,6 +150,8 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     agent, _, _, _ = _build_agent({"oc-1": poll})
     poll_started = asyncio.Event()
     release_poll = asyncio.Event()
+    recovery_complete = asyncio.Event()
+    agent.controller._delivery_recovery_complete = recovery_complete
 
     class _HeldPollLoop:
         async def run_restored_poll_loop(self, poll_info):
@@ -164,7 +165,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
 
     async def _run():
         restored = await agent.restore_active_polls()
-        await poll_started.wait()
+        assert not poll_started.is_set()
         identity = active_steer_identity(
             agent.controller,
             "opencode",
@@ -172,6 +173,8 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             expected_logical_turn_id="logical-restored",
         )
         assert identity is not None
+        recovery_complete.set()
+        await poll_started.wait()
         receipt = await steer_active_turn(
             agent.controller,
             "opencode",
@@ -202,6 +205,34 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "tools": {"question": False},
         }
     ]
+
+
+def test_restore_publishes_workbench_status_after_native_identity_registration() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-1",
+    )
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    observed: list[tuple[bool, bool]] = []
+
+    def restore_running(session_id: str) -> None:
+        observed.append(
+            (
+                session_id in agent._active_requests,
+                agent._session_manager.get_request_session(session_id) is not None,
+            )
+        )
+
+    agent.controller.session_turns.restore_running = restore_running
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert observed == [(True, True)]
 
 
 def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:

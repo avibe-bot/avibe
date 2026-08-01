@@ -1506,6 +1506,7 @@ class OpenCodeServerManager:
         session_id: str,
         directory: str,
         text: str,
+        message_id: Optional[str] = None,
         agent: Optional[str] = None,
         model: Optional[Dict[str, str]] = None,
         reasoning_effort: Optional[str] = None,
@@ -1521,6 +1522,8 @@ class OpenCodeServerManager:
             body: Dict[str, Any] = {
                 "parts": [{"type": "text", "text": text}],
             }
+            if message_id:
+                body["messageID"] = message_id
             if agent:
                 body["agent"] = agent
             if model:

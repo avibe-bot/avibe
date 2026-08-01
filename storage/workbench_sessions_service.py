@@ -29,6 +29,7 @@ from storage.agent_session_rows import (
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    reserve_write_lock,
 )
 from storage.db import escape_sql_like
 from storage.session_reclaim import (
@@ -40,6 +41,7 @@ from storage.pagination import PageRequest, PageResult, page_result_from_limit_p
 from storage.models import (
     agent_runs,
     agent_sessions,
+    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -482,6 +484,7 @@ def update_session(
     """
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
         raise ReservedSessionError(str(session_id))
+    reserve_write_lock(conn)
     existing = conn.execute(
         select(
             agent_sessions.c.id,
@@ -864,18 +867,12 @@ def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
         ).scalar()
         or 0
     )
-    # Send-while-busy queued prompts are user-entered text that archive discards;
-    # surface them so the confirm dialog doesn't say "nothing linked" while
-    # silently dropping them. (PENDING reservations are transient dispatch state,
-    # not user-visible, so they're not counted here.)
-    from storage.messages_service import QUEUED_TYPE
-
     queued = (
         conn.execute(
             select(func.count())
-            .select_from(messages)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == QUEUED_TYPE)
+            .select_from(message_deliveries)
+            .where(message_deliveries.c.session_id == session_id)
+            .where(message_deliveries.c.state == "queued")
         ).scalar()
         or 0
     )
@@ -1177,11 +1174,10 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
             .values(status="canceled", completed_at=now)
         )
 
-    # 3b) Reclaim all unsent user input so the terminal session retains none:
-    #     queued prompts (flushed on completion / send-now), ``pending`` rows a
-    #     concurrent send reserved just before this committed (``promote_pending``
-    #     then no-ops on that in-flight send), and the saved composer draft.
-    from storage.messages_service import clear_draft, clear_pending, clear_queued
+    # 3b) Retire only submissions proven not written. Native start/steer/control
+    #     ambiguity remains durable and can still materialize positive evidence
+    #     after archive; the archived admission guard prevents any new work.
+    from storage import message_deliveries as delivery_store
     from storage.vault_service import (
         ACTIVE_GRANT_STATES,
         agent_release_scopes_after_rows,
@@ -1190,9 +1186,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
         vault_grants,
     )
 
-    clear_queued(conn, session_id)
-    clear_pending(conn, session_id)
-    clear_draft(conn, session_id)
+    delivery_store.retire_for_archive(conn, session_id)
+    delivery_store.set_draft(conn, session_id, None)
     revoked_vault_grant_rows = [
         dict(row)
         for row in conn.execute(
@@ -1251,21 +1246,3 @@ def set_agent_status(conn: Connection, session_id: str, status: str) -> bool:
         update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status=status)
     )
     return True
-
-
-def reset_running_agent_status(conn: Connection) -> int:
-    """Reset every ``running`` session to ``idle`` (startup crash recovery).
-
-    No turn survives a controller restart, so a ``running`` left in the table
-    is stale. Returns the number of rows reset. The browser reconciles the reset
-    by refetching sessions when its inbox-event stream (re)connects, NOT from a
-    broadcast — this runs in ``Controller.__init__`` before any event subscriber
-    exists, so a broadcast here would be dropped.
-    """
-
-    result = conn.execute(
-        update(agent_sessions)
-        .where(agent_sessions.c.agent_status == "running")
-        .values(agent_status="idle")
-    )
-    return result.rowcount or 0

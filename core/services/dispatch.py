@@ -79,6 +79,7 @@ async def dispatch_turn(
     *,
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
+    logical_turn_id: str | None = None,
 ) -> Optional[str]:
     """Run one agent turn for ``context`` and return the primary message id.
 
@@ -92,6 +93,7 @@ async def dispatch_turn(
         text,
         source=source,
         on_chunk=on_chunk,
+        logical_turn_id=logical_turn_id,
     )
     return outcome.error
 
@@ -103,6 +105,7 @@ async def dispatch_turn_with_outcome(
     *,
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
+    logical_turn_id: str | None = None,
 ) -> TurnDispatchOutcome:
     """Run one agent turn for ``context`` and report how its waiter was released.
 
@@ -153,7 +156,14 @@ async def dispatch_turn_with_outcome(
     # late straggler emit from a PREVIOUS (stopped / timed-out) turn can't
     # cross-feed into this turn's live stream or prematurely complete it.
     # Fail-open: emits without a token still flow (byte-identical to before).
-    turn_token = uuid.uuid4().hex
+    existing_turn_token = str(
+        (context.platform_specific or {}).get("turn_token") or ""
+    ).strip()
+    turn_token = (
+        str(logical_turn_id or "").strip()
+        or existing_turn_token
+        or uuid.uuid4().hex
+    )
     if context.platform_specific is None:
         context.platform_specific = {}
     context.platform_specific["turn_token"] = turn_token

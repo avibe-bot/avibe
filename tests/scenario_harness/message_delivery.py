@@ -44,7 +44,7 @@ class MessageDeliveryController(ScenarioControllerBase):
             ),
         )
         self.session_turns = SimpleNamespace(
-            on_terminal_result=lambda context, is_error: setattr(
+            on_terminal_result=lambda context, is_error, **_kwargs: setattr(
                 self,
                 "turn_terminal_calls",
                 self.turn_terminal_calls + 1,

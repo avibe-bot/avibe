@@ -24,7 +24,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from config import paths
 from config.platform_registry import PLATFORM_REGISTRY
 from config.v2_config import (
-    DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS,
     DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS,
     DEFAULT_HARNESS_RUN_QUEUED_TTL_SECONDS,
     DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
@@ -52,6 +51,7 @@ from modules.im import MessageContext
 from storage.agent_session_rows import (
     INBOX_SESSION_VISIBILITIES,
     WORKSPACE_NOTICE_SESSION_ID,
+    reserve_write_lock,
     session_is_runtime_owned,
 )
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
@@ -90,10 +90,10 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
-AGENT_RUN_DELIVERY_QUEUE = "queue"
+AGENT_RUN_DELIVERY_STEER = "steer"
 AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
 AGENT_RUN_DELIVERY_INTENTS = frozenset(
-    {AGENT_RUN_DELIVERY_QUEUE, AGENT_RUN_DELIVERY_SEND_NOW}
+    {AGENT_RUN_DELIVERY_STEER, AGENT_RUN_DELIVERY_SEND_NOW}
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
@@ -137,7 +137,7 @@ def _json_loads(value: str | None, default: Any) -> Any:
 def normalize_agent_run_delivery_intent(value: Any) -> str:
     """Return the durable Agent Run delivery intent or reject an unknown value."""
 
-    normalized = str(value or AGENT_RUN_DELIVERY_QUEUE).strip().lower()
+    normalized = str(value or AGENT_RUN_DELIVERY_STEER).strip().lower()
     if normalized not in AGENT_RUN_DELIVERY_INTENTS:
         raise ValueError(f"unsupported Agent Run delivery intent: {normalized}")
     return normalized
@@ -439,7 +439,6 @@ class AgentRunExecutionResult:
     complete_on_return: bool
     requeue_on_return: bool = False
     recover_queue_on_return: bool = False
-    coalesced_completion_ids: tuple[str, ...] = ()
     # The run's terminal row was already written by the executor itself (through a
     # guarded writer), so the caller must skip ``complete()`` but still run the
     # post-completion side effects: callback delivery and session-queue recovery.
@@ -875,6 +874,7 @@ class TaskExecutionRequest:
     session_policy: Optional[str] = None
     callback_session_id: Optional[str] = None
     callback_status: Optional[str] = None
+    delivery_id: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -905,67 +905,20 @@ class TaskExecutionRequest:
             session_policy=payload.get("session_policy"),
             callback_session_id=payload.get("callback_session_id"),
             callback_status=payload.get("callback_status"),
+            delivery_id=payload.get("delivery_id"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
 
 
 def _agent_run_message_for_request(request: TaskExecutionRequest) -> str:
-    coalesced = (request.metadata or {}).get("coalesced_queue")
-    if isinstance(coalesced, dict):
-        live_execution_ids = _live_coalesced_agent_run_ids(request)
-        live_set = set(live_execution_ids) if live_execution_ids is not None else None
-        prompt = str(coalesced.get("prompt") or "")
-        if prompt and live_set is None:
-            return prompt
-        messages = coalesced.get("messages")
-        if isinstance(messages, list):
-            parts: list[str] = []
-            for item in messages:
-                if not isinstance(item, dict):
-                    continue
-                execution_id = str(item.get("execution_id") or "").strip()
-                if live_set is not None and execution_id not in live_set:
-                    continue
-                message = str(item.get("message") or item.get("prompt") or "")
-                if message:
-                    parts.append(message)
-            if parts:
-                return "\n\n---\n\n".join(parts)
     return str(request.message or "")
-
-
-def _live_coalesced_agent_run_ids(request: TaskExecutionRequest) -> list[str] | None:
-    coalesced = (request.metadata or {}).get("coalesced_queue")
-    if not isinstance(coalesced, dict):
-        return None
-    execution_ids = coalesced.get("execution_ids")
-    if not isinstance(execution_ids, list):
-        return None
-    run_ids: list[str] = []
-    seen: set[str] = set()
-    for value in execution_ids:
-        run_id = str(value or "").strip()
-        if run_id and run_id not in seen:
-            seen.add(run_id)
-            run_ids.append(run_id)
-    if not run_ids:
-        return []
-    store = SQLiteBackgroundTaskStore()
-    try:
-        queued_ids, _stale_ids = store.inspect_queued_runs_for_workbench(run_ids)
-    finally:
-        store.close()
-    live = [request.id]
-    for run_id in queued_ids:
-        if run_id not in live:
-            live.append(run_id)
-    return live
 
 
 def _retire_stale_agent_run_queue_rows(
     *,
     session_id: Optional[str],
     execution_ids: list[str],
+    resubmit_execution_id: Optional[str] = None,
 ) -> int:
     """Retire old queued Workbench rows for recovered direct Agent Runs.
 
@@ -987,44 +940,42 @@ def _retire_stale_agent_run_queue_rows(
     if not session_id or not normalized_ids:
         return 0
 
-    from storage import messages_service
-    from storage.models import messages
+    from sqlalchemy import select
+    from storage import message_deliveries
+    from storage.models import agent_runs
 
-    native_ids = [f"agent_run:{execution_id}" for execution_id in normalized_ids]
-    primary_native_id = native_ids[0]
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        rows = list(
+        reserve_write_lock(conn)
+        bindings = {
+            str(row["id"]): str(row["delivery_id"])
+            for row in
             conn.execute(
-                select(messages.c.id, messages.c.native_message_id)
-                .where(messages.c.session_id == session_id)
-                .where(messages.c.platform == "avibe")
-                .where(messages.c.type == messages_service.QUEUED_TYPE)
-                .where(messages.c.native_message_id.in_(native_ids))
-            )
-        )
-        primary_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") == primary_native_id]
-        marker_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") != primary_native_id]
-        if marker_row_ids:
-            conn.execute(
-                messages.update()
-                .where(messages.c.id.in_(marker_row_ids))
-                .values(
-                    author="harness",
-                    source="harness",
-                    type=messages_service.HARNESS_DEDUPE_TYPE,
-                    content_text="",
-                    content_json=json.dumps({"text": ""}),
-                    metadata_json=json.dumps({"coalesced_from": primary_native_id, "recovered_queue_row": True}),
-                    updated_at=_utc_now_iso(),
+                select(agent_runs.c.id, agent_runs.c.delivery_id)
+                .where(agent_runs.c.id.in_(normalized_ids))
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.delivery_id.is_not(None))
+            ).mappings()
+        }
+        retired = 0
+        for run_id, delivery_id in bindings.items():
+            delivery = message_deliveries.get_delivery(conn, str(delivery_id))
+            if delivery is None or delivery["state"] != "queued":
+                continue
+            if run_id == resubmit_execution_id:
+                retired += int(
+                    message_deliveries.retire_queued_for_resubmission(
+                        conn,
+                        session_id,
+                        str(delivery_id),
+                        expected_dedupe_key=f"avibe:agent_run:{resubmit_execution_id}",
+                    )
                 )
-            )
-        row_ids = primary_row_ids + marker_row_ids
-        if not row_ids:
-            return 0
-        if primary_row_ids:
-            messages_service.delete_queued(conn, primary_row_ids)
-        return len(row_ids)
+            else:
+                retired += int(
+                    message_deliveries.retire_queued(conn, session_id, str(delivery_id))
+                )
+        return retired
 
 
 class ScheduledTaskStore:
@@ -1817,7 +1768,7 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         callback_session_id: Optional[str] = None,
         callback_active: bool = True,
-        delivery_intent: str = AGENT_RUN_DELIVERY_QUEUE,
+        delivery_intent: str = AGENT_RUN_DELIVERY_STEER,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
@@ -1862,7 +1813,6 @@ class TaskExecutionStore:
                 TaskExecutionRequest.from_dict(item)
                 for item in self._sqlite.list_runs(status="pending")
                 if item.get("request_type") in {"task_run", "hook_send", "agent_run", "scheduled", "watch", "webhook"}
-                and not (item.get("metadata") or {}).get("workbench_queue_holds_run")
             ]
         self._ensure_dirs()
         requests: list[TaskExecutionRequest] = []
@@ -1993,10 +1943,8 @@ class TaskExecutionStore:
         owned_run_ids: set[str],
         error_texts: dict[str, str],
         deliverable_run_ids: Optional[set[str]] = None,
-        busy_session_ids: Optional[set[str]] = None,
         orphan_grace_seconds: int,
         queued_ttl_seconds: int,
-        hold_ttl_seconds: int,
     ) -> list[SweptRun]:
         """Terminalize provably stale runs. Empty for the legacy file store."""
 
@@ -2006,10 +1954,8 @@ class TaskExecutionStore:
             owned_run_ids=owned_run_ids,
             error_texts=error_texts,
             deliverable_run_ids=deliverable_run_ids,
-            busy_session_ids=busy_session_ids,
             orphan_grace_seconds=orphan_grace_seconds,
             queued_ttl_seconds=queued_ttl_seconds,
-            hold_ttl_seconds=hold_ttl_seconds,
         )
 
     def supports_guarded_settlement(self) -> bool:
@@ -2488,7 +2434,7 @@ class TaskExecutionStore:
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
 
-    def complete_coalesced(
+    def settle_turn_participants(
         self,
         request: TaskExecutionRequest,
         run_ids: list[str],
@@ -2498,12 +2444,12 @@ class TaskExecutionStore:
     ) -> None:
         if self._sqlite is not None:
             from storage.background import (
-                complete_coalesced_agent_runs_for_workbench_in_connection,
+                settle_agent_runs_for_turn_in_connection,
                 run_update_event_transaction,
             )
 
             with run_update_event_transaction(self._sqlite.engine) as conn:
-                complete_coalesced_agent_runs_for_workbench_in_connection(
+                settle_agent_runs_for_turn_in_connection(
                     conn,
                     run_ids,
                     ok=ok,
@@ -2956,26 +2902,6 @@ class ScheduledTaskService:
         owned |= {str(run_id) for run_id in provider() if run_id}
         return owned
 
-    def _busy_session_ids(self) -> set[str]:
-        """Sessions with a live turn, which is why their queue holds exist.
-
-        The gate answers ``enqueued`` for a run submitted into a session that already
-        has a turn in flight, and that run is then requeued with
-        ``workbench_queue_holds_run``. Nobody reports it as owned — the live turn owns
-        only the ids it is itself executing — so the hold class needs this second live
-        fact or it fails the follower of any turn longer than the hold TTL (Codex P2).
-
-        Raises when the turn lane cannot be reached, for the same reason
-        :meth:`_owned_agent_run_ids` does: "no session is busy" and "I cannot tell" are
-        opposite answers, and the caller must fail closed on the second.
-        """
-
-        session_turns = getattr(self.controller, "session_turns", None)
-        provider = getattr(session_turns, "busy_session_ids", None)
-        if not callable(provider):
-            raise RuntimeError("controller.session_turns.busy_session_ids is unavailable")
-        return {str(session_id) for session_id in provider() if session_id}
-
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.
 
@@ -3074,30 +3000,14 @@ class ScheduledTaskService:
             )
             deliverable_run_ids = set()
             queued_ttl_seconds = 0
-        hold_ttl_seconds = self._runtime_seconds(
-            "harness_run_hold_ttl_seconds", DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS
-        )
-        try:
-            busy_session_ids = self._busy_session_ids()
-        except Exception:
-            # Fail closed by disabling the class, same posture as deliverability: a hold
-            # is only abandoned if no live turn explains it, and "I cannot tell which
-            # sessions are busy" would fail a run the gate is about to flush.
-            logger.warning(
-                "Skipping queue-hold sweep: live session turns are unknown", exc_info=True
-            )
-            busy_session_ids = set()
-            hold_ttl_seconds = 0
         swept = self.request_store.sweep_stale_runs(
             owned_run_ids=owned_run_ids,
             deliverable_run_ids=deliverable_run_ids,
-            busy_session_ids=busy_session_ids,
             error_texts={reason: self._t(key) for reason, key in SWEEP_I18N_KEYS.items()},
             orphan_grace_seconds=self._runtime_seconds(
                 "harness_run_orphan_grace_seconds", DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS
             ),
             queued_ttl_seconds=queued_ttl_seconds,
-            hold_ttl_seconds=hold_ttl_seconds,
         )
         # Unconditional: the in-memory wedge and the stale rows are independent
         # failures, and either can outlive the other.
@@ -4957,7 +4867,6 @@ class ScheduledTaskService:
         should_complete = True
         settled_out_of_band = False
         recover_queue_on_return = False
-        coalesced_completion_ids: list[str] = _live_coalesced_agent_run_ids(request) or []
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -5043,15 +4952,12 @@ class ScheduledTaskService:
                 settled_out_of_band = result.settled_out_of_band
                 recover_queue_on_return = result.recover_queue_on_return
                 if result.requeue_on_return:
-                    requeue_metadata: dict[str, Any] = {
-                        "workbench_queue_holds_run": True,
-                    }
+                    requeue_metadata: dict[str, Any] = {}
                     if result.delivery_outcome is not None:
                         requeue_metadata[
                             AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY
                         ] = result.delivery_outcome
                     self.request_store.requeue(request.id, metadata=requeue_metadata)
-                coalesced_completion_ids = list(result.coalesced_completion_ids)
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
@@ -5113,29 +5019,16 @@ class ScheduledTaskService:
             settled_out_of_band = False
         finally:
             if should_complete:
-                if coalesced_completion_ids:
-                    self.request_store.complete_coalesced(
-                        request,
-                        coalesced_completion_ids,
-                        ok=not error,
-                        error=error,
-                    )
-                else:
-                    self.request_store.complete(
-                        request,
-                        ok=not error,
-                        error=error,
-                        task_id=task_id,
-                        session_key=session_key,
-                        session_id=session_id,
-                        # ``None`` for every ordinary completion, so the settlement
-                        # writer's metadata merge is a no-op exactly as before. Only
-                        # ``complete`` carries it: ``complete_coalesced`` settles
-                        # ``agent_run`` fan-outs, which reserve their own session per
-                        # run and so cannot reach the branch above.
-                        interrupt_reason=interrupt_reason,
-                        failure_code=failure_code,
-                    )
+                self.request_store.complete(
+                    request,
+                    ok=not error,
+                    error=error,
+                    task_id=task_id,
+                    session_key=session_key,
+                    session_id=session_id,
+                    interrupt_reason=interrupt_reason,
+                    failure_code=failure_code,
+                )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes
                 # the same callback follow-through as ``complete()``.
@@ -5379,24 +5272,6 @@ class ScheduledTaskService:
                 delivery_outcome=delivery_outcome,
             )
         if target.platform == "avibe" and session_id and gate is not None:
-            stale_queue_rows = _retire_stale_agent_run_queue_rows(
-                session_id=session_id,
-                execution_ids=_live_coalesced_agent_run_ids(
-                    TaskExecutionRequest(
-                        id=execution_id,
-                        request_type="agent_run",
-                        metadata=metadata or {},
-                    )
-                )
-                or [execution_id],
-            )
-            if stale_queue_rows:
-                try:
-                    from core.inbox_events import bus
-
-                    bus.publish("queue.updated", {"session_id": session_id})
-                except Exception:
-                    logger.debug("agent_run recovery: queue.updated publish failed", exc_info=True)
             if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW:
                 state = await gate.submit_scheduled(
                     session_id,
@@ -5438,7 +5313,7 @@ class ScheduledTaskService:
                     complete_on_return=False,
                     requeue_on_return=not (
                         isinstance(state, TurnSubmissionResult)
-                        and state.queue_owner_transferred
+                        and state.delivery_owner_transferred
                     ),
                     recover_queue_on_return=bool(
                         isinstance(state, TurnSubmissionResult)
@@ -5447,17 +5322,9 @@ class ScheduledTaskService:
                     delivery_outcome=delivery_outcome,
                 )
             if route == "duplicate":
-                live_ids = _live_coalesced_agent_run_ids(
-                    TaskExecutionRequest(
-                        id=execution_id,
-                        request_type="agent_run",
-                        metadata=metadata or {},
-                    )
-                )
                 return AgentRunExecutionResult(
                     error=None,
                     complete_on_return=True,
-                    coalesced_completion_ids=tuple(live_ids or [execution_id]),
                 )
             return AgentRunExecutionResult(
                 error=None,
@@ -5539,6 +5406,99 @@ class ScheduledTaskService:
                 execution_id, settled_by=settled_by, error=error_text
             ):
                 settled_any = True
+        if settled_any:
+            self._drain_dirty = True
+
+    def settle_agent_runs_from_terminal_turn(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        turn_id: str,
+        outcome: str,
+        settled_by: str | None,
+        evidence_kind: str | None,
+        evidence: Mapping[str, Any],
+    ) -> None:
+        """Settle late accepted Runs from their immutable Turn snapshot."""
+
+        if settled_by in SETTLEMENTS_WITHOUT_RESULT:
+            self.settle_agent_runs_without_result(
+                execution_ids,
+                settled_by=str(settled_by),
+            )
+            return
+        if evidence.get("settles_run") is not True:
+            return
+        store = self.request_store.sqlite_backend
+        if store is None:
+            logger.warning(
+                "cannot settle late accepted Agent Runs for Turn=%s without SQLite",
+                turn_id,
+            )
+            return
+        terminal_status = {
+            "completed": "succeeded",
+            "failed": "failed",
+            "canceled": "canceled",
+        }.get(outcome)
+        if terminal_status is None:
+            return
+        result_text = str(evidence.get("result_text") or "")
+        terminal_error = evidence.get("terminal_error")
+        message_id = str(evidence.get("message_id") or "").strip() or None
+        output_provenance = evidence.get("output_provenance")
+        output_provenance = (
+            dict(output_provenance) if isinstance(output_provenance, Mapping) else {}
+        )
+        output_id = str(output_provenance.get("output_id") or "").strip()
+        if not output_id and output_provenance.get("sequence") is not None:
+            output_id = f"sequence:{output_provenance['sequence']}"
+        if not output_id:
+            output_id = "terminal"
+        registry = getattr(
+            getattr(getattr(self, "controller", None), "agent_service", None),
+            "activities",
+            None,
+        )
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        settled_any = False
+        for raw_execution_id in execution_ids:
+            execution_id = str(raw_execution_id or "").strip()
+            if not execution_id:
+                continue
+            run_terminal_status = terminal_status
+            if callable(has_blocker) and has_blocker(execution_id):
+                if not store.defer_run_terminal(
+                    execution_id,
+                    terminal_status=terminal_status,
+                    result_text=result_text,
+                    error=(
+                        str(terminal_error) if terminal_error is not None else None
+                    ),
+                ):
+                    logger.warning(
+                        "failed to defer late terminal settlement for Run=%s Turn=%s",
+                        execution_id,
+                        turn_id,
+                    )
+                run_terminal_status = None
+            result = store.record_run_output(
+                execution_id,
+                output_id=output_id,
+                text=result_text,
+                message_id=message_id,
+                provenance={
+                    **output_provenance,
+                    "turn_id": turn_id,
+                    "evidence_kind": evidence_kind,
+                    "settled_by": settled_by,
+                },
+                terminal_status=run_terminal_status,
+                error=str(terminal_error) if terminal_error is not None else None,
+            )
+            settled_any = settled_any or bool(
+                result.get("terminal_transition") or result.get("text_backfilled")
+            )
         if settled_any:
             self._drain_dirty = True
 
@@ -6657,7 +6617,6 @@ class ScheduledTaskService:
                 "source_actor": (metadata or {}).get("source_actor"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
-                "coalesced_queue": (metadata or {}).get("coalesced_queue"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {

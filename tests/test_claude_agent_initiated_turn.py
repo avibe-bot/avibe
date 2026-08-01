@@ -2526,7 +2526,7 @@ class ActivityRunAttributionTests(unittest.IsolatedAsyncioTestCase):
             self._pending(
                 task_trigger_kind="scheduled",
                 task_execution_id="run-scheduled",
-                coalesced_queue={"execution_ids": ["run-scheduled", "run-coalesced"]},
+                accepted_agent_run_ids=["run-scheduled", "run-coalesced"],
             )
         ]
 

@@ -5,6 +5,8 @@ import json
 import pytest
 
 from config import paths
+from storage import message_deliveries
+from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
@@ -392,20 +394,18 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
     engine = _setup(monkeypatch, tmp_path)
     scope_id = _seed(engine, "sesaaa")
     with engine.begin() as conn:
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
             text="first",
         )
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
             text="second",
             metadata={
                 "scheduled_provenance": {
@@ -416,7 +416,7 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
                 }
             },
         )
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
@@ -461,7 +461,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
     scope_id = _seed(engine, "sesaaa")
     _seed(engine, "sesbbb", native="proj_b")
     with engine.begin() as conn:
-        queued = messages_service.enqueue_queued(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesaaa",
@@ -496,7 +496,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
     assert removed["status"] == "removed"
     assert notified == ["sesaaa"]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "sesaaa") == []
+        assert message_deliveries.list_queued(conn, "sesaaa") == []
 
 
 def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
@@ -521,16 +521,20 @@ def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
         metadata={"workbench_queue_holds_run": True},
     )
     with engine.begin() as conn:
-        queued = messages_service.append(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="sesrun",
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
             text=request.message or "",
             native_message_id=f"agent_run:{request.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id="sesrun",
+            delivery_id=queued["id"],
         )
     monkeypatch.setattr(
         cli,
@@ -551,7 +555,7 @@ def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
     assert stored["status"] == "canceled"
     assert stored["cancel_requested"] is True
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "sesrun") == []
+        assert message_deliveries.list_queued(conn, "sesrun") == []
 
 
 def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys):

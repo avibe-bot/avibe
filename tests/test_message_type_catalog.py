@@ -15,7 +15,6 @@ from vibe.message_types import (
     input_author_type_pairs,
     spec_for,
     types_with,
-    types_without,
 )
 
 
@@ -102,9 +101,9 @@ def test_searchable_types_match_current_default_query() -> None:
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    expected = ("queued", "draft", "pending", "harness_dedupe", "silent")
-    assert types_without("inboxActivity") == expected
-    assert messages_service.NON_CONVERSATION_TYPES == expected
+    expected = ("user", "harness", "annotation", "result", "notify", "error", "assistant")
+    assert types_with("inboxActivity") == expected
+    assert messages_service.INBOX_ACTIVITY_TYPES == expected
 
 
 def test_inbox_preview_and_settlement_types_match_current_query() -> None:
@@ -113,13 +112,13 @@ def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     current_query_sets = _message_type_sequences(connection.statements[-1])
 
     expected_preview = ("result", "notify", "error")
-    expected_settlement = ("result", "notify", "error", "silent")
+    expected_settlement = ("result", "notify", "error")
     expected_unread = ("result",)
     assert types_with("inboxPreview") == expected_preview
     assert types_with("inboxSettlesReply") == expected_settlement
     assert types_with("unread") == expected_unread
     assert current_query_sets == {
-        messages_service.NON_CONVERSATION_TYPES,
+        messages_service.INBOX_ACTIVITY_TYPES,
         expected_preview,
         expected_settlement,
         expected_unread,
@@ -162,7 +161,6 @@ def test_annotation_catalog_contract_is_explicit() -> None:
         "unread": False,
         "webPush": False,
         "webPushWhenEvents": (),
-        "acceptedReservation": True,
         "render": "annotation",
     }
 
@@ -180,7 +178,6 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         "result",
         "notify",
         "error",
-        "silent",
         "assistant",
     )
     assert derived_relevant == set(expected_relevant)

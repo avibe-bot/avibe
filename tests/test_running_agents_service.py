@@ -967,7 +967,7 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
             "agent_session_id": session_id,
             "task_trigger_kind": "agent_run",
             "task_execution_id": "run-primary",
-            "coalesced_queue": {"execution_ids": ["run-coalesced"]},
+            "accepted_agent_run_ids": ["run-primary", "run-coalesced"],
             "agent_session_target": {
                 "id": session_id,
                 "agent_backend": "codex",
@@ -1001,7 +1001,10 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
     assert stopped_context.platform_specific["turn_token"] == "sink-token"
     assert stopped_context.platform_specific["task_trigger_kind"] == "agent_run"
     assert stopped_context.platform_specific["task_execution_id"] == "run-primary"
-    assert stopped_context.platform_specific["coalesced_queue"] == {"execution_ids": ["run-coalesced"]}
+    assert stopped_context.platform_specific["accepted_agent_run_ids"] == [
+        "run-primary",
+        "run-coalesced",
+    ]
     assert stopped_context.platform_specific["agent_session_target"]["session_anchor"] == base_session_id
 
 

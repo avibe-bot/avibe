@@ -15,6 +15,8 @@ from config import paths
 from config.v2_config import V2Config
 from core.services import sessions as workbench_sessions_service
 from storage import messages_service
+from storage import message_deliveries
+from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, media_objects, show_session_events
@@ -152,6 +154,7 @@ class ShowSessionEventStore:
 
         with ExitStack() as cleanup:
             with self.engine.begin() as conn:
+                reserve_write_lock(conn)
                 session = conn.execute(
                     select(agent_sessions.c.id, agent_sessions.c.scope_id, agent_sessions.c.status)
                     .where(agent_sessions.c.id == session_id)
@@ -229,6 +232,7 @@ class ShowSessionEventStore:
                         ),
                         transcript_text=transcript_text,
                         message_id=None,
+                        delivery_id=None,
                         created_at=created_at,
                     )
                 )
@@ -261,6 +265,8 @@ class ShowSessionEventStore:
                     return existing
                 message: dict[str, Any] | None = None
                 message_id: str | None = None
+                delivery: dict[str, Any] | None = None
+                delivery_id: str | None = None
                 writes_annotation = (
                     event_type == "human.annotation.created"
                     or (
@@ -271,7 +277,6 @@ class ShowSessionEventStore:
                 if writes_annotation or (
                     transcript_text and event_type not in ANNOTATION_EVENT_TYPES
                 ):
-                    harness_input = requests_dispatch
                     content: dict[str, Any] = {"text": transcript_text}
                     metadata: dict[str, Any] = {
                         "source": "show_page",
@@ -287,42 +292,68 @@ class ShowSessionEventStore:
                             content["attachments"] = attachments
                         metadata.update(_annotation_metadata(event_payload, anchor))
                     if requests_dispatch:
-                        metadata[messages_service.QUEUED_DISPATCH_TEXT_KEY] = dispatch_text
-                    message = messages_service.append(
-                        conn,
-                        scope_id=session["scope_id"],
-                        session_id=session_id,
-                        platform="avibe",
-                        author=(
-                            "agent"
-                            if actor in {"assistant", "system"}
-                            else messages_service.HARNESS_TYPE
-                            if harness_input
-                            else "user"
-                        ),
-                        message_type=(
-                            messages_service.PENDING_TYPE
-                            if requests_dispatch and reserve_dispatch
-                            else messages_service.ANNOTATION_TYPE
-                            if writes_annotation
-                            else messages_service.HARNESS_TYPE
-                            if harness_input
-                            else None
-                        ),
-                        text=transcript_text,
-                        content=content,
-                        metadata=metadata,
-                        source=messages_service.HARNESS_TYPE if harness_input else None,
-                        author_name=SHOW_TRIGGER_KIND[event_type] if harness_input else None,
-                        author_id=event_id if harness_input else None,
-                        native_message_id=f"show:{event_id}",
-                    )
-                    message_id = message["id"]
-                    conn.execute(
-                        update(show_session_events)
-                        .where(show_session_events.c.id == event_id)
-                        .values(message_id=message_id)
-                    )
+                        delivery_id = message_deliveries.new_delivery_id()
+                        delivery_row = message_deliveries.insert_delivery(
+                            conn,
+                            delivery_id=delivery_id,
+                            session_id=session_id,
+                            priority="p3",
+                            state="reserved",
+                            snapshot=message_deliveries.message_snapshot(
+                                scope_id=session["scope_id"],
+                                session_id=session_id,
+                                platform="avibe",
+                                author=messages_service.HARNESS_TYPE,
+                                source=messages_service.HARNESS_TYPE,
+                                message_type=(
+                                    messages_service.ANNOTATION_TYPE
+                                    if writes_annotation
+                                    else messages_service.HARNESS_TYPE
+                                ),
+                                text=transcript_text,
+                                content=content,
+                                metadata=metadata,
+                                author_name=SHOW_TRIGGER_KIND[event_type],
+                                author_id=event_id,
+                                native_message_id=f"show:{event_id}",
+                            ),
+                            dispatch_text=dispatch_text,
+                            dedupe_key=f"show:{event_id}",
+                            history_event={
+                                "kind": "admission",
+                                "priority": "p3",
+                                "state": "reserved",
+                            },
+                        )
+                        delivery = message_deliveries.delivery_payload(delivery_row)
+                        conn.execute(
+                            update(show_session_events)
+                            .where(show_session_events.c.id == event_id)
+                            .values(delivery_id=delivery_id)
+                        )
+                    else:
+                        message = messages_service.append(
+                            conn,
+                            scope_id=session["scope_id"],
+                            session_id=session_id,
+                            platform="avibe",
+                            author="agent" if actor in {"assistant", "system"} else "user",
+                            message_type=(
+                                messages_service.ANNOTATION_TYPE
+                                if writes_annotation
+                                else None
+                            ),
+                            text=transcript_text,
+                            content=content,
+                            metadata=metadata,
+                            native_message_id=f"show:{event_id}",
+                        )
+                        message_id = message["id"]
+                        conn.execute(
+                            update(show_session_events)
+                            .where(show_session_events.c.id == event_id)
+                            .values(message_id=message_id)
+                        )
                     workbench_sessions_service.touch_session(conn, session_id)
             cleanup.pop_all()
 
@@ -338,6 +369,8 @@ class ShowSessionEventStore:
             "transcript_text": transcript_text,
             "message_id": message_id,
             "message": message,
+            "delivery_id": delivery_id,
+            "delivery": delivery,
             "created_at": created_at,
         }
         return event
@@ -1105,6 +1138,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "payload": payload,
         "transcript_text": row.get("transcript_text"),
         "message_id": row.get("message_id"),
+        "delivery_id": row.get("delivery_id"),
         "created_at": row.get("created_at"),
     }
 
@@ -1140,6 +1174,14 @@ def _existing_event_payload(
             None,
         )
     event["message"] = message
+    delivery_id = event.get("delivery_id")
+    event["delivery"] = (
+        message_deliveries.delivery_payload(delivery)
+        if isinstance(delivery_id, str)
+        and delivery_id
+        and (delivery := message_deliveries.get_delivery(conn, delivery_id)) is not None
+        else None
+    )
     return event
 
 

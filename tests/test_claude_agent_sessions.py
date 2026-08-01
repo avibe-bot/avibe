@@ -2820,13 +2820,13 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
                 "task_execution_id": "run-old",
             }
         )
-        coalesced = {"execution_ids": ["run-new", "run-child"]}
+        accepted = ["run-new", "run-child"]
         pending = SimpleNamespace(
             context=SimpleNamespace(
                 platform_specific={
                     "task_trigger_kind": "agent_run",
                     "task_execution_id": "run-new",
-                    "coalesced_queue": coalesced,
+                    "accepted_agent_run_ids": accepted,
                 }
             )
         )
@@ -2834,12 +2834,8 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         ClaudeAgent._adopt_pending_turn_token(ctx, pending)
 
         self.assertEqual(ctx.platform_specific["task_execution_id"], "run-new")
-        self.assertEqual(ctx.platform_specific["coalesced_queue"], coalesced)
-        self.assertIsNot(ctx.platform_specific["coalesced_queue"], coalesced)
-        self.assertIsNot(
-            ctx.platform_specific["coalesced_queue"]["execution_ids"],
-            coalesced["execution_ids"],
-        )
+        self.assertEqual(ctx.platform_specific["accepted_agent_run_ids"], accepted)
+        self.assertIsNot(ctx.platform_specific["accepted_agent_run_ids"], accepted)
 
     def test_clears_stale_agent_run_attribution_for_plain_turn(self):
         ctx = SimpleNamespace(
@@ -2847,7 +2843,7 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
                 "turn_token": "T1",
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-old",
-                "coalesced_queue": {"execution_ids": ["run-old"]},
+                "accepted_agent_run_ids": ["run-old"],
             }
         )
         pending = SimpleNamespace(
@@ -2859,7 +2855,7 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         self.assertEqual(ctx.platform_specific["turn_token"], "T2")
         self.assertNotIn("task_trigger_kind", ctx.platform_specific)
         self.assertNotIn("task_execution_id", ctx.platform_specific)
-        self.assertNotIn("coalesced_queue", ctx.platform_specific)
+        self.assertNotIn("accepted_agent_run_ids", ctx.platform_specific)
 
 
 class _FakeBaseAgent(BaseAgent):

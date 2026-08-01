@@ -20,7 +20,10 @@ from core.session_turns import SessionTurnManager, emit_matches_active_turn
 from core.show_git import POST_TURN, PRE_TURN, ShowGitCheckpointService, TurnCheckpointContext
 from modules.agents.service import AgentService
 from modules.im import MessageContext
+from storage.agent_session_rows import create_agent_session_row
+from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
+from storage import message_deliveries
 
 
 class _Settings:
@@ -211,6 +214,35 @@ def test_all_turn_entrypoints_reach_checkpoint_subscriber(monkeypatch, tmp_path)
         "scheduled_task": _context("scheduled_task", platform="slack", trigger_kind="scheduled"),
         "watch_callback": _context("watch_callback", platform="slack", trigger_kind="watch"),
     }
+    engine = create_sqlite_engine()
+    show_delivery_id = "msg_show_page"
+    with engine.begin() as conn:
+        for context in contexts.values():
+            create_agent_session_row(
+                conn,
+                session_id=context.platform_specific["agent_session_id"],
+                scope_id=None,
+                session_anchor=None,
+                agent_backend="claude",
+                agent_variant="claude",
+                workdir=str(tmp_path),
+            )
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id=show_delivery_id,
+            session_id="ses_show_page",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id="ses_show_page",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="edit show page",
+            ),
+            dispatch_text="edit show page",
+        )
     checkpoint_calls = defaultdict(list)
 
     class _Repository:
@@ -279,7 +311,11 @@ def test_all_turn_entrypoints_reach_checkpoint_subscriber(monkeypatch, tmp_path)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/internal/dispatch_async",
-                json={"session_id": "ses_show_page", "entrypoint": "show_page"},
+                json={
+                    "session_id": "ses_show_page",
+                    "user_message_id": show_delivery_id,
+                    "entrypoint": "show_page",
+                },
             )
         assert response.status_code == 202
         for _ in range(100):

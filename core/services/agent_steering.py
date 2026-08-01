@@ -31,6 +31,17 @@ class SteerRequest:
     expected_logical_turn_id: str
     expected_native_turn_id: str
     text: str
+    attempt_id: str = ""
+
+
+@dataclass(frozen=True)
+class SteerReconcileRequest:
+    """One read-only query for exact evidence about a prior steer attempt."""
+
+    target_session_id: str
+    expected_logical_turn_id: str
+    expected_native_turn_id: str
+    attempt_id: str
 
 
 @dataclass(frozen=True)
@@ -211,4 +222,39 @@ async def steer_active_turn(
         raise
     if not isinstance(receipt, SteerResult):
         return result(SteerOutcome.UNKNOWN, reason="invalid_adapter_receipt", backend=backend)
+    return receipt
+
+
+async def reconcile_steer_attempt(
+    controller: Any,
+    backend: str,
+    request: SteerReconcileRequest,
+) -> SteerResult:
+    """Read exact backend evidence without repeating the native write."""
+
+    targets = [
+        target
+        for target in _active_targets(controller, backend, request.target_session_id)
+        if target.logical_turn_id == request.expected_logical_turn_id
+    ]
+    if len(targets) != 1:
+        return result(
+            SteerOutcome.UNKNOWN,
+            reason="reconciliation_target_unavailable",
+            backend=backend,
+        )
+    reconcile = getattr(targets[0].agent, "reconcile_steer_attempt", None)
+    if not callable(reconcile):
+        return result(
+            SteerOutcome.UNKNOWN,
+            reason="reconciliation_unsupported",
+            backend=backend,
+        )
+    receipt = await reconcile(request, targets[0])
+    if not isinstance(receipt, SteerResult):
+        return result(
+            SteerOutcome.UNKNOWN,
+            reason="invalid_reconciliation_receipt",
+            backend=backend,
+        )
     return receipt

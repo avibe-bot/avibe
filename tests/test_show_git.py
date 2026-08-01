@@ -821,17 +821,27 @@ def test_storage_lookup_uses_turn_boundary_instead_of_later_pending_message():
             message_type="user",
             text="current driving message",
         )
-        later = messages_service.append(
+        from storage import message_deliveries
+
+        later = message_deliveries.insert_delivery(
             conn,
-            scope_id=scope_id,
+            delivery_id=message_deliveries.new_delivery_id(),
             session_id=session_id,
-            platform="avibe",
-            author="user",
-            message_type="pending",
-            text="later pending message",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="later pending message",
+            ),
+            dispatch_text="later pending message",
+            now="2099-01-01T00:00:02+00:00",
         )
         conn.execute(update(messages).where(messages.c.id == current["id"]).values(created_at="2099-01-01T00:00:01+00:00"))
-        conn.execute(update(messages).where(messages.c.id == later["id"]).values(created_at="2099-01-01T00:00:02+00:00"))
+        assert later["message_id"] is None
 
     context = show_git.load_turn_checkpoint_context(session_id, after="2099-01-01T00:00:00+00:00")
     assert context.message == "current driving message"

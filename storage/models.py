@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DDL,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -130,6 +132,14 @@ agent_sessions = Table(
     # ``running`` while a turn is in flight, ``failed`` when the most recent
     # turn errored, ``idle`` otherwise. Drives the workbench sidebar status dot.
     Column("agent_status", String, nullable=False, server_default="idle"),
+    # Session-level policy/state. The hold blocks only autonomous backlog drain;
+    # explicit admission and empty-P1 release remain Delivery-manager decisions.
+    Column("queue_hold_state", String, nullable=False, server_default="open"),
+    Column("queue_hold_version", Integer, nullable=False, server_default="1"),
+    Column("queue_held_at", String, nullable=True),
+    # Composer state is one value per Session, not a communication record.
+    Column("composer_draft_text", Text, nullable=True),
+    Column("composer_draft_updated_at", String, nullable=True),
     Column("metadata_json", Text, nullable=False),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
@@ -155,6 +165,10 @@ agent_sessions = Table(
         "id",
     ),
     Index("ix_agent_sessions_native_session", "native_session_id"),
+    CheckConstraint(
+        "queue_hold_state in ('open', 'held')",
+        name="ck_agent_sessions_queue_hold_state",
+    ),
 )
 
 runtime_records = Table(
@@ -249,6 +263,7 @@ agent_runs = Table(
     Column("result_text", Text, nullable=True),
     Column("result_payload_json", Text, nullable=True),
     Column("message_ids_json", Text, nullable=True),
+    Column("delivery_id", String, nullable=True),
     Column("callback_session_id", String, nullable=True),
     Column("callback_status", String, nullable=True),
     Column("callback_error", Text, nullable=True),
@@ -270,6 +285,12 @@ agent_runs = Table(
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
+    Index(
+        "uq_agent_runs_delivery",
+        "delivery_id",
+        unique=True,
+        sqlite_where=text("delivery_id is not null"),
+    ),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
@@ -308,6 +329,7 @@ show_session_events = Table(
     Column("payload_json", Text, nullable=False),
     Column("transcript_text", Text, nullable=True),
     Column("message_id", String, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True),
+    Column("delivery_id", String, nullable=True),
     Column("created_at", String, nullable=False),
     Index("ix_show_session_events_session_created", "session_id", "created_at"),
     Index("ix_show_session_events_type_created", "event_type", "created_at"),
@@ -354,12 +376,22 @@ messages = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
-    Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey(
+            "agent_sessions.id",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+            name="fk_messages_session_id_agent_sessions",
+        ),
+        nullable=True,
+    ),
     Column("platform", String, nullable=False),
     Column("author", String, nullable=False),
-    # Fine-grained message type, distinct from the coarse ``author``:
-    # user / assistant / tool_call / notify / result. The inbox preview uses
-    # the latest ``assistant`` row. Persisted regardless of IM display muting.
+    # Fine-grained accepted communication kind, distinct from coarse ``author``.
+    # Operational queue/trace/draft concepts are forbidden from this ledger.
     Column("type", String, nullable=False, server_default="assistant"),
     Column("author_id", String, nullable=True),
     Column("author_name", Text, nullable=True),
@@ -412,6 +444,339 @@ messages = Table(
     Index("ix_messages_scope_created", "scope_id", "created_at"),
     Index("ix_messages_scope_unread", "scope_id", "read_at"),
     Index("ix_messages_author_created", "author", "created_at"),
+    CheckConstraint(
+        "type not in ('queued', 'pending', 'draft', 'harness_dedupe', 'silent', 'tool_call')",
+        name="ck_messages_communication_type",
+    ),
+)
+
+# Durable execution ownership for one logical Agent Turn per Session. The Turn
+# references its initial Delivery even before native acceptance has materialized
+# a Message. Accepted steer participants reference the Turn from their Delivery.
+session_turns = Table(
+    "session_turns",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey(
+            "agent_sessions.id",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=False,
+    ),
+    Column("initial_delivery_id", String, nullable=False),
+    Column("state", String, nullable=False),
+    Column("backend", String, nullable=False),
+    Column("runtime_key", Text, nullable=True),
+    Column("runtime_turn_id", Text, nullable=True),
+    Column("native_turn_id", Text, nullable=True),
+    Column("start_attempt_id", String, nullable=True),
+    Column("start_receipt_outcome", String, nullable=True),
+    Column("start_receipt_json", Text, nullable=False, server_default="{}"),
+    Column("dispatch_text", Text, nullable=True),
+    Column("dispatch_sha256", String, nullable=True),
+    Column("terminal_outcome", String, nullable=True),
+    Column("settled_by", String, nullable=True),
+    Column("terminal_evidence_kind", String, nullable=True),
+    Column("terminal_evidence_json", Text, nullable=False, server_default="{}"),
+    # One coalesced control slot owns empty/content P0 against this exact Turn.
+    Column("control_state", String, nullable=True),
+    Column("control_mode", String, nullable=True),
+    Column("control_attempt_id", String, nullable=True),
+    Column("control_expected_native_turn_id", Text, nullable=True),
+    Column("control_receipt_outcome", String, nullable=True),
+    Column("control_receipt_json", Text, nullable=False, server_default="{}"),
+    Column("control_successor_delivery_id", String, nullable=True),
+    Column("control_successor_turn_id", String, nullable=True),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("started_at", String, nullable=True),
+    Column("terminal_at", String, nullable=True),
+    ForeignKeyConstraint(
+        ["initial_delivery_id"],
+        ["message_deliveries.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_session_turns_initial_delivery",
+    ),
+    ForeignKeyConstraint(
+        ["control_successor_delivery_id"],
+        ["message_deliveries.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_session_turns_control_successor_delivery",
+    ),
+    ForeignKeyConstraint(
+        ["control_successor_turn_id"],
+        ["session_turns.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_session_turns_control_successor_turn",
+    ),
+    CheckConstraint(
+        "state in ('waiting', 'starting', 'active', 'terminal')",
+        name="ck_session_turns_state",
+    ),
+    CheckConstraint(
+        "terminal_outcome is null or terminal_outcome in "
+        "('completed', 'failed', 'canceled', 'not_written')",
+        name="ck_session_turns_terminal_outcome",
+    ),
+    CheckConstraint(
+        "start_receipt_outcome is null or start_receipt_outcome in "
+        "('accepted', 'not_written', 'unknown')",
+        name="ck_session_turns_start_receipt_outcome",
+    ),
+    CheckConstraint(
+        "(state = 'waiting' and start_attempt_id is null and dispatch_text is null "
+        "and dispatch_sha256 is null and start_receipt_outcome is null) "
+        "or (state in ('starting', 'active') and start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null) "
+        "or (state = 'terminal' and ((start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null) "
+        "or (terminal_outcome = 'not_written' and start_attempt_id is null "
+        "and dispatch_text is null and dispatch_sha256 is null)))",
+        name="ck_session_turns_start_shape",
+    ),
+    CheckConstraint(
+        "control_state is null or control_state in "
+        "('pending', 'interrupting', 'waiting_terminal', 'reconciling', 'refused', 'settled')",
+        name="ck_session_turns_control_state",
+    ),
+    CheckConstraint(
+        "control_mode is null or control_mode in ('stop_only', 'replace')",
+        name="ck_session_turns_control_mode",
+    ),
+    CheckConstraint(
+        "(state = 'terminal' and terminal_outcome is not null and terminal_at is not null) "
+        "or (state <> 'terminal' and terminal_outcome is null and terminal_at is null)",
+        name="ck_session_turns_terminal_shape",
+    ),
+    CheckConstraint(
+        "(control_mode = 'replace' and control_successor_delivery_id is not null "
+        "and control_successor_turn_id is not null) "
+        "or (control_mode = 'stop_only' and control_successor_delivery_id is null "
+        "and control_successor_turn_id is null) "
+        "or (control_mode is null and control_successor_delivery_id is null "
+        "and control_successor_turn_id is null)",
+        name="ck_session_turns_control_shape",
+    ),
+    Index("ix_session_turns_session_created", "session_id", "created_at", "id"),
+    Index(
+        "uq_session_turns_live_session",
+        "session_id",
+        unique=True,
+        sqlite_where=text("state in ('starting', 'active')"),
+    ),
+    Index(
+        "uq_session_turns_message_written_attempt",
+        "initial_delivery_id",
+        unique=True,
+        sqlite_where=text("terminal_outcome is null or terminal_outcome <> 'not_written'"),
+    ),
+    Index(
+        "uq_session_turns_waiting_successor",
+        "session_id",
+        unique=True,
+        sqlite_where=text("state = 'waiting'"),
+    ),
+    Index(
+        "uq_session_turns_control_attempt",
+        "control_attempt_id",
+        unique=True,
+        sqlite_where=text("control_attempt_id is not null"),
+    ),
+    Index(
+        "uq_session_turns_start_attempt",
+        "start_attempt_id",
+        unique=True,
+        sqlite_where=text("start_attempt_id is not null"),
+    ),
+)
+
+# One durable operational owner per submitted content-bearing input. Before
+# positive native acceptance the complete immutable Message candidate lives only
+# here. Acceptance moves one Delivery snapshot, or one ordered merged batch,
+# into ``messages`` and links every participating Delivery to that record.
+message_deliveries = Table(
+    "message_deliveries",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey(
+            "agent_sessions.id",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=False,
+    ),
+    Column("message_id", String, nullable=True),
+    Column("priority", String, nullable=False),
+    Column("state", String, nullable=False),
+    Column("snapshot_json", Text, nullable=True),
+    Column("snapshot_sha256", String, nullable=False),
+    # The exact backend-facing prompt is independent of Message display content
+    # and remains immutable after materialization for audit/recovery.
+    Column("dispatch_text", Text, nullable=True),
+    Column("dispatch_sha256", String, nullable=False),
+    Column("dedupe_key", Text, nullable=True),
+    Column("turn_id", String, nullable=True),
+    Column("turn_role", String, nullable=True),
+    Column("turn_position", Integer, nullable=True),
+    Column("current_attempt_id", String, nullable=True),
+    Column("current_attempt_kind", String, nullable=True),
+    Column("current_target_turn_id", String, nullable=True),
+    Column("current_expected_native_turn_id", Text, nullable=True),
+    Column("current_receipt_outcome", String, nullable=True),
+    Column("current_receipt_json", Text, nullable=False, server_default="{}"),
+    Column("current_attempt_opened_at", String, nullable=True),
+    Column("delivery_history_json", Text, nullable=False, server_default='{"version":1,"events":[]}'),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("submitted_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("materialized_at", String, nullable=True),
+    Column("retired_at", String, nullable=True),
+    ForeignKeyConstraint(
+        ["message_id"],
+        ["messages.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_message_deliveries_message",
+    ),
+    ForeignKeyConstraint(
+        ["turn_id"],
+        ["session_turns.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_message_deliveries_turn",
+    ),
+    ForeignKeyConstraint(
+        ["current_target_turn_id"],
+        ["session_turns.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_message_deliveries_current_target_turn",
+    ),
+    UniqueConstraint("dedupe_key", name="uq_message_deliveries_dedupe"),
+    CheckConstraint("priority in ('p0', 'p1', 'p3')", name="ck_message_deliveries_priority"),
+    CheckConstraint(
+        "state in ('reserved', 'queued', 'claimed', 'pending_steer', "
+        "'steering', 'interrupt_waiting', 'reconciling_steer', "
+        "'reconciling_migration', 'accepted', 'retired')",
+        name="ck_message_deliveries_state",
+    ),
+    CheckConstraint(
+        "current_attempt_kind is null or current_attempt_kind in ('steer', 'migration')",
+        name="ck_message_deliveries_current_attempt_kind",
+    ),
+    CheckConstraint(
+        "json_valid(delivery_history_json) = 1 "
+        "and json_extract(delivery_history_json, '$.version') = 1 "
+        "and json_type(delivery_history_json, '$.events') = 'array'",
+        name="ck_message_deliveries_history_json",
+    ),
+    CheckConstraint(
+        "(state in ('steering', 'reconciling_steer') "
+        "and current_attempt_id is not null and current_attempt_kind = 'steer' "
+        "and current_target_turn_id is not null "
+        "and current_expected_native_turn_id is not null) "
+        "or (state = 'reconciling_migration' and current_attempt_id is not null "
+        "and current_attempt_kind = 'migration' and current_target_turn_id is null "
+        "and current_expected_native_turn_id is null) "
+        "or (state = 'pending_steer' and current_attempt_id is not null "
+        "and current_attempt_kind = 'steer' and current_target_turn_id is not null "
+        "and current_expected_native_turn_id is null) "
+        "or (state not in ('steering', 'reconciling_steer', "
+        "'reconciling_migration', 'pending_steer') and current_attempt_id is null "
+        "and current_attempt_kind is null and current_target_turn_id is null "
+        "and current_expected_native_turn_id is null)",
+        name="ck_message_deliveries_current_attempt_shape",
+    ),
+    CheckConstraint(
+        "(state in ('reconciling_steer', 'reconciling_migration') "
+        "and current_receipt_outcome = 'unknown') "
+        "or (state not in ('reconciling_steer', 'reconciling_migration') "
+        "and current_receipt_outcome is null)",
+        name="ck_message_deliveries_current_receipt",
+    ),
+    CheckConstraint(
+        "(state = 'accepted' and message_id is not null and turn_id is not null "
+        "and turn_role in ('initial', 'steer') and turn_position is not null "
+        "and materialized_at is not null and snapshot_json is null and dispatch_text is null "
+        "and current_attempt_id is null and current_attempt_kind is null "
+        "and current_target_turn_id is null and current_expected_native_turn_id is null "
+        "and current_receipt_outcome is null and current_attempt_opened_at is null) "
+        "or (state <> 'accepted' and message_id is null and materialized_at is null)",
+        name="ck_message_deliveries_materialization",
+    ),
+    CheckConstraint(
+        "(state in ('claimed', 'interrupt_waiting') and turn_id is not null "
+        "and turn_role = 'initial' and turn_position is not null) "
+        "or (state = 'accepted' and turn_id is not null and turn_role is not null "
+        "and turn_position is not null) "
+        "or (state not in ('claimed', 'interrupt_waiting', 'accepted') "
+        "and turn_id is null and turn_role is null and turn_position is null)",
+        name="ck_message_deliveries_turn_membership",
+    ),
+    Index(
+        "ix_message_deliveries_session_order",
+        "session_id",
+        "submitted_at",
+        "id",
+        sqlite_where=text(
+            "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', "
+            "'reconciling_steer')"
+        ),
+    ),
+    Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
+    Index("ix_message_deliveries_turn", "turn_id", "turn_position"),
+    Index(
+        "uq_message_deliveries_turn_position",
+        "turn_id",
+        "turn_position",
+        unique=True,
+        sqlite_where=text("turn_id is not null"),
+    ),
+    Index("ix_message_deliveries_current_target_turn", "current_target_turn_id"),
+    Index("ix_message_deliveries_current_attempt", "current_attempt_id"),
+)
+
+agent_runs.append_constraint(
+    ForeignKeyConstraint(
+        ["delivery_id"],
+        ["message_deliveries.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_agent_runs_delivery",
+    )
+)
+
+# The Show event can exist before its input is accepted, so its durable anchor is
+# the Delivery. The Message link is filled only on acceptance for history reads.
+show_session_events.append_constraint(
+    ForeignKeyConstraint(
+        ["delivery_id"],
+        ["message_deliveries.id"],
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_show_session_events_delivery",
+    )
 )
 
 # Opaque-token proxy for chat media. The workbench browser can't load

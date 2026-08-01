@@ -22,10 +22,12 @@ from storage.background import (
     SQLiteBackgroundTaskStore,
     definition_state_unchanged,
 )
+from storage import message_deliveries as delivery_store
 from storage.models import (
     agent_runs,
     agent_sessions,
     agents,
+    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -189,31 +191,32 @@ def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
                     metadata_json="{}",
                 )
             )
-        conn.execute(
-            messages.insert().values(
-                id="msg_queued_archive",
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id="msg_queued_archive",
+            session_id="ses_archive",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
                 scope_id=SCOPE_ID,
                 session_id="ses_archive",
                 platform="avibe",
                 author="harness",
-                type="queued",
                 source="harness",
-                content_text="continue",
-                content_json=json.dumps({"text": "continue"}),
-                metadata_json=json.dumps(
-                    {
-                        "scheduled_provenance": {
-                            "platform_specific": {
-                                "vibe_agent_name": agent_name,
-                                "scheduled_target_agent_name": agent_name,
-                                "agent_session_target": {"agent_name": agent_name},
-                            }
+                message_type="harness",
+                text="continue",
+                metadata={
+                    "scheduled_provenance": {
+                        "platform_specific": {
+                            "vibe_agent_name": agent_name,
+                            "scheduled_target_agent_name": agent_name,
+                            "agent_session_target": {"agent_name": agent_name},
                         }
                     }
-                ),
-                created_at=NOW,
-                updated_at=NOW,
-            )
+                },
+            ),
+            dispatch_text="continue",
+            now=NOW,
         )
 
 
@@ -265,9 +268,11 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             session = conn.execute(select(agent_sessions)).mappings().one()
             definitions = conn.execute(select(run_definitions).order_by(run_definitions.c.id)).mappings().all()
             runs = conn.execute(select(agent_runs.c.status, agent_runs.c.agent_name)).mappings().all()
-            queued_metadata = json.loads(
+            queued_snapshot = json.loads(
                 conn.execute(
-                    select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+                    select(message_deliveries.c.snapshot_json).where(
+                        message_deliveries.c.id == "msg_queued_archive"
+                    )
                 ).scalar_one()
             )
         assert scope["agent_name"] == result.archived_name
@@ -295,7 +300,9 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             for row in runs
             if row["status"] in {"succeeded", "failed", "canceled"}
         } == {"pm"}
-        queued_spec = queued_metadata["scheduled_provenance"]["platform_specific"]
+        queued_spec = json.loads(queued_snapshot["metadata_json"])["scheduled_provenance"][
+            "platform_specific"
+        ]
         assert queued_spec["vibe_agent_name"] == result.archived_name
         assert queued_spec["scheduled_target_agent_name"] == result.archived_name
         assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
@@ -1120,8 +1127,10 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
                     agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
                 )
             ).scalars().all()
-            queued_metadata = conn.execute(
-                select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+            queued_snapshot = conn.execute(
+                select(message_deliveries.c.snapshot_json).where(
+                    message_deliveries.c.id == "msg_queued_archive"
+                )
             ).scalar_one()
         assert scope["agent_name"] == result.archived_name
         assert json.loads(scope["settings_json"])["routing"] == {
@@ -1139,7 +1148,9 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
             "session_settings_snapshot"
         ]["agent_name"] == stored_name
         assert set(live_runs) == {result.archived_name}
-        queued_spec = json.loads(queued_metadata)["scheduled_provenance"]["platform_specific"]
+        queued_spec = json.loads(json.loads(queued_snapshot)["metadata_json"])[
+            "scheduled_provenance"
+        ]["platform_specific"]
         assert queued_spec["vibe_agent_name"] == result.archived_name
         assert queued_spec["scheduled_target_agent_name"] == result.archived_name
         assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name

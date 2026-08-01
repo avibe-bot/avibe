@@ -11,8 +11,10 @@ from aiohttp.client_reqrep import ConnectionKey
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
+    SteerReconcileRequest,
     SteerRequest,
     active_steer_identity,
+    reconcile_steer_attempt,
     steer_active_turn,
 )
 from modules.agents.base import AgentRequest
@@ -148,7 +150,10 @@ class _OpenCodeServer:
             raise self.error
         self.messages.append(
             {
-                "info": {"id": f"steer-user-{len(self.prompt_calls)}", "role": "user"},
+                "info": {
+                    "id": kwargs.get("message_id") or f"steer-user-{len(self.prompt_calls)}",
+                    "role": "user",
+                },
                 "parts": [{"type": "text", "text": kwargs["text"]}],
             }
         )
@@ -165,6 +170,13 @@ class _OpenCodeServer:
         if self.status_responses:
             return self.status_responses.pop(0)
         return self.status
+
+    async def get_message(self, session_id: str, message_id: str, directory: str) -> dict:
+        return next(
+            message
+            for message in self.messages
+            if message.get("info", {}).get("id") == message_id
+        )
 
     async def abort_session(self, *args) -> bool:
         self.abort_calls.append(args)
@@ -600,6 +612,49 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
         assert server.abort_calls == []
         assert len(agent._active_requests) == 1
         assert not gate_task.done()
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer()
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    attempt_id = "atm_exact_restart_evidence"
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(
+            controller,
+            "opencode",
+            SteerRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                text=STEER_TEXT,
+                attempt_id=attempt_id,
+            ),
+        )
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert server.prompt_calls[0]["message_id"] == attempt_id
+
+        reconciled = await reconcile_steer_attempt(
+            controller,
+            "opencode",
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                attempt_id=attempt_id,
+            ),
+        )
+
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.details["native_message_id"] == attempt_id
+        assert len(server.prompt_calls) == 1
     finally:
         await _cancel_tasks(gate_task)
 

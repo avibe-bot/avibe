@@ -21,6 +21,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.runtime_command_watcher = SimpleNamespace(start=AsyncMock())
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
+    controller._delivery_recovery_barrier = asyncio.Event()
 
     asyncio.run(controller._on_runtime_ready())
 

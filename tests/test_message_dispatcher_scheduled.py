@@ -653,6 +653,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={
                 "suppress_delivery": True,
+                "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
             },
         )
@@ -672,7 +673,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-1", "private output", "suppressed:run-1", None),
+                ("record", "run-1", "private output", "suppressed:run-1", "succeeded"),
                 ("close",),
             ],
         )
@@ -762,7 +763,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 "suppress_delivery": True,
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
-                "coalesced_queue": {"execution_ids": ["run-1", "run-2", "run-3"]},
+                "accepted_agent_run_ids": ["run-1", "run-2", "run-3"],
             },
         )
         calls = []
@@ -799,7 +800,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 "suppress_delivery": True,
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
-                "coalesced_queue": {"execution_ids": ["run-1", "run-2", "run-3"]},
+                "accepted_agent_run_ids": ["run-1", "run-2", "run-3"],
             },
         )
         calls = []
@@ -839,7 +840,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
-                "coalesced_queue": {"execution_ids": ["run-1", "run-2", "run-3"]},
+                "accepted_agent_run_ids": ["run-1", "run-2", "run-3"],
             },
         )
         calls = []
@@ -865,6 +866,42 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_human_turn_result_settles_accepted_steer_agent_run(self):
+        controller = _StubController()
+        controller.session_turns = SimpleNamespace(
+            accepted_agent_run_ids_for_turn=lambda turn_id: (
+                ["run-steered"] if turn_id == "turn-active" else []
+            ),
+            on_terminal_result=lambda *_args, **_kwargs: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="human",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={"turn_token": "turn-active"},
+        )
+        calls = []
+
+        class _Store:
+            def record_run_message(self, run_id, *, text, message_id=None, terminal_status=None):
+                calls.append((run_id, text, message_id, terminal_status))
+
+            def close(self):
+                calls.append(("close",))
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            message_id = await dispatcher.emit_agent_message(context, "result", "steered result")
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(
+            calls,
+            [
+                ("run-steered", "steered result", "bot-msg-1", "succeeded"),
+                ("close",),
+            ],
+        )
+
     async def test_coalesced_agent_run_result_preserves_cancelled_child(self):
         controller = _StubController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
@@ -875,7 +912,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
-                "coalesced_queue": {"execution_ids": ["run-1", "run-2", "run-3"]},
+                "accepted_agent_run_ids": ["run-1", "run-2", "run-3"],
             },
         )
         calls = []
@@ -915,7 +952,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
-                "coalesced_queue": {"execution_ids": ["run-1", "run-2"]},
+                "accepted_agent_run_ids": ["run-1", "run-2"],
             },
         )
         calls = []
@@ -995,6 +1032,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             platform="slack",
             platform_specific={
                 "suppress_delivery": True,
+                "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-1",
             },
         )
@@ -1012,13 +1050,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(message_id, "suppressed:run-1")
         self.assertEqual(controller.im_client.sent, [])
-        self.assertEqual(
-            calls,
-            [
-                ("record", "run-1", "auth recovery required", "suppressed:run-1", None),
-                ("close",),
-            ],
-        )
+        self.assertEqual(calls, [])
 
     async def test_visible_agent_run_result_marks_run_terminal(self):
         controller = _StubController()

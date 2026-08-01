@@ -20,6 +20,7 @@
     }
   },
   "harness": {
+    "agentInitiatedContinuation": "Agent-initiated continuation",
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",

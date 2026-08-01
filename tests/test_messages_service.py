@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from storage import messages_service
+from storage import message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, agent_sessions, messages, scopes
@@ -334,7 +334,7 @@ def test_list_session_messages_full_after_page_without_extra_row_has_no_cursor(i
 
 def test_list_session_messages_filters_to_user_facing_types(isolated_state):
     """The chat transcript scopes to user-facing types so the intermediate
-    assistant / tool_call / notify rows now persisted for avibe stay out of the
+    assistant / notify rows stay out of the
     dialogue view (they're the process log, not the conversation)."""
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -344,7 +344,6 @@ def test_list_session_messages_filters_to_user_facing_types(isolated_state):
         # second-resolution now would tie and fall back to random id order).
         _insert_msg(conn, scope_id, "ses_tx", "user", "q", "2026-05-30T10:00:00Z", msg_type="user")
         _insert_msg(conn, scope_id, "ses_tx", "agent", "thinking", "2026-05-30T10:00:01Z", msg_type="assistant")
-        _insert_msg(conn, scope_id, "ses_tx", "agent", "ran tool", "2026-05-30T10:00:02Z", msg_type="tool_call")
         _insert_msg(conn, scope_id, "ses_tx", "agent", "progress", "2026-05-30T10:00:03Z", msg_type="notify")
         _insert_msg(conn, scope_id, "ses_tx", "agent", "final", "2026-05-30T10:00:04Z", msg_type="result")
 
@@ -354,7 +353,7 @@ def test_list_session_messages_filters_to_user_facing_types(isolated_state):
             conn, session_id="ses_tx", types=("user", "result")
         )
 
-    assert [m["type"] for m in every["messages"]] == ["user", "assistant", "tool_call", "notify", "result"]
+    assert [m["type"] for m in every["messages"]] == ["user", "assistant", "notify", "result"]
     assert [m["text"] for m in dialogue["messages"]] == ["q", "final"]
 
 
@@ -440,38 +439,33 @@ def test_append_normalizes_legacy_harness_identity(isolated_state):
 
 
 @pytest.mark.parametrize(
-    ("author", "source", "author_name", "expected"),
+    ("author", "source", "message_type", "expected"),
     [
         ("user", "user", None, "user"),
-        ("user", None, None, "user"),
-        ("harness", "harness", "show_intent", "harness"),
-        ("user", "harness", "show_intent", "harness"),
-        ("harness", None, None, "harness"),
-        ("harness", "harness", "show_annotation", "annotation"),
-        ("user", "user", "show_annotation", "user"),
-        ("user", "harness", "show_annotation", "harness"),
-        ("harness", None, "show_annotation", "harness"),
+        ("user", "harness", None, "harness"),
+        ("harness", "harness", "harness", "harness"),
+        ("harness", "harness", "annotation", "annotation"),
     ],
 )
-def test_pending_message_target_type_uses_row_origin(
+def test_delivery_snapshot_preserves_accepted_message_identity(
     author,
     source,
-    author_name,
+    message_type,
     expected,
 ):
-    assert (
-        messages_service.pending_message_target_type(
-            author,
-            source,
-            author_name,
-        )
-        == expected
+    snapshot = message_deliveries.message_snapshot(
+        scope_id="scope",
+        session_id="session",
+        platform="avibe",
+        author=author,
+        source=source,
+        message_type=message_type,
+        text="input",
     )
+    assert snapshot["type"] == expected
 
 
 def test_show_annotation_reservation_flushes_as_annotation(isolated_state):
-    from core import session_turns
-
     engine = create_sqlite_engine()
     legacy_prompt = (
         "[show-annotation] comment\n\nLegacy body\n\n"
@@ -480,28 +474,43 @@ def test_show_annotation_reservation_flushes_as_annotation(isolated_state):
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_legacy_annotation")
-        messages_service.append(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="ses_legacy_annotation",
-            platform="avibe",
             author="harness",
             source="harness",
             author_name="show_annotation",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type=messages_service.ANNOTATION_TYPE,
             text=legacy_prompt,
-            content={"text": legacy_prompt},
         )
-        segment = messages_service.list_queued(conn, "ses_legacy_annotation")
-        visible = session_turns._promote_merged_user_segment(
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
             conn,
-            segment,
-            text=legacy_prompt,
-            attachments=[],
-            metadata={},
-            author_id=None,
+            turn_id=turn_id,
+            session_id="ses_legacy_annotation",
+            initial_delivery_id=queued["id"],
+            state="starting",
+            backend="opencode",
         )
+        delivery = message_deliveries.get_delivery(conn, queued["id"])
+        assert delivery is not None
+        attempt_id = message_deliveries.new_attempt_id()
+        message_deliveries.open_start_attempt(
+            conn,
+            queued["id"],
+            expected_version=delivery["version"],
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+        )
+        message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "native_start"},
+        )
+        visible = messages_service.get_message(conn, queued["id"])
 
+    assert visible is not None
     assert visible["type"] == messages_service.ANNOTATION_TYPE
     assert visible["text"] == legacy_prompt
     assert "annotation" not in visible["content"]
@@ -558,19 +567,14 @@ def test_transcript_visibility_depends_only_on_message_type(isolated_state):
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
             author="harness", source="harness", author_name="show_annotation",
-            message_type=messages_service.PENDING_TYPE, text="pending",
+            message_type=messages_service.ANNOTATION_TYPE, text="annotation",
             metadata={"source": "show_page"},
         )
-        messages_service.append(
-            conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
-            author="harness", source="harness", author_name="show_annotation",
-            message_type=messages_service.QUEUED_TYPE, text="queued",
-            metadata={"source": "show_page"},
-        )
-        messages_service.append(
-            conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
-            author="agent", message_type=messages_service.ANNOTATION_TYPE,
-            text="annotation", metadata={"source": "anything"},
+        message_deliveries.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_mark",
+            text="queued",
         )
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
@@ -582,7 +586,7 @@ def test_transcript_visibility_depends_only_on_message_type(isolated_state):
     texts = [m["text"] for m in page["messages"]]
     assert texts == ["q", "annotation", "final"]
     assert messages_service.ANNOTATION_TYPE in messages_service.TRANSCRIPT_TYPES
-    assert messages_service.ANNOTATION_TYPE not in messages_service.NON_CONVERSATION_TYPES
+    assert messages_service.ANNOTATION_TYPE in messages_service.INBOX_ACTIVITY_TYPES
 
 
 def test_transcript_keeps_notify_terminal_marker(isolated_state):
@@ -596,7 +600,6 @@ def test_transcript_keeps_notify_terminal_marker(isolated_state):
         for author, mtype, text in (
             ("user", "user", "go"),
             ("agent", "assistant", "thinking"),
-            ("agent", "tool_call", "ran tool"),
             ("agent", "notify", "Agent run failed and stopped."),
         ):
             messages_service.append(
@@ -647,15 +650,11 @@ def test_unread_counts_by_session_splits_within_a_scope(isolated_state):
             conn, scope_id=scope_id, session_id="ses_b", platform="avibe",
             author="agent", message_type="result", text="b",
         )
-        # An unread assistant + tool_call (intermediate) and a user message
+        # An unread assistant (intermediate) and a user message
         # must NOT count toward the unread badge.
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_b", platform="avibe",
             author="agent", message_type="assistant", text="thinking",
-        )
-        messages_service.append(
-            conn, scope_id=scope_id, session_id="ses_b", platform="avibe",
-            author="agent", message_type="tool_call", text="ran tool",
         )
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_b", platform="avibe",
@@ -960,20 +959,58 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
 
 
 def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):
-    """A turn that completes with only the INVISIBLE ``silent`` marker still counts as
-    the agent having replied — ``replied`` (awaiting) clears — while the preview text
-    stays the last VISIBLE reply (silent is not a preview type)."""
+    """A terminal Turn snapshot settles Inbox state without a pseudo Message."""
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_titled_session(conn, scope_id, "ses_sil", "Silent")
         _insert_msg(conn, scope_id, "ses_sil", "user", "first", "2026-05-30T10:00:00Z")
         _insert_msg(conn, scope_id, "ses_sil", "agent", "R1", "2026-05-30T10:01:00Z")  # visible reply
-        # turn 2: user follows up; the agent runs and finishes SILENTLY (marker only).
-        _insert_msg(conn, scope_id, "ses_sil", "user", "second", "2026-05-30T10:05:00Z")
-        _insert_msg(
-            conn, scope_id, "ses_sil", "agent", "", "2026-05-30T10:07:00Z",
-            read=False, msg_type=messages_service.SILENT_TYPE,
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_silent_turn",
+            session_id="ses_sil",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_sil",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="second",
+            ),
+            dispatch_text="second",
+            now="2026-05-30T10:05:00Z",
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="trn_silent_turn",
+            session_id="ses_sil",
+            backend="opencode",
+            deliveries=[delivery],
+            dispatch_text="second",
+            attempt_id="atm_silent_turn",
+        )
+        assert message_deliveries.bind_native_start(
+            conn,
+            "trn_silent_turn",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="silent-runtime",
+            runtime_turn_id="silent-runtime-turn",
+            native_turn_id="silent-native-turn",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id="trn_silent_turn",
+            evidence={"kind": "native_start"},
+        )
+        message_deliveries.terminalize_turn(
+            conn,
+            "trn_silent_turn",
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="result",
         )
 
     with engine.connect() as conn:
@@ -1102,33 +1139,31 @@ def test_list_inbox_sessions_pagination(isolated_state):
 # --- Send-while-busy queue + per-session draft ------------------------------
 
 
-def test_enqueue_list_and_pop_queued(isolated_state):
-    """Queued messages persist in order, stay OUT of the conversation transcript
-    (different ``type``), and ``pop_queued`` reads-then-deletes them atomically."""
+def test_enqueue_list_and_retire_queued(isolated_state):
+    """Queued Deliveries persist FIFO, stay out of transcript, and retire in place."""
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_q")
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id="ses_q", text="first")
+        first = message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id="ses_q", text="first")
         time.sleep(0.001)
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id="ses_q", text="second")
+        message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id="ses_q", text="second")
 
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, "ses_q")
+        queued = message_deliveries.list_queued(conn, "ses_q")
         # Queued rows never appear in the user/result/notify transcript.
         transcript = messages_service.list_session_messages(
             conn, session_id="ses_q", types=("user", "result", "notify")
         )
     assert [q["text"] for q in queued] == ["first", "second"]
-    assert all(q["type"] == "queued" for q in queued)
+    assert all(q["state"] == "queued" for q in queued)
     assert transcript["messages"] == []
 
-    # pop returns them in order and clears the queue.
     with engine.begin() as conn:
-        popped = messages_service.pop_queued(conn, "ses_q")
-    assert [p["text"] for p in popped] == ["first", "second"]
+        assert message_deliveries.retire_queued(conn, "ses_q", first["id"])
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "ses_q") == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, "ses_q")] == ["second"]
+        assert message_deliveries.get_delivery(conn, first["id"])["state"] == "retired"
 
 
 def test_remove_queued_targets_only_queued(isolated_state):
@@ -1136,26 +1171,29 @@ def test_remove_queued_targets_only_queued(isolated_state):
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_rm")
-        a = messages_service.enqueue_queued(conn, scope_id=scope_id, session_id="ses_rm", text="a")
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id="ses_rm", text="b")
+        a = message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id="ses_rm", text="a")
+        message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id="ses_rm", text="b")
         # A real user message must NOT be removable through remove_queued.
         user_row = messages_service.append(
             conn, scope_id=scope_id, session_id="ses_rm", platform="avibe", author="user", text="real"
         )
 
     with engine.begin() as conn:
-        assert messages_service.remove_queued(conn, "ses_rm", a["id"]) is True
+        assert message_deliveries.retire_queued_with_run(conn, "ses_rm", a["id"]) is True
         # Wrong session id must NOT delete the row (scoped delete).
-        assert messages_service.remove_queued(conn, "ses_other", a["id"]) is False
+        assert message_deliveries.retire_queued_with_run(conn, "ses_other", a["id"]) is False
         # A real user message is not removable through remove_queued.
-        assert messages_service.remove_queued(conn, "ses_rm", user_row["id"]) is False
+        assert message_deliveries.retire_queued_with_run(conn, "ses_rm", user_row["id"]) is False
     with engine.connect() as conn:
-        assert [q["text"] for q in messages_service.list_queued(conn, "ses_rm")] == ["b"]
+        assert [q["text"] for q in message_deliveries.list_queued(conn, "ses_rm")] == ["b"]
 
 
-def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
+def test_remove_queued_cancels_only_its_exact_agent_run(isolated_state):
     from core.scheduled_tasks import TaskExecutionStore
-    from storage.background import run_update_event_transaction
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        run_update_event_transaction,
+    )
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1163,59 +1201,66 @@ def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
         _seed_session(conn, scope_id, "ses_rm_run")
 
     store = TaskExecutionStore()
-    request = store.enqueue_agent_run(
-        session_id="ses_rm_run",
-        message="obsolete delegated work",
-        agent_name="worker",
-    )
-    assert store.claim(request.id) is not None
-    store.requeue(
-        request.id,
-        metadata={"workbench_queue_holds_run": True},
-    )
-    with engine.begin() as conn:
-        queued = messages_service.append(
-            conn,
-            scope_id=scope_id,
+    requests = [
+        store.enqueue_agent_run(
             session_id="ses_rm_run",
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.QUEUED_TYPE,
-            text=request.message or "",
-            metadata={
-                "scheduled_provenance": {
-                    "platform_specific": {
-                        "task_trigger_kind": "agent_run",
-                        "task_execution_id": request.id,
-                    }
-                }
-            },
+            message=f"obsolete delegated work {index}",
+            agent_name="worker",
         )
+        for index in range(2)
+    ]
+    primary, sibling = requests
+    deliveries = []
+    with engine.begin() as conn:
+        for request in requests:
+            delivery = message_deliveries.enqueue_queued(
+                conn,
+                scope_id=scope_id,
+                session_id="ses_rm_run",
+                author="harness",
+                source="harness",
+                text=request.message or "",
+                native_message_id=f"agent_run:{request.id}",
+            )
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                request.id,
+                session_id="ses_rm_run",
+                delivery_id=str(delivery["id"]),
+            )
+            deliveries.append(delivery)
 
     with run_update_event_transaction(engine) as conn:
         assert (
-            messages_service.remove_queued(
+            message_deliveries.retire_queued_with_run(
                 conn,
                 "ses_rm_run",
-                queued["id"],
+                deliveries[0]["id"],
             )
             is True
         )
 
-    stored = store.get_run(request.id)
-    assert stored is not None
-    assert stored["status"] == "canceled"
-    assert stored["cancel_requested"] is True
-    assert stored["completed_at"]
+    canceled = store.get_run(primary.id)
+    retained = store.get_run(sibling.id)
+    assert canceled["status"] == "canceled"
+    assert canceled["cancel_requested"] is True
+    assert canceled["completed_at"]
+    assert retained["status"] == "queued"
+    assert retained["cancel_requested"] is False
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, "ses_rm_run") == []
+        assert [
+            row["id"] for row in message_deliveries.list_queued(conn, "ses_rm_run")
+        ] == [deliveries[1]["id"]]
 
 
 def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
     isolated_state,
 ):
     from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        claim_agent_runs_for_turn_in_connection,
+    )
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1228,23 +1273,37 @@ def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
         message="already claimed work",
         agent_name="worker",
     )
-    assert store.claim(request.id) is not None
     with engine.begin() as conn:
-        queued = messages_service.append(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="ses_rm_claimed",
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
             text=request.message or "",
             native_message_id=f"agent_run:{request.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id="ses_rm_claimed",
+            delivery_id=str(queued["id"]),
+        )
+        assert claim_agent_runs_for_turn_in_connection(conn, [request.id]) == [
+            request.id
+        ]
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=message_deliveries.new_turn_id(),
+            session_id="ses_rm_claimed",
+            backend="worker",
+            deliveries=[queued],
+            dispatch_text=request.message or "",
         )
 
     with engine.begin() as conn:
         assert (
-            messages_service.remove_queued(
+            message_deliveries.retire_queued_with_run(
                 conn,
                 "ses_rm_claimed",
                 queued["id"],
@@ -1257,9 +1316,8 @@ def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
     assert stored["status"] == "running"
     assert stored["cancel_requested"] is False
     with engine.connect() as conn:
-        assert [row["id"] for row in messages_service.list_queued(conn, "ses_rm_claimed")] == [
-            queued["id"]
-        ]
+        claimed = message_deliveries.get_delivery(conn, queued["id"])
+    assert claimed is not None and claimed["state"] == "claimed"
 
 
 def test_list_queued_page_is_bounded_and_fifo(isolated_state):
@@ -1267,19 +1325,19 @@ def test_list_queued_page_is_bounded_and_fifo(isolated_state):
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_page")
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="ses_page",
             text="first",
         )
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="ses_page",
             text="second",
         )
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id="ses_page",
@@ -1287,12 +1345,12 @@ def test_list_queued_page_is_bounded_and_fifo(isolated_state):
         )
 
     with engine.connect() as conn:
-        page1 = messages_service.list_queued_page(
+        page1 = message_deliveries.list_queued_page(
             conn,
             "ses_page",
             page_request=PageRequest(page=1, limit=2),
         )
-        page2 = messages_service.list_queued_page(
+        page2 = message_deliveries.list_queued_page(
             conn,
             "ses_page",
             page_request=PageRequest(page=2, limit=2),
@@ -1315,50 +1373,50 @@ def test_draft_upsert_get_and_clear(isolated_state):
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_d")
-        messages_service.set_draft(conn, scope_id=scope_id, session_id="ses_d", text="half typed")
+        message_deliveries.set_draft(conn, "ses_d", "half typed")
 
     with engine.connect() as conn:
-        draft = messages_service.get_draft(conn, "ses_d")
-    assert draft is not None and draft["text"] == "half typed" and draft["type"] == "draft"
+        draft = message_deliveries.get_draft(conn, "ses_d")
+    assert draft is not None and draft["text"] == "half typed"
 
     # Setting again replaces in place (still exactly one draft row).
     with engine.begin() as conn:
-        messages_service.set_draft(conn, scope_id=scope_id, session_id="ses_d", text="rewritten")
+        message_deliveries.set_draft(conn, "ses_d", "rewritten")
     with engine.connect() as conn:
-        rows = conn.execute(
-            select(messages).where(messages.c.session_id == "ses_d", messages.c.type == "draft")
-        ).all()
-        draft = messages_service.get_draft(conn, "ses_d")
-    assert len(rows) == 1 and draft["text"] == "rewritten"
+        rows = conn.execute(select(messages).where(messages.c.session_id == "ses_d")).all()
+        draft = message_deliveries.get_draft(conn, "ses_d")
+    assert rows == [] and draft["text"] == "rewritten"
 
     # Blank text clears the draft.
     with engine.begin() as conn:
-        assert messages_service.set_draft(conn, scope_id=scope_id, session_id="ses_d", text="   ") is None
+        assert message_deliveries.set_draft(conn, "ses_d", "   ") is True
     with engine.connect() as conn:
-        assert messages_service.get_draft(conn, "ses_d") is None
+        assert message_deliveries.get_draft(conn, "ses_d") is None
 
     # clear_draft is idempotent.
     with engine.begin() as conn:
-        messages_service.set_draft(conn, scope_id=scope_id, session_id="ses_d", text="again")
+        message_deliveries.set_draft(conn, "ses_d", "again")
     with engine.begin() as conn:
-        messages_service.clear_draft(conn, "ses_d")
+        message_deliveries.set_draft(conn, "ses_d", None)
     with engine.connect() as conn:
-        assert messages_service.get_draft(conn, "ses_d") is None
+        assert message_deliveries.get_draft(conn, "ses_d") is None
 
 
-def test_inbox_ignores_draft_and_queued_activity(isolated_state):
-    """A saved draft / pending queued message lives in the messages table but
-    must NOT bump the session in the inbox or flip its 'replied' badge — only
-    sent conversation counts as activity (Codex P2)."""
+def test_inbox_ignores_draft_and_queued_delivery_activity(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
         _seed_session(conn, scope_id, "ses_inbox")
         _insert_msg(conn, scope_id, "ses_inbox", "user", "hi", "2026-05-30T10:00:00Z")
         _insert_msg(conn, scope_id, "ses_inbox", "agent", "reply", "2026-05-30T10:00:01Z")
-        # A LATER draft + queued (newer created_at) must not count as activity.
-        _insert_msg(conn, scope_id, "ses_inbox", "user", "typing", "2026-05-30T10:05:00Z", msg_type="draft")
-        _insert_msg(conn, scope_id, "ses_inbox", "user", "queued", "2026-05-30T10:06:00Z", msg_type="queued")
+        message_deliveries.set_draft(conn, "ses_inbox", "typing")
+        message_deliveries.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_inbox",
+            text="queued",
+            now="2026-05-30T10:06:00Z",
+        )
 
     with engine.connect() as conn:
         rows = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"]
@@ -1368,6 +1426,154 @@ def test_inbox_ignores_draft_and_queued_activity(isolated_state):
     assert row["last_activity_at"] == "2026-05-30T10:00:01Z"
     assert row["last_message_author"] == "agent"
     assert row["replied"] is False
+
+
+def test_inbox_ignores_not_written_successor_as_terminal_evidence(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "Not written",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "agent",
+            "previous reply",
+            "2026-05-30T10:00:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_not_written_inbox",
+            "user",
+            "still running",
+            "2026-05-30T10:01:00Z",
+        )
+        successor = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_not_written_inbox",
+            session_id="ses_not_written_inbox",
+            priority="p0",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_not_written_inbox",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="refused replacement",
+            ),
+            dispatch_text="refused replacement",
+            now="2026-05-30T10:02:00Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id="trn_not_written_inbox",
+            session_id="ses_not_written_inbox",
+            initial_delivery_id="msg_not_written_inbox",
+            state="waiting",
+            backend="codex",
+            now="2026-05-30T10:02:00Z",
+        )
+        assert message_deliveries.cas_delivery(
+            conn,
+            successor["id"],
+            expected_version=int(successor["version"]),
+            expected_states=("reserved",),
+            values={
+                "state": "interrupt_waiting",
+                "turn_id": "trn_not_written_inbox",
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        ) is not None
+        message_deliveries.terminalize_turn(
+            conn,
+            "trn_not_written_inbox",
+            outcome="not_written",
+            settled_by="interrupt_refused",
+            evidence_kind="definitive_stop_receipt",
+        )
+
+    with engine.connect() as conn:
+        rows = messages_service.list_inbox_sessions(conn, platform="avibe")[
+            "sessions"
+        ]
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == "ses_not_written_inbox"
+    assert rows[0]["replied"] is True
+
+
+def test_inbox_awaiting_uses_active_accepted_turn_not_submission_order(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_delayed_accept", "Delayed acceptance")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_delayed_accept",
+            "agent",
+            "previous reply",
+            "2026-05-30T10:02:00Z",
+        )
+        delivery_id = "msg_delayed_accept"
+        turn_id = "trn_delayed_accept"
+        attempt_id = "atm_delayed_accept"
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_delayed_accept",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_delayed_accept",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="submitted before the previous turn completed",
+            ),
+            dispatch_text="submitted before the previous turn completed",
+            now="2026-05-30T10:01:00Z",
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_delayed_accept",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="submitted before the previous turn completed",
+            attempt_id=attempt_id,
+        )
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="delayed-runtime",
+            runtime_turn_id="delayed-runtime-turn",
+            native_turn_id="delayed-native-turn",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "delayed_start_acceptance"},
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+
+    assert row["replied"] is True
 
 
 def test_list_session_messages_tail_returns_recent_window(isolated_state):

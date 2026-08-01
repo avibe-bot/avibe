@@ -53,6 +53,8 @@ HEAD_TABLES = INITIAL_TABLES | {
     "agent_runs",
     "show_pages",
     "messages",
+    "message_deliveries",
+    "session_turns",
     "agent_events",
     "show_session_events",
     "media_objects",
@@ -70,7 +72,7 @@ PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "show_pages",
     "messages",
 }
-HEAD_REQUIRED_COLUMNS = {
+PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS = {
     "agents": {"enabled"},
     "scope_settings": {"agent_name"},
     "agent_sessions": {"agent_id", "agent_name", "visibility", "pinned"},
@@ -108,6 +110,33 @@ HEAD_REQUIRED_COLUMNS = {
         "callback_completed_at",
         "cancel_requested",
         "cancel_requested_at",
+    },
+}
+HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
+    "agent_sessions": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["agent_sessions"]
+    | {
+        "queue_hold_state",
+        "queue_hold_version",
+        "queue_held_at",
+        "composer_draft_text",
+        "composer_draft_updated_at",
+    },
+    "message_deliveries": {
+        "message_id",
+        "priority",
+        "state",
+        "dispatch_text",
+        "delivery_history_json",
+        "version",
+    },
+    "session_turns": {
+        "initial_delivery_id",
+        "state",
+        "native_turn_id",
+        "control_state",
+        "terminal_outcome",
+        "settled_by",
+        "version",
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
@@ -450,7 +479,10 @@ def _head_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
 def _pre_show_session_events_head_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
     if not PRE_SHOW_SESSION_EVENTS_HEAD_TABLES.issubset(tables):
         return False
-    return all(required_columns.issubset(_column_names(conn, table)) for table, required_columns in HEAD_REQUIRED_COLUMNS.items())
+    return all(
+        required_columns.issubset(_column_names(conn, table))
+        for table, required_columns in PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS.items()
+    )
 
 
 def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) -> bool:
@@ -732,6 +764,8 @@ def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
+    from vibe.message_types import build_partial_index_predicate
+
     if "agent_sessions" in tables:
         conn.execute(
             "create index if not exists ix_agent_sessions_visibility "
@@ -758,25 +792,17 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         'create index if not exists ix_messages_mark_read '
         'on messages (session_id, author, read_at, created_at, id)'
     )
-    conn.execute("drop index if exists ix_messages_inbox_activity")
-    conn.execute(
-        "create index ix_messages_inbox_activity "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
-    )
-    conn.execute(
-        "create index if not exists ix_messages_inbox_agent_reply "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type in ('result', 'notify', 'error')"
-    )
-    conn.execute("drop index if exists ix_messages_inbox_user_send")
-    conn.execute(
-        "create index ix_messages_inbox_user_send "
-        "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and "
-        "((author = 'user' and type = 'user') or "
-        "(author = 'harness' and type = 'harness'))"
-    )
+    for index_name in (
+        "ix_messages_inbox_activity",
+        "ix_messages_inbox_agent_reply",
+        "ix_messages_inbox_user_send",
+    ):
+        conn.execute(f"drop index if exists {index_name}")
+        conn.execute(
+            f"create index {index_name} "
+            "on messages (platform, session_id, created_at desc, id desc) "
+            f"where {build_partial_index_predicate(index_name)}"
+        )
 
 
 def _ensure_agent_events_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
@@ -864,7 +890,7 @@ def _missing_pre_show_session_events_head_schema_description(conn: sqlite3.Conne
         if not PRE_SHOW_SESSION_EVENTS_HEAD_TABLES.issubset(tables)
         else []
     )
-    for table, required_columns in HEAD_REQUIRED_COLUMNS.items():
+    for table, required_columns in PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS.items():
         if table not in tables:
             continue
         missing_columns = required_columns - _column_names(conn, table)

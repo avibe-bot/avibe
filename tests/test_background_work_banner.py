@@ -310,12 +310,12 @@ def test_turn_state_survives_harness_derivation_failure(tmp_path: Path):
 
     import core.session_turns as session_turns
 
-    original = session_turns.messages_service.list_queued
-    session_turns.messages_service.list_queued = lambda conn, sid: []
+    original = session_turns.delivery_store.list_queued
+    session_turns.delivery_store.list_queued = lambda conn, sid: []
     try:
         state = manager.turn_state("ses-1")
     finally:
-        session_turns.messages_service.list_queued = original
+        session_turns.delivery_store.list_queued = original
 
     assert [item["id"] for item in state["background_activities"]] == ["bg-1"]
     assert state["background_activities"][0]["item_kind"] == "backend_activity"

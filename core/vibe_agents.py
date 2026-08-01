@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -24,6 +26,7 @@ from storage.models import (
     agent_runs,
     agent_sessions,
     agents,
+    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -242,14 +245,14 @@ def _rewrite_definition_agent_name(
     return _json_dumps(payload), True
 
 
-def _rewrite_queued_agent_provenance(
+def _rewrite_scheduled_agent_provenance(
     raw: str | None,
     reference_names: frozenset[str],
     new_name: str,
     *,
     agent_id: str,
 ) -> tuple[str, bool]:
-    """Move routing names captured on a queued Workbench harness message."""
+    """Move routing names captured in scheduled submission metadata."""
 
     try:
         payload = json.loads(raw or "{}")
@@ -284,6 +287,28 @@ def _rewrite_queued_agent_provenance(
         target["agent_name"] = new_name
         changed = True
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
+
+
+def _rewrite_delivery_agent_provenance(
+    raw: str | None,
+    reference_names: frozenset[str],
+    new_name: str,
+    *,
+    agent_id: str,
+) -> tuple[str, bool]:
+    snapshot = _json_loads(raw, {})
+    if not isinstance(snapshot, dict):
+        return raw or "{}", False
+    metadata, changed = _rewrite_scheduled_agent_provenance(
+        snapshot.get("metadata_json"),
+        reference_names,
+        new_name,
+        agent_id=agent_id,
+    )
+    if not changed:
+        return raw or "{}", False
+    snapshot["metadata_json"] = metadata
+    return _json_dumps(snapshot), True
 
 
 @dataclass(frozen=True)
@@ -928,21 +953,34 @@ class VibeAgentStore:
             )
 
         queued_rows = conn.execute(
-            select(messages.c.id, messages.c.metadata_json).where(messages.c.type == "queued")
+            select(
+                message_deliveries.c.id,
+                message_deliveries.c.snapshot_json,
+                message_deliveries.c.version,
+                message_deliveries.c.state,
+            ).where(message_deliveries.c.state.in_(("reserved", "queued")))
         ).mappings().all()
         for row in queued_rows:
-            metadata, changed = _rewrite_queued_agent_provenance(
-                row["metadata_json"],
+            snapshot, changed = _rewrite_delivery_agent_provenance(
+                row["snapshot_json"],
                 reference_names,
                 new_name,
                 agent_id=agent_id,
             )
             if changed:
-                conn.execute(
-                    messages.update()
-                    .where(messages.c.id == row["id"])
-                    .values(metadata_json=metadata)
+                updated = delivery_store.cas_delivery(
+                    conn,
+                    str(row["id"]),
+                    expected_version=int(row["version"]),
+                    expected_states=(str(row["state"]),),
+                    values={
+                        "snapshot_json": snapshot,
+                        "snapshot_sha256": hashlib.sha256(snapshot.encode("utf-8")).hexdigest(),
+                    },
+                    history_event={"kind": "agent_reference_rewritten", "agent_id": agent_id},
                 )
+                if updated is None:
+                    raise AgentReferenceRewriteError()
 
         scope_rows = conn.execute(
             select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)

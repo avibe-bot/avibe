@@ -942,6 +942,37 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     assert gate.runtime_started is False
 
 
+def test_agent_service_contains_terminal_owner_failure_after_releasing_gate() -> None:
+    async def _run():
+        controller = _Controller()
+
+        class _TurnOwner:
+            @staticmethod
+            def on_native_terminal(_context, *, outcome):
+                assert outcome == "terminal"
+                raise RuntimeError("terminal owner write failed")
+
+        controller.session_turns = _TurnOwner()
+        service = AgentService(controller=controller)
+        runtime_key = "session:/repo"
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "runtime-token"
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_runtime_turn_key": runtime_key,
+                "agent_runtime_turn_token": "runtime-token",
+            }
+        )
+
+        service.release_runtime_turn(context)
+
+        assert not gate.lock.locked()
+        assert gate.token == ""
+
+    asyncio.run(_run())
+
+
 def test_agent_service_clear_backend_sessions_does_not_release_other_backend_gate() -> None:
     async def _run():
         service = AgentService(controller=_Controller())
@@ -986,10 +1017,16 @@ def test_agent_service_refresh_runtime_config_releases_backend_gates() -> None:
     asyncio.run(_run())
 
 
-def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
+@pytest.mark.parametrize("reason", ["not_active", "runtime_unavailable"])
+def test_agent_service_releases_runtime_gate_for_stale_stop_without_terminal_evidence(
+    reason: str,
+) -> None:
     async def _run():
-        service = AgentService(controller=_Controller())
-        agent = _StopRuntimeAgent("not_active")
+        controller = _Controller()
+        terminal_owner = Mock()
+        controller.session_turns = SimpleNamespace(on_native_terminal=terminal_owner)
+        service = AgentService(controller=controller)
+        agent = _StopRuntimeAgent(reason)
         service.register(agent)
         request = _request("stop")
         gate = service._get_turn_gate("session:/repo")
@@ -1003,6 +1040,7 @@ def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
         assert handled is False
         assert not gate.lock.locked()
         assert request.context.platform_specific["agent_runtime_turn_token"] == "stop-token"
+        terminal_owner.assert_not_called()
 
     asyncio.run(_run())
 

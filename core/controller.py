@@ -225,6 +225,10 @@ class Controller:
         from core.session_turns import SessionTurnManager
 
         self.session_turns = SessionTurnManager(self)
+        # Durable Delivery recovery must not classify a Turn before backend
+        # adapters have restored their restart-stable native identities.
+        self._delivery_recovery_barrier = asyncio.Event()
+        self._delivery_recovery_complete = asyncio.Event()
 
         self._init_model_hub()
 
@@ -271,10 +275,9 @@ class Controller:
         # Restore session mappings on startup (after handlers are initialized)
         self.session_handler.restore_session_mappings()
 
-        # Crash recovery: no turn survives a restart, so any session left
-        # ``running`` in the table is stale — reset it to ``idle`` so the
-        # workbench sidebar dot doesn't show a phantom green forever.
-        self.session_turns.reset_stale()
+        # Clean only pre-durable status projections. Durable Turn owners remain
+        # running until backend restoration and exact reconciliation complete.
+        self.session_turns.reset_legacy_ownerless_status()
 
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
@@ -934,7 +937,10 @@ class Controller:
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
-        await self._restore_active_polls(workbench_platforms)
+        try:
+            await self._restore_active_polls(workbench_platforms)
+        finally:
+            self._delivery_recovery_barrier.set()
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -1185,18 +1191,9 @@ class Controller:
 
     # ----- Live agent-runtime status (workbench sidebar dot) -------------
     #
-    # ``agent_sessions.agent_status`` is idle/running/failed, written at EXACTLY
-    # two chokepoints every turn funnels through — no per-path / per-backend
-    # instrumentation:
-    #   * inbound  — ``AgentService.handle_message`` flips the session to
-    #     ``running`` (every source/backend dispatches through it).
-    #   * outbound — ``MessageDispatcher.emit_agent_message`` settles the terminal
-    #     ``result`` to ``idle`` (or ``failed`` when ``is_error``).
-    # A fire-and-forget backend error surfaces as an emitted message, not an
-    # exception, so terminal failures are emitted as ``result`` + ``is_error`` and
-    # ride the same outbound chokepoint. ``set_agent_status`` is the shared writer;
-    # ``SessionTurnManager.reset_stale`` recovers ``running`` rows to ``idle`` on
-    # startup (a turn whose process died never reached the outbound chokepoint).
+    # ``agent_sessions.agent_status`` is a projection of durable Turn ownership.
+    # Admission projects running; the terminal transaction projects the exact
+    # successor state. Legacy non-durable paths use this writer directly.
 
     @staticmethod
     def _session_id_from_context(context: Optional[MessageContext]) -> Optional[str]:

@@ -40,6 +40,7 @@ from core.services.dispatch import (
     dispatch_turn,
 )
 from modules.im import MessageContext
+from storage import message_deliveries
 
 
 # ---------------------------------------------------------------------
@@ -68,6 +69,154 @@ def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "202
             updated_at=now,
         )
     )
+
+
+def _reserve_submission(
+    conn,
+    *,
+    scope_id: str | None,
+    session_id: str,
+    text: str,
+    author: str = "user",
+    source: str = "user",
+    message_type: str = "user",
+    author_name: str | None = None,
+    content: dict | None = None,
+    metadata: dict | None = None,
+    native_message_id: str | None = None,
+):
+    delivery_id = message_deliveries.new_delivery_id()
+    row = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=delivery_id,
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author=author,
+            source=source,
+            message_type=message_type,
+            text=text,
+            content=content,
+            metadata=metadata,
+            author_name=author_name,
+            native_message_id=native_message_id,
+        ),
+        dispatch_text=text,
+        dedupe_key=(
+            f"avibe:{native_message_id}" if native_message_id else None
+        ),
+        history_event={"kind": "test_admission", "priority": "p3"},
+    )
+    return message_deliveries.delivery_payload(row)
+
+
+def _create_test_session(tmp_path: Path, *, native_id: str, backend: str = "claude"):
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id=native_id,
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend=backend,
+            agent_name="worker",
+        )
+    return engine, session
+
+
+def _create_active_test_turn(
+    tmp_path: Path,
+    *,
+    native_id: str,
+    backend: str = "claude",
+):
+    engine, session = _create_test_session(tmp_path, native_id=native_id, backend=backend)
+    with engine.begin() as conn:
+        delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="active owner",
+        )
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            initial_delivery_id=delivery["id"],
+            state="starting",
+            backend=backend,
+        )
+        claimed = message_deliveries.open_start_attempt(
+            conn,
+            delivery["id"],
+            expected_version=1,
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+        assert claimed is not None
+        bound = message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(message_deliveries.get_turn(conn, turn_id)["version"]),
+            runtime_key=f"runtime:{session['id']}",
+            runtime_turn_id=f"runtime-turn:{turn_id}",
+            native_turn_id=f"native:{turn_id}",
+        )
+        assert bound is not None
+        accepted = message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        )
+        assert accepted
+    return engine, session, turn_id
+
+
+def _bind_test_native_start(engine, context: MessageContext) -> str:
+    """Simulate the narrow backend start binding bypassed by dispatch doubles."""
+
+    turn_id = str((context.platform_specific or {}).get("turn_token") or "")
+    assert turn_id
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        if turn["state"] == "starting":
+            turn = message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(turn["version"]),
+                runtime_key=f"runtime:{turn_id}",
+                runtime_turn_id=f"runtime-turn:{turn_id}",
+                native_turn_id=f"native:{turn_id}",
+            )
+            assert turn is not None
+        delivery = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert delivery is not None
+        if delivery["state"] != "accepted":
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            assert accepted
+    return turn_id
 
 
 def _build_controller_double(handler=None):
@@ -501,6 +650,12 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
                 "fork_source_backend": "claude",
             },
         )
+        delivery = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="hi",
+        )
     session_id = session["id"]
 
     captured: dict = {}
@@ -517,7 +672,14 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
 
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post("/internal/dispatch_async", json={"session_id": session_id, "text": "hi"})
+            resp = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": "hi",
+                    "user_message_id": delivery["id"],
+                },
+            )
             assert resp.status_code == 202
         # Fire-and-forget: wait for the background turn to run + capture.
         for _ in range(200):
@@ -555,7 +717,15 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
     # dispatch_async reads the queue (to preserve order after a Stop), so it needs
     # an initialized state DB even on the empty-queue happy path.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    engine, session = _create_test_session(tmp_path, native_id="proj_dispatch_start")
+    with engine.begin() as conn:
+        delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="hi",
+        )
+    session_id = session["id"]
 
     started = asyncio.Event()
 
@@ -574,10 +744,17 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
         events: list[str] = []
         try:
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-                resp = await client.post("/internal/dispatch_async", json={"session_id": "ses_a", "text": "hi"})
+                resp = await client.post(
+                    "/internal/dispatch_async",
+                    json={
+                        "session_id": session_id,
+                        "text": "hi",
+                        "user_message_id": delivery["id"],
+                    },
+                )
             await asyncio.wait_for(started.wait(), timeout=3)
             for _ in range(100):
-                if "ses_a" not in app.state.in_flight_dispatches:
+                if session_id not in app.state.in_flight_dispatches:
                     break
                 await asyncio.sleep(0.02)
             # Drain the bus: turn.start (at accept) + turn.end (at settle).
@@ -595,11 +772,11 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
     assert resp.status_code == 202
     assert resp.json()["ok"] is True
     controller.message_handler.handle_user_message.assert_awaited()
-    assert "ses_a" not in app.state.in_flight_dispatches, "slot released after the turn"
+    assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
     assert events == ["turn.start", "turn.end"], "publishes session turn lifecycle on the bus"
 
 
-def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, tmp_path):
+def test_dispatch_async_stop_receipt_waits_for_terminal_evidence(monkeypatch, tmp_path):
     """There is NO turn-duration timeout (Phase 1a): a turn whose backend never
     emits a terminal result stays in_flight indefinitely — the slot is freed ONLY
     by a real terminal result or a cancel, never by any timer. A long-running
@@ -612,7 +789,15 @@ def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, 
     from storage.importer import ensure_sqlite_state
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    engine, session = _create_test_session(tmp_path, native_id="proj_dispatch_long")
+    with engine.begin() as conn:
+        delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="hi",
+        )
+    session_id = session["id"]
 
     started = asyncio.Event()
 
@@ -634,27 +819,36 @@ def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, 
 
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post("/internal/dispatch_async", json={"session_id": "ses_long", "text": "hi"})
+            resp = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": "hi",
+                    "user_message_id": delivery["id"],
+                },
+            )
             assert resp.status_code == 202
             await asyncio.wait_for(started.wait(), timeout=3)
             # Give any (nonexistent) timer ample time to fire, then confirm the slot
             # is STILL held — no timer auto-freed it.
             await asyncio.sleep(0.1)
-            entry = app.state.in_flight_dispatches.get("ses_long")
+            entry = app.state.in_flight_dispatches.get(session_id)
             captured["held"] = entry is not None and not entry.task.done()
             # Only a real cancel frees the slot — clean up so the loop tears down.
-            resp_cancel = await client.post("/internal/cancel/ses_long")
+            resp_cancel = await client.post(f"/internal/cancel/{session_id}")
             captured["cancel_status"] = resp_cancel.status_code
-            for _ in range(200):
-                if "ses_long" not in app.state.in_flight_dispatches:
-                    break
-                await asyncio.sleep(0.02)
-            captured["freed_after_cancel"] = "ses_long" not in app.state.in_flight_dispatches
+            await asyncio.sleep(0.05)
+            captured["held_after_stop_receipt"] = (
+                session_id in app.state.in_flight_dispatches
+            )
+            turn = app.state.in_flight_dispatches[session_id]
+            turn.task.cancel()
+            await asyncio.gather(turn.task, return_exceptions=True)
 
     asyncio.run(_go())
     assert captured["held"] is True, "a turn with no terminal result is NOT auto-freed by any timer"
     assert captured["cancel_status"] == 200, "the user's Stop ends the wedged turn"
-    assert captured["freed_after_cancel"] is True, "only a cancel (or terminal result) frees the slot"
+    assert captured["held_after_stop_receipt"] is True
 
 
 def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
@@ -664,7 +858,7 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     a competing agent turn. The row flushes when the running turn ends."""
     from core.services import sessions as sessions_service
 
-    from storage import messages_service
+    from storage import message_deliveries, messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
@@ -680,11 +874,26 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         session = sessions_service.create_session(
             conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
         )
-        # The UI reserves the user row as 'pending' before dispatching; the
-        # controller promotes it to 'queued' when it finds a turn in flight.
-        user_row = messages_service.append(
-            conn, scope_id=scope_id, session_id=session["id"], platform="avibe", author="user",
-            source="user", message_type=messages_service.PENDING_TYPE, text="while busy",
+        owner = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="active owner",
+        )
+        owner_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=owner_turn_id,
+            session_id=session["id"],
+            initial_delivery_id=owner["id"],
+            state="active",
+            backend="claude",
+        )
+        user_row = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="while busy",
         )
     session_id = session["id"]
 
@@ -702,6 +911,7 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         app.state.in_flight_dispatches[session_id] = session_turns.Turn(
             task=task,
             context=MessageContext(user_id="U", channel_id="C", platform="avibe"),
+            logical_turn_id=owner_turn_id,
         )
         sub_id, events = bus.subscribe()
         try:
@@ -730,204 +940,54 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     assert ("queue.updated", {"session_id": session_id}) in published
     with engine.connect() as conn:
         # The row was atomically re-typed to queued (now out of the transcript).
-        assert [q["text"] for q in messages_service.list_queued(conn, session_id)] == ["while busy"]
+        assert [q["text"] for q in message_deliveries.list_queued(conn, session_id)] == ["while busy"]
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert transcript["messages"] == []
 
 
-@pytest.mark.parametrize(
-    (
-        "stored_type",
-        "author",
-        "source",
-        "author_name",
-        "content",
-        "active_same_message",
-        "expect_queued",
-        "expected_type",
-        "expected_activity",
-    ),
-    (
-        (
-            "pending",
-            "user",
-            "user",
-            None,
-            {},
-            True,
-            False,
-            "user",
-            "user_message",
-        ),
-        (
-            "pending",
-            "user",
-            "user",
-            "show_annotation",
-            {},
-            True,
-            False,
-            "user",
-            "user_message",
-        ),
-        (
-            "pending",
-            "harness",
-            "harness",
-            None,
-            {},
-            True,
-            False,
-            "harness",
-            "show_event",
-        ),
-        (
-            "pending",
-            "harness",
-            "harness",
-            "show_annotation",
-            {"annotation": {"direction": "user", "action": "created"}},
-            True,
-            False,
-            "annotation",
-            "show_event",
-        ),
-        ("queued", "user", "user", None, {}, False, True, "queued", None),
-        ("user", "user", "user", None, {}, False, False, "user", None),
-        (
-            "annotation",
-            "harness",
-            "harness",
-            "show_annotation",
-            {"annotation": {"direction": "user", "action": "created"}},
-            False,
-            False,
-            "annotation",
-            None,
-        ),
-    ),
-)
-def test_dispatch_async_deduplicates_replayed_reserved_message(
-    monkeypatch,
-    tmp_path,
-    stored_type,
-    author,
-    source,
-    author_name,
-    content,
-    active_same_message,
-    expect_queued,
-    expected_type,
-    expected_activity,
-):
-    from core.inbox_events import bus
-    from core.services import sessions as sessions_service
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
+def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp_path):
+    from storage import message_deliveries, messages_service
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
+    engine, session = _create_test_session(tmp_path, native_id="proj_replay_queued")
     with engine.begin() as conn:
-        scope_id = upsert_scope(
+        row = message_deliveries.enqueue_queued(
             conn,
-            platform="avibe",
-            scope_type="project",
-            native_id=f"proj_replay_{stored_type}",
-            now="2026-05-31T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )
-        row = messages_service.append(
-            conn,
-            scope_id=scope_id,
+            scope_id=session["scope_id"],
             session_id=session["id"],
-            platform="avibe",
-            author=author,
-            source=source,
-            author_name=author_name,
-            message_type=stored_type,
             text="same show event",
-            content=content,
         )
 
     controller = _build_controller_double()
-    published: list[tuple[str, dict]] = []
-    monkeypatch.setattr(
-        bus,
-        "publish",
-        lambda event_type, data: published.append((event_type, data)),
-    )
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
     async def _go():
-        active_task = None
-        if active_same_message:
-            active_task = asyncio.create_task(asyncio.sleep(60))
-            app.state.in_flight_dispatches[session["id"]] = session_turns.Turn(
-                task=active_task,
-                context=MessageContext(
-                    user_id="U",
-                    channel_id="C",
-                    platform="avibe",
-                    message_id=row["id"],
-                ),
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "same show event",
+                    "user_message_id": row["id"],
+                },
             )
-        try:
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url="http://testserver",
-            ) as client:
-                return await client.post(
-                    "/internal/dispatch_async",
-                    json={
-                        "session_id": session["id"],
-                        "text": "same show event",
-                        "user_message_id": row["id"],
-                    },
-                )
-        finally:
-            if active_task is not None:
-                active_task.cancel()
 
     response = asyncio.run(_go())
 
     assert response.status_code == 202
     assert response.json()["duplicate"] is True
-    assert bool(response.json().get("queued")) is expect_queued
+    assert response.json()["queued"] is True
     controller.message_handler.handle_user_message.assert_not_awaited()
     with engine.connect() as conn:
-        rows = messages_service.list_session_messages(
+        transcript = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
         )["messages"]
-    assert [item["id"] for item in rows] == [row["id"]]
-    assert rows[0]["type"] == expected_type
-    visible_events = [
-        data
-        for event_type, data in published
-        if event_type == "message.new"
-    ]
-    if stored_type == messages_service.PENDING_TYPE:
-        assert [item["id"] for item in visible_events] == [row["id"]]
-    else:
-        assert visible_events == []
-    activity_events = [
-        data["event"]
-        for event_type, data in published
-        if event_type == "session.activity"
-    ]
-    assert activity_events == (
-        [expected_activity] if expected_activity is not None else []
-    )
+    assert transcript == []
 
 
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
@@ -959,14 +1019,13 @@ def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
             agent_backend="claude",
             agent_name="worker",
         )
-        row = messages_service.append(
+        row = _reserve_submission(
             conn,
             scope_id=scope_id,
             session_id=session["id"],
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.PENDING_TYPE,
+            message_type="harness",
             text="Dispatch exactly once.",
         )
 
@@ -1006,16 +1065,12 @@ def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     first, replay = asyncio.run(_go())
 
     assert first.status_code == 202
-    assert first.json()["message_type"] == messages_service.HARNESS_TYPE
+    assert first.json()["delivery_state"] in {"claimed", "accepted"}
     assert replay.status_code == 202
     assert replay.json()["duplicate"] is True
     controller.message_handler.handle_user_message.assert_awaited_once()
     with engine.connect() as conn:
-        settled = messages_service.get_message(
-            conn,
-            row["id"],
-            session_id=session["id"],
-        )
+        settled = messages_service.get_message(conn, row["id"], session_id=session["id"])
     assert settled is not None
     assert settled["type"] == messages_service.HARNESS_TYPE
     assert [
@@ -1053,14 +1108,13 @@ def test_dispatch_async_rejects_archived_session_after_reservation_reclaimed(
             agent_backend="claude",
             agent_name="worker",
         )
-        row = messages_service.append(
+        row = _reserve_submission(
             conn,
             scope_id=scope_id,
             session_id=session["id"],
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.PENDING_TYPE,
+            message_type="harness",
             text="Do not dispatch after archive.",
         )
     with engine.begin() as conn:
@@ -1091,7 +1145,7 @@ def test_dispatch_async_rejects_archived_session_after_reservation_reclaimed(
     controller.message_handler.handle_user_message.assert_not_awaited()
 
 
-def test_dispatch_async_cancels_turn_when_archive_reclaims_reservation_during_submit(
+def test_dispatch_async_archive_after_start_does_not_reclaim_may_have_written_delivery(
     monkeypatch,
     tmp_path,
 ):
@@ -1119,14 +1173,13 @@ def test_dispatch_async_cancels_turn_when_archive_reclaims_reservation_during_su
             agent_backend="claude",
             agent_name="worker",
         )
-        row = messages_service.append(
+        row = _reserve_submission(
             conn,
             scope_id=scope_id,
             session_id=session["id"],
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.PENDING_TYPE,
+            message_type="harness",
             text="Archive before acceptance.",
         )
 
@@ -1164,11 +1217,12 @@ def test_dispatch_async_cancels_turn_when_archive_reclaims_reservation_during_su
 
     response = asyncio.run(_go())
 
-    assert response.status_code == 409
-    assert response.json()["code"] == "session_archived"
-    assert session["id"] not in app.state.in_flight_dispatches
-    controller.command_handler.handle_stop.assert_awaited_once()
-    controller.message_handler.handle_user_message.assert_not_awaited()
+    assert response.status_code == 202
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, row["id"])
+    assert delivery is not None
+    assert delivery["state"] not in {"retired", "queued", "reserved"}
 
 
 def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
@@ -1358,6 +1412,12 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
             agent_backend="claude",
             agent_name="worker",
         )
+        first_delivery = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="active turn",
+        )
     session_id = session["id"]
 
     first_started = asyncio.Event()
@@ -1379,7 +1439,11 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             first = await client.post(
                 "/internal/dispatch_async",
-                json={"session_id": session_id, "text": "active turn"},
+                json={
+                    "session_id": session_id,
+                    "text": "active turn",
+                    "user_message_id": first_delivery["id"],
+                },
             )
             assert first.status_code == 202
             await asyncio.wait_for(first_started.wait(), timeout=3)
@@ -1401,30 +1465,26 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
                 )
             finally:
                 store.close()
-            assert annotation["message"]["type"] == messages_service.PENDING_TYPE
-            enriched_dispatch_text = annotation["message"]["metadata"][
-                session_turns.QUEUED_DISPATCH_TEXT_KEY
-            ]
+            assert annotation["message"] is None
+            assert annotation["delivery"]["state"] == "reserved"
+            enriched_dispatch_text = annotation["delivery"]["dispatch_text"]
             assert f"Show event id: {annotation['id']}" in enriched_dispatch_text
             queued = await client.post(
                 "/internal/dispatch_async",
                 json={
                     "session_id": session_id,
                     "text": enriched_dispatch_text,
-                    "user_message_id": annotation["message_id"],
+                    "user_message_id": annotation["delivery_id"],
                     "show_event_id": annotation["id"],
                 },
             )
             assert queued.status_code == 202
             assert queued.json()["queued"] is True
             with engine.connect() as conn:
-                queued_rows = messages_service.list_queued(conn, session_id)
-                assert [row["id"] for row in queued_rows] == [annotation["message_id"]]
+                queued_rows = message_deliveries.list_queued(conn, session_id)
+                assert [row["id"] for row in queued_rows] == [annotation["delivery_id"]]
                 assert queued_rows[0]["text"] == annotation["transcript_text"]
-                assert (
-                    queued_rows[0]["metadata"][session_turns.QUEUED_DISPATCH_TEXT_KEY]
-                    == enriched_dispatch_text
-                )
+                assert queued_rows[0]["dispatch_text"] == enriched_dispatch_text
                 visible = messages_service.list_session_messages(
                     conn,
                     session_id=session_id,
@@ -1447,7 +1507,7 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
     with engine.connect() as conn:
         from storage.models import show_session_events
 
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
         visible = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -1458,17 +1518,20 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
         linked_message_id = conn.execute(
             select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
         ).scalar_one()
-    assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
-    assert visible["messages"][0]["type"] == messages_service.ANNOTATION_TYPE
-    assert visible["messages"][0]["author"] == messages_service.HARNESS_TYPE
-    assert visible["messages"][0]["source"] == messages_service.HARNESS_TYPE
-    assert visible["messages"][0]["author_name"] == "show_annotation"
-    assert visible["messages"][0]["content"]["annotation"] == expected_display
-    assert visible["messages"][0]["id"] != annotation["message_id"]
-    assert visible["messages"][0]["metadata"]["source"] == "show_page"
-    assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
-    assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
-    assert linked_message_id == visible["messages"][0]["id"]
+    assert [message["text"] for message in visible["messages"]] == [
+        "active turn",
+        annotation["transcript_text"],
+    ]
+    delivered = visible["messages"][-1]
+    assert delivered["type"] == messages_service.ANNOTATION_TYPE
+    assert delivered["author"] == messages_service.HARNESS_TYPE
+    assert delivered["source"] == messages_service.HARNESS_TYPE
+    assert delivered["author_name"] == "show_annotation"
+    assert delivered["content"]["annotation"] == expected_display
+    assert delivered["id"] == annotation["delivery_id"]
+    assert delivered["metadata"]["source"] == "show_page"
+    assert delivered["metadata"]["show_event_id"] == annotation["id"]
+    assert linked_message_id == delivered["id"]
 
 
 def test_startup_recovered_annotation_retries_reserved_dispatch_text(
@@ -1522,15 +1585,7 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
         )
     finally:
         store.close()
-    expected_dispatch = annotation["message"]["metadata"][
-        session_turns.QUEUED_DISPATCH_TEXT_KEY
-    ]
-
-    assert ui_server._recover_stale_pending_messages() == {
-        "promoted": 0,
-        "deleted": 0,
-        "skipped": 1,
-    }
+    expected_dispatch = annotation["delivery"]["dispatch_text"]
 
     controller = _build_controller_double()
     internal_app = internal_server.create_app(controller)
@@ -1544,8 +1599,22 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
     )
     dispatched = []
 
-    async def capture_run(sid, context, text, *, source=SOURCE_HUMAN):
+    async def capture_run(
+        sid,
+        context,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        logical_turn_id=None,
+        **_kwargs,
+    ):
         dispatched.append((sid, context.message_id, text, source))
+        manager._terminalize_durable_turn(
+            logical_turn_id,
+            "completed",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            evidence_kind="test_terminal",
+        )
 
     manager._run = capture_run
 
@@ -1566,7 +1635,7 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
     assert outcome == ui_server._ShowEventDispatchOutcome.ACCEPTED
 
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session["id"])
+        queued = message_deliveries.list_queued(conn, session["id"])
         transcript = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
@@ -1575,20 +1644,16 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
             tail=True,
         )["messages"]
     assert queued == []
-    assert dispatched[0][1] == annotation["message_id"]
+    assert dispatched[0][1] == annotation["delivery_id"]
     assert dispatched[0][2] == expected_dispatch
     assert "Anchor: #summary" in dispatched[0][2]
     assert f"Show event id: {annotation['id']}" in dispatched[0][2]
     assert transcript[0]["type"] == messages_service.ANNOTATION_TYPE
     assert transcript[0]["text"] == "Recover and deliver this."
     assert transcript[0]["content"]["annotation"]["quote"] == "Quarterly summary"
-    assert (
-        session_turns.QUEUED_DISPATCH_TEXT_KEY
-        not in transcript[0]["metadata"]
-    )
 
 
-def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
+def test_idle_show_admission_starts_itself_without_releasing_held_backlog(
     monkeypatch,
     tmp_path,
 ):
@@ -1597,7 +1662,7 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
-    from storage.models import messages, show_session_events
+    from storage.models import show_session_events
     from storage.settings_service import upsert_scope
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1618,16 +1683,13 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
             agent_backend="claude",
             agent_name="worker",
         )
-        messages_service.append(
+        older = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=session["id"],
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.QUEUED_TYPE,
             text="older stopped message",
         )
+        assert message_deliveries.set_queue_hold(conn, session["id"], held=True)
     store = ShowSessionEventStore()
     try:
         annotation = store.append(
@@ -1656,8 +1718,22 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     )
     runs = []
 
-    async def capture_run(sid, context, text, *, source=SOURCE_HUMAN):
+    async def capture_run(
+        sid,
+        context,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        logical_turn_id=None,
+        **_kwargs,
+    ):
         runs.append((sid, text, source))
+        manager._terminalize_durable_turn(
+            logical_turn_id,
+            "completed",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            evidence_kind="test_terminal",
+        )
 
     manager._run = capture_run
     transport = httpx.ASGITransport(app=app)
@@ -1671,10 +1747,8 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
                 "/internal/dispatch_async",
                 json={
                     "session_id": session["id"],
-                    "text": annotation["message"]["metadata"][
-                        session_turns.QUEUED_DISPATCH_TEXT_KEY
-                    ],
-                    "user_message_id": annotation["message_id"],
+                    "text": annotation["delivery"]["dispatch_text"],
+                    "user_message_id": annotation["delivery_id"],
                     "show_event_id": annotation["id"],
                 },
             )
@@ -1682,20 +1756,17 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     response = asyncio.run(_go())
 
     assert response.status_code == 202
-    assert response.json()["queued"] is True
+    assert response.json()["queued"] is False
     assert response.json().get("drained") is None
     assert len(runs) == 1
-    assert runs[0][1] == "older stopped message"
+    assert runs[0][1] == annotation["delivery"]["dispatch_text"]
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session["id"])
+        queued = message_deliveries.list_queued(conn, session["id"])
         linked_message_id = conn.execute(
             select(show_session_events.c.message_id).where(
                 show_session_events.c.id == annotation["id"]
             )
         ).scalar_one()
-        original_exists = conn.execute(
-            select(messages.c.id).where(messages.c.id == annotation["message_id"])
-        ).scalar_one_or_none()
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
@@ -1703,39 +1774,14 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
             types=messages_service.TRANSCRIPT_TYPES,
             tail=True,
         )["messages"]
-    assert [row["id"] for row in queued] == [annotation["message_id"]]
-    assert original_exists == annotation["message_id"]
-    assert linked_message_id == annotation["message_id"]
-    assert [row["text"] for row in visible] == ["older stopped message"]
-
-    assert asyncio.run(manager.flush_queue(session["id"])) is True
-    with engine.connect() as conn:
-        linked_message_id = conn.execute(
-            select(show_session_events.c.message_id).where(
-                show_session_events.c.id == annotation["id"]
-            )
-        ).scalar_one()
-        original_exists = conn.execute(
-            select(messages.c.id).where(messages.c.id == annotation["message_id"])
-        ).scalar_one_or_none()
-        visible = messages_service.list_session_messages(
-            conn,
-            session_id=session["id"],
-            limit=50,
-            types=messages_service.TRANSCRIPT_TYPES,
-            tail=True,
-        )["messages"]
-    assert [run[1] for run in runs] == [
-        "older stopped message",
-        annotation["message"]["metadata"][
-            session_turns.QUEUED_DISPATCH_TEXT_KEY
-        ],
-    ]
-    assert original_exists is None
-    assert linked_message_id == visible[1]["id"]
-    assert visible[1]["type"] == messages_service.ANNOTATION_TYPE
-    assert visible[1]["author_name"] == "show_annotation"
-    assert visible[1]["native_message_id"] == f"show:{annotation['id']}"
+    assert [row["id"] for row in queued] == [older["id"]]
+    assert linked_message_id == annotation["delivery_id"]
+    assert [row["text"] for row in visible] == [annotation["transcript_text"]]
+    assert visible[0]["id"] == annotation["delivery_id"]
+    assert visible[0]["type"] == messages_service.ANNOTATION_TYPE
+    assert visible[0]["author_name"] == "show_annotation"
+    assert visible[0]["native_message_id"] == f"show:{annotation['id']}"
+    assert asyncio.run(manager.flush_queue(session["id"])) is False
 
 
 def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
@@ -1743,26 +1789,30 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
     monkeypatch,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        message_deliveries,
+        "new_delivery_id",
+        lambda: "msg_000000000000200aaaaaaaa",
+    )
     session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
 
     from sqlalchemy import update
 
     from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import messages
+    from storage.models import message_deliveries as delivery_rows, messages
 
     with create_sqlite_engine().begin() as conn:
-        queued = messages_service.list_queued(conn, session_id)[0]
+        queued = message_deliveries.list_queued(conn, session_id)[0]
         queued_id = queued["id"]
         conn.execute(
-            update(messages)
-            .where(messages.c.id == queued["id"])
-            .values(created_at="2026-06-22T00:00:36Z")
+            update(delivery_rows)
+            .where(delivery_rows.c.id == queued["id"])
+            .values(submitted_at="2026-06-22T00:00:37Z")
         )
         generated_ids = iter(
             (
                 "msg_000000000000100aaaaaaaa",
-                "msg_000000000000200aaaaaaaa",
                 "msg_000000000000300aaaaaaaa",
             )
         )
@@ -1796,8 +1846,23 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         lambda event_type, data: published.append((event_type, data)),
     )
 
-    async def append_fast_result(sid, context, text, *, source=SOURCE_HUMAN):
+    async def append_fast_result(
+        sid,
+        context,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        logical_turn_id=None,
+        delivery_id=None,
+        **_kwargs,
+    ):
         with create_sqlite_engine().begin() as conn:
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=logical_turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            assert accepted
             messages_service.append(
                 conn,
                 scope_id=context.platform_specific.get("scope_id"),
@@ -1807,6 +1872,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
                 message_type="result",
                 text="fast queued result",
             )
+        manager._publish_materialized_delivery(delivery_id)
 
     async def fail_if_sleeping(_delay):
         pytest.fail("queue promotion must not wait for wall-clock time")
@@ -1836,7 +1902,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         "msg_000000000000200aaaaaaaa",
         "msg_000000000000300aaaaaaaa",
     ]
-    assert queued_id not in {row["id"] for row in transcript["messages"]}
+    assert queued_id == "msg_000000000000200aaaaaaaa"
     assert [
         (event_type, data.get("id"))
         for event_type, data in published
@@ -1846,7 +1912,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
     assert not hasattr(session_turns, "_wait_until_message_timestamp")
 
 
-def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
+def test_flush_materializes_exact_head_and_links_delivery_dependencies(
     tmp_path,
     monkeypatch,
 ):
@@ -1860,14 +1926,14 @@ def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
 
     from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import media_objects, messages, show_session_events
+    from storage.models import show_session_events
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        queued = messages_service.list_queued(conn, session_id)
-        canonical_id = queued[0]["id"]
-        merged_id = queued[1]["id"]
-        for index, message_id in enumerate((canonical_id, merged_id), start=1):
+        queued = message_deliveries.list_queued(conn, session_id)
+        head_id = queued[0]["id"]
+        second_id = queued[1]["id"]
+        for index, delivery_id in enumerate((head_id, second_id), start=1):
             conn.execute(
                 show_session_events.insert().values(
                     id=f"show_evt_repoint_{index}",
@@ -1878,24 +1944,13 @@ def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
                     anchor_json="{}",
                     payload_json="{}",
                     transcript_text=f"annotation {index}",
-                    message_id=message_id,
-                    created_at=f"2026-06-22T00:00:0{index}Z",
-                )
-            )
-            conn.execute(
-                media_objects.insert().values(
-                    token=f"media_repoint_{index}",
-                    scope_id=queued[index - 1]["scope_id"],
-                    session_id=session_id,
-                    message_id=message_id,
-                    kind="file",
-                    source="user_upload",
-                    local_path=f"/tmp/repoint-{index}.txt",
+                    message_id=None,
+                    delivery_id=delivery_id,
                     created_at=f"2026-06-22T00:00:0{index}Z",
                 )
             )
 
-    manager, _runs = _manager_capturing_runs()
+    manager, _runs = _manager_accepting_runs()
     assert asyncio.run(manager.flush_queue(session_id)) is True
 
     with engine.connect() as conn:
@@ -1909,22 +1964,15 @@ def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
                 show_session_events.c.id
             )
         ).scalars().all()
-        media_message_ids = conn.execute(
-            select(media_objects.c.message_id).order_by(media_objects.c.token)
-        ).scalars().all()
-        old_ids = conn.execute(
-            select(messages.c.id).where(messages.c.id.in_((canonical_id, merged_id)))
-        ).scalars().all()
+        queued_ids = [row["id"] for row in message_deliveries.list_queued(conn, session_id)]
 
     assert len(visible) == 1
-    visible_id = visible[0]["id"]
-    assert visible_id not in {canonical_id, merged_id}
-    assert event_message_ids == [visible_id, visible_id]
-    assert media_message_ids == [visible_id, visible_id]
-    assert old_ids == []
+    assert visible[0]["id"] == head_id
+    assert event_message_ids == [head_id, head_id]
+    assert queued_ids == []
 
 
-def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
+def test_flush_claims_compatible_user_rows_as_one_turn_and_one_message(
     tmp_path,
     monkeypatch,
 ):
@@ -1936,22 +1984,15 @@ def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
         ]
     )
 
-    from sqlalchemy import update
-
     from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import messages, show_session_events
+    from storage.models import show_session_events
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
         for index, row in enumerate(queued, start=1):
             event_id = f"show_evt_identity_{index}"
-            conn.execute(
-                update(messages)
-                .where(messages.c.id == row["id"])
-                .values(native_message_id=f"show:{event_id}")
-            )
             conn.execute(
                 show_session_events.insert().values(
                     id=event_id,
@@ -1962,13 +2003,13 @@ def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
                     anchor_json="{}",
                     payload_json="{}",
                     transcript_text=row["text"],
-                    message_id=row["id"],
+                    message_id=None,
+                    delivery_id=row["id"],
                     created_at=f"2026-06-22T00:00:0{index}Z",
                 )
             )
 
-    manager, runs = _manager_capturing_runs()
-    assert asyncio.run(manager.flush_queue(session_id)) is True
+    manager, runs = _manager_accepting_runs()
     assert asyncio.run(manager.flush_queue(session_id)) is True
 
     with engine.connect() as conn:
@@ -1984,23 +2025,17 @@ def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
         ).all()
 
     assert [text for text, _source, _context in runs] == [
-        "first show annotation",
-        "second show annotation",
+        "first show annotation\nsecond show annotation"
     ]
-    assert [row["native_message_id"] for row in visible] == [
-        "show:show_evt_identity_1",
-        "show:show_evt_identity_2",
-    ]
+    assert len(visible) == 1
     assert event_links == [
         ("show_evt_identity_1", visible[0]["id"]),
-        ("show_evt_identity_2", visible[1]["id"]),
+        ("show_evt_identity_2", visible[0]["id"]),
     ]
 
 
-def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
-    """When a turn ends, messages queued (send-while-busy) during it are popped,
-    merged (newline-joined) into ONE user row, and run as the next turn —
-    draining the queue. Exercises the controller-side flush wiring end to end."""
+def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeypatch, tmp_path):
+    """Natural settlement combines the compatible FIFO segment into one Turn."""
     from core.services import sessions as sessions_service
     from storage import messages_service
     from storage.db import create_sqlite_engine
@@ -2018,6 +2053,12 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
         session = sessions_service.create_session(
             conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
         )
+        first = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="first turn",
+        )
     session_id = session["id"]
 
     seen_texts: list[str] = []
@@ -2028,26 +2069,24 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
         # real flow — queued rows only exist during an active turn).
         if text == "first turn":
             with engine.begin() as conn:
-                messages_service.append(
+                message_deliveries.enqueue_queued(
                     conn,
                     scope_id=scope_id,
                     session_id=session_id,
                     platform="avibe",
                     author="user",
                     source="user",
-                    message_type=messages_service.QUEUED_TYPE,
                     text="q1",
                     author_id="remote:user-a",
                     metadata={"_web_push_user_key": "remote:user-a"},
                 )
-                messages_service.append(
+                message_deliveries.enqueue_queued(
                     conn,
                     scope_id=scope_id,
                     session_id=session_id,
                     platform="avibe",
                     author="user",
                     source="user",
-                    message_type=messages_service.QUEUED_TYPE,
                     text="q2",
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
@@ -2059,7 +2098,14 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
 
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            await client.post("/internal/dispatch_async", json={"session_id": session_id, "text": "first turn"})
+            await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": "first turn",
+                    "user_message_id": first["id"],
+                },
+            )
         # Wait for the first turn AND the flush turn to both drain the queue.
         for _ in range(200):
             if len(seen_texts) >= 2 and session_id not in app.state.in_flight_dispatches:
@@ -2067,14 +2113,13 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
             await asyncio.sleep(0.02)
 
     asyncio.run(_go())
-    # First the user's turn, then ONE merged flush turn for the two queued msgs.
     assert seen_texts == ["first turn", "q1\nq2"]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
-    assert [m["text"] for m in transcript["messages"]] == ["q1\nq2"], "the flush persisted one merged user row"
-    assert transcript["messages"][0]["author_id"] == "remote:user-a"
-    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert [m["text"] for m in transcript["messages"]] == ["first turn", "q1\nq2"]
+    assert transcript["messages"][1]["author_id"] == "remote:user-a"
+    assert transcript["messages"][1]["metadata"]["_web_push_user_key"] == "remote:user-a"
 
 
 def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
@@ -2098,6 +2143,12 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
         session = sessions_service.create_session(
             conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
         )
+        first = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="first",
+        )
     session_id = session["id"]
 
     started = asyncio.Event()
@@ -2106,7 +2157,6 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
-        return None
 
     controller = _build_controller_double(handler=long_handler)
     app = internal_server.create_app(controller)
@@ -2114,11 +2164,18 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
 
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            await client.post("/internal/dispatch_async", json={"session_id": session_id, "text": "first"})
+            await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": "first",
+                    "user_message_id": first["id"],
+                },
+            )
             await asyncio.wait_for(started.wait(), timeout=3)
             # Queue a message while the turn runs, then Stop.
             with engine.begin() as conn:
-                messages_service.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
+                message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
             await client.post(f"/internal/cancel/{session_id}")
             for _ in range(200):
                 if session_id not in app.state.in_flight_dispatches:
@@ -2127,10 +2184,10 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
 
     asyncio.run(_go())
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert [q["text"] for q in queued] == ["q1"], "Stop must keep the queue intact"
-    assert transcript["messages"] == [], "Stop must not flush the queue into a turn"
+    assert [row["text"] for row in transcript["messages"]] == ["first"]
 
 
 def test_turn_state_reflects_in_flight():
@@ -2166,7 +2223,38 @@ def test_turn_state_reflects_in_flight():
     assert busy["backend"] == "opencode"
 
 
-def test_cancel_returns_404_when_session_not_in_flight():
+def test_turn_state_projects_a_restored_durable_owner_without_in_flight(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="restored-turn-state",
+        backend="opencode",
+    )
+    app = internal_server.create_app(_build_controller_double())
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (await client.get(f"/internal/turn-state/{session['id']}")).json()
+
+    state = asyncio.run(_go())
+    assert state["in_flight"] is True
+    assert state["foreground"] == "running"
+    assert state["native_turn_started"] is True
+    assert state["backend"] == "opencode"
+    assert state["owner"]["runtime_key"] == f"runtime:{session['id']}"
+    assert state["owner"]["native_turn_started"] is True
+    assert turn_id
+
+
+def test_cancel_returns_404_when_session_not_in_flight(tmp_path, monkeypatch):
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
     app = internal_server.create_app(_build_controller_double())
     transport = httpx.ASGITransport(app=app)
 
@@ -2181,7 +2269,13 @@ def test_cancel_returns_404_when_session_not_in_flight():
     assert body["code"] == "not_in_flight"
 
 
-def test_cancel_releases_stale_turn_when_backend_not_active():
+def test_cancel_releases_stale_turn_when_backend_not_active(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_stale_cancel",
+    )
+    session_id = session["id"]
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
@@ -2195,9 +2289,13 @@ def test_cancel_releases_stale_turn_when_backend_not_active():
             user_id="U",
             channel_id="C",
             platform="avibe",
-            platform_specific={"agent_session_id": "ses_stale"},
+            platform_specific={"agent_session_id": session_id},
         )
-        app.state.in_flight_dispatches["ses_stale"] = session_turns.Turn(task=task, context=context)
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=task,
+            context=context,
+            logical_turn_id=turn_id,
+        )
 
         async def _not_active(_context):
             notices.append(_context.platform_specific.get("suppress_stop_no_active_notice"))
@@ -2206,9 +2304,9 @@ def test_cancel_releases_stale_turn_when_backend_not_active():
 
         controller.command_handler.handle_stop = AsyncMock(side_effect=_not_active)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post("/internal/cancel/ses_stale")
+            resp = await client.post(f"/internal/cancel/{session_id}")
         for _ in range(200):
-            if "ses_stale" not in app.state.in_flight_dispatches:
+            if session_id not in app.state.in_flight_dispatches:
                 break
             await asyncio.sleep(0.02)
         return resp, task
@@ -2219,12 +2317,25 @@ def test_cancel_releases_stale_turn_when_backend_not_active():
     assert body["status"] == "stale_released"
     assert body["reason"] == "not_active"
     assert task.cancelled()
-    assert "ses_stale" not in app.state.in_flight_dispatches
-    assert statuses == [("ses_stale", "idle")]
+    assert session_id not in app.state.in_flight_dispatches
+    assert statuses == []
+    from storage.models import agent_sessions
+
+    with engine.connect() as conn:
+        status = conn.execute(
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == session_id)
+        ).scalar_one()
+    assert status == "idle"
     assert notices == [True]
 
 
-def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing():
+def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_stale_cleanup",
+    )
+    session_id = session["id"]
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
@@ -2238,7 +2349,7 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing():
             user_id="U",
             channel_id="C",
             platform="avibe",
-            platform_specific={"agent_session_id": "ses_stale_cleanup"},
+            platform_specific={"agent_session_id": session_id},
         )
 
         async def _stale_dispatch():
@@ -2261,7 +2372,11 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing():
                 break
             await asyncio.sleep(0.01)
         assert controller.get_turn_sink("avibe::C") is not None
-        app.state.in_flight_dispatches["ses_stale_cleanup"] = session_turns.Turn(task=task, context=context)
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=task,
+            context=context,
+            logical_turn_id=turn_id,
+        )
 
         async def _not_active(_context):
             _context.platform_specific["stop_failure_reason"] = "not_active"
@@ -2269,11 +2384,11 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing():
 
         controller.command_handler.handle_stop = AsyncMock(side_effect=_not_active)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            cancel_task = asyncio.create_task(client.post("/internal/cancel/ses_stale_cleanup"))
+            cancel_task = asyncio.create_task(client.post(f"/internal/cancel/{session_id}"))
             await asyncio.wait_for(cleanup_started.wait(), timeout=1)
             await asyncio.sleep(0.02)
             assert not cancel_task.done()
-            assert "ses_stale_cleanup" in app.state.in_flight_dispatches
+            assert session_id in app.state.in_flight_dispatches
             allow_cleanup.set()
             resp = await cancel_task
         return resp, task
@@ -2285,7 +2400,13 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing():
     assert controller.get_turn_sink("avibe::C") is None
 
 
-def test_cancel_keeps_turn_when_backend_interrupt_failed():
+def test_cancel_keeps_turn_when_backend_interrupt_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_failed_stop",
+    )
+    session_id = session["id"]
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
@@ -2296,9 +2417,13 @@ def test_cancel_keeps_turn_when_backend_interrupt_failed():
             user_id="U",
             channel_id="C",
             platform="avibe",
-            platform_specific={"agent_session_id": "ses_failed_stop"},
+            platform_specific={"agent_session_id": session_id},
         )
-        app.state.in_flight_dispatches["ses_failed_stop"] = session_turns.Turn(task=task, context=context)
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=task,
+            context=context,
+            logical_turn_id=turn_id,
+        )
 
         async def _interrupt_failed(_context):
             _context.platform_specific["stop_failure_reason"] = "interrupt_failed"
@@ -2306,8 +2431,8 @@ def test_cancel_keeps_turn_when_backend_interrupt_failed():
 
         controller.command_handler.handle_stop = AsyncMock(side_effect=_interrupt_failed)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post("/internal/cancel/ses_failed_stop")
-        held = "ses_failed_stop" in app.state.in_flight_dispatches and not task.done()
+            resp = await client.post(f"/internal/cancel/{session_id}")
+        held = session_id in app.state.in_flight_dispatches and not task.done()
         task.cancel()
         return resp, held
 
@@ -2315,8 +2440,8 @@ def test_cancel_keeps_turn_when_backend_interrupt_failed():
     assert resp.status_code == 409
     body = resp.json()
     assert body["ok"] is False
-    assert body["code"] == "stop_failed"
-    assert body["reason"] == "interrupt_failed"
+    assert body["code"] == "stop_unknown"
+    assert body["reason"] == "stop_unknown"
     assert held is True
 
 
@@ -2394,19 +2519,26 @@ def test_release_for_backend_refresh_leaves_other_backend_turn_running():
     assert statuses == []
 
 
-def test_backend_drain_queues_idle_session_without_dispatching():
+def test_backend_drain_queues_idle_session_without_dispatching(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_backend_drain",
+        backend="codex",
+    )
+    session_id = session["id"]
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock(return_value=True)
-    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
     context.platform_specific = {
-        "agent_session_id": "ses_codex",
+        "agent_session_id": session_id,
+        "scope_id": session["scope_id"],
         "agent_session_target": {"agent_backend": "codex"},
     }
 
     async def _go():
         manager.begin_backend_drain("codex")
-        return await manager.submit("ses_codex", context, "next", enqueue=enqueue)
+        return await manager.submit(session_id, context, "next")
 
     result = asyncio.run(_go())
 
@@ -2414,57 +2546,128 @@ def test_backend_drain_queues_idle_session_without_dispatching():
         route="enqueued",
         queue_persisted=True,
     )
-    enqueue.assert_called_once_with()
-    assert manager.is_in_flight("ses_codex") is False
-    assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+    with engine.connect() as conn:
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == ["next"]
+    assert manager.is_in_flight(session_id) is False
+    assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
-def test_backend_drain_exposes_failed_queue_persistence():
+def test_backend_drain_queues_pre_reserved_idle_submission_before_resume(
+    tmp_path,
+    monkeypatch,
+):
+    """A Web-reserved Delivery becomes claimable before the backend drain ends."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_backend_drain_reserved",
+        backend="codex",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="reserved during refresh",
+        )
+
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock(return_value=False)
-    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
-    context.platform_specific = {
-        "agent_session_id": "ses_codex",
-        "agent_session_target": {"agent_backend": "codex"},
-    }
+    manager._start_persisted_turn = AsyncMock(return_value=None)
+    context = MessageContext(
+        user_id="U",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": session_id,
+            "scope_id": session["scope_id"],
+            "delivery_id": reserved["id"],
+            "agent_session_target": {"agent_backend": "codex"},
+        },
+    )
 
     async def _go():
         manager.begin_backend_drain("codex")
-        return await manager.submit("ses_codex", context, "next", enqueue=enqueue)
+        admitted = await manager.submit(
+            session_id,
+            context,
+            "reserved during refresh",
+        )
+        with engine.connect() as conn:
+            queued = message_deliveries.get_delivery(conn, reserved["id"])
+        await manager.end_backend_drain("codex")
+        return admitted, queued
 
-    result = asyncio.run(_go())
+    admitted, queued = asyncio.run(_go())
 
-    assert result == session_turns.TurnSubmissionResult(
+    assert admitted == session_turns.TurnSubmissionResult(
         route="enqueued",
-        queue_persisted=False,
+        queue_persisted=True,
     )
-    enqueue.assert_called_once_with()
-    assert manager.is_in_flight("ses_codex") is False
+    assert queued is not None and queued["state"] == "queued"
+    manager._start_persisted_turn.assert_awaited_once()
 
 
-def test_backend_drain_resolves_inherited_default_agent_backend():
+def test_backend_drain_exposes_failed_queue_persistence(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_backend_drain_failure",
+        backend="codex",
+    )
+    session_id = session["id"]
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    context = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": session_id,
+        "scope_id": session["scope_id"],
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+    monkeypatch.setattr(
+        manager,
+        "_insert_delivery",
+        Mock(side_effect=RuntimeError("queue persistence failed")),
+    )
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        return await manager.submit(session_id, context, "next")
+
+    with pytest.raises(RuntimeError, match="queue persistence failed"):
+        asyncio.run(_go())
+    assert manager.is_in_flight(session_id) is False
+
+
+def test_backend_drain_resolves_inherited_default_agent_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_backend_drain_default",
+        backend="codex",
+    )
+    session_id = session["id"]
     controller = _build_controller_double()
     controller.resolve_agent_for_context = Mock(return_value="codex")
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock(return_value=True)
-    context = MessageContext(user_id="U", channel_id="ses_default", platform="avibe")
+    context = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
     context.platform_specific = {
-        "agent_session_id": "ses_default",
+        "agent_session_id": session_id,
+        "scope_id": session["scope_id"],
         "agent_session_target": {"agent_name": None, "agent_backend": None},
     }
 
     async def _go():
         manager.begin_backend_drain("codex")
-        return await manager.submit("ses_default", context, "next", enqueue=enqueue)
+        return await manager.submit(session_id, context, "next")
 
     assert asyncio.run(_go()) == session_turns.TurnSubmissionResult(
         route="enqueued",
         queue_persisted=True,
     )
-    enqueue.assert_called_once_with()
-    controller.resolve_agent_for_context.assert_called_once_with(context)
-    assert manager._deferred_restart_sessions == {"codex": {"ses_default"}}
+    assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
 def test_backend_drain_flushes_deferred_session_after_cutover():
@@ -2480,44 +2683,84 @@ def test_backend_drain_flushes_deferred_session_after_cutover():
     assert "codex" not in manager._draining_backends
 
 
-def test_backend_drain_blocks_direct_queue_flush():
+def test_backend_drain_blocks_direct_queue_flush(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_direct_drain",
+        backend="codex",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="queued",
+        )
     controller = _build_controller_double()
-    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
     context.platform_specific = {
-        "agent_session_id": "ses_codex",
+        "agent_session_id": session_id,
         "agent_session_target": {"agent_backend": "codex"},
     }
     manager = session_turns.SessionTurnManager(controller, build_context=lambda _session_id: context)
     manager._run = AsyncMock()  # type: ignore[method-assign]
     manager.begin_backend_drain("codex")
 
-    assert asyncio.run(manager.flush_queue("ses_codex")) is False
+    assert asyncio.run(manager.flush_queue(session_id)) is False
     manager._run.assert_not_awaited()
-    assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+    with engine.connect() as conn:
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == ["queued"]
+    assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
-def test_stop_during_backend_drain_keeps_existing_queue_parked():
+def test_stop_during_backend_drain_keeps_existing_queue_parked(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_stop_drain",
+        backend="codex",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="queued",
+        )
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
-    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context = MessageContext(user_id="U", channel_id=session_id, platform="avibe")
     context.platform_specific = {
-        "agent_session_id": "ses_codex",
+        "agent_session_id": session_id,
         "agent_session_target": {"agent_backend": "codex"},
     }
 
     async def _go():
         task = asyncio.create_task(asyncio.sleep(60))
-        manager.in_flight["ses_codex"] = session_turns.Turn(task=task, context=context)
+        manager.in_flight[session_id] = session_turns.Turn(
+            task=task,
+            context=context,
+            logical_turn_id=turn_id,
+        )
         manager.begin_backend_drain("codex")
-        manager._deferred_restart_sessions["codex"].add("ses_codex")
-        result = await manager.cancel("ses_codex")
+        manager._deferred_restart_sessions["codex"].add(session_id)
+        result = await manager.cancel(session_id)
+        held = not task.done()
+        task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        return result
+        return result, held
 
-    result = asyncio.run(_go())
+    result, held = asyncio.run(_go())
 
     assert result["status"] == "cancel_requested"
-    assert manager._deferred_restart_sessions == {"codex": set()}
+    assert held is True
+    with engine.connect() as conn:
+        assert message_deliveries.queue_is_held(conn, session_id) is True
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == ["queued"]
+    assert manager._deferred_restart_sessions == {"codex": {session_id}}
 
 
 # ---------------------------------------------------------------------
@@ -2567,12 +2810,12 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     for the scheduled turn's whole lifetime so a Chat send can't preempt a
     still-running scheduled turn (Codex P2)."""
     from core import inbox_events
-    from storage.importer import ensure_sqlite_state
-
-    # submit_scheduled reads the queue (idle → empty-queue happy path), so it
-    # needs an initialized state DB.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_scheduled_idle",
+    )
+    session_id = session["id"]
 
     captured: dict = {}
     started = asyncio.Event()
@@ -2581,7 +2824,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
         captured["source"] = source
         captured["on_chunk"] = on_chunk
         captured["text"] = text
-        captured["in_flight_while_running"] = "ses_sched" in app.state.in_flight_dispatches
+        captured["in_flight_while_running"] = session_id in app.state.in_flight_dispatches
         started.set()
         # The manager now branches on the outcome to settle a run whose turn ended
         # without a terminal result, so a double has to return one.
@@ -2591,16 +2834,24 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
-    ctx = MessageContext(user_id="workbench", channel_id="ses_sched", platform="avibe")
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+        },
+    )
 
     async def _go():
         sub_id, queue = inbox_events.bus.subscribe()
         events: list[str] = []
         try:
-            await controller.session_turn_gate.submit_scheduled("ses_sched", ctx, "digest please")
+            await controller.session_turn_gate.submit_scheduled(session_id, ctx, "digest please")
             await asyncio.wait_for(started.wait(), timeout=3)
             for _ in range(100):
-                if "ses_sched" not in app.state.in_flight_dispatches:
+                if session_id not in app.state.in_flight_dispatches:
                     break
                 await asyncio.sleep(0.02)
             for _ in range(2):
@@ -2624,7 +2875,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     assert captured["text"] == "digest please"
     assert captured["in_flight_while_running"] is True, "registered in_flight (Stop works) while running"
     assert events == ["turn.start", "turn.end"], "publishes the session turn lifecycle on the bus"
-    assert "ses_sched" not in app.state.in_flight_dispatches, "slot released after the turn"
+    assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
 
 
 def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch, tmp_path):
@@ -2632,23 +2883,14 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     harness-attributed ``queued`` row (so it runs AFTER the active turn via the
     existing flush) instead of preempting it — and it never starts a competing
     turn nor disturbs the in-flight Chat task (Codex P2)."""
-    from core.services import sessions as sessions_service
     from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn, platform="avibe", scope_type="project", native_id="proj_sched_busy", now="2026-05-31T00:00:00Z"
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
-        )
+    engine, session, owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_sched_busy",
+    )
+    scope_id = session["scope_id"]
     session_id = session["id"]
 
     # A scheduled run must NEVER reach dispatch_turn while busy — a call here fails
@@ -2668,7 +2910,11 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
 
         chat_task = asyncio.create_task(_busy())
         chat_ctx = MessageContext(user_id="U", channel_id="C", platform="avibe")
-        app.state.in_flight_dispatches[session_id] = session_turns.Turn(task=chat_task, context=chat_ctx)
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=chat_task,
+            context=chat_ctx,
+            logical_turn_id=owner_turn_id,
+        )
         try:
             await controller.session_turn_gate.submit_scheduled(session_id, ctx, "scheduled while busy")
         finally:
@@ -2681,26 +2927,25 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     chat_ctx = asyncio.run(_go())
     controller.message_handler.handle_user_message.assert_not_awaited()
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
         # The queued row is drainable + carries the session's scope and harness
         # attribution; it stays OUT of the user transcript.
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert [q["text"] for q in queued] == ["scheduled while busy"]
     assert queued[0]["scope_id"] == scope_id
     assert queued[0]["author"] == "harness"
-    assert transcript["messages"] == []
+    assert [row["text"] for row in transcript["messages"]] == ["active owner"]
 
 
 def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch, tmp_path):
     """HFR-430 — Agent-to-Agent send-now reuses the Workbench turn transition.
 
     The Agent Run row and queued message must exist before Stop is attempted. The
-    active turn is then canceled once, and its ``flush_on_cancel`` finally starts
+    active turn is then canceled once, and the durable successor claim starts
     the durable Agent Run as a new scheduled turn.
     """
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
-    from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
@@ -2723,6 +2968,12 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
             agent_backend="claude",
             agent_name="worker",
         )["id"]
+        original = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            text="original work",
+        )
 
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -2740,6 +2991,7 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
     async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
         seen.append((text, source))
         if text == "original work":
+            _bind_test_native_start(engine, ctx)
             original_started.set()
             try:
                 await asyncio.sleep(60)
@@ -2755,11 +3007,23 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
+    async def _stop_original(_context):
+        active = app.state.in_flight_dispatches.get(session_id)
+        assert active is not None
+        active.task.cancel()
+        return True
+
+    controller.command_handler.handle_stop.side_effect = _stop_original
+
     async def _go():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/internal/dispatch_async",
-                json={"session_id": session_id, "text": "original work"},
+                json={
+                    "session_id": session_id,
+                    "text": "original work",
+                    "user_message_id": original["id"],
+                },
             )
             assert response.status_code == 202
             await asyncio.wait_for(original_started.wait(), timeout=3)
@@ -2794,8 +3058,8 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
         route="enqueued",
         queue_persisted=True,
         target_was_busy=True,
-        delivery_status="interrupted",
-        queue_owner_transferred=True,
+        delivery_status="waiting_terminal",
+        delivery_owner_transferred=True,
     )
     controller.command_handler.handle_stop.assert_awaited_once()
     assert seen == [
@@ -2803,12 +3067,12 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
         ("apply the correction", SOURCE_SCHEDULED),
     ]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["metadata"]["delivery_outcome"] == {
         "intent": "send_now",
-        "status": "interrupted",
+        "status": "waiting_terminal",
         "target_was_busy": True,
     }
 
@@ -2816,30 +3080,12 @@ def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch
 def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_path):
     """A refused interrupt is truthful and leaves both durable owners untouched."""
     from core.scheduled_tasks import TaskExecutionStore
-    from core.services import sessions as sessions_service
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn,
-            platform="avibe",
-            scope_type="project",
-            native_id="proj_agent_send_now_refused",
-            now="2026-07-30T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session_id = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )["id"]
+    engine, session, owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_agent_send_now_refused",
+    )
+    session_id = session["id"]
 
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -2850,7 +3096,12 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
     )
     assert request_store.claim(request.id) is not None
     controller = _build_controller_double()
-    controller.command_handler.handle_stop = AsyncMock(return_value=False)
+
+    async def _refuse_stop(context):
+        context.platform_specific["stop_failure_reason"] = "refused"
+        return False
+
+    controller.command_handler.handle_stop = AsyncMock(side_effect=_refuse_stop)
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -2858,6 +3109,7 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
         app.state.in_flight_dispatches[session_id] = session_turns.Turn(
             task=task,
             context=MessageContext(user_id="U", channel_id=session_id, platform="avibe"),
+            logical_turn_id=owner_turn_id,
         )
         context = MessageContext(
             user_id="workbench",
@@ -2889,27 +3141,32 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
         route="enqueued",
         queue_persisted=True,
         target_was_busy=True,
-        delivery_status="stop_failed",
-        queue_owner_transferred=True,
+        delivery_status="queued",
+        delivery_owner_transferred=True,
     )
     assert held is True
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+        queued = message_deliveries.list_queued(conn, session_id)
+        assert [row["text"] for row in queued] == [
             "keep this queued"
         ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["status"] == "queued"
-    assert stored["metadata"]["workbench_queue_holds_run"] is True
+    assert stored["status"] == "running"
+    assert stored["delivery_id"] == queued[0]["id"]
+    assert "workbench_queue_holds_run" not in stored["metadata"]
     assert stored["metadata"]["delivery_outcome"] == {
         "intent": "send_now",
-        "status": "stop_failed",
+        "status": "queued",
         "target_was_busy": True,
     }
 
 
-def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, tmp_path):
-    """Two admitted Runs share one Stop and keep FIFO order under real overlap."""
+def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fifo(
+    monkeypatch,
+    tmp_path,
+):
+    """Two admitted Runs share one Stop, then drain the joined FIFO in order."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -2935,6 +3192,12 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
             agent_backend="claude",
             agent_name="worker",
         )["id"]
+        original = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            text="original work",
+        )
 
     request_store = TaskExecutionStore()
     requests = [
@@ -2958,6 +3221,7 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
     async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
         seen.append(text)
         if text == "original work":
+            _bind_test_native_start(engine, ctx)
             original_started.set()
             try:
                 await asyncio.sleep(60)
@@ -2972,6 +3236,9 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
     async def _stop(_context):
         stop_entered.set()
         await release_stop.wait()
+        active = app.state.in_flight_dispatches.get(session_id)
+        assert active is not None
+        active.task.cancel()
         return True
 
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
@@ -2999,7 +3266,11 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
         ) as client:
             response = await client.post(
                 "/internal/dispatch_async",
-                json={"session_id": session_id, "text": "original work"},
+                json={
+                    "session_id": session_id,
+                    "text": "original work",
+                    "user_message_id": original["id"],
+                },
             )
             assert response.status_code == 202
             await asyncio.wait_for(original_started.wait(), timeout=3)
@@ -3017,7 +3288,9 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
             await asyncio.wait_for(stop_entered.wait(), timeout=3)
             for _ in range(100):
                 with engine.connect() as conn:
-                    if len(messages_service.list_queued(conn, session_id)) == 2:
+                    queued = message_deliveries.list_queued(conn, session_id)
+                    owner = message_deliveries.active_turn(conn, session_id)
+                    if len(queued) == 1 and owner and owner["control_successor_turn_id"]:
                         break
                 await asyncio.sleep(0.01)
             assert controller.command_handler.handle_stop.await_count == 1
@@ -3033,60 +3306,45 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt(monkeypatch, 
     results = asyncio.run(_go())
 
     assert controller.command_handler.handle_stop.await_count == 1
-    assert all(
-        result
-        == session_turns.TurnSubmissionResult(
-            route="enqueued",
-            queue_persisted=True,
-            target_was_busy=True,
-            delivery_status="interrupted",
-            queue_owner_transferred=True,
-        )
-        for result in results
-    )
+    assert [result.delivery_status for result in results] == [
+        "waiting_terminal",
+        "queued",
+    ]
+    assert all(result.route == "enqueued" for result in results)
+    assert all(result.queue_persisted is True for result in results)
+    assert all(result.target_was_busy is True for result in results)
+    assert all(result.delivery_owner_transferred is True for result in results)
     assert seen == ["original work", "first correction", "second correction"]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-    for request in requests:
+        assert message_deliveries.list_queued(conn, session_id) == []
+        assert message_deliveries.queue_is_held(conn, session_id) is False
+    for request, expected_status in zip(
+        requests,
+        ("waiting_terminal", "queued"),
+        strict=True,
+    ):
         stored = request_store.get_run(request.id)
         assert stored is not None
         assert stored["metadata"]["delivery_outcome"] == {
             "intent": "send_now",
-            "status": "interrupted",
+            "status": expected_status,
             "target_was_busy": True,
         }
 
 
-def test_agent_run_send_now_restart_recovers_without_a_second_interrupt(
+def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner(
     monkeypatch,
     tmp_path,
 ):
-    """A refused durable send-now is recovered as queued work, not replayed Stop."""
+    """Restart neither replays Stop nor bypasses the still-active durable owner."""
     from core.scheduled_tasks import TaskExecutionStore
-    from core.services import sessions as sessions_service
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn,
-            platform="avibe",
-            scope_type="project",
-            native_id="proj_agent_send_now_restart",
-            now="2026-07-30T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session_id = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )["id"]
+    engine, session, owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_agent_send_now_restart",
+    )
+    session_id = session["id"]
 
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -3097,7 +3355,12 @@ def test_agent_run_send_now_restart_recovers_without_a_second_interrupt(
     )
     assert request_store.claim(request.id) is not None
     first_controller = _build_controller_double()
-    first_controller.command_handler.handle_stop = AsyncMock(return_value=False)
+
+    async def _refuse_stop(stop_context):
+        stop_context.platform_specific["stop_failure_reason"] = "refused"
+        return False
+
+    first_controller.command_handler.handle_stop = AsyncMock(side_effect=_refuse_stop)
     first_app = internal_server.create_app(first_controller)
     context = MessageContext(
         user_id="workbench",
@@ -3119,6 +3382,7 @@ def test_agent_run_send_now_restart_recovers_without_a_second_interrupt(
                 channel_id=session_id,
                 platform="avibe",
             ),
+            logical_turn_id=owner_turn_id,
         )
         try:
             result = await first_controller.session_turn_gate.submit_scheduled(
@@ -3134,9 +3398,9 @@ def test_agent_run_send_now_restart_recovers_without_a_second_interrupt(
         return result
 
     admitted = asyncio.run(_admit_then_restart())
-    assert admitted.delivery_status == "stop_failed"
+    assert admitted.delivery_status == "queued"
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
             "recover after restart"
         ]
 
@@ -3158,25 +3422,24 @@ def test_agent_run_send_now_restart_recovers_without_a_second_interrupt(
             session_id
         )
         for _ in range(200):
-            if (
-                seen == ["recover after restart"]
-                and session_id not in second_controller.session_turns.in_flight
-            ):
+            if session_id not in second_controller.session_turns.in_flight:
                 break
             await asyncio.sleep(0.01)
         return recovered
 
     recovered = asyncio.run(_recover())
 
-    assert recovered == [session_id]
-    assert seen == ["recover after restart"]
+    assert recovered == []
+    assert seen == []
     second_controller.command_handler.handle_stop.assert_not_awaited()
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "recover after restart"
+        ]
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["metadata"]["delivery_intent"] == "send_now"
-    assert stored["metadata"]["delivery_outcome"]["status"] == "stop_failed"
+    assert stored["metadata"]["delivery_outcome"]["status"] == "queued"
 
 
 def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatch, tmp_path):
@@ -3206,12 +3469,13 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
             agent_backend="claude",
             agent_name="worker",
         )["id"]
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=session_id,
             text="older queued input",
         )
+        assert message_deliveries.set_queue_hold(conn, session_id, held=True)
 
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -3249,7 +3513,7 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
             delivery_intent="send_now",
         )
         for _ in range(300):
-            if len(seen) == 2 and session_id not in app.state.in_flight_dispatches:
+            if len(seen) == 1 and session_id not in app.state.in_flight_dispatches:
                 break
             await asyncio.sleep(0.01)
         return result
@@ -3257,17 +3521,25 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="enqueued",
+        route="ran",
         queue_persisted=True,
         target_was_busy=False,
-        delivery_status="flushed",
-        queue_owner_transferred=True,
+        delivery_status="claimed",
+        delivery_owner_transferred=True,
     )
-    assert seen == ["older queued input", "new urgent input"]
+    assert seen == ["new urgent input"]
+    with engine.connect() as conn:
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "older queued input"
+        ]
+        assert message_deliveries.queue_is_held(conn, session_id)
     controller.command_handler.handle_stop.assert_not_awaited()
 
 
-def test_agent_run_send_now_idle_flush_failure_is_recoverable(monkeypatch, tmp_path):
+def test_agent_run_send_now_idle_start_failure_is_reconciled_without_replay(
+    monkeypatch,
+    tmp_path,
+):
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -3303,8 +3575,13 @@ def test_agent_run_send_now_idle_flush_failure_is_recoverable(monkeypatch, tmp_p
     )
     assert request_store.claim(request.id) is not None
     controller = _build_controller_double()
-    internal_server.create_app(controller)
-    controller.session_turns.flush_queue = AsyncMock(return_value=False)
+    app = internal_server.create_app(controller)
+    controller.emit_agent_message = AsyncMock()
+
+    async def _ambiguous_dispatch(*args, **kwargs):
+        raise RuntimeError("native start outcome lost")
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _ambiguous_dispatch)
     context = MessageContext(
         user_id="workbench",
         channel_id=session_id,
@@ -3316,30 +3593,44 @@ def test_agent_run_send_now_idle_flush_failure_is_recoverable(monkeypatch, tmp_p
         },
     )
 
-    result = asyncio.run(
-        controller.session_turn_gate.submit_scheduled(
+    async def _go():
+        result = await controller.session_turn_gate.submit_scheduled(
             session_id,
             context,
             request.message or "",
             delivery_intent="send_now",
         )
-    )
+        for _ in range(300):
+            if session_id not in app.state.in_flight_dispatches:
+                break
+            await asyncio.sleep(0.01)
+        return result
+
+    result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="enqueued",
+        route="ran",
         queue_persisted=True,
         target_was_busy=False,
-        delivery_status="flush_failed",
-        queue_owner_transferred=True,
+        delivery_status="claimed",
+        delivery_owner_transferred=True,
     )
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
-            "retry the idle flush"
-        ]
+        delivery = message_deliveries.get_delivery_by_dedupe(
+            conn,
+            f"avibe:agent_run:{request.id}",
+        )
+        assert delivery is not None
+        assert delivery["state"] == "claimed"
+        turn = message_deliveries.get_turn(conn, delivery["turn_id"])
+        assert turn is not None
+        assert turn["start_receipt_outcome"] == "unknown"
+        assert message_deliveries.list_queued(conn, session_id) == []
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["status"] == "queued"
-    assert stored["metadata"]["workbench_queue_holds_run"] is True
+    assert stored["status"] == "running"
+    assert stored["delivery_id"] == delivery["id"]
+    assert "workbench_queue_holds_run" not in stored["metadata"]
 
 
 def test_canceling_held_agent_run_retires_queue_before_send_now(
@@ -3382,21 +3673,26 @@ def test_canceling_held_agent_run_retires_queue_before_send_now(
         delivery_intent="send_now",
     )
     assert request_store.claim(request.id) is not None
-    request_store.requeue(
-        request.id,
-        metadata={"workbench_queue_holds_run": True},
-    )
+    request_store.requeue(request.id)
     with engine.begin() as conn:
-        messages_service.append(
+        queued_delivery = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=session_id,
             platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             native_message_id=f"agent_run:{request.id}",
             text=request.message or "",
+        )
+        from storage.background import attach_agent_run_delivery_in_connection
+
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id=session_id,
+            delivery_id=queued_delivery["id"],
         )
 
     controller = _build_controller_double()
@@ -3429,18 +3725,18 @@ def test_canceling_held_agent_run_retires_queue_before_send_now(
     }
     controller.command_handler.handle_stop.assert_not_awaited()
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["status"] == "canceled"
     assert stored["cancel_requested"] is True
 
 
-def test_idle_send_now_flush_failure_is_an_http_failure(
+def test_idle_send_now_releases_hold_and_starts_the_exact_head(
     monkeypatch,
     tmp_path,
 ):
-    """A durable queue refusal stays retryable and never reports success."""
+    """Empty P1 releases a hold and claims only the observed FIFO head."""
 
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -3466,16 +3762,24 @@ def test_idle_send_now_flush_failure_is_an_http_failure(
             agent_backend="claude",
             agent_name="worker",
         )["id"]
-        messages_service.enqueue_queued(
+        queued = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=session_id,
             text="retry me later",
         )
+        assert message_deliveries.set_queue_hold(conn, session_id, held=True)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
-    controller.session_turns.flush_queue = AsyncMock(return_value=False)
+    controller.emit_agent_message = AsyncMock()
+
+    async def _dispatch(ctrl, context, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        assert text == "retry me later"
+        _bind_test_native_start(engine, context)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise():
         transport = httpx.ASGITransport(app=app)
@@ -3483,20 +3787,26 @@ def test_idle_send_now_flush_failure_is_an_http_failure(
             transport=transport,
             base_url="http://testserver",
         ) as client:
-            return await client.post(f"/internal/send-now/{session_id}")
+            response = await client.post(f"/internal/send-now/{session_id}")
+            for _ in range(300):
+                if session_id not in app.state.in_flight_dispatches:
+                    break
+                await asyncio.sleep(0.01)
+            return response
 
     response = asyncio.run(_exercise())
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert response.json() == {
-        "ok": False,
-        "code": "flush_failed",
+        "ok": True,
         "session_id": session_id,
+        "status": "claimed",
+        "delivery_id": queued["id"],
     }
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
-            "retry me later"
-        ]
+        assert message_deliveries.list_queued(conn, session_id) == []
+        assert not message_deliveries.queue_is_held(conn, session_id)
+        assert messages_service.get_message(conn, queued["id"], session_id=session_id)
 
 
 def test_agent_run_send_now_cancel_race_never_becomes_failed(monkeypatch, tmp_path):
@@ -3575,7 +3885,7 @@ def test_agent_run_send_now_cancel_race_never_becomes_failed(monkeypatch, tmp_pa
     assert stored["error"] is None
     assert stored["metadata"]["delivery_outcome"]["status"] == "canceled"
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
 def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_path):
@@ -3598,6 +3908,61 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
         session = sessions_service.create_session(
             conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
         )
+        active_delivery = _reserve_submission(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            text="running",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            native_message_id="watch:def-watch:running",
+        )
+        active_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=active_turn_id,
+            session_id=session["id"],
+            initial_delivery_id=active_delivery["id"],
+            state="starting",
+            backend="claude",
+        )
+        opened = message_deliveries.open_start_attempt(
+            conn,
+            active_delivery["id"],
+            expected_version=1,
+            turn_id=active_turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+        assert opened is not None
+        bound = message_deliveries.bind_native_start(
+            conn,
+            active_turn_id,
+            expected_version=int(
+                message_deliveries.get_turn(conn, active_turn_id)["version"]
+            ),
+            runtime_key=f"runtime:{session['id']}",
+            runtime_turn_id=f"runtime-turn:{active_turn_id}",
+            native_turn_id=f"native:{active_turn_id}",
+        )
+        assert bound is not None
+        accepted = message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=active_turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        )
+        assert accepted
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="accepted before delivery migration",
+            native_message_id="watch:def-watch:legacy-accepted",
+        )
     session_id = session["id"]
 
     async def _explode_dispatch_turn(*args, **kwargs):
@@ -3613,7 +3978,6 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
         platform="avibe",
         message_id="watch:def-watch:run-1",
         platform_specific={
-            "task_execution_id": "run-1",
             "task_trigger_kind": "watch",
             "task_definition_id": "def-watch",
         },
@@ -3632,6 +3996,7 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
                 platform="avibe",
                 message_id="watch:def-watch:running",
             ),
+            logical_turn_id=active_turn_id,
         )
         try:
             first = await controller.session_turn_gate.submit_scheduled(session_id, ctx, "first")
@@ -3647,14 +4012,187 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
                 running_ctx,
                 "running duplicate",
             )
+            legacy_ctx = MessageContext(
+                user_id="workbench",
+                channel_id=session_id,
+                platform="avibe",
+                message_id="watch:def-watch:legacy-accepted",
+            )
+            legacy_duplicate = await controller.session_turn_gate.submit_scheduled(
+                session_id,
+                legacy_ctx,
+                "legacy accepted duplicate",
+            )
         finally:
             chat_task.cancel()
-        return first, second, running_duplicate
+        return first, second, running_duplicate, legacy_duplicate
 
-    assert asyncio.run(_go()) == ("enqueued", "duplicate", "duplicate")
+    assert asyncio.run(_go()) == ("enqueued", "duplicate", "duplicate", "duplicate")
     with engine.connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in queued] == ["first"]
+
+
+def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tmp_path):
+    """A retry resumes a pre-claim reservation instead of completing as duplicate."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_sched_reserved_retry",
+    )
+    session_id = session["id"]
+    dispatched: list[str] = []
+
+    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        dispatched.append(text)
+        _bind_test_native_start(engine, ctx)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _accept_dispatch)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    submit_scheduled = controller.session_turn_gate.submit_scheduled
+    resolve_backend = manager._delivery_backend
+    fail_before_claim = True
+
+    def _resolve_backend(session_id, context):
+        nonlocal fail_before_claim
+        if fail_before_claim:
+            fail_before_claim = False
+            raise RuntimeError("backend temporarily unresolved")
+        return resolve_backend(session_id, context)
+
+    monkeypatch.setattr(manager, "_delivery_backend", _resolve_backend)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="watch:def-watch:reserved-retry",
+        platform_specific={
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_trigger_kind": "watch",
+            "task_definition_id": "def-watch",
+        },
+    )
+
+    async def _go():
+        with pytest.raises(RuntimeError, match="temporarily unresolved"):
+            await submit_scheduled(session_id, ctx, "original prompt")
+        with engine.connect() as conn:
+            reserved = message_deliveries.get_delivery_by_dedupe(
+                conn,
+                "avibe:watch:def-watch:reserved-retry",
+            )
+            assert reserved is not None
+            assert reserved["state"] == "reserved"
+
+        resumed = await submit_scheduled(
+            session_id,
+            ctx,
+            "changed retry payload",
+        )
+        duplicate = await submit_scheduled(session_id, ctx, "duplicate")
+        return resumed, duplicate, reserved["id"]
+
+    resumed, duplicate, delivery_id = asyncio.run(_go())
+    assert (resumed, duplicate) == ("ran", "duplicate")
+    assert dispatched == ["original prompt"]
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, delivery_id)
+        assert delivery is not None
+        assert delivery["state"] == "accepted"
+        assert delivery["message_id"] == delivery_id
+
+
+def test_scheduled_send_now_retry_resumes_transferred_reservation(monkeypatch, tmp_path):
+    """A pre-claim retry reuses both the reserved Delivery and held Agent Run."""
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_sched_send_now_reserved_retry",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="original send-now prompt",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    assert request_store.claim(run.id) is not None
+    dispatched: list[str] = []
+
+    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        dispatched.append(text)
+        _bind_test_native_start(engine, ctx)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _accept_dispatch)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    submit_scheduled = controller.session_turn_gate.submit_scheduled
+    resolve_backend = manager._delivery_backend
+    fail_before_claim = True
+
+    def _resolve_backend(session_id, context):
+        nonlocal fail_before_claim
+        if fail_before_claim:
+            fail_before_claim = False
+            raise RuntimeError("backend temporarily unresolved")
+        return resolve_backend(session_id, context)
+
+    monkeypatch.setattr(manager, "_delivery_backend", _resolve_backend)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{run.id}",
+        platform_specific={
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        with pytest.raises(RuntimeError, match="temporarily unresolved"):
+            await submit_scheduled(
+                session_id,
+                ctx,
+                "original send-now prompt",
+                delivery_intent="send_now",
+            )
+        held = request_store.get_run(run.id)
+        assert held is not None
+        assert held["status"] == "running"
+        assert held["delivery_id"] is not None
+        assert "workbench_queue_holds_run" not in held["metadata"]
+
+        resumed = await submit_scheduled(
+            session_id,
+            ctx,
+            "changed retry payload",
+            delivery_intent="send_now",
+        )
+        duplicate = await submit_scheduled(
+            session_id,
+            ctx,
+            "duplicate",
+            delivery_intent="send_now",
+        )
+        return resumed, duplicate
+
+    resumed, duplicate = asyncio.run(_go())
+    assert isinstance(resumed, session_turns.TurnSubmissionResult)
+    assert resumed.route == "ran"
+    assert duplicate == "duplicate"
+    assert dispatched == ["original send-now prompt"]
 
 
 def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
@@ -3683,6 +4221,7 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     started = asyncio.Event()
 
     async def _long_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        _bind_test_native_start(engine, ctx)
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -3720,14 +4259,15 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
 
 
 def _seed_avibe_session_with_queue(queued):
-    """Create an isolated avibe session and seed its queue (oldest first). Each
-    ``queued`` entry is ``(text, scheduled_provenance | None)`` — None => a user row,
-    a dict => a scheduled row carrying that provenance under the marker key."""
+    """Create an isolated Session and seed independent Deliveries oldest first."""
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
+    from storage.background import attach_agent_run_delivery_in_connection
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
+    from storage.models import agent_runs
     from storage.settings_service import upsert_scope
+    from sqlalchemy import update
 
     ensure_sqlite_state()
     engine = create_sqlite_engine()
@@ -3740,18 +4280,34 @@ def _seed_avibe_session_with_queue(queued):
             conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
         )
         for text, prov in queued:
-            messages_service.append(
+            delivery = message_deliveries.enqueue_queued(
                 conn,
                 scope_id=scope_id,
                 session_id=session["id"],
                 platform="avibe",
                 author=("harness" if prov is not None else "user"),
                 source=("harness" if prov is not None else "user"),
-                message_type=messages_service.QUEUED_TYPE,
+                message_type=("harness" if prov is not None else "user"),
                 text=text,
                 metadata=({session_turns.SCHEDULED_PROVENANCE_KEY: prov} if prov is not None else None),
                 native_message_id=(prov or {}).get("message_id") if prov is not None else None,
             )
+            spec = (prov or {}).get("platform_specific") or {}
+            run_id = str(spec.get("task_execution_id") or "").strip()
+            if run_id and conn.execute(
+                select(agent_runs.c.id).where(agent_runs.c.id == run_id)
+            ).scalar_one_or_none():
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(session_id=session["id"])
+                )
+                assert attach_agent_run_delivery_in_connection(
+                    conn,
+                    run_id,
+                    session_id=session["id"],
+                    delivery_id=str(delivery["id"]),
+                )
     return session["id"]
 
 
@@ -3766,11 +4322,47 @@ def _manager_capturing_runs():
         ),
     )
 
-    async def _fake_run(sid, context, text, *, source=SOURCE_HUMAN):
+    async def _fake_run(sid, context, text, *, source=SOURCE_HUMAN, **_kwargs):
         runs.append((text, source, context))
 
     mgr._run = _fake_run
     return mgr, runs
+
+
+def _manager_accepting_runs():
+    """Capture durable starts while simulating exact native acceptance."""
+
+    manager, runs = _manager_capturing_runs()
+
+    async def _accept(
+        sid,
+        context,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        logical_turn_id=None,
+        delivery_id=None,
+        **_kwargs,
+    ):
+        runs.append((text, source, context))
+        with manager._sqlite_engine().begin() as conn:
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=logical_turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            assert accepted
+        manager._publish_materialized_delivery(delivery_id)
+        settled = manager._terminalize_durable_turn(
+            logical_turn_id,
+            "completed",
+            settled_by="test",
+            evidence_kind="test_native_terminal",
+        )
+        assert settled["changed"] is True
+
+    manager._run = _accept
+    return manager, runs
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
@@ -3808,12 +4400,10 @@ def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeyp
     from storage.db import create_sqlite_engine
 
     with create_sqlite_engine().begin() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
-def test_flush_coalesces_same_scheduled_callbacks_within_window(tmp_path, monkeypatch):
-    """Harness callback rows stay visible as separate queued messages, but same
-    watch/task callbacks inside the rolling window dispatch as one Agent turn."""
+def test_flush_merges_compatible_scheduled_deliveries_into_one_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def prov(execution_id: str, message_id: str = "watch:def-watch") -> dict:
@@ -3834,13 +4424,10 @@ def test_flush_coalesces_same_scheduled_callbacks_within_window(tmp_path, monkey
         ]
     )
 
-    from sqlalchemy import select
-    from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import messages
 
     with create_sqlite_engine().begin() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
             "first callback",
             "second callback",
             "third callback",
@@ -3852,35 +4439,19 @@ def test_flush_coalesces_same_scheduled_callbacks_within_window(tmp_path, monkey
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert "first callback" in text
-    assert "second callback" in text
-    assert "third callback" in text
-    assert "fired 3 times" in text
-    assert "pause, remove, or update" in text
+    assert text == "first callback\n\n---\n\nsecond callback\n\n---\n\nthird callback"
     assert ctx.platform_specific["task_definition_id"] == "def-watch"
-    assert ctx.platform_specific["coalesced_queue"]["count"] == 3
-    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == ["run-1", "run-2", "run-3"]
-    assert ctx.platform_specific["coalesced_queue"]["native_message_ids"] == [
-        "watch:def-watch:run-1",
-        "watch:def-watch:run-2",
-        "watch:def-watch:run-3",
-    ]
+    assert len(ctx.platform_specific["delivery_ids"]) == 3
     with create_sqlite_engine().begin() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-        dedupe_rows = conn.execute(select(messages)).mappings().all()
-    dedupe_native_ids = {
-        row["native_message_id"]
-        for row in dedupe_rows
-        if row["type"] == messages_service.HARNESS_DEDUPE_TYPE
-    }
-    assert dedupe_native_ids == {"watch:def-watch:run-2", "watch:def-watch:run-3"}
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
-def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
+def test_flush_claims_compatible_agent_run_deliveries_as_one_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
 
     request_store = TaskExecutionStore()
 
@@ -3905,24 +4476,12 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
             agent_name="codex",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id)))
 
     session_id = _seed_avibe_session_with_queue(queued)
 
-    from sqlalchemy import update
-    from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import messages
-
-    with create_sqlite_engine().begin() as conn:
-        rows = messages_service.list_queued(conn, session_id)
-        for index, row in enumerate(rows):
-            conn.execute(
-                update(messages)
-                .where(messages.c.id == row["id"])
-                .values(created_at=f"2026-06-22T00:00:0{index}Z")
-            )
 
     mgr, runs = _manager_capturing_runs()
 
@@ -3930,12 +4489,13 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert "cli agent message 1" in text
-    assert "cli agent message 2" in text
-    assert "cli agent message 3" in text
-    assert "cli agent message 4" in text
-    execution_ids = ctx.platform_specific["coalesced_queue"]["execution_ids"]
-    assert len(execution_ids) == 4
+    assert text == (
+        "cli agent message 1\n\n---\n\ncli agent message 2\n\n---\n\n"
+        "cli agent message 3\n\n---\n\ncli agent message 4"
+    )
+    execution_ids = [item[1]["platform_specific"]["task_execution_id"] for item in queued]
+    assert ctx.platform_specific["task_execution_id"] == execution_ids[0]
+    assert ctx.platform_specific["accepted_agent_run_ids"] == execution_ids
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -3943,34 +4503,21 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
     finally:
         bg.close()
 
-    assert stored[execution_ids[0]]["status"] == "running"
-    assert [stored[run_id]["status"] for run_id in execution_ids[1:]] == ["queued", "queued", "queued"]
-    assert [stored[run_id]["metadata"]["effective_run_id"] for run_id in execution_ids] == [
-        execution_ids[0],
-        execution_ids[0],
-        execution_ids[0],
-        execution_ids[0],
-    ]
-    assert stored[execution_ids[0]]["metadata"].get("coalesced_into_run_id") is None
-    assert [stored[run_id]["metadata"]["coalesced_into_run_id"] for run_id in execution_ids[1:]] == [
-        execution_ids[0],
-        execution_ids[0],
-        execution_ids[0],
-    ]
-    assert stored[execution_ids[0]]["metadata"]["workbench_queue_holds_run"] is False
-    assert [stored[run_id]["metadata"]["workbench_queue_holds_run"] for run_id in execution_ids[1:]] == [
-        True,
-        True,
-        True,
-    ]
+    assert [stored[run_id]["status"] for run_id in execution_ids] == ["running"] * 4
+    assert len({stored[run_id]["delivery_id"] for run_id in execution_ids}) == 4
+    assert all(stored[run_id]["delivery_id"] for run_id in execution_ids)
+    assert all(
+        "workbench_queue_holds_run" not in stored[run_id]["metadata"]
+        for run_id in execution_ids
+    )
+    with create_sqlite_engine().connect() as conn:
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
 def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    from core.message_mirror import mirror_harness_inbound
     from core.scheduled_tasks import TaskExecutionStore
-    from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.models import messages
 
@@ -3981,7 +4528,7 @@ def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypat
         agent_name="codex",
     )
     assert request_store.claim(request.id) is not None
-    request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+    request_store.requeue(request.id)
     session_id = _seed_avibe_session_with_queue(
         [
             (
@@ -4001,11 +4548,26 @@ def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypat
     )
     mgr, runs = _manager_capturing_runs()
 
-    async def _mirror_run(sid, context, text, *, source=SOURCE_HUMAN):
-        mirror_harness_inbound(context, text)
+    async def _accept_run(
+        sid,
+        context,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        logical_turn_id=None,
+        delivery_id=None,
+        **_kwargs,
+    ):
+        with mgr._sqlite_engine().begin() as conn:
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=logical_turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            assert accepted
         runs.append((text, source, context))
 
-    mgr._run = _mirror_run
+    mgr._run = _accept_run
 
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert len(runs) == 1
@@ -4018,47 +4580,13 @@ def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypat
     assert [(row["native_message_id"], row["content_text"]) for row in harness_rows] == [
         (f"agent_run:{request.id}", "background prompt")
     ]
-    assert [row for row in rows if row["type"] == messages_service.HARNESS_DEDUPE_TYPE] == []
+    assert len(rows) == 1
 
 
-def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    from core.scheduled_tasks import TaskExecutionStore
-    from storage.background import SQLiteBackgroundTaskStore
-
-    request_store = TaskExecutionStore()
-    run_ids: list[str] = []
-    for index in range(3):
-        request = request_store.enqueue_agent_run(
-            session_id="placeholder",
-            message=f"cli agent message {index + 1}",
-            agent_name="codex",
-        )
-        assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
-        run_ids.append(request.id)
-
-    bg = SQLiteBackgroundTaskStore()
-    try:
-        assert bg.cancel_run(run_ids[1]) is True
-        assert bg.claim_queued_runs_for_workbench(run_ids) == []
-        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
-    finally:
-        bg.close()
-
-    assert stored[run_ids[0]]["status"] == "queued"
-    assert stored[run_ids[1]]["status"] == "canceled"
-    assert stored[run_ids[2]]["status"] == "queued"
-    assert {row["status"] for row in stored.values()} == {"queued", "canceled"}
-    assert all(row["status"] != "running" for row in stored.values())
-    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is True
-    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
-    assert stored[run_ids[0]]["metadata"].get("effective_run_id") is None
-    assert stored[run_ids[2]]["metadata"].get("effective_run_id") is None
-
-
-def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tmp_path, monkeypatch):
+def test_cancel_retires_exact_agent_run_delivery_without_reordering_survivors(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -4088,14 +4616,18 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
             agent_name="codex",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id)))
         run_ids.append(request.id)
 
     session_id = _seed_avibe_session_with_queue(queued)
 
-    from storage import messages_service
     from storage.db import create_sqlite_engine
+
+    from core.inbox_events import bus
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(bus, "publish", lambda event, payload: published.append((event, payload)))
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -4103,25 +4635,21 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
     finally:
         bg.close()
 
-    from core.inbox_events import bus
-
-    published: list[tuple[str, dict]] = []
-    monkeypatch.setattr(bus, "publish", lambda event, payload: published.append((event, payload)))
-
     mgr, runs = _manager_capturing_runs()
 
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert "cli agent message 1" in text
-    assert "cli agent message 3" in text
-    assert "cli agent message 2" not in text
-    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [run_ids[0], run_ids[2]]
+    assert text == "cli agent message 1\n\n---\n\ncli agent message 3"
+    assert ctx.platform_specific["task_execution_id"] == run_ids[0]
+    assert ctx.platform_specific["accepted_agent_run_ids"] == [
+        run_ids[0],
+        run_ids[2],
+    ]
 
     with create_sqlite_engine().begin() as conn:
-        queued_rows = messages_service.list_queued(conn, session_id)
-    assert queued_rows == []
+        assert message_deliveries.list_queued(conn, session_id) == []
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -4131,148 +4659,24 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
 
     assert stored[run_ids[0]]["status"] == "running"
     assert stored[run_ids[1]]["status"] == "canceled"
-    assert stored[run_ids[2]]["status"] == "queued"
-    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is False
-    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
-    assert published.count(("queue.updated", {"session_id": session_id})) >= 2
-
-
-def test_flush_preserves_recovered_coalesced_agent_run_children(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    from core.scheduled_tasks import TaskExecutionStore
-
-    request_store = TaskExecutionStore()
-
-    def prov(execution_id: str, coalesced_ids: list[str] | None = None) -> dict:
-        platform_specific = {
-            "task_execution_id": execution_id,
-            "task_trigger_kind": "agent_run",
-            "task_definition_id": None,
-            "vibe_agent_name": "codex",
-            "source_kind": None,
-            "callback_session_id": None,
-        }
-        if coalesced_ids:
-            platform_specific["coalesced_queue"] = {"execution_ids": coalesced_ids}
-        return {
-            "message_id": f"agent_run:{execution_id}",
-            "platform_specific": platform_specific,
-        }
-
-    recovered_ids: list[str] = []
-    for index in range(2):
-        request = request_store.enqueue_agent_run(
-            session_id="placeholder",
-            message=f"recovered message {index + 1}",
-            agent_name="codex",
+    assert stored[run_ids[2]]["status"] == "running"
+    assert len({stored[run_ids[0]]["delivery_id"], stored[run_ids[2]]["delivery_id"]}) == 2
+    with create_sqlite_engine().connect() as conn:
+        canceled_delivery = message_deliveries.get_delivery(
+            conn,
+            stored[run_ids[1]]["delivery_id"],
         )
-        assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": index != 0})
-        recovered_ids.append(request.id)
-    new_request = request_store.enqueue_agent_run(
-        session_id="placeholder",
-        message="new message",
-        agent_name="codex",
-    )
-    assert request_store.claim(new_request.id) is not None
-    request_store.requeue(new_request.id, metadata={"workbench_queue_holds_run": True})
-
-    session_id = _seed_avibe_session_with_queue(
-        [
-            ("recovered primary", prov(recovered_ids[0], recovered_ids)),
-            ("new message", prov(new_request.id)),
-        ]
-    )
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert len(runs) == 1
-    _text, source, ctx = runs[0]
-    assert source == SOURCE_SCHEDULED
-    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [
-        recovered_ids[0],
-        recovered_ids[1],
-        new_request.id,
-    ]
+    assert canceled_delivery is not None
+    assert canceled_delivery["state"] == "retired"
+    assert published.count(("queue.updated", {"session_id": session_id})) >= 1
 
 
-def test_flush_retargets_recovered_coalesced_row_when_primary_is_stale(tmp_path, monkeypatch):
+def test_turn_claim_refuses_batch_with_terminal_agent_run_without_dispatch(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import SQLiteBackgroundTaskStore
-
-    request_store = TaskExecutionStore()
-
-    def prov(execution_id: str, coalesced_ids: list[str]) -> dict:
-        return {
-            "message_id": f"agent_run:{execution_id}",
-            "platform_specific": {
-                "task_execution_id": execution_id,
-                "task_trigger_kind": "agent_run",
-                "task_definition_id": None,
-                "vibe_agent_name": "codex",
-                "source_kind": None,
-                "callback_session_id": None,
-                "coalesced_queue": {
-                    "execution_ids": coalesced_ids,
-                    "messages": [
-                        {"execution_id": coalesced_ids[0], "message": "stale primary prompt"},
-                        {"execution_id": coalesced_ids[1], "message": "surviving child prompt"},
-                    ],
-                },
-            },
-        }
-
-    run_ids: list[str] = []
-    for index in range(2):
-        request = request_store.enqueue_agent_run(
-            session_id="placeholder",
-            message=f"coalesced message {index + 1}",
-            agent_name="codex",
-        )
-        assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": index != 0})
-        run_ids.append(request.id)
-
-    session_id = _seed_avibe_session_with_queue(
-        [("stale primary prompt", prov(run_ids[0], run_ids))]
-    )
-
-    bg = SQLiteBackgroundTaskStore()
-    try:
-        assert bg.cancel_run(run_ids[0]) is True
-    finally:
-        bg.close()
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert len(runs) == 1
-    text, source, ctx = runs[0]
-    assert source == SOURCE_SCHEDULED
-    assert text == "surviving child prompt"
-    assert ctx.message_id == f"agent_run:{run_ids[1]}"
-    assert ctx.platform_specific["task_execution_id"] == run_ids[1]
-    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [run_ids[1]]
-
-    bg = SQLiteBackgroundTaskStore()
-    try:
-        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
-    finally:
-        bg.close()
-    assert stored[run_ids[0]]["status"] == "canceled"
-    assert stored[run_ids[1]]["status"] == "running"
-
-
-def test_flush_retries_when_agent_run_claim_finds_late_stale_row(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    from core.scheduled_tasks import TaskExecutionStore
-    from storage import background as background_module
-    from storage.background import SQLiteBackgroundTaskStore
+    from storage.db import create_sqlite_engine
     from storage.models import agent_runs
     from sqlalchemy import update
 
@@ -4300,38 +4704,27 @@ def test_flush_retries_when_agent_run_claim_finds_late_stale_row(tmp_path, monke
             agent_name="codex",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id)))
         run_ids.append(request.id)
 
     session_id = _seed_avibe_session_with_queue(queued)
-    real_claim = background_module.claim_queued_runs_for_workbench_in_connection
-    injected = {"done": False}
-
-    def late_stale_claim(conn, pending_run_ids, *, started_at=None):
-        if not injected["done"]:
-            injected["done"] = True
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_ids[1])
-                .values(status="canceled", cancel_requested=1, completed_at="2026-06-22T00:00:10Z")
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_ids[1])
+            .values(
+                status="canceled",
+                cancel_requested=1,
+                completed_at="2026-06-22T00:00:10Z",
             )
-            return []
-        return real_claim(conn, pending_run_ids, started_at=started_at)
-
-    monkeypatch.setattr(background_module, "claim_queued_runs_for_workbench_in_connection", late_stale_claim)
-    monkeypatch.setattr(session_turns, "claim_queued_runs_for_workbench_in_connection", late_stale_claim, raising=False)
+        )
 
     mgr, runs = _manager_capturing_runs()
 
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert len(runs) == 1
-    text, source, ctx = runs[0]
-    assert source == SOURCE_SCHEDULED
-    assert "cli agent message 1" in text
-    assert "cli agent message 3" in text
-    assert "cli agent message 2" not in text
-    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [run_ids[0], run_ids[2]]
+    with pytest.raises(RuntimeError, match="unclaimable Agent Run"):
+        asyncio.run(mgr.flush_queue(session_id))
+    assert runs == []
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -4339,12 +4732,18 @@ def test_flush_retries_when_agent_run_claim_finds_late_stale_row(tmp_path, monke
     finally:
         bg.close()
 
-    assert stored[run_ids[0]]["status"] == "running"
+    assert stored[run_ids[0]]["status"] == "queued"
     assert stored[run_ids[1]]["status"] == "canceled"
     assert stored[run_ids[2]]["status"] == "queued"
+    with mgr._sqlite_engine().connect() as conn:
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "cli agent message 1",
+            "cli agent message 2",
+            "cli agent message 3",
+        ]
 
 
-def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):
+def test_flush_merges_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -4372,7 +4771,7 @@ def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_
             callback_session_id=callback_session_id,
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id, callback_session_id)))
 
     session_id = _seed_avibe_session_with_queue(queued)
@@ -4383,11 +4782,14 @@ def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert text == "cli agent message 1"
+    assert text == "cli agent message 1\n\n---\n\ncli agent message 2"
+    assert len(ctx.platform_specific["accepted_agent_run_ids"]) == 2
     assert "coalesced_queue" not in ctx.platform_specific
+    with mgr._sqlite_engine().connect() as conn:
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
-def test_flush_does_not_coalesce_callback_backed_agent_runs(tmp_path, monkeypatch):
+def test_flush_merges_callback_backed_agent_runs_by_delivery_compatibility(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -4415,7 +4817,7 @@ def test_flush_does_not_coalesce_callback_backed_agent_runs(tmp_path, monkeypatc
             callback_session_id="same-caller",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"callback agent message {index + 1}", prov(request.id)))
 
     session_id = _seed_avibe_session_with_queue(queued)
@@ -4426,11 +4828,12 @@ def test_flush_does_not_coalesce_callback_backed_agent_runs(tmp_path, monkeypatc
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert text == "callback agent message 1"
+    assert text == "callback agent message 1\n\n---\n\ncallback agent message 2"
+    assert len(ctx.platform_specific["accepted_agent_run_ids"]) == 2
     assert "coalesced_queue" not in ctx.platform_specific
 
 
-def test_flush_isolates_legacy_agent_runs_without_source_provenance(tmp_path, monkeypatch):
+def test_flush_merges_agent_runs_without_redundant_provenance_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -4457,7 +4860,7 @@ def test_flush_isolates_legacy_agent_runs_without_source_provenance(tmp_path, mo
             callback_session_id=f"caller-{index + 1}",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"legacy callback message {index + 1}", prov(request.id)))
 
     session_id = _seed_avibe_session_with_queue(queued)
@@ -4468,7 +4871,8 @@ def test_flush_isolates_legacy_agent_runs_without_source_provenance(tmp_path, mo
     assert len(runs) == 1
     text, source, ctx = runs[0]
     assert source == SOURCE_SCHEDULED
-    assert text == "legacy callback message 1"
+    assert text == "legacy callback message 1\n\n---\n\nlegacy callback message 2"
+    assert len(ctx.platform_specific["accepted_agent_run_ids"]) == 2
     assert "coalesced_queue" not in ctx.platform_specific
 
 
@@ -4502,7 +4906,7 @@ def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monk
             agent_name="codex",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id)))
         run_ids.append(request.id)
 
@@ -4515,20 +4919,11 @@ def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monk
 
     assert asyncio.run(mgr.flush_queue(session_id)) is False
 
-    from storage import messages_service
     from storage.db import create_sqlite_engine
 
-    from storage.models import messages
-
     with create_sqlite_engine().begin() as conn:
-        queued_rows = messages_service.list_queued(conn, session_id)
-        dedupe_rows = conn.execute(
-            select(messages)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
-        ).mappings().all()
+        queued_rows = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in queued_rows] == ["cli agent message 1", "cli agent message 2"]
-    assert dedupe_rows == []
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -4536,11 +4931,14 @@ def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monk
     finally:
         bg.close()
 
-    assert {row["status"] for row in stored.values()} == {"queued"}
-    assert all(row["metadata"]["workbench_queue_holds_run"] is True for row in stored.values())
+    assert {row["status"] for row in stored.values()} == {"running"}
+    assert all(row["delivery_id"] for row in stored.values())
 
 
-def test_flush_resets_agent_run_claim_when_run_start_fails(tmp_path, monkeypatch):
+def test_flush_quarantines_agent_run_when_native_start_may_have_written(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -4568,7 +4966,7 @@ def test_flush_resets_agent_run_claim_when_run_start_fails(tmp_path, monkeypatch
             agent_name="codex",
         )
         assert request_store.claim(request.id) is not None
-        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        request_store.requeue(request.id)
         queued.append((f"cli agent message {index + 1}", prov(request.id)))
         run_ids.append(request.id)
 
@@ -4582,12 +4980,19 @@ def test_flush_resets_agent_run_claim_when_run_start_fails(tmp_path, monkeypatch
 
     assert asyncio.run(mgr.flush_queue(session_id)) is False
 
-    from storage import messages_service
     from storage.db import create_sqlite_engine
 
     with create_sqlite_engine().begin() as conn:
-        queued_rows = messages_service.list_queued(conn, session_id)
-    assert [row["text"] for row in queued_rows] == ["cli agent message 1", "cli agent message 2"]
+        queued_rows = message_deliveries.list_queued(conn, session_id)
+        unresolved_turn = message_deliveries.active_turn(conn, session_id)
+        assert unresolved_turn is not None
+        unresolved_batch = message_deliveries.initial_deliveries_for_turn(
+            conn,
+            unresolved_turn["id"],
+        )
+    assert queued_rows == []
+    assert unresolved_turn["start_receipt_outcome"] == "unknown"
+    assert [row["state"] for row in unresolved_batch] == ["claimed", "claimed"]
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -4595,12 +5000,11 @@ def test_flush_resets_agent_run_claim_when_run_start_fails(tmp_path, monkeypatch
     finally:
         bg.close()
 
-    assert {row["status"] for row in stored.values()} == {"queued"}
-    assert all(row["metadata"]["workbench_queue_holds_run"] is True for row in stored.values())
-    assert all(row["metadata"].get("effective_run_id") is None for row in stored.values())
+    assert [stored[run_id]["status"] for run_id in run_ids] == ["running", "running"]
+    assert len({stored[run_id]["delivery_id"] for run_id in run_ids}) == 2
 
 
-def test_flush_suppressed_segment_reserves_first_native_id_for_prompt(tmp_path, monkeypatch):
+def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def prov(execution_id: str) -> dict:
@@ -4621,25 +5025,16 @@ def test_flush_suppressed_segment_reserves_first_native_id_for_prompt(tmp_path, 
         ]
     )
 
-    from sqlalchemy import select
-
-    from storage import messages_service
     from storage.db import create_sqlite_engine
-    from storage.models import messages
 
     mgr, runs = _manager_capturing_runs()
 
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert len(runs) == 1
     assert runs[0][2].message_id == "watch:def-watch:run-1"
+    assert len(runs[0][2].platform_specific["delivery_ids"]) == 2
     with create_sqlite_engine().begin() as conn:
-        dedupe_rows = conn.execute(select(messages)).mappings().all()
-    dedupe_native_ids = {
-        row["native_message_id"]
-        for row in dedupe_rows
-        if row["type"] == messages_service.HARNESS_DEDUPE_TYPE
-    }
-    assert dedupe_native_ids == {"watch:def-watch:run-2"}
+        assert message_deliveries.list_queued(conn, session_id) == []
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp_path, monkeypatch):
@@ -4671,7 +5066,7 @@ def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert [(text, source) for text, source, _ in runs] == [("first callback", SOURCE_SCHEDULED)]
     with create_sqlite_engine().begin() as conn:
-        remaining = messages_service.list_queued(conn, session_id)
+        remaining = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in remaining] == ["different delivery"]
 
 
@@ -4706,7 +5101,7 @@ def test_flush_does_not_coalesce_scheduled_callbacks_with_different_agent(tmp_pa
     assert (text, source) == ("codex callback", SOURCE_SCHEDULED)
     assert ctx.platform_specific["vibe_agent_name"] == "codex"
     with create_sqlite_engine().begin() as conn:
-        remaining = messages_service.list_queued(conn, session_id)
+        remaining = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in remaining] == ["claude callback"]
 
 
@@ -4745,37 +5140,8 @@ def test_capture_scheduled_target_agent_splits_coalescing_key(tmp_path, monkeypa
     assert (text, source) == ("codex target callback", SOURCE_SCHEDULED)
     assert ctx.platform_specific[session_turns.SCHEDULED_TARGET_AGENT_KEY] == "codex"
     with create_sqlite_engine().begin() as conn:
-        remaining = messages_service.list_queued(conn, session_id)
+        remaining = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in remaining] == ["claude target callback"]
-
-
-def test_flush_coalesced_scheduled_copy_uses_i18n(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    def prov(execution_id: str) -> dict:
-        return {
-            "message_id": f"watch:def-watch:{execution_id}",
-            "platform_specific": {
-                "language": "zh",
-                "task_execution_id": execution_id,
-                "task_trigger_kind": "watch",
-                "task_definition_id": "def-watch",
-            },
-        }
-
-    session_id = _seed_avibe_session_with_queue(
-        [
-            ("第一次 callback", prov("run-1")),
-            ("第二次 callback", prov("run-2")),
-        ]
-    )
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    text = runs[0][0]
-    assert "同一个 watch/task callback" in text
-    assert "已合并的 callback 消息" in text
 
 
 def test_flush_preserves_scheduled_prompt_whitespace(tmp_path, monkeypatch):
@@ -4802,156 +5168,6 @@ def test_flush_preserves_scheduled_prompt_whitespace(tmp_path, monkeypatch):
     assert runs[0][0] == "  indented: true\n"
 
 
-def test_flush_skips_scheduled_callback_when_native_id_already_claimed(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    session_id = _seed_avibe_session_with_queue(
-        [
-            (
-                "duplicate callback",
-                {
-                    "message_id": "watch:def-watch:run-2",
-                    "platform_specific": {
-                        "task_execution_id": "run-2",
-                        "task_trigger_kind": "watch",
-                        "task_definition_id": "def-watch",
-                    },
-                },
-            )
-        ]
-    )
-
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-
-    with create_sqlite_engine().begin() as conn:
-        queued = messages_service.list_queued(conn, session_id)
-        messages_service.delete_queued(conn, [queued[0]["id"]])
-        messages_service.append(
-            conn,
-            scope_id=queued[0]["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.HARNESS_DEDUPE_TYPE,
-            text="",
-            metadata={"coalesced_from": "older-row"},
-            native_message_id="watch:def-watch:run-2",
-        )
-        messages_service.append(
-            conn,
-            scope_id=queued[0]["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.QUEUED_TYPE,
-            text="duplicate callback",
-            metadata={
-                session_turns.SCHEDULED_PROVENANCE_KEY: {
-                    "message_id": "watch:def-watch:run-2",
-                    "platform_specific": {
-                        "task_execution_id": "run-2",
-                        "task_trigger_kind": "watch",
-                        "task_definition_id": "def-watch",
-                    },
-                }
-            },
-            native_message_id=None,
-        )
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is False
-    assert runs == []
-    with create_sqlite_engine().begin() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-
-
-def test_flush_drops_only_claimed_scheduled_callbacks(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    def prov(execution_id: str) -> dict:
-        return {
-            "message_id": f"watch:def-watch:{execution_id}",
-            "platform_specific": {
-                "task_execution_id": execution_id,
-                "task_trigger_kind": "watch",
-                "task_definition_id": "def-watch",
-            },
-        }
-
-    session_id = _seed_avibe_session_with_queue(
-        [
-            ("duplicate callback", prov("run-1")),
-            ("fresh callback", prov("run-2")),
-        ]
-    )
-
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-
-    with create_sqlite_engine().begin() as conn:
-        from sqlalchemy import update
-
-        from storage.models import messages
-
-        queued = messages_service.list_queued(conn, session_id)
-        duplicate = queued[0]
-        fresh = queued[1]
-        messages_service.delete_queued(conn, [duplicate["id"]])
-        messages_service.append(
-            conn,
-            scope_id=duplicate["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.HARNESS_DEDUPE_TYPE,
-            text="",
-            metadata={"coalesced_from": "older-row"},
-            native_message_id="watch:def-watch:run-1",
-        )
-        duplicate = messages_service.append(
-            conn,
-            scope_id=duplicate["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.QUEUED_TYPE,
-            text="duplicate callback",
-            metadata={
-                session_turns.SCHEDULED_PROVENANCE_KEY: {
-                    "message_id": "watch:def-watch:run-1",
-                    "platform_specific": {
-                        "task_execution_id": "run-1",
-                        "task_trigger_kind": "watch",
-                        "task_definition_id": "def-watch",
-                    },
-                }
-            },
-            native_message_id=None,
-        )
-        conn.execute(
-            update(messages)
-            .where(messages.c.id == duplicate["id"])
-            .values(created_at="2026-06-22T00:00:00Z")
-        )
-        conn.execute(update(messages).where(messages.c.id == fresh["id"]).values(created_at="2026-06-22T00:00:01Z"))
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert len(runs) == 1
-    text, source, ctx = runs[0]
-    assert (text, source) == ("fresh callback", SOURCE_SCHEDULED)
-    assert ctx.message_id == "watch:def-watch:run-2"
-    assert ctx.platform_specific["task_execution_id"] == "run-2"
-    with create_sqlite_engine().begin() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-
-
 def test_flush_does_not_mark_native_ids_when_context_build_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _seed_avibe_session_with_queue(
@@ -4971,7 +5187,6 @@ def test_flush_does_not_mark_native_ids_when_context_build_fails(tmp_path, monke
         ]
     )
 
-    from storage import messages_service
     from storage.db import create_sqlite_engine
 
     mgr = session_turns.SessionTurnManager(
@@ -4981,209 +5196,8 @@ def test_flush_does_not_mark_native_ids_when_context_build_fails(tmp_path, monke
 
     assert asyncio.run(mgr.flush_queue(session_id)) is False
     with create_sqlite_engine().begin() as conn:
-        from sqlalchemy import select
-
-        from storage.models import messages
-
-        rows = conn.execute(select(messages).where(messages.c.session_id == session_id)).mappings().all()
-    assert [row for row in rows if row["type"] == messages_service.HARNESS_DEDUPE_TYPE] == []
-
-
-def test_flush_continues_after_dropping_duplicate_scheduled_segment(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    session_id = _seed_avibe_session_with_queue(
-        [
-            (
-                "duplicate callback",
-                {
-                    "message_id": "watch:def-watch:run-2",
-                    "platform_specific": {
-                        "task_execution_id": "run-2",
-                        "task_trigger_kind": "watch",
-                        "task_definition_id": "def-watch",
-                    },
-                },
-            ),
-            ("queued user follow-up", None),
-        ]
-    )
-
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-
-    with create_sqlite_engine().begin() as conn:
-        from sqlalchemy import update
-
-        from storage.models import messages
-
-        queued = messages_service.list_queued(conn, session_id)
-        messages_service.delete_queued(conn, [queued[0]["id"]])
-        messages_service.append(
-            conn,
-            scope_id=queued[0]["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.HARNESS_DEDUPE_TYPE,
-            text="",
-            metadata={"coalesced_from": "older-row"},
-            native_message_id="watch:def-watch:run-2",
-        )
-        messages_service.append(
-            conn,
-            scope_id=queued[0]["scope_id"],
-            session_id=session_id,
-            platform="avibe",
-            author="harness",
-            source="harness",
-            message_type=messages_service.QUEUED_TYPE,
-            text="duplicate callback",
-            metadata={
-                session_turns.SCHEDULED_PROVENANCE_KEY: {
-                    "message_id": "watch:def-watch:run-2",
-                    "platform_specific": {
-                        "task_execution_id": "run-2",
-                        "task_trigger_kind": "watch",
-                        "task_definition_id": "def-watch",
-                    },
-                }
-            },
-            native_message_id=None,
-        )
-        queued = messages_service.list_queued(conn, session_id)
-        for row in queued:
-            created_at = "2026-06-22T00:00:00Z" if row["text"] == "duplicate callback" else "2026-06-22T00:01:00Z"
-            conn.execute(update(messages).where(messages.c.id == row["id"]).values(created_at=created_at))
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert [(text, source) for text, source, _ in runs] == [("queued user follow-up", SOURCE_HUMAN)]
-    with create_sqlite_engine().begin() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
-    assert runs[0][2].message_id == visible["messages"][0]["id"]
-
-
-def test_flush_does_not_coalesce_scheduled_callbacks_outside_window(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    def prov(execution_id: str) -> dict:
-        return {
-            "message_id": f"watch:def-watch:{execution_id}",
-            "platform_specific": {
-                "task_execution_id": execution_id,
-                "task_trigger_kind": "watch",
-                "task_definition_id": "def-watch",
-            },
-        }
-
-    session_id = _seed_avibe_session_with_queue(
-        [
-            ("first callback", prov("run-1")),
-            ("late callback", prov("run-2")),
-        ]
-    )
-
-    from sqlalchemy import update
-
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.models import messages
-
-    with create_sqlite_engine().begin() as conn:
-        rows = messages_service.list_queued(conn, session_id)
-        conn.execute(update(messages).where(messages.c.id == rows[0]["id"]).values(created_at="2026-06-22T00:00:00Z"))
-        conn.execute(update(messages).where(messages.c.id == rows[1]["id"]).values(created_at="2026-06-22T00:02:01Z"))
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert [(text, source) for text, source, _ in runs] == [("first callback", SOURCE_SCHEDULED)]
-    with create_sqlite_engine().begin() as conn:
-        remaining = messages_service.list_queued(conn, session_id)
-    assert [row["text"] for row in remaining] == ["late callback"]
-
-
-def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
-    """A mixed queue drains one segment per flush, in order: leading user rows merge
-    into one user turn; the scheduled row then runs separately with its provenance.
-    The completion-reflush handles the next segment, so one flush runs only the first
-    segment and leaves the rest (#84)."""
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    session_id = _seed_avibe_session_with_queue(
-        [
-            ("u1", None),
-            ("u2", None),
-            ("sched", {"message_id": "scheduled:x", "platform_specific": {"suppress_delivery": True}}),
-        ]
-    )
-    mgr, runs = _manager_capturing_runs()
-
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-
-    # First flush: leading user rows merge into one user turn; the scheduled row stays.
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert [(t, s) for t, s, _ in runs] == [("u1\nu2", SOURCE_HUMAN)]
-    assert "suppress_delivery" not in (runs[0][2].platform_specific or {})
-    with create_sqlite_engine().begin() as conn:
-        remaining = messages_service.list_queued(conn, session_id)
-    assert [r["text"] for r in remaining] == ["sched"]
-
-    # Second flush (what the turn completion triggers): the scheduled row runs as
-    # SOURCE_SCHEDULED with its provenance.
-    assert asyncio.run(mgr.flush_queue(session_id)) is True
-    assert (runs[-1][0], runs[-1][1]) == ("sched", SOURCE_SCHEDULED)
-    assert runs[-1][2].platform_specific["suppress_delivery"] is True
-
-
-def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-
-    from core.services import sessions as sessions_service
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
-
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn, platform="avibe", scope_type="project", native_id="proj_mixed_owner", now="2026-05-31T00:00:00Z"
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
-        )
-        for text, owner in (("u1", "remote:user-a"), ("u2", "remote:user-b")):
-            messages_service.append(
-                conn,
-                scope_id=scope_id,
-                session_id=session["id"],
-                platform="avibe",
-                author="user",
-                source="user",
-                message_type=messages_service.QUEUED_TYPE,
-                text=text,
-                author_id=owner,
-                metadata={"_web_push_user_key": owner},
-            )
-
-    mgr, runs = _manager_capturing_runs()
-
-    assert asyncio.run(mgr.flush_queue(session["id"])) is True
-    assert [(t, s) for t, s, _ in runs] == [("u1\nu2", SOURCE_HUMAN)]
-    with engine.connect() as conn:
-        transcript = messages_service.list_session_messages(conn, session_id=session["id"], types=("user",))
-    assert transcript["messages"][0]["author_id"] is None
-    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
-        "remote:user-a",
-        "remote:user-b",
-    ]
-    assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
+        queued = message_deliveries.list_queued(conn, session_id)
+    assert [row["native_message_id"] for row in queued] == ["watch:def-watch:run-1"]
 
 
 def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
@@ -5221,3 +5235,107 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
     # Routing keys the flush rebuilds are NOT carried.
     for routing in ("platform", "is_dm", "agent_session_id", "agent_session_target"):
         assert routing not in spec
+
+
+def test_boot_queue_recovery_stops_when_durable_owner_recovery_fails(
+    monkeypatch,
+    tmp_path,
+):
+    import uvicorn
+
+    calls: list[str] = []
+
+    async def fail_delivery_recovery():
+        calls.append("delivery")
+        raise RuntimeError("owner recovery failed")
+
+    async def recover_queue():
+        calls.append("queue")
+        return []
+
+    manager = SimpleNamespace(
+        recover_durable_delivery_state=fail_delivery_recovery,
+        recover_persisted_agent_run_queue=recover_queue,
+    )
+    controller = SimpleNamespace(session_turns=manager)
+
+    class _Server:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self, *, sockets):
+            assert len(sockets) == 1
+            calls.append("serve")
+
+    listener = SimpleNamespace(close=lambda: calls.append("close"))
+    monkeypatch.setattr(internal_server, "create_app", lambda _controller: object())
+    monkeypatch.setattr(
+        internal_server,
+        "_bind_socket",
+        lambda _path: (listener, tmp_path / "internal.sock"),
+    )
+    monkeypatch.setattr(uvicorn, "Config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    asyncio.run(internal_server.serve(controller))
+
+    assert calls == ["delivery", "serve", "close"]
+
+
+def test_boot_waits_for_backend_restore_before_delivery_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    import uvicorn
+
+    calls: list[str] = []
+    restore_barrier = asyncio.Event()
+    recovery_complete = asyncio.Event()
+
+    async def recover_deliveries():
+        calls.append("delivery")
+        return []
+
+    async def recover_queue():
+        calls.append("queue")
+        return []
+
+    manager = SimpleNamespace(
+        recover_durable_delivery_state=recover_deliveries,
+        recover_persisted_agent_run_queue=recover_queue,
+    )
+    controller = SimpleNamespace(
+        session_turns=manager,
+        _delivery_recovery_barrier=restore_barrier,
+        _delivery_recovery_complete=recovery_complete,
+    )
+
+    class _Server:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self, *, sockets):
+            assert len(sockets) == 1
+            assert recovery_complete.is_set()
+            calls.append("serve")
+
+    listener = SimpleNamespace(close=lambda: calls.append("close"))
+    monkeypatch.setattr(internal_server, "create_app", lambda _controller: object())
+    monkeypatch.setattr(
+        internal_server,
+        "_bind_socket",
+        lambda _path: (listener, tmp_path / "internal.sock"),
+    )
+    monkeypatch.setattr(uvicorn, "Config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    async def _run() -> None:
+        serving = asyncio.create_task(internal_server.serve(controller))
+        await asyncio.sleep(0)
+        assert calls == []
+        restore_barrier.set()
+        await serving
+
+    asyncio.run(_run())
+
+    assert calls == ["delivery", "queue", "serve", "close"]
