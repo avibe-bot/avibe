@@ -641,6 +641,10 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
             session_turns.c.terminal_at,
         )
         .where(session_turns.c.session_id == source_session_id)
+        .where(
+            session_turns.c.terminal_outcome.is_(None)
+            | (session_turns.c.terminal_outcome != "not_written")
+        )
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(1)
     ).mappings().first()

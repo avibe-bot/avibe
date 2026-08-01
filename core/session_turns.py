@@ -1940,6 +1940,19 @@ class SessionTurnManager:
             else:
                 resolved.message_id = str(delivery["id"])
             text = str(delivery.get("dispatch_text") or "")
+        except Exception:
+            logger.exception(
+                "durable native start failed during pre-dispatch preparation for Turn=%s",
+                turn_id,
+            )
+            self._terminalize_durable_turn(
+                turn_id,
+                "not_written",
+                settled_by="pre_write_failure",
+                evidence_kind="dispatch_preparation_failed",
+            )
+            return False
+        try:
             await self._run(
                 str(turn["session_id"]),
                 resolved,

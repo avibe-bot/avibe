@@ -2350,6 +2350,40 @@ def test_reserved_show_dispatch_rejects_whitespace_only_dispatch_text(monkeypatc
     assert outcome is ui_server._ShowEventDispatchOutcome.FAILED
 
 
+@pytest.mark.parametrize(
+    "delivery_state",
+    [
+        "queued",
+        "pending_steer",
+        "steering",
+        "start_attempting",
+        "reconciling_start",
+        "reconciling_steer",
+        "interrupt_waiting",
+    ],
+)
+def test_show_dispatch_replay_accepts_existing_admission(monkeypatch, delivery_state):
+    async def unexpected_dispatch(*_args, **_kwargs):
+        pytest.fail("an admitted Show Delivery must not be dispatched twice")
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", unexpected_dispatch)
+    outcome = asyncio.run(
+        ui_server._run_show_event_dispatch(
+            {
+                "id": "show_evt_admitted",
+                "session_id": "ses123",
+                "delivery": {
+                    "id": "msg_admitted",
+                    "state": delivery_state,
+                    "dispatch_text": "already admitted",
+                },
+            }
+        )
+    )
+
+    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
+
+
 def test_private_show_page_materializes_same_submission_after_synchronous_acceptance(
     monkeypatch,
     tmp_path,

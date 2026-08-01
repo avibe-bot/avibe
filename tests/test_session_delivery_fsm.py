@@ -772,6 +772,34 @@ def test_start_write_ambiguity_survives_restart_without_duplicate_dispatch(manag
         assert conn.execute(select(messages.c.id)).all() == []
 
 
+def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) -> None:
+    first, restarted, engine, _engine_b, starts = managers
+
+    def fail_before_dispatch(*_args, **_kwargs):
+        raise OSError("attachment lookup failed before dispatch")
+
+    first._hydrate_delivery_context = fail_before_dispatch
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="retry safely"),
+            context=_context(),
+        )
+    )
+
+    row = _row(engine, str(admitted.delivery_id))
+    assert row["state"] == "queued"
+    with engine.connect() as conn:
+        failed_turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+    assert failed_turn is not None
+    assert failed_turn["terminal_outcome"] == "not_written"
+    assert starts == []
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm"))
+
+    assert [text for _turn_id, text in starts] == ["retry safely"]
+    assert _row(engine, str(admitted.delivery_id))["state"] == "start_attempting"
+
+
 def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     delivery_id = delivery_store.new_delivery_id()

@@ -72,6 +72,18 @@ class _ShowEventDispatchOutcome(str, Enum):
     FAILED = "failed"
 
 
+_SHOW_EVENT_ADMITTED_DELIVERY_STATES = {
+    "accepted",
+    "queued",
+    "pending_steer",
+    "steering",
+    "start_attempting",
+    "reconciling_start",
+    "reconciling_steer",
+    "interrupt_waiting",
+}
+
+
 # Python's mimetypes map omits .webmanifest; register it so the PWA manifest is
 # served as a type browsers accept (an octet-stream manifest is rejected).
 mimetypes.add_type("application/manifest+json", ".webmanifest")
@@ -9623,7 +9635,7 @@ async def _run_show_event_dispatch(
     if not isinstance(delivery, dict):
         return _ShowEventDispatchOutcome.FAILED
     delivery_state = str(delivery.get("state") or "")
-    if delivery_state == "accepted":
+    if delivery_state in _SHOW_EVENT_ADMITTED_DELIVERY_STATES:
         return _ShowEventDispatchOutcome.ACCEPTED
     if delivery_state != "reserved":
         return _ShowEventDispatchOutcome.FAILED
@@ -9681,16 +9693,7 @@ async def _run_show_event_dispatch(
         return _ShowEventDispatchOutcome.FAILED
     settled = _settle_show_event_message(event_payload)
     state = str((settled or {}).get("state") or body.get("delivery_state") or "")
-    if state in {
-        "accepted",
-        "queued",
-        "pending_steer",
-        "steering",
-        "start_attempting",
-        "reconciling_start",
-        "reconciling_steer",
-        "interrupt_waiting",
-    }:
+    if state in _SHOW_EVENT_ADMITTED_DELIVERY_STATES:
         return _ShowEventDispatchOutcome.ACCEPTED
     return _ShowEventDispatchOutcome.FAILED
 

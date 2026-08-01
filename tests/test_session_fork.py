@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1504,8 +1505,83 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
     assert result.fork.trim_latest_running_turn is False
 
 
+def test_not_written_successor_does_not_mask_accepted_source_turn(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            accepted_turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="keep working",
+            )
+            successor_id = message_deliveries.new_delivery_id()
+            successor_turn_id = message_deliveries.new_turn_id()
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=successor_id,
+                session_id=source_id,
+                priority="p0",
+                state="interrupt_waiting",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="replacement",
+                ),
+                dispatch_text="replacement",
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=successor_turn_id,
+                session_id=source_id,
+                initial_delivery_id=successor_id,
+                state="waiting",
+                backend="codex",
+            )
+            message_deliveries.terminalize_turn(
+                conn,
+                successor_turn_id,
+                outcome="not_written",
+                settled_by="definitive_stop_receipt",
+                evidence_kind="stop_refused",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            message_deliveries.terminalize_turn(
+                conn,
+                accepted_turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="replyless_completion",
+            )
+    finally:
+        engine.dispose()
+
+    completed = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert completed.fork.trim_latest_running_turn is False
+
+
 def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A migrated legacy silent event remains a terminal fork boundary."""
 
@@ -1517,6 +1593,14 @@ def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).scalar_one()
+            message_micros = int(
+                datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1_000_000
+            )
+            monkeypatch.setattr(
+                messages_service,
+                "_new_message_id",
+                lambda: f"msg_{message_micros:015x}{'0' * 8}",
+            )
             message = messages_service.append(
                 conn,
                 scope_id=scope_id,
