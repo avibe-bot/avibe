@@ -1551,6 +1551,101 @@ def test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_noti
     assert "owed_failure_notice" not in metadata
 
 
+def test_end_does_not_reconcile_manager_runs_when_the_canonical_stop_fails(
+    tmp_path, monkeypatch
+):
+    """HFR-358: a refused Workbench stop does not transfer manager ownership.
+
+    ``SessionTurnManager.cancel`` deliberately leaves the turn registered and alive
+    when the backend stop fails, so its run still belongs to that turn and must stay
+    writable for the natural result.  The scheduler-only cancellation reports those
+    manager ids separately for exactly this decision; End may claim them only after a
+    successful canonical stop actually released the turn.
+
+    Pin the dangerous convergence shape: backend cleanup can still succeed and clear
+    the stale runtime, but that success cannot retroactively turn the refused stop into
+    interruption evidence or terminalize the live turn's run.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    run_id = _running_harness_run(
+        request_store,
+        session_id="ses-end-358",
+        message="a manager turn whose backend refused Stop",
+        agent_backend="codex",
+    )
+
+    cleared = {}
+    session_mgr = types.SimpleNamespace(
+        get_cwd=lambda _base: "/w",
+        get_thread_id=lambda _base: None,
+        clear=lambda base: cleared.__setitem__("session", base),
+        sessions_for_cwd=lambda _cwd: [],
+    )
+    turn_registry = types.SimpleNamespace(
+        get_active_turn=lambda _base: "turn-live",
+        clear_session=lambda base: cleared.__setitem__("turn", base),
+    )
+    codex = types.SimpleNamespace(
+        _session_mgr=session_mgr,
+        _turn_registry=turn_registry,
+        _transports={},
+        _transport_last_activity={},
+        _runtime_turn_key_for_base_session=lambda base: f"{base}:/w",
+    )
+
+    async def _refuse_stop(_session_id):
+        return {"ok": False, "code": "stop_failed", "status": "stop_failed"}
+
+    inflight_entry = types.SimpleNamespace(
+        task=types.SimpleNamespace(done=lambda: False),
+        context=types.SimpleNamespace(
+            platform_specific={
+                "agent_session_target": {
+                    "agent_backend": "codex",
+                    "session_anchor": "codex-base",
+                }
+            }
+        ),
+    )
+    controller = _make_controller(codex=codex)
+    controller.sessions = types.SimpleNamespace(
+        find_session_ids_for_anchor=lambda anchor, **_kw: (
+            ["ses-end-358"] if anchor == "codex-base" else []
+        )
+    )
+    controller.session_turns = types.SimpleNamespace(
+        is_in_flight=lambda session_id: session_id == "ses-end-358",
+        cancel=_refuse_stop,
+        in_flight={"ses-end-358": inflight_entry},
+        owned_agent_run_ids=lambda: {run_id},
+    )
+    controller.scheduled_task_service = service
+    service.controller = controller
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="codex",
+            state="active",
+            session_id="ses-end-358",
+            base_session_id="codex-base",
+        )
+    )
+
+    assert result["ok"] is True
+    assert "ses-end-358" in controller.session_turns.in_flight
+    survivor = request_store.get_run(run_id)
+    assert survivor is not None
+    assert survivor["status"] == "running"
+    assert survivor["completed_at"] is None
+    assert request_store.settle_without_result(
+        run_id, terminal_status="succeeded"
+    ) == "succeeded"
+    assert cleared == {"session": "codex-base", "turn": "codex-base"}
+
+
 def test_ending_an_idle_row_is_silent_and_settles_nothing(tmp_path, monkeypatch):
     """HFR-108: the unconditional settlement must be SAFE, not merely correct.
 

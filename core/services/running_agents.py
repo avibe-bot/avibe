@@ -1532,19 +1532,25 @@ async def end_running_agent(
             # in this session is a claim neither reached. Reconcile BEFORE the teardown,
             # for the same reason the whole ordering exists.
             #
-            # THE MANAGER LANE IS CLAIMED HERE AND ONLY HERE (HFR-324). The cancel above
-            # left that lane alone precisely so this stop could own it, and the stop has
-            # now run — against a turn the live-state recheck already confirmed belongs to
-            # THIS row, since a turn it could not attribute is what makes the state idle.
-            # So its runs are this End's interrupted work, and the reconcile is their
-            # backstop for the case the stop interrupted the turn without its own
-            # settlement running (HFR-107). The idle branch below has no such stop and
-            # claims nothing from that lane: the live turn there is somebody else's.
+            # THE MANAGER LANE IS CLAIMED HERE AND ONLY AFTER A SUCCESSFUL STOP
+            # (HFR-324/358). The cancel above left that lane alone precisely so this
+            # stop could own it. Merely CALLING the stop does not transfer ownership:
+            # ``stop_failed`` deliberately leaves the manager turn registered and alive
+            # for natural completion, so its runs remain that turn's work and must not
+            # be reconciled as canceled. ``turn_settled`` is the structured proof that
+            # the canonical path actually released it. The idle branch below likewise
+            # claims nothing from the manager lane: the live turn there is somebody
+            # else's.
+            manager_run_ids = (
+                scheduler_lane.manager_lane_run_ids
+                if stop_ok and bool(stop_result.get("turn_settled"))
+                else frozenset()
+            )
             await reconcile_session_runs(
                 controller,
                 teardown_session_id,
                 settled_by=SETTLED_BY_STOPPED,
-                claimed_run_ids=claimed_run_ids | scheduler_lane.manager_lane_run_ids,
+                claimed_run_ids=claimed_run_ids | manager_run_ids,
             )
             # The canonical stop interrupts the turn (and releases its runtime gate via
             # the turn's own context — verified in Incus) but does NOT free the rest of

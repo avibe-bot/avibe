@@ -4389,6 +4389,22 @@ scenarios:
     # sole candidate. An ambiguous result, or a unique result different from the stale
     # supplied id, fails closed while the backend-specific runtime cleanup proceeds.
     test: tests/test_running_agents_service.py::test_end_revalidates_a_supplied_session_id_against_ambiguous_runtime_identity
+  - id: HFR-358
+    name: End reconciles manager-owned runs only after the canonical stop succeeds
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 26. The scheduler-only cancellation returns manager-lane ids
+    # separately because it deliberately did not interrupt that lane. End unioned
+    # those ids into reconciliation after merely CALLING the canonical stop, even when
+    # SessionTurnManager.cancel returned stop_failed and intentionally left the turn
+    # registered and alive for natural completion. The run became canceled while its
+    # live owner could still emit output, and the guarded terminal writer could never
+    # restore the real result. Manager ownership is now claimed only when the canonical
+    # stop succeeds; backend cleanup remains best-effort and may still clear a stale
+    # runtime without inventing interruption evidence for the refused turn.
+    test: tests/test_running_agents_service.py::test_end_does_not_reconcile_manager_runs_when_the_canonical_stop_fails
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
