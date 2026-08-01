@@ -2264,6 +2264,7 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
+            resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
             provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
             source = SOURCE_HUMAN

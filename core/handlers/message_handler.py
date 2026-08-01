@@ -149,22 +149,20 @@ class MessageHandler(BaseHandler):
 
             context = await self._prepare_turn_context(context, source)
 
-            # Mirror the originating prompt into the workbench messages table
-            # before we kick off the agent, so the transcript shows the turn
-            # that produced the reply. Human turns are source='user'; harness
-            # turns (scheduled task / watch / webhook) use a first-class harness
-            # author/type so they cannot be mistaken for human input. Wrapped in
-            # try/except inside the helper so a mirror failure can't break the turn.
-            if source == self.TURN_SOURCE_HUMAN:
-                from core.message_mirror import mirror_inbound
+            # Durable Deliveries materialize their Message only after exact native
+            # acceptance. Legacy direct turns still mirror at this boundary.
+            durable_delivery_owned = bool(
+                (context.platform_specific or {}).get("delivery_ids")
+            )
+            if not durable_delivery_owned:
+                if source == self.TURN_SOURCE_HUMAN:
+                    from core.message_mirror import mirror_inbound
 
-                mirror_inbound(context, control_message)
-            else:
-                # Harness turns retain a complete local transcript even when their
-                # session is background-only; visibility gates outward delivery.
-                from core.message_mirror import mirror_harness_inbound
+                    mirror_inbound(context, control_message)
+                else:
+                    from core.message_mirror import mirror_harness_inbound
 
-                mirror_harness_inbound(context, message)
+                    mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             payload = dict(context.platform_specific or {})

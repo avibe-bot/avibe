@@ -1179,8 +1179,9 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
-          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
+          Add --send-now to admit this new Run as content P0 and replace the active Turn.
+          To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
@@ -13120,7 +13121,7 @@ def build_parser():
     agent_run_parser.add_argument(
         "--send-now",
         action="store_true",
-        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+        help="Replace the active Turn with this new Run; start it immediately when idle",
     )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
@@ -13210,7 +13211,7 @@ def build_parser():
         help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'send-now' promotes the exact queued head, steering it when active; "
             "'update' changes title, visibility, or scope. Archived sessions are "
             "soft-deleted and never surfaced."
         ),
@@ -13250,12 +13251,12 @@ def build_parser():
     _add_json_noop(session_get_parser)
     session_send_now_parser = session_subparsers.add_parser(
         "send-now",
-        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        help="Promote the exact existing FIFO queue head",
         description=(
-            "Apply the same Session-level Send now transition as Workbench without "
-            "adding another message. If the Session is busy, Avibe interrupts the "
-            "active turn and starts the durable FIFO queue head as a new turn. If "
-            "the Session is idle, Avibe starts the queue head directly."
+            "Promote the exact current P3 queue head without adding a message. "
+            "If a native Turn is active, Avibe steers that head into it; if the "
+            "Session is idle, Avibe starts that head as a new Turn. A stale head "
+            "is refused rather than replaced by the next queued item."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session send-now --help",

@@ -183,11 +183,19 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     queued = [
         asyncio.run(
             manager.deliver(
-                DeliveryRequest(session_id="ses_fsm", priority="p3", content=text),
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    metadata={"_web_push_user_key": user_key},
+                ),
                 context=_context(),
             )
         )
-        for text in ("queued A", "queued B")
+        for text, user_key in (
+            ("queued A", "remote:user-a"),
+            ("queued B", "remote:user-b"),
+        )
     ]
 
     assert asyncio.run(manager.terminalize_turn(active_turn_id))
@@ -232,8 +240,33 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
         ).all()
         assert merged_rows == [(accepted[0]["message_id"],)]
     assert stored["content_text"] == "queued A\nqueued B"
+    assert json.loads(stored["metadata_json"])["_web_push_user_keys"] == [
+        "remote:user-a",
+        "remote:user-b",
+    ]
     assert stored["created_at"] == accepted[0]["submitted_at"]
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
+
+
+def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    captured: dict[str, object] = {}
+
+    async def capture_run(_session_id, context, _text, **_kwargs):
+        captured.update(context.platform_specific or {})
+
+    manager._run = capture_run
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="start"),
+            context=_context(),
+        )
+    )
+    assert admitted.turn_id is not None
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, admitted.turn_id)
+    assert turn is not None
+    assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
 
 
 def test_terminal_transaction_claims_fifo_and_projects_running_atomically(managers) -> None:

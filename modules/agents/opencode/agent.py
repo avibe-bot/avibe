@@ -821,6 +821,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 session_id=session_id,
                 directory=request.working_path,
                 text=prompt_text,
+                message_id=str(
+                    (request.context.platform_specific or {}).get(
+                        "delivery_start_attempt_id"
+                    )
+                    or ""
+                )
+                or None,
                 agent=agent_to_use,
                 model=model_dict,
                 reasoning_effort=reasoning_effort,

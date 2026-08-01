@@ -802,6 +802,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 platform_specific={
                     "agent_session_id": "ses_test",
                     "turn_token": "logical-turn",
+                    "delivery_start_attempt_id": "atm_initial_start",
                 },
             ),
             message="hello",
@@ -819,6 +820,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+    assert calls[0]["message_id"] == "atm_initial_start"
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
 

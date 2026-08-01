@@ -29,6 +29,8 @@ FENCE_STATES = (
     "reconciling_migration",
 )
 CLAIMABLE_QUEUE_STATES = ("queued",)
+WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
+WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 
 
 def utc_now_iso() -> str:
@@ -877,6 +879,23 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     if attachments:
         merged_content["attachments"] = attachments
     metadata = _json_object(first.get("metadata_json"))
+    web_push_user_keys: list[str] = []
+    for snapshot in snapshots:
+        snapshot_metadata = _json_object(snapshot.get("metadata_json"))
+        values = [snapshot_metadata.get(WEB_PUSH_USER_KEY_METADATA)]
+        plural = snapshot_metadata.get(WEB_PUSH_USER_KEYS_METADATA)
+        if isinstance(plural, list):
+            values.extend(plural)
+        for value in values:
+            key = str(value or "").strip()
+            if key and key not in web_push_user_keys:
+                web_push_user_keys.append(key)
+    metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
+    metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
+    if len(web_push_user_keys) == 1:
+        metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_user_keys[0]
+    elif web_push_user_keys:
+        metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_user_keys
     if len(deliveries) > 1:
         metadata["merged_delivery_ids"] = [str(delivery["id"]) for delivery in deliveries]
         native_ids = [

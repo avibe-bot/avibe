@@ -219,11 +219,14 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             .where(message_deliveries.c.state == "accepted")
             .where(message_deliveries.c.message_id.in_(message_ids))
         ).mappings()
-        accepted_roles = {
-            str(row["message_id"]): dict(row)
-            for row in rows
-            if row["message_id"] is not None
-        }
+        for row in rows:
+            if row["message_id"] is None:
+                continue
+            key = str(row["message_id"])
+            candidate = dict(row)
+            current = accepted_roles.get(key)
+            if current is None or candidate["delivery_id"] == candidate["initial_delivery_id"]:
+                accepted_roles[key] = candidate
 
     items: list[dict[str, Any]] = []
     for msg in msgs:

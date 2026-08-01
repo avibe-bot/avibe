@@ -1379,7 +1379,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
         self.assertIn(
-            "That existing-Session send queues behind an active turn by default",
+            "That existing-Session send is a P1 delivery by default",
             prompt,
         )
         self.assertIn(

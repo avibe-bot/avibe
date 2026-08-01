@@ -1097,6 +1097,84 @@ def test_accepted_steer_participant_does_not_open_a_second_turn(isolated_state):
     assert groups[0]["anchor_message_id"] == "msg_result"
 
 
+def test_merged_initial_deliveries_keep_one_turn_start(isolated_state, monkeypatch):
+    engine = create_sqlite_engine()
+    sid = "ses_merged_initial"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        deliveries = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=sid,
+                priority="p3",
+                state="queued",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope,
+                    session_id=sid,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text=text,
+                ),
+                dispatch_text=text,
+                now=created_at,
+            )
+            for delivery_id, text, created_at in (
+                ("msg_merged_initial", "first", "2026-06-01T10:00:00Z"),
+                ("msg_merged_second", "second", "2026-06-01T10:00:01Z"),
+            )
+        ]
+        monkeypatch.setattr(
+            message_deliveries,
+            "turn_now_iso",
+            lambda: "2026-06-01T10:00:02Z",
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id="trn_merged",
+            session_id=sid,
+            backend="codex",
+            deliveries=deliveries,
+            dispatch_text="first\nsecond",
+            attempt_id="atm_merged",
+        )
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id="trn_merged",
+            evidence={"kind": "test_native_acceptance"},
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="event_merged_tool",
+            created_at="2026-06-01T10:00:03Z",
+            text="merged tool",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="msg_merged_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="done",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert len(groups) == 1
+    assert groups[0]["status"] == "done"
+    assert groups[0]["steps"] == 1
+    assert groups[0]["anchor_message_id"] == "msg_merged_result"
+
+
 def test_midturn_notify_does_not_split_or_close_a_turn(isolated_state):
     """A plain (non-backend-failure) ``notify`` is NOT terminal: agents emit mid-turn
     notify rows that keep the turn going (e.g. Claude's model-refusal fallback). It must

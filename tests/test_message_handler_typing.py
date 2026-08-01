@@ -1258,6 +1258,27 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
 
+    async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="watch:native-1",
+            platform="slack",
+            platform_specific={
+                "delivery_id": "msg_delivery_1",
+                "delivery_ids": ["msg_delivery_1"],
+            },
+        )
+
+        with patch("core.message_mirror.mirror_harness_inbound") as mirror:
+            await handler.handle_scheduled_message(context, "hello")
+
+        mirror.assert_not_called()
+        self.assertEqual(len(controller.agent_service.requests), 1)
+
     async def test_resume_session_callback_preserves_platform(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         setattr(

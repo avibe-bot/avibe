@@ -263,16 +263,17 @@ vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --me
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
-`--send-now` is valid only with an existing `--session-id`. Avibe first
-persists the Agent Run in that Session's queue, then applies the same operation
-as Workbench's **Send now** control: interrupt the active turn through the
-shared Stop path and dispatch the FIFO queue head as a new turn. It does not
-inject input into the same backend-native turn or move the new message ahead of
-older queued work. If interruption is refused, the active turn keeps running
-and the Agent Run remains queued. The accepted command payload names the
-`delivery_intent`; `vibe runs show <run-id>` exposes the durable
-`metadata.delivery_outcome` (`interrupted`, `flushed`, `deferred`, or
-`stop_failed`) after the controller consumes it.
+With an existing `--session-id`, the default admission is P1: Avibe steers the
+new Run into an active native Turn, starts it immediately when idle, or moves the
+same Delivery to the durable P3 queue after a definitive refusal/not-active
+receipt. It does not interrupt the active Turn.
+
+`--send-now` is valid only with an existing `--session-id`. It admits the new
+Run as content P0: with an active Turn, Avibe persists the replacement successor
+before calling Stop; when idle, it starts the new Run immediately. This is
+different from `vibe session send-now`, which adds no message and promotes only
+the exact current P3 queue head, steering it when active or starting it when
+idle. A stale head is refused rather than replaced by the next queued item.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new

@@ -235,7 +235,7 @@ def _migrate_pseudo_messages(bind) -> None:
         snapshot = _message_snapshot(row)
         if pending_target is not None:
             snapshot["type"] = pending_target
-            snapshot["author"] = "harness"
+            snapshot["author"] = "user" if pending_target == "user" else "harness"
         snapshot_json = _json(snapshot)
         metadata = _metadata(row["metadata_json"])
         provenance = metadata.get("scheduled_provenance")
@@ -296,9 +296,43 @@ def _migrate_pseudo_messages(bind) -> None:
                 }
             ],
         }
+        delivery_values = {
+            "id": row["id"],
+            "session_id": session_id,
+            "state": state,
+            "snapshot_json": snapshot_json,
+            "snapshot_sha256": _hash(snapshot_json),
+            "dispatch_text": dispatch_text,
+            "dispatch_sha256": _hash(dispatch_text),
+            "dedupe_key": (
+                (
+                    f"{row['platform']}:{row['native_message_id']}"
+                    if kind == "harness_dedupe" or owned_agent_run
+                    else f"legacy:{row['platform']}:{row['native_message_id']}"
+                )
+                if row["native_message_id"]
+                else None
+            ),
+            "attempt_id": (
+                f"atm_migration_{hashlib.sha256(str(row['id']).encode()).hexdigest()[:24]}"
+                if state == "reconciling_migration"
+                else None
+            ),
+            "attempt_kind": "migration" if state == "reconciling_migration" else None,
+            "receipt_outcome": "unknown" if state == "reconciling_migration" else None,
+            "attempt_opened_at": (
+                row["updated_at"] or row["created_at"]
+                if state == "reconciling_migration"
+                else None
+            ),
+            "history_json": _json(history),
+            "submitted_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "retired_at": row["updated_at"] if state == "retired" else None,
+        }
         bind.execute(
             sa.text(
-                "insert into message_deliveries ("
+                "insert or ignore into message_deliveries ("
                 "id, session_id, message_id, priority, state, snapshot_json, snapshot_sha256, "
                 "dispatch_text, dispatch_sha256, dedupe_key, turn_id, turn_role, turn_position, "
                 "current_attempt_id, current_attempt_kind, current_target_turn_id, "
@@ -311,41 +345,23 @@ def _migrate_pseudo_messages(bind) -> None:
                 ":attempt_id, :attempt_kind, null, null, :receipt_outcome, '{}', :attempt_opened_at, "
                 ":history_json, 1, :submitted_at, :updated_at, null, :retired_at)"
             ),
-            {
-                "id": row["id"],
-                "session_id": session_id,
-                "state": state,
-                "snapshot_json": snapshot_json,
-                "snapshot_sha256": _hash(snapshot_json),
-                "dispatch_text": dispatch_text,
-                "dispatch_sha256": _hash(dispatch_text),
-                "dedupe_key": (
-                    (
-                        f"{row['platform']}:{row['native_message_id']}"
-                        if kind == "harness_dedupe" or owned_agent_run
-                        else f"legacy:{row['platform']}:{row['native_message_id']}"
-                    )
-                    if row["native_message_id"]
-                    else None
-                ),
-                "attempt_id": (
-                    f"atm_migration_{hashlib.sha256(str(row['id']).encode()).hexdigest()[:24]}"
-                    if state == "reconciling_migration"
-                    else None
-                ),
-                "attempt_kind": "migration" if state == "reconciling_migration" else None,
-                "receipt_outcome": "unknown" if state == "reconciling_migration" else None,
-                "attempt_opened_at": (
-                    row["updated_at"] or row["created_at"]
-                    if state == "reconciling_migration"
-                    else None
-                ),
-                "history_json": _json(history),
-                "submitted_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "retired_at": row["updated_at"] if state == "retired" else None,
-            },
+            delivery_values,
         )
+        persisted = bind.execute(
+            sa.text(
+                "select session_id, snapshot_sha256, submitted_at from message_deliveries "
+                "where id = :id"
+            ),
+            {"id": row["id"]},
+        ).one()
+        if tuple(persisted) != (
+            session_id,
+            delivery_values["snapshot_sha256"],
+            delivery_values["submitted_at"],
+        ):
+            raise RuntimeError(
+                f"0044 migration Delivery {row['id']} conflicts with its Message snapshot"
+            )
         bind.execute(
             sa.text(
                 "update show_session_events set delivery_id = :id, message_id = null "
@@ -390,20 +406,318 @@ def _migrate_pseudo_messages(bind) -> None:
     )
 
 
+def _precreated_schema_gaps(bind) -> list[str]:
+    inspector = sa.inspect(bind)
+    gaps: list[str] = []
+    required_columns = {
+        "message_deliveries": {
+            "id", "session_id", "message_id", "priority", "state",
+            "snapshot_json", "snapshot_sha256", "dispatch_text",
+            "dispatch_sha256", "dedupe_key", "turn_id", "turn_role",
+            "turn_position", "current_attempt_id", "current_attempt_kind",
+            "current_target_turn_id", "current_expected_native_turn_id",
+            "current_receipt_outcome", "current_receipt_json",
+            "current_attempt_opened_at", "delivery_history_json", "version",
+            "submitted_at", "updated_at", "materialized_at", "retired_at",
+        },
+        "session_turns": {
+            "id", "session_id", "initial_delivery_id", "state", "backend",
+            "runtime_key", "runtime_turn_id", "native_turn_id",
+            "start_attempt_id", "start_receipt_outcome", "start_receipt_json",
+            "dispatch_text", "dispatch_sha256", "terminal_outcome", "settled_by",
+            "terminal_evidence_kind", "terminal_evidence_json", "control_state",
+            "control_mode", "control_attempt_id", "control_expected_native_turn_id",
+            "control_receipt_outcome", "control_receipt_json",
+            "control_successor_delivery_id", "control_successor_turn_id", "version",
+            "created_at", "updated_at", "started_at", "terminal_at",
+        },
+    }
+    for table_name, expected in required_columns.items():
+        present = {column["name"] for column in inspector.get_columns(table_name)}
+        for name in sorted(expected - present):
+            gaps.append(f"{table_name}.{name}")
+
+    required_checks = {
+        "message_deliveries": {
+            "ck_message_deliveries_priority",
+            "ck_message_deliveries_state",
+            "ck_message_deliveries_current_attempt_kind",
+            "ck_message_deliveries_current_attempt_shape",
+            "ck_message_deliveries_current_receipt",
+            "ck_message_deliveries_history_json",
+            "ck_message_deliveries_materialization",
+            "ck_message_deliveries_turn_membership",
+        },
+        "session_turns": {
+            "ck_session_turns_state",
+            "ck_session_turns_terminal_outcome",
+            "ck_session_turns_start_receipt_outcome",
+            "ck_session_turns_start_shape",
+            "ck_session_turns_control_state",
+            "ck_session_turns_control_mode",
+            "ck_session_turns_terminal_shape",
+            "ck_session_turns_control_shape",
+        },
+    }
+    for table_name, expected in required_checks.items():
+        present = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name)
+        }
+        for name in sorted(expected - present):
+            gaps.append(f"constraint {name}")
+
+    required_foreign_keys = {
+        "message_deliveries": {
+            (("session_id",), "agent_sessions"),
+            (("message_id",), "messages"),
+            (("turn_id",), "session_turns"),
+            (("current_target_turn_id",), "session_turns"),
+        },
+        "session_turns": {
+            (("session_id",), "agent_sessions"),
+            (("initial_delivery_id",), "message_deliveries"),
+            (("control_successor_delivery_id",), "message_deliveries"),
+            (("control_successor_turn_id",), "session_turns"),
+        },
+    }
+    for table_name, expected in required_foreign_keys.items():
+        present = {
+            (tuple(foreign_key["constrained_columns"]), foreign_key["referred_table"])
+            for foreign_key in inspector.get_foreign_keys(table_name)
+            if foreign_key.get("options", {}).get("deferrable") is True
+            and str(foreign_key.get("options", {}).get("initially") or "").upper()
+            == "DEFERRED"
+        }
+        for columns, target in sorted(expected - present):
+            gaps.append(f"deferred FK {table_name}.{','.join(columns)}->{target}")
+
+    unique_names = {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("message_deliveries")
+    }
+    if "uq_message_deliveries_dedupe" not in unique_names:
+        gaps.append("constraint uq_message_deliveries_dedupe")
+    return gaps
+
+
+def _column_names(bind, table_name: str) -> set[str]:
+    return {column["name"] for column in sa.inspect(bind).get_columns(table_name)}
+
+
+def _index_names(bind, table_name: str) -> set[str]:
+    return {
+        str(name)
+        for name in bind.execute(
+            sa.text(
+                "select name from sqlite_master "
+                "where type = 'index' and tbl_name = :table_name"
+            ),
+            {"table_name": table_name},
+        ).scalars()
+    }
+
+
+def _has_deferred_fk(bind, table_name: str, column: str, target: str) -> bool:
+    return any(
+        foreign_key["constrained_columns"] == [column]
+        and foreign_key["referred_table"] == target
+        and foreign_key.get("options", {}).get("deferrable") is True
+        and str(foreign_key.get("options", {}).get("initially") or "").upper()
+        == "DEFERRED"
+        for foreign_key in sa.inspect(bind).get_foreign_keys(table_name)
+    )
+
+
+def _add_precreated_columns(bind) -> None:
+    session_columns = _column_names(bind, "agent_sessions")
+    if "queue_hold_state" not in session_columns:
+        op.add_column(
+            "agent_sessions",
+            sa.Column(
+                "queue_hold_state",
+                sa.String(),
+                sa.CheckConstraint(
+                    "queue_hold_state in ('open', 'held')",
+                    name="ck_agent_sessions_queue_hold_state",
+                ),
+                server_default="open",
+                nullable=False,
+            ),
+        )
+    if "queue_hold_version" not in session_columns:
+        op.add_column(
+            "agent_sessions",
+            sa.Column("queue_hold_version", sa.Integer(), server_default="1", nullable=False),
+        )
+    for name, column_type in (
+        ("queue_held_at", sa.String()),
+        ("composer_draft_text", sa.Text()),
+        ("composer_draft_updated_at", sa.String()),
+    ):
+        if name not in session_columns:
+            op.add_column("agent_sessions", sa.Column(name, column_type, nullable=True))
+
+    if "delivery_id" not in _column_names(bind, "show_session_events"):
+        with op.batch_alter_table("show_session_events") as batch:
+            batch.add_column(sa.Column("delivery_id", sa.String(), nullable=True))
+    if "delivery_id" not in _column_names(bind, "agent_runs"):
+        with op.batch_alter_table("agent_runs") as batch:
+            batch.add_column(sa.Column("delivery_id", sa.String(), nullable=True))
+
+
+def _finish_upgrade(bind) -> None:
+    _add_precreated_columns(bind)
+    session_checks = {
+        constraint["name"]
+        for constraint in sa.inspect(bind).get_check_constraints("agent_sessions")
+    }
+    if "ck_agent_sessions_queue_hold_state" not in session_checks:
+        raise RuntimeError(
+            "pre-existing agent_sessions queue hold columns lack their 0044 constraint"
+        )
+    if not _has_deferred_fk(
+        bind, "show_session_events", "delivery_id", "message_deliveries"
+    ):
+        with op.batch_alter_table("show_session_events") as batch:
+            batch.create_foreign_key(
+                "fk_show_session_events_delivery",
+                "message_deliveries",
+                ["delivery_id"],
+                ["id"],
+                ondelete="NO ACTION",
+                deferrable=True,
+                initially="DEFERRED",
+            )
+    if not _has_deferred_fk(bind, "agent_runs", "delivery_id", "message_deliveries"):
+        with op.batch_alter_table("agent_runs") as batch:
+            batch.create_foreign_key(
+                "fk_agent_runs_delivery",
+                "message_deliveries",
+                ["delivery_id"],
+                ["id"],
+                ondelete="NO ACTION",
+                deferrable=True,
+                initially="DEFERRED",
+            )
+    _restore_agent_run_expression_indexes(bind)
+
+    delivery_indexes = _index_names(bind, "message_deliveries")
+    for name, columns, unique, where in (
+        (
+            "ix_message_deliveries_session_order",
+            ["session_id", "submitted_at", "id"],
+            False,
+            "state in ('reserved','queued','claimed','pending_steer','steering','reconciling_steer')",
+        ),
+        ("ix_message_deliveries_session_state", ["session_id", "state", "submitted_at", "id"], False, None),
+        ("ix_message_deliveries_turn", ["turn_id", "turn_position"], False, None),
+        ("uq_message_deliveries_turn_position", ["turn_id", "turn_position"], True, "turn_id is not null"),
+        ("ix_message_deliveries_current_attempt", ["current_attempt_id"], False, None),
+        ("ix_message_deliveries_current_target_turn", ["current_target_turn_id"], False, None),
+    ):
+        if name not in delivery_indexes:
+            op.create_index(
+                name,
+                "message_deliveries",
+                columns,
+                unique=unique,
+                **({"sqlite_where": sa.text(where)} if where else {}),
+            )
+
+    turn_indexes = _index_names(bind, "session_turns")
+    for name, columns, unique, where in (
+        ("ix_session_turns_session_created", ["session_id", "created_at", "id"], False, None),
+        ("uq_session_turns_live_session", ["session_id"], True, "state in ('starting','active')"),
+        (
+            "uq_session_turns_message_written_attempt",
+            ["initial_delivery_id"],
+            True,
+            "terminal_outcome is null or terminal_outcome <> 'not_written'",
+        ),
+        ("uq_session_turns_waiting_successor", ["session_id"], True, "state = 'waiting'"),
+        ("uq_session_turns_control_attempt", ["control_attempt_id"], True, "control_attempt_id is not null"),
+        ("uq_session_turns_start_attempt", ["start_attempt_id"], True, "start_attempt_id is not null"),
+    ):
+        if name not in turn_indexes:
+            op.create_index(
+                name,
+                "session_turns",
+                columns,
+                unique=unique,
+                **({"sqlite_where": sa.text(where)} if where else {}),
+            )
+    if "uq_agent_runs_delivery" not in _index_names(bind, "agent_runs"):
+        op.create_index(
+            "uq_agent_runs_delivery",
+            "agent_runs",
+            ["delivery_id"],
+            unique=True,
+            sqlite_where=sa.text("delivery_id is not null"),
+        )
+
+    _migrate_pseudo_messages(bind)
+    message_checks = {
+        constraint["name"]
+        for constraint in sa.inspect(bind).get_check_constraints("messages")
+    }
+    messages_complete = (
+        "ck_messages_communication_type" in message_checks
+        and _has_deferred_fk(bind, "messages", "session_id", "agent_sessions")
+    )
+    if not messages_complete:
+        _snapshot_message_references(bind)
+        with op.batch_alter_table(
+            "messages",
+            naming_convention={
+                "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
+            },
+        ) as batch:
+            batch.drop_constraint(
+                "fk_messages_session_id_agent_sessions",
+                type_="foreignkey",
+            )
+            batch.create_foreign_key(
+                "fk_messages_session_id_agent_sessions",
+                "agent_sessions",
+                ["session_id"],
+                ["id"],
+                ondelete="NO ACTION",
+                deferrable=True,
+                initially="DEFERRED",
+            )
+            batch.create_check_constraint(
+                "ck_messages_communication_type",
+                "type not in ('queued','pending','draft','harness_dedupe','silent','tool_call')",
+            )
+        _restore_message_references(bind)
+    for index_name, create_sql in (
+        ("ix_messages_inbox_activity", _INBOX_ACTIVITY_SQL),
+        ("ix_messages_inbox_agent_reply", _INBOX_AGENT_REPLY_SQL),
+        ("ix_messages_inbox_user_send", _INBOX_USER_SEND_SQL),
+    ):
+        op.execute(f"drop index if exists {index_name}")
+        op.execute(create_sql)
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     tables = set(sa.inspect(bind).get_table_names())
-    if "message_deliveries" in tables and "session_turns" in tables:
-        for index_name, create_sql in (
-            ("ix_messages_inbox_activity", _INBOX_ACTIVITY_SQL),
-            ("ix_messages_inbox_agent_reply", _INBOX_AGENT_REPLY_SQL),
-            ("ix_messages_inbox_user_send", _INBOX_USER_SEND_SQL),
-        ):
-            op.execute(f"drop index if exists {index_name}")
-            op.execute(create_sql)
+    operational_tables = {"message_deliveries", "session_turns"}
+    if operational_tables.issubset(tables):
+        gaps = _precreated_schema_gaps(bind)
+        if gaps:
+            raise RuntimeError(
+                "pre-existing durable Message delivery tables indicate an interrupted "
+                f"0044 migration; incomplete: {', '.join(gaps)}"
+            )
+        _finish_upgrade(bind)
         return
-    if {"message_deliveries", "session_turns"} & tables:
-        raise RuntimeError("durable Message delivery schema is only partially present")
+    if operational_tables & tables:
+        raise RuntimeError(
+            "pre-existing durable Message delivery tables indicate an interrupted "
+            "0044 migration; incomplete: one operational table is missing"
+        )
 
     op.add_column(
         "agent_sessions",
@@ -660,145 +974,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    # SQLite permits the forward references above; add the Show Delivery FK only
-    # after both operational tables exist.
-    with op.batch_alter_table("show_session_events") as batch:
-        batch.create_foreign_key(
-            "fk_show_session_events_delivery",
-            "message_deliveries",
-            ["delivery_id"],
-            ["id"],
-            ondelete="NO ACTION",
-            deferrable=True,
-            initially="DEFERRED",
-        )
-    with op.batch_alter_table("agent_runs") as batch:
-        batch.create_foreign_key(
-            "fk_agent_runs_delivery",
-            "message_deliveries",
-            ["delivery_id"],
-            ["id"],
-            ondelete="NO ACTION",
-            deferrable=True,
-            initially="DEFERRED",
-        )
-    _restore_agent_run_expression_indexes(op.get_bind())
-
-    op.create_index(
-        "ix_message_deliveries_session_order",
-        "message_deliveries",
-        ["session_id", "submitted_at", "id"],
-        sqlite_where=sa.text(
-            "state in ('reserved','queued','claimed','pending_steer','steering',"
-            "'reconciling_steer')"
-        ),
-    )
-    op.create_index(
-        "ix_message_deliveries_session_state",
-        "message_deliveries",
-        ["session_id", "state", "submitted_at", "id"],
-    )
-    op.create_index(
-        "ix_message_deliveries_turn",
-        "message_deliveries",
-        ["turn_id", "turn_position"],
-    )
-    op.create_index(
-        "uq_message_deliveries_turn_position",
-        "message_deliveries",
-        ["turn_id", "turn_position"],
-        unique=True,
-        sqlite_where=sa.text("turn_id is not null"),
-    )
-    op.create_index(
-        "ix_message_deliveries_current_attempt",
-        "message_deliveries",
-        ["current_attempt_id"],
-    )
-    op.create_index(
-        "ix_message_deliveries_current_target_turn",
-        "message_deliveries",
-        ["current_target_turn_id"],
-    )
-    op.create_index("ix_session_turns_session_created", "session_turns", ["session_id", "created_at", "id"])
-    op.create_index(
-        "uq_session_turns_live_session",
-        "session_turns",
-        ["session_id"],
-        unique=True,
-        sqlite_where=sa.text("state in ('starting','active')"),
-    )
-    op.create_index(
-        "uq_session_turns_message_written_attempt",
-        "session_turns",
-        ["initial_delivery_id"],
-        unique=True,
-        sqlite_where=sa.text("terminal_outcome is null or terminal_outcome <> 'not_written'"),
-    )
-    op.create_index(
-        "uq_session_turns_waiting_successor",
-        "session_turns",
-        ["session_id"],
-        unique=True,
-        sqlite_where=sa.text("state = 'waiting'"),
-    )
-    op.create_index(
-        "uq_session_turns_control_attempt",
-        "session_turns",
-        ["control_attempt_id"],
-        unique=True,
-        sqlite_where=sa.text("control_attempt_id is not null"),
-    )
-    op.create_index(
-        "uq_session_turns_start_attempt",
-        "session_turns",
-        ["start_attempt_id"],
-        unique=True,
-        sqlite_where=sa.text("start_attempt_id is not null"),
-    )
-    op.create_index(
-        "uq_agent_runs_delivery",
-        "agent_runs",
-        ["delivery_id"],
-        unique=True,
-        sqlite_where=sa.text("delivery_id is not null"),
-    )
-    _migrate_pseudo_messages(bind)
-    # SQLite rebuilds ``messages`` to add the CHECK.  Its SET NULL dependents
-    # observe the transient DROP even though their accepted Message survives,
-    # so retain and restore those audit links around the batch operation.
-    _snapshot_message_references(bind)
-    with op.batch_alter_table(
-        "messages",
-        naming_convention={
-            "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
-        },
-    ) as batch:
-        batch.drop_constraint(
-            "fk_messages_session_id_agent_sessions",
-            type_="foreignkey",
-        )
-        batch.create_foreign_key(
-            "fk_messages_session_id_agent_sessions",
-            "agent_sessions",
-            ["session_id"],
-            ["id"],
-            ondelete="NO ACTION",
-            deferrable=True,
-            initially="DEFERRED",
-        )
-        batch.create_check_constraint(
-            "ck_messages_communication_type",
-            "type not in ('queued','pending','draft','harness_dedupe','silent','tool_call')",
-        )
-    _restore_message_references(bind)
-    for index_name, create_sql in (
-        ("ix_messages_inbox_activity", _INBOX_ACTIVITY_SQL),
-        ("ix_messages_inbox_agent_reply", _INBOX_AGENT_REPLY_SQL),
-        ("ix_messages_inbox_user_send", _INBOX_USER_SEND_SQL),
-    ):
-        op.drop_index(index_name, table_name="messages")
-        op.execute(create_sql)
+    _finish_upgrade(bind)
 
 
 def _snapshot_message_references(bind) -> None:

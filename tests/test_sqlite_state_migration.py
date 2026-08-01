@@ -487,6 +487,90 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
     assert downgraded_refs == (("msg_accepted_ref",), ("msg_accepted_ref",))
 
 
+def test_session_delivery_migration_refuses_preexisting_operational_tables(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260731_0043")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table message_deliveries (id text primary key)")
+        conn.execute("create table session_turns (id text primary key)")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="interrupted 0044 migration"):
+        run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchone() == (
+            "20260731_0043",
+        )
+
+
+def test_session_delivery_migration_completes_precreated_operational_tables(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260731_0043")
+    now = "2026-07-31T00:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values ('ses_interrupted', null, 'codex', 'codex', 'codex',
+                'interrupted', '/tmp', '', 'active', 'foreground', 0,
+                'idle', '{}', ?, ?, ?)
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, source,
+                content_text, content_json, metadata_json, created_at, updated_at
+            ) values (
+                'msg_interrupted', null, 'ses_interrupted', 'avibe', 'user',
+                'queued', 'user', 'resume me', '{"text":"resume me"}', '{}', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        metadata.create_all(
+            engine,
+            tables=[
+                metadata.tables["message_deliveries"],
+                metadata.tables["session_turns"],
+            ],
+        )
+    finally:
+        engine.dispose()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select 1 from messages where id = 'msg_interrupted'"
+        ).fetchone() is None
+        assert conn.execute(
+            "select state, session_id from message_deliveries "
+            "where id = 'msg_interrupted'"
+        ).fetchone() == ("queued", "ses_interrupted")
+        assert conn.execute(
+            "select 1 from pragma_table_info('agent_runs') where name = 'delivery_id'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "select 1 from pragma_index_list('agent_runs') "
+            "where name = 'uq_agent_runs_delivery'"
+        ).fetchone() == (1,)
+
+
 def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     tmp_path: Path,
 ) -> None:
@@ -550,9 +634,11 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     ]
     snapshots = {row[0]: json.loads(row[4]) for row in deliveries}
     assert snapshots["msg_pending_harness"]["type"] == "harness"
+    assert snapshots["msg_pending_harness"]["author"] == "harness"
     assert snapshots["msg_pending_harness"]["author_name"] == "watch"
     assert snapshots["msg_pending_harness"]["source"] == "harness"
     assert snapshots["msg_pending_human"]["type"] == "user"
+    assert snapshots["msg_pending_human"]["author"] == "user"
     assert snapshots["msg_pending_human"]["source"] == "user"
     from storage import message_deliveries
 
@@ -566,12 +652,12 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
     with sqlite3.connect(db_path) as conn:
         restored = conn.execute(
-            "select id, type from messages where id in "
+            "select id, type, author from messages where id in "
             "('msg_pending_human', 'msg_pending_harness') order by id"
         ).fetchall()
     assert restored == [
-        ("msg_pending_harness", "pending"),
-        ("msg_pending_human", "pending"),
+        ("msg_pending_harness", "pending", "harness"),
+        ("msg_pending_human", "pending", "user"),
     ]
 
 
