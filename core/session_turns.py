@@ -117,6 +117,33 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
+_UNKNOWN_START_REPLAY_BACKENDS = frozenset({"claude", "codex"})
+_MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
+_UNKNOWN_START_REPLAY_INSTRUCTION = (
+    "[Avibe recovery: this request may have been delivered before restart. "
+    "Before any irreversible action, check whether the work is already complete.]\n\n"
+)
+
+
+def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
+    counts: list[int] = []
+    for delivery in deliveries:
+        try:
+            history = json.loads(str(delivery.get("delivery_history_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            history = {}
+        events = history.get("events") if isinstance(history, dict) else None
+        counts.append(
+            sum(
+                1
+                for event in events or []
+                if isinstance(event, dict)
+                and event.get("kind") == "start"
+                and event.get("outcome") == "restart_replayed"
+            )
+        )
+    return max(counts, default=0)
+
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
     """Capture the scheduled run's provenance to persist on its queued row so
@@ -2284,6 +2311,7 @@ class SessionTurnManager:
                         select(
                             agent_runs.c.id,
                             agent_runs.c.status,
+                            agent_runs.c.cancel_requested,
                             agent_runs.c.metadata_json,
                         ).where(agent_runs.c.id.in_(run_ids))
                     ).mappings()
@@ -2293,7 +2321,10 @@ class SessionTurnManager:
                     if run_row is None:
                         continue
                     run_status = normalize_run_status(run_row["status"])
-                    if run_status not in {"queued", "running"}:
+                    if bool(run_row["cancel_requested"]) or run_status not in {
+                        "queued",
+                        "running",
+                    }:
                         run_terminal_before_dispatch = True
         if archived_before_dispatch:
             self._terminalize_durable_turn(
@@ -2435,6 +2466,7 @@ class SessionTurnManager:
         evidence_kind: str = "terminal_reconciliation",
         evidence: dict[str, Any] | None = None,
         expected_start_attempt_id: str | None = None,
+        replay_unknown_start: bool = False,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -2448,6 +2480,9 @@ class SessionTurnManager:
         terminal_run_ids: list[str] = []
         projected_status: str | None = None
         status_changed = False
+        replayed_unknown_start = False
+        unknown_start_exhausted = False
+        unknown_start_run_ids: list[str] = []
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
@@ -2475,11 +2510,19 @@ class SessionTurnManager:
                     select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
                 ).scalar_one_or_none()
                 initial_batch = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+                unknown_start_reconciliation = bool(
+                    replay_unknown_start
+                    and outcome == "failed"
+                    and initial_batch
+                    and all(row["state"] == "claimed" for row in initial_batch)
+                    and turn.get("start_receipt_outcome") == "unknown"
+                )
                 if (
                     initial_batch
                     and all(row["state"] == "claimed" for row in initial_batch)
                     and outcome != "not_written"
                     and turn.get("start_receipt_outcome") != "accepted"
+                    and not unknown_start_reconciliation
                 ):
                     return {
                         "changed": False,
@@ -2489,23 +2532,83 @@ class SessionTurnManager:
                         "reason": "start_acceptance_unproven",
                     }
                 if initial_batch and all(row["state"] == "claimed" for row in initial_batch):
-                    if outcome == "not_written":
+                    if unknown_start_reconciliation:
+                        run_rows = []
+                        run_ids = list(
+                            dict.fromkeys(
+                                run_id
+                                for initial in initial_batch
+                                for run_id in delivery_store.agent_run_ids_for_delivery(
+                                    conn, initial
+                                )
+                            )
+                        )
+                        if run_ids:
+                            run_rows = list(
+                                conn.execute(
+                                    select(
+                                        agent_runs.c.status,
+                                        agent_runs.c.cancel_requested,
+                                    ).where(agent_runs.c.id.in_(run_ids))
+                                ).mappings()
+                            )
+                        run_can_replay = len(run_rows) == len(run_ids) and all(
+                            not bool(row["cancel_requested"])
+                            and normalize_run_status(row["status"]) in {"queued", "running"}
+                            for row in run_rows
+                        )
+                        replayed_unknown_start = bool(
+                            session_status == "active"
+                            and not turn.get("control_mode")
+                            and run_can_replay
+                            and _start_replay_count(initial_batch)
+                            < _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS
+                        )
+                        unknown_start_exhausted = not replayed_unknown_start
+                        unknown_start_run_ids = run_ids
+                        next_state = "queued" if replayed_unknown_start else "retired"
+                        attempt_outcome = (
+                            "restart_replayed"
+                            if replayed_unknown_start
+                            else "restart_retry_exhausted"
+                        )
+                        for initial in initial_batch:
+                            reconciled = delivery_store.record_definitive_attempt(
+                                conn,
+                                str(initial["id"]),
+                                expected_version=int(initial["version"]),
+                                expected_states=("claimed",),
+                                outcome=attempt_outcome,
+                                next_state=next_state,
+                                next_priority=str(initial["priority"]),
+                                receipt={"kind": evidence_kind, **(evidence or {})},
+                            )
+                            if reconciled is None:
+                                raise RuntimeError(
+                                    "unknown start recovery lost a Delivery batch CAS"
+                                )
+                    elif outcome == "not_written":
                         for initial in initial_batch:
                             owned_run_terminal = False
                             run_ids = delivery_store.agent_run_ids_for_delivery(conn, initial)
                             if run_ids:
-                                statuses = list(
+                                run_rows = list(
                                     conn.execute(
-                                        select(agent_runs.c.status).where(
+                                        select(
+                                            agent_runs.c.status,
+                                            agent_runs.c.cancel_requested,
+                                        ).where(
                                             agent_runs.c.id.in_(run_ids)
                                         )
-                                    ).scalars()
+                                    ).mappings()
                                 )
                                 owned_run_terminal = bool(
-                                    statuses
+                                    run_rows
                                     and all(
-                                        normalize_run_status(status) not in {"queued", "running"}
-                                        for status in statuses
+                                        bool(row["cancel_requested"])
+                                        or normalize_run_status(row["status"])
+                                        not in {"queued", "running"}
+                                        for row in run_rows
                                     )
                                 )
                             next_state = (
@@ -2631,6 +2734,31 @@ class SessionTurnManager:
                                 claimed_successor = successor_turn_id
                     if (
                         claimed_successor is None
+                        and replayed_unknown_start
+                        and session_status == "active"
+                    ):
+                        retry_rows = [
+                            delivery_store.get_delivery(conn, str(initial["id"]))
+                            for initial in initial_batch
+                        ]
+                        if any(row is None or row["state"] != "queued" for row in retry_rows):
+                            raise RuntimeError(
+                                "unknown start recovery lost its replayable Delivery batch"
+                            )
+                        claimed_successor = delivery_store.new_turn_id()
+                        self._claim_start_batch(
+                            conn,
+                            turn_id=claimed_successor,
+                            session_id=session_id,
+                            backend=str(turn["backend"]),
+                            deliveries=[row for row in retry_rows if row is not None],
+                            dispatch_text=(
+                                _UNKNOWN_START_REPLAY_INSTRUCTION
+                                + str(turn.get("dispatch_text") or "")
+                            ),
+                        )
+                    if (
+                        claimed_successor is None
                         and outcome == "completed"
                         and session_status == "active"
                     ):
@@ -2663,10 +2791,15 @@ class SessionTurnManager:
                         "successor_turn_id": claimed_successor,
                         "delivery_id": materialized_id,
                         "preserve_queue": delivery_store.queue_is_held(conn, session_id),
+                        "unknown_start_exhausted": unknown_start_exhausted,
                     }
-                    terminal_run_ids = delivery_store.accepted_agent_run_ids_for_turn(
-                        conn,
-                        turn_id,
+                    terminal_run_ids = (
+                        unknown_start_run_ids
+                        if unknown_start_exhausted
+                        else delivery_store.accepted_agent_run_ids_for_turn(
+                            conn,
+                            turn_id,
+                        )
                     )
                     projected_status = (
                         "running"
@@ -2683,7 +2816,12 @@ class SessionTurnManager:
                     )
                     status_changed = bool(projected.rowcount)
         if result.get("changed"):
-            self._settle_agent_run_ids(terminal_run_ids, settled_by)
+            run_settled_by = (
+                SETTLED_BY_NO_TERMINAL_RESULT
+                if result.get("unknown_start_exhausted")
+                else settled_by
+            )
+            self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
@@ -3105,6 +3243,7 @@ class SessionTurnManager:
             turns = delivery_store.recovery_turns(conn, session_id)
         pending_interrupts: list[tuple[str, str]] = []
         pending_steers: list[tuple[str, str]] = []
+        unresolved_starts: list[tuple[str, str, str]] = []
         recovered: list[str] = []
         materialized_ids: set[str] = set()
         for turn in turns:
@@ -3152,6 +3291,10 @@ class SessionTurnManager:
                 latest = delivery_store.get_turn(conn, turn_id)
                 if latest is None or latest["state"] not in delivery_store.TURN_OWNER_STATES:
                     continue
+                if turn["state"] == "waiting" and latest["state"] == "starting":
+                    # This successor was activated by an earlier reconciliation in
+                    # this same pass. Its native start is live now, not crash residue.
+                    continue
                 if identity and identity[0] == turn_id:
                     bound = delivery_store.bind_native_start(
                         conn,
@@ -3196,12 +3339,46 @@ class SessionTurnManager:
                 if latest["state"] == "starting" and latest.get(
                     "start_receipt_outcome"
                 ) is None:
-                    delivery_store.mark_start_unknown(
+                    latest = delivery_store.mark_start_unknown(
                         conn,
                         turn_id,
                         expected_version=int(latest["version"]),
                         receipt={"reason": "restart_without_native_evidence"},
                     )
+                if (
+                    latest is not None
+                    and latest["state"] == "starting"
+                    and latest.get("start_receipt_outcome") == "unknown"
+                    and str(latest.get("backend") or "")
+                    in _UNKNOWN_START_REPLAY_BACKENDS
+                ):
+                    unresolved_starts.append(
+                        (
+                            target_session,
+                            turn_id,
+                            str(latest.get("start_attempt_id") or ""),
+                        )
+                    )
+
+        for target_session, turn_id, attempt_id in unresolved_starts:
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "failed",
+                settled_by="restart_unknown_start",
+                evidence_kind="restart_unknown_start",
+                evidence={
+                    "reason": "native_start_acceptance_unrecoverable",
+                    "automatic_replay_limit": _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS,
+                },
+                expected_start_attempt_id=attempt_id,
+                replay_unknown_start=True,
+            )
+            if not terminal.get("changed"):
+                continue
+            recovered.append(target_session)
+            retry_turn_id = str(terminal.get("successor_turn_id") or "")
+            if retry_turn_id:
+                await self._start_persisted_turn(retry_turn_id)
 
         with self._sqlite_engine().connect() as conn:
             unresolved = delivery_store.unresolved_deliveries(conn, session_id)

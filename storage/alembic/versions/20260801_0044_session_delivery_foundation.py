@@ -259,7 +259,7 @@ def _migrate_pseudo_messages(bind) -> None:
         )
         state = {
             "queued": "queued",
-            "pending": "reconciling_migration",
+            "pending": "retired",
             "harness_dedupe": "retired",
         }[kind]
         if session_status != "active":
@@ -313,18 +313,10 @@ def _migrate_pseudo_messages(bind) -> None:
                 if row["native_message_id"]
                 else None
             ),
-            "attempt_id": (
-                f"atm_migration_{hashlib.sha256(str(row['id']).encode()).hexdigest()[:24]}"
-                if state == "reconciling_migration"
-                else None
-            ),
-            "attempt_kind": "migration" if state == "reconciling_migration" else None,
-            "receipt_outcome": "unknown" if state == "reconciling_migration" else None,
-            "attempt_opened_at": (
-                row["updated_at"] or row["created_at"]
-                if state == "reconciling_migration"
-                else None
-            ),
+            "attempt_id": None,
+            "attempt_kind": None,
+            "receipt_outcome": None,
+            "attempt_opened_at": None,
             "history_json": _json(history),
             "submitted_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -633,7 +625,7 @@ def _finish_upgrade(bind) -> None:
             "uq_session_turns_message_written_attempt",
             ["initial_delivery_id"],
             True,
-            "terminal_outcome is null or terminal_outcome <> 'not_written'",
+            "state <> 'terminal' or start_receipt_outcome = 'accepted'",
         ),
         ("uq_session_turns_waiting_successor", ["session_id"], True, "state = 'waiting'"),
         ("uq_session_turns_control_attempt", ["control_attempt_id"], True, "control_attempt_id is not null"),
@@ -781,12 +773,12 @@ def upgrade() -> None:
         sa.CheckConstraint("priority in ('p0','p1','p3')", name="ck_message_deliveries_priority"),
         sa.CheckConstraint(
             "state in ('reserved','queued','claimed','pending_steer','steering',"
-            "'interrupt_waiting','reconciling_steer','reconciling_migration',"
+            "'interrupt_waiting','reconciling_steer',"
             "'accepted','retired')",
             name="ck_message_deliveries_state",
         ),
         sa.CheckConstraint(
-            "current_attempt_kind is null or current_attempt_kind in ('steer','migration')",
+            "current_attempt_kind is null or current_attempt_kind = 'steer'",
             name="ck_message_deliveries_current_attempt_kind",
         ),
         sa.CheckConstraint(
@@ -799,22 +791,19 @@ def upgrade() -> None:
             "(state in ('steering','reconciling_steer') "
             "and current_attempt_id is not null and current_attempt_kind = 'steer' "
             "and current_target_turn_id is not null and current_expected_native_turn_id is not null) "
-            "or (state = 'reconciling_migration' and current_attempt_id is not null "
-            "and current_attempt_kind = 'migration' and current_target_turn_id is null "
-            "and current_expected_native_turn_id is null) "
             "or (state = 'pending_steer' and current_attempt_id is not null "
             "and current_attempt_kind = 'steer' and current_target_turn_id is not null "
             "and current_expected_native_turn_id is null) "
-            "or (state not in ('steering','reconciling_steer',"
-            "'reconciling_migration','pending_steer') and current_attempt_id is null "
+            "or (state not in ('steering','reconciling_steer','pending_steer') "
+            "and current_attempt_id is null "
             "and current_attempt_kind is null and current_target_turn_id is null "
             "and current_expected_native_turn_id is null)",
             name="ck_message_deliveries_current_attempt_shape",
         ),
         sa.CheckConstraint(
-            "(state in ('reconciling_steer','reconciling_migration') "
+            "(state = 'reconciling_steer' "
             "and current_receipt_outcome = 'unknown') "
-            "or (state not in ('reconciling_steer','reconciling_migration') "
+            "or (state <> 'reconciling_steer' "
             "and current_receipt_outcome is null)",
             name="ck_message_deliveries_current_receipt",
         ),
@@ -919,9 +908,12 @@ def upgrade() -> None:
             "or (state = 'active' and start_attempt_id is not null "
             "and dispatch_text is not null and dispatch_sha256 is not null "
             "and start_receipt_outcome = 'accepted') "
-            "or (state = 'terminal' and ((terminal_outcome <> 'not_written' "
+            "or (state = 'terminal' and (((terminal_outcome <> 'not_written' "
             "and start_attempt_id is not null and dispatch_text is not null "
             "and dispatch_sha256 is not null and start_receipt_outcome = 'accepted') "
+            "or (terminal_outcome = 'failed' and start_attempt_id is not null "
+            "and dispatch_text is not null and dispatch_sha256 is not null "
+            "and start_receipt_outcome = 'unknown')) "
             "or (terminal_outcome = 'not_written' and start_attempt_id is not null "
             "and dispatch_text is not null and dispatch_sha256 is not null "
             "and start_receipt_outcome = 'not_written') "
@@ -1219,7 +1211,7 @@ def downgrade() -> None:
             "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'queued' "
             "and state in ('queued','retired')) or "
             "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'pending' "
-            "and state in ('reconciling_migration','retired')) or "
+            "and state = 'retired') or "
             "(json_extract(delivery_history_json, '$.events[0].legacy_type') = 'harness_dedupe' "
             "and state = 'retired')))"
         )

@@ -41,9 +41,6 @@ DELIVERY_STATE_MATRIX: Mapping[str, DeliveryStatePolicy] = MappingProxyType(
         "reconciling_steer": DeliveryStatePolicy(
             "fence", "unknown", "turn_owner", "admitted"
         ),
-        "reconciling_migration": DeliveryStatePolicy(
-            "fence", "unknown", "turn_owner", "admitted"
-        ),
         "accepted": DeliveryStatePolicy(
             "terminal", "accepted", "complete", "admitted"
         ),

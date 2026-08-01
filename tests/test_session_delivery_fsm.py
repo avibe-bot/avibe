@@ -1334,8 +1334,8 @@ def test_late_t1_terminal_cannot_clear_active_t2(managers) -> None:
     assert still_active is not None and still_active["id"] == t2["id"]
 
 
-def test_start_write_ambiguity_survives_restart_without_duplicate_dispatch(managers) -> None:
-    """MESSAGE-DELIVERY-017: native start is may-have-written."""
+def test_start_write_ambiguity_replays_once_after_restart(managers) -> None:
+    """MESSAGE-DELIVERY-017: availability wins after an unresolvable start."""
 
     first, restarted, engine, _engine_b, starts = managers
 
@@ -1355,9 +1355,98 @@ def test_start_write_ambiguity_survives_restart_without_duplicate_dispatch(manag
 
     row = _row(engine, str(outcome.delivery_id))
     assert row["state"] == "claimed"
-    assert [text for _, text in starts] == ["once"]
+    assert len(starts) == 2
+    assert starts[0][1] == "once"
+    assert starts[1][1].endswith("once")
+    assert "may have been delivered before restart" in starts[1][1]
     with engine.connect() as conn:
         assert conn.execute(select(messages.c.id)).all() == []
+        turns = conn.execute(
+            select(session_turns)
+            .where(session_turns.c.initial_delivery_id == outcome.delivery_id)
+            .order_by(session_turns.c.created_at, session_turns.c.id)
+        ).mappings().all()
+    assert len(turns) == 2
+    assert turns[0]["state"] == "terminal"
+    assert turns[0]["terminal_outcome"] == "failed"
+    assert turns[0]["start_receipt_outcome"] == "unknown"
+    assert turns[1]["state"] == "starting"
+
+
+def test_second_unknown_start_retires_delivery_and_unblocks_fifo(managers) -> None:
+    first, restarted, engine, _engine_b, starts = managers
+    settlements: list[tuple[list[str], str]] = []
+    settlement_service = SimpleNamespace(
+        settle_agent_runs_without_result=lambda run_ids, *, settled_by: settlements.append(
+            (list(run_ids), settled_by)
+        )
+    )
+    first.controller.scheduled_task_service = settlement_service
+    restarted.controller.scheduled_task_service = settlement_service
+
+    async def ambiguous(_session_id, _context_value, text, **kwargs):
+        starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        raise OSError("connection lost after native write")
+
+    first._run = ambiguous
+    restarted._run = ambiguous
+    outcome = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="retry once"),
+            context=_context(),
+        )
+    )
+    run_id = "run-unknown-start-retry"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                delivery_id=str(outcome.delivery_id),
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+    restarted._active_identity = lambda *_args: None
+    asyncio.run(restarted.recover_durable_delivery_state())
+    assert len(starts) == 2
+
+    with engine.begin() as conn:
+        following = delivery_store.enqueue_queued(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            text="continue queue",
+        )
+
+    async def succeeds(_session_id, _context_value, text, **kwargs):
+        starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+
+    first._run = succeeds
+    first._active_identity = lambda *_args: None
+    asyncio.run(first.recover_durable_delivery_state())
+
+    retired = _row(engine, str(outcome.delivery_id))
+    assert retired["state"] == "retired"
+    history = json.loads(retired["delivery_history_json"])["events"]
+    assert [
+        event["outcome"]
+        for event in history
+        if event["kind"] == "start" and event["outcome"].startswith("restart_")
+    ] == [
+        "restart_replayed",
+        "restart_retry_exhausted",
+    ]
+    assert _row(engine, str(following["id"]))["state"] == "claimed"
+    assert starts[-1][1] == "continue queue"
+    assert settlements == [([run_id], "no_terminal_result")]
 
 
 def test_exact_missing_start_attempt_requeues_only_its_own_delivery(managers) -> None:
@@ -1435,7 +1524,7 @@ def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(manage
                 id=run_id,
                 definition_id=None,
                 run_type="agent",
-                status="canceled",
+                status="running",
                 cancel_requested=1,
                 session_id="ses_fsm",
                 created_at=now,

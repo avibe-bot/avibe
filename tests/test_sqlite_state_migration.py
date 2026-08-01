@@ -629,8 +629,8 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
         ).fetchall()
     assert remaining_messages == []
     assert [(row[0], row[1], row[2], row[3]) for row in deliveries] == [
-        ("msg_pending_harness", "reconciling_migration", "migration", "unknown"),
-        ("msg_pending_human", "reconciling_migration", "migration", "unknown"),
+        ("msg_pending_harness", "retired", None, None),
+        ("msg_pending_human", "retired", None, None),
     ]
     snapshots = {row[0]: json.loads(row[4]) for row in deliveries}
     assert snapshots["msg_pending_harness"]["type"] == "harness"
@@ -646,6 +646,7 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     try:
         with engine.connect() as conn:
             assert message_deliveries.recoverable_reservations(conn, "ses_pending") == []
+            assert message_deliveries.ordering_head(conn, "ses_pending") is None
     finally:
         engine.dispose()
 

@@ -550,9 +550,12 @@ session_turns = Table(
         "or (state = 'active' and start_attempt_id is not null "
         "and dispatch_text is not null and dispatch_sha256 is not null "
         "and start_receipt_outcome = 'accepted') "
-        "or (state = 'terminal' and ((terminal_outcome <> 'not_written' "
+        "or (state = 'terminal' and (((terminal_outcome <> 'not_written' "
         "and start_attempt_id is not null and dispatch_text is not null "
         "and dispatch_sha256 is not null and start_receipt_outcome = 'accepted') "
+        "or (terminal_outcome = 'failed' and start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null "
+        "and start_receipt_outcome = 'unknown')) "
         "or (terminal_outcome = 'not_written' and start_attempt_id is not null "
         "and dispatch_text is not null and dispatch_sha256 is not null "
         "and start_receipt_outcome = 'not_written') "
@@ -594,7 +597,7 @@ session_turns = Table(
         "uq_session_turns_message_written_attempt",
         "initial_delivery_id",
         unique=True,
-        sqlite_where=text("terminal_outcome is null or terminal_outcome <> 'not_written'"),
+        sqlite_where=text("state <> 'terminal' or start_receipt_outcome = 'accepted'"),
     ),
     Index(
         "uq_session_turns_waiting_successor",
@@ -692,7 +695,7 @@ message_deliveries = Table(
         name="ck_message_deliveries_state",
     ),
     CheckConstraint(
-        "current_attempt_kind is null or current_attempt_kind in ('steer', 'migration')",
+        "current_attempt_kind is null or current_attempt_kind = 'steer'",
         name="ck_message_deliveries_current_attempt_kind",
     ),
     CheckConstraint(
@@ -706,22 +709,19 @@ message_deliveries = Table(
         "and current_attempt_id is not null and current_attempt_kind = 'steer' "
         "and current_target_turn_id is not null "
         "and current_expected_native_turn_id is not null) "
-        "or (state = 'reconciling_migration' and current_attempt_id is not null "
-        "and current_attempt_kind = 'migration' and current_target_turn_id is null "
-        "and current_expected_native_turn_id is null) "
         "or (state = 'pending_steer' and current_attempt_id is not null "
         "and current_attempt_kind = 'steer' and current_target_turn_id is not null "
         "and current_expected_native_turn_id is null) "
-        "or (state not in ('steering', 'reconciling_steer', "
-        "'reconciling_migration', 'pending_steer') and current_attempt_id is null "
+        "or (state not in ('steering', 'reconciling_steer', 'pending_steer') "
+        "and current_attempt_id is null "
         "and current_attempt_kind is null and current_target_turn_id is null "
         "and current_expected_native_turn_id is null)",
         name="ck_message_deliveries_current_attempt_shape",
     ),
     CheckConstraint(
-        "(state in ('reconciling_steer', 'reconciling_migration') "
+        "(state = 'reconciling_steer' "
         "and current_receipt_outcome = 'unknown') "
-        "or (state not in ('reconciling_steer', 'reconciling_migration') "
+        "or (state <> 'reconciling_steer' "
         "and current_receipt_outcome is null)",
         name="ck_message_deliveries_current_receipt",
     ),

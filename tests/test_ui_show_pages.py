@@ -2366,7 +2366,6 @@ def test_reserved_show_dispatch_rejects_whitespace_only_dispatch_text(monkeypatc
         "pending_steer",
         "steering",
         "reconciling_steer",
-        "reconciling_migration",
         "interrupt_waiting",
     ],
 )

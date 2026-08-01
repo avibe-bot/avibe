@@ -221,7 +221,6 @@ def create_app(controller: "Controller") -> FastAPI:
                                     "interrupt_waiting",
                                     "waiting_terminal",
                                     "reconciling_steer",
-                                    "reconciling_migration",
                                 }
                                 else "ran"
                             ),
@@ -401,7 +400,6 @@ def create_app(controller: "Controller") -> FastAPI:
             "interrupt_waiting",
             "waiting_terminal",
             "reconciling_steer",
-            "reconciling_migration",
         } else "ran"
         submission = TurnSubmissionResult(
             route=route,

@@ -44,7 +44,6 @@ lists.
 | `steering` | fence | possible | Turn owner | admitted |
 | `interrupt_waiting` | Turn-owned | possible | Turn owner | admitted |
 | `reconciling_steer` | fence | unknown | Turn owner | admitted |
-| `reconciling_migration` | fence | unknown | Turn owner | admitted |
 | `accepted` | terminal | accepted | complete | admitted |
 | `retired` | terminal | none | complete | retired |
 
@@ -84,9 +83,12 @@ initial Message materialization. Terminal output alone cannot prove that native
 input was accepted: without the start receipt, the Turn remains owned and
 blocked for reconciliation rather than exposing a phantom Message or idle gap.
 
-Unknown start or steer outcomes never retry. A definitive pre-write start failure
-requeues the entire claimed batch in its original order. A late event for T1
-cannot mutate T2.
+Unknown steer outcomes never retry. For Claude and Codex, an unresolvable start
+after restart replays the same Delivery batch once with a private instruction to
+check existing effects before irreversible work. A second unknown attempt retires
+that batch and releases the Session. OpenCode retains its stronger exact-attempt
+reconciliation. A definitive pre-write start failure requeues the entire claimed
+batch in its original order. A late event for T1 cannot mutate T2.
 
 OpenCode writes the persisted Delivery attempt ID as the native `messageID`.
 After restart, reconciliation reads that exact native Message without issuing a
@@ -137,6 +139,9 @@ finished, so neither side can consume the other's evidence early.
 Revision 0044 follows the already-shipped 0043 migration. It creates
 `message_deliveries` and `session_turns`, moves unaccepted pseudo Messages into
 Deliveries, and leaves accepted communication Messages as immutable history.
+Legacy `pending` rows have no recoverable native identity, so migration retains
+their snapshot as a retired, not-replayed Delivery instead of creating a FIFO
+fence that can never resolve.
 `/new` archives a non-empty Session and re-anchors future work; only empty
 Sessions are physically removed, so accepted Messages and their Delivery/Turn
 audit graph remain intact.
