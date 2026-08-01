@@ -18,6 +18,7 @@ user turn.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import unittest
 from pathlib import Path
@@ -26,6 +27,7 @@ from unittest.mock import ANY, AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core import session_turns
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import (
@@ -2584,3 +2586,127 @@ class ActivityRunAttributionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(run_ids, [])
+
+
+def _teardown_ctx(session_id: str):
+    """An agent-initiated emit's reused receiver context (HFR-343)."""
+    return SimpleNamespace(
+        user_id="U1",
+        channel_id="C1",
+        platform="avibe",
+        platform_specific={"agent_session_id": session_id, "turn_token": "T-ai"},
+    )
+
+
+def _wire_real_manager():
+    """``_build_agent`` + a REAL ``SessionTurnManager`` (HFR-343).
+
+    The stub ``controller.session_turns`` the other tests use records ``on_running``
+    and nothing else; admission is a real manager's state, so this door can only be
+    tested against one.
+    """
+    agent, service = _build_agent()
+    controller = service.controller
+    controller._session_id_from_context = lambda ctx: (
+        (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id") or None
+    )
+    controller._get_session_key = lambda ctx: (
+        f"avibe::{(getattr(ctx, 'platform_specific', None) or {}).get('agent_session_id')}"
+    )
+    controller.set_agent_status = lambda sid, status: None
+    controller.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
+    manager = session_turns.SessionTurnManager(controller=controller)
+    # The holder flushes the send-while-busy queue on natural completion; stub it so
+    # the test never reaches the DB.
+    manager.flush_queue = AsyncMock(return_value=False)
+    controller.session_turns = manager
+    controller.agent_service = service
+    return agent, service, manager, controller
+
+
+async def _settle(times: int = 3) -> None:
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+class AgentInitiatedTurnTeardownAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    """HFR-343: the agent-initiated turn path is the FOURTH admission door.
+
+    ``submit`` was the first (HFR-330), the send-now direct flush the second, the
+    scheduler drain + ``_run_task`` the third (HFR-336). A Claude process that emits
+    unsolicited Activity / ScheduleWakeup output inside the teardown window — the
+    cancelled turn already popped from ``in_flight``, ``cleanup_session`` not yet
+    having disconnected the client — opened a brand-new turn regardless of the hold.
+    The teardown's ownership snapshot was already taken, so the runtime was destroyed
+    AROUND that successor, stranding its runtime gate, its ``in_flight`` entry, and
+    any output or run it carried.
+    """
+
+    async def _drop_open_turn(self, service, manager, runtime_key: str, session_id: str) -> None:
+        gate = service._get_turn_gate(runtime_key)
+        turn = manager.in_flight.pop(session_id, None)
+        if turn is not None:
+            turn.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await turn.task
+        if gate.lock.locked():
+            gate.lock.release()
+
+    async def test_agent_initiated_successor_is_refused_during_teardown(self):
+        agent, service, manager, controller = _wire_real_manager()
+        session_id = "sess-343"
+        runtime_key = "S:/w"
+        session_key = controller._get_session_key(_teardown_ctx(session_id))
+
+        with manager.teardown_admission(session_id):
+            self.assertTrue(manager.is_teardown_admission_closed(session_id))
+
+            # SERVICE LAYER: the gate is never acquired, so there is nothing to
+            # strand. The refusal reuses the existing contended-gate semantics
+            # (``None`` == "no turn opened"), and the successor's emits then die
+            # against the outbound active-turn guard as stale stragglers — which is
+            # the correct fate: the client is about to be disconnected.
+            token = await service.begin_agent_initiated_turn(
+                "claude", _teardown_ctx(session_id), runtime_key
+            )
+            self.assertIsNone(token)
+            self.assertFalse(service._get_turn_gate(runtime_key).lock.locked())
+            self.assertNotIn(session_id, manager.in_flight)
+
+            # MANAGER LAYER: the shared registration chokepoint every
+            # agent-initiated caller funnels through refuses too, with no sink left
+            # behind (the refusal lands BEFORE ``register_turn_sink``).
+            registered = manager.register_agent_initiated_turn(_teardown_ctx(session_id))
+            self.assertFalse(registered)
+            self.assertNotIn(session_id, manager.in_flight)
+            self.assertIsNone(manager.get_turn_sink(session_key))
+
+        # The teardown then completes clean: nothing to reconcile, nothing stranded.
+        self.assertFalse(manager.is_teardown_admission_closed(session_id))
+        self.assertEqual(manager.in_flight, {})
+
+        # COMPANION: the refusal is WINDOW-SCOPED. With the counted hold released, a
+        # fresh agent-initiated turn opens and registers exactly as before.
+        fresh = _teardown_ctx(session_id)
+        token = await service.begin_agent_initiated_turn("claude", fresh, runtime_key)
+        self.assertTrue(token)
+        self.assertTrue(service._get_turn_gate(runtime_key).lock.locked())
+        await _settle()
+        self.assertIn(session_id, manager.in_flight)
+        await self._drop_open_turn(service, manager, runtime_key, session_id)
+
+        # ...but the HFR-339 process-wide close is NEVER cleared, so from there on
+        # every session stays refused at both layers.
+        manager.close_admission_for_shutdown()
+        shutdown_session = "sess-343-shutdown"
+        shutdown_key = "S:/w-shutdown"
+        self.assertIsNone(
+            await service.begin_agent_initiated_turn(
+                "claude", _teardown_ctx(shutdown_session), shutdown_key
+            )
+        )
+        self.assertFalse(service._get_turn_gate(shutdown_key).lock.locked())
+        self.assertFalse(
+            manager.register_agent_initiated_turn(_teardown_ctx(shutdown_session))
+        )
+        self.assertNotIn(shutdown_session, manager.in_flight)

@@ -2591,6 +2591,25 @@ class SessionTurnManager:
         session_id = self.controller._session_id_from_context(context)
         if not session_id:
             return False
+        # THE FOURTH ADMISSION DOOR (HFR-343). ``submit`` was the first (HFR-330),
+        # the send-now direct flush the second, the scheduler drain + ``_run_task``
+        # the third (HFR-336) — and this is the last one, because it is the shared
+        # registration chokepoint EVERY agent-initiated caller funnels through. A
+        # Claude process that emits unsolicited Activity / ScheduleWakeup output in
+        # the teardown window (the cancelled turn already popped from ``in_flight``,
+        # ``cleanup_session`` not yet having disconnected the client) would otherwise
+        # register a brand-new turn that the teardown's ALREADY-CONSUMED ownership
+        # snapshot cannot see — so the runtime is destroyed around the successor,
+        # stranding its ``in_flight`` entry, its sink, and its runtime gate.
+        # THE REFUSED SUCCESSOR'S FATE, stated plainly: no turn is registered, so its
+        # emits are dropped by the outbound active-turn guard as stale stragglers,
+        # and the teardown disconnects the client underneath it. That is correct —
+        # nothing durable is lost that the teardown was not already discarding.
+        # BEFORE ``register_turn_sink`` on purpose: refusing here needs no rollback,
+        # unlike the no-running-loop branch below which has to pop the sink it just
+        # registered.
+        if self.is_teardown_admission_closed(session_id):
+            return False
         get_key = getattr(self.controller, "_get_session_key", None)
         if not callable(get_key):
             return False

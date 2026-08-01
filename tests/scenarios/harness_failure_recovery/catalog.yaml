@@ -3924,6 +3924,51 @@ scenarios:
     # timeout); GREEN in ~2s with the row converged restarted + owed notice before
     # the instrumented backend teardown.
     test: tests/test_running_agents_service.py::test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind
+  - id: HFR-343
+    name: >-
+      the agent-initiated turn is the fourth admission door, and a successor opened
+      inside the teardown window outlives its runtime
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # PR2 review round 17. THE FOURTH DOOR, and the last one: submit was the first
+    # (HFR-330), the send-now direct flush the second, the scheduler drain +
+    # _run_task the third (HFR-336). AgentService.begin_agent_initiated_turn and
+    # SessionTurnManager.register_agent_initiated_turn consulted admission at
+    # NEITHER layer. A Claude process emitting unsolicited Activity / ScheduleWakeup
+    # output inside the teardown window -- the cancelled turn already popped from
+    # in_flight and turn.end published, cleanup_session not yet having disconnected
+    # the client -- therefore opened a brand-new turn straight through the hold. The
+    # teardown's ownership snapshot had ALREADY been consumed, so the runtime was
+    # destroyed AROUND that successor, stranding its runtime gate, its in_flight
+    # entry, its sink, and any output or run it carried.
+    # THE FIX IS A REFUSAL AT BOTH LAYERS, and invents no new semantics: each reuses
+    # the refusal its own layer already had. begin_ returns None -- the existing
+    # contended-gate answer, non-blocking, gate never acquired -- consulted BEFORE
+    # the acquire through the same defensive cross-service adapter shape as
+    # ScheduledTaskService._teardown_held_session_locks (getattr manager, getattr
+    # predicate, resolve the session id via controller._session_id_from_context, any
+    # failure proceeds as before). register_ returns False BEFORE register_turn_sink,
+    # so unlike its no-running-loop sibling there is nothing to roll back. The
+    # manager half is the chokepoint every agent-initiated caller funnels through;
+    # the service half means a refusal strands not even a gate.
+    # THE REFUSED SUCCESSOR'S FATE IS THE POINT, not a regrettable side effect: with
+    # no turn open its emits are dropped by the outbound active-turn guard
+    # (emit_matches_runtime_turn) as stale stragglers, and the teardown disconnects
+    # the client underneath it. The successor is MEANT to die with its runtime, and
+    # nothing durable is lost that the teardown was not already discarding.
+    # NO SPECIAL-CASING FOR HFR-320, deliberately: the in-dispatch-recreation shape
+    # was already refused twice over before this change (the caller's own turn holds
+    # the gate, so begin_ answers None; and it occupies in_flight, so register_
+    # refuses) -- both pins stay green untouched.
+    # SCOPE IS THE WINDOW, pinned by the test's companion: once the counted hold
+    # releases, a fresh agent-initiated turn opens and registers exactly as before,
+    # while HFR-339's never-cleared process-wide close keeps refusing at both layers.
+    # RED against the real AgentService + a real SessionTurnManager under a real
+    # teardown_admission hold: begin_ handed back a token
+    # ('74cc7324...' is not None) and registered the successor in in_flight.
+    test: tests/test_claude_agent_initiated_turn.py::AgentInitiatedTurnTeardownAdmissionTests::test_agent_initiated_successor_is_refused_during_teardown
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

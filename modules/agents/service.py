@@ -573,6 +573,58 @@ class AgentService:
             return False
         return any(not w.cancelled() for w in waiters)
 
+    def _teardown_admission_closed(self, context: Any) -> bool:
+        """True while a teardown (or the process exit) holds this session shut (HFR-343).
+
+        THE OUTER HALF of the fourth admission door; the inner half is
+        ``SessionTurnManager.register_agent_initiated_turn``, which refuses the same
+        registration for every caller. Checking here as well means the runtime gate is
+        never even acquired, so a refused successor leaves nothing at all behind — no
+        gate, no ``in_flight`` entry, no sink — where a registration-only refusal would
+        still strand the gate this method opened.
+
+        WHY IT MATTERS: in the teardown window the cancelled turn has already been
+        popped from ``in_flight`` and published ``turn.end``, but ``cleanup_session``
+        has not yet disconnected the SDK client. Claude can emit unsolicited Activity /
+        ScheduleWakeup output right there, and a turn opened for it is invisible to the
+        teardown's already-consumed ownership snapshot — so the runtime is destroyed
+        around it.
+
+        THE REFUSED SUCCESSOR DIES WITH THE RUNTIME BY DESIGN. Its output is dropped by
+        the outbound active-turn guard (``emit_matches_runtime_turn``) exactly like any
+        stale straggler, and the teardown disconnects the client underneath it. Nothing
+        durable is lost that the teardown was not already discarding.
+
+        SAME DEFENSIVE ADAPTER SHAPE as every other cross-service read in this codebase
+        (compare ``ScheduledTaskService._teardown_held_session_locks``): resolve through
+        ``getattr``, verify the predicate is callable, and on ANY failure proceed as
+        before rather than refusing work on a manager that could not be consulted. A
+        context that resolves to no session id is the avibe-only no-op case — IM / CLI
+        turns have no session row to hold — and also proceeds as today.
+        """
+
+        manager = getattr(self.controller, "session_turns", None)
+        if manager is None:
+            return False
+        closed = getattr(manager, "is_teardown_admission_closed", None)
+        if not callable(closed):
+            return False
+        resolve = getattr(self.controller, "_session_id_from_context", None)
+        if not callable(resolve):
+            return False
+        try:
+            session_id = resolve(context)
+            if not session_id:
+                return False
+            return bool(closed(session_id))
+        except Exception:
+            logger.debug(
+                "teardown admission could not be read for an agent-initiated turn; "
+                "opening it as before",
+                exc_info=True,
+            )
+            return False
+
     async def begin_agent_initiated_turn(
         self, agent_name: str, context: Any, runtime_key: str
     ) -> Optional[str]:
@@ -591,7 +643,10 @@ class AgentService:
         Returns the fresh turn token when the gate was free and a turn was opened,
         else ``None`` when the gate is contended (a user turn holds OR is queued on
         it) — let that turn own the output; the agent-initiated emit then adopts its
-        token instead.
+        token instead. Also ``None`` when a teardown holds this session's admission
+        shut (HFR-343): the successor is meant to die with the runtime, and reusing
+        the contended-gate refusal means the gate is never acquired, so there is
+        nothing to strand — see :meth:`_teardown_admission_closed`.
 
         STRICTLY NON-BLOCKING: this runs ON the long-lived Claude receiver, which is
         the only reader of the SDK stream. An ``asyncio.Lock`` can be momentarily
@@ -606,6 +661,8 @@ class AgentService:
         """
         runtime_key = str(runtime_key or "").strip()
         if not runtime_key:
+            return None
+        if self._teardown_admission_closed(context):
             return None
         gate = self._get_turn_gate(runtime_key)
         if gate.lock.locked() or self._lock_has_live_waiters(gate.lock):
