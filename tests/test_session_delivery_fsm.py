@@ -1409,6 +1409,77 @@ def test_start_write_ambiguity_replays_once_after_restart(managers) -> None:
     assert turns[1]["state"] == "starting"
 
 
+def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers) -> None:
+    first, restarted, engine, _engine_b, starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="accepted before restart"))
+    queued = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="continue after restart",
+            ),
+            context=_context(),
+        )
+    )
+    starts.clear()
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(
+        restarted.recover_durable_delivery_state(
+            "ses_fsm",
+            service_restart=True,
+        )
+    )
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+        accepted = delivery_store.delivery_for_turn(conn, turn_id)
+    assert settled is not None and settled["state"] == "terminal"
+    assert settled["terminal_outcome"] == "failed"
+    assert settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert accepted is not None and accepted["state"] == "accepted"
+    assert _row(engine, str(queued.delivery_id))["state"] == "claimed"
+    assert [text for _started_turn, text in starts] == ["continue after restart"]
+
+
+def test_accepted_opencode_turn_without_restored_identity_stays_live(managers) -> None:
+    first, restarted, engine, _engine_b, starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="restorable runtime"))
+    queued = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="wait"),
+            context=_context(),
+        )
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_backend="opencode", agent_name="opencode")
+        )
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id == turn_id)
+            .values(backend="opencode")
+        )
+    starts.clear()
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(
+        restarted.recover_durable_delivery_state(
+            "ses_fsm",
+            service_restart=True,
+        )
+    )
+
+    with engine.connect() as conn:
+        retained = delivery_store.get_turn(conn, turn_id)
+    assert retained is not None and retained["state"] == "active"
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    assert starts == []
+
+
 def test_second_unknown_start_retires_delivery_and_unblocks_fifo(managers) -> None:
     first, restarted, engine, _engine_b, starts = managers
     settlements: list[tuple[list[str], str]] = []

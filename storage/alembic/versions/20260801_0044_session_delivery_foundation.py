@@ -90,6 +90,41 @@ def _legacy_delivery_dedupe_key(row: sa.RowMapping) -> str | None:
     return f"legacy:{platform}:{native_id}"
 
 
+def _legacy_live_run_id(
+    bind,
+    row: sa.RowMapping,
+    provenance_spec: object,
+) -> str | None:
+    run_id = ""
+    if isinstance(provenance_spec, dict):
+        run_id = str(provenance_spec.get("task_execution_id") or "").strip()
+    if not run_id and str(row["native_message_id"] or "").startswith("agent_run:"):
+        run_id = str(row["native_message_id"] or "").removeprefix("agent_run:").strip()
+    if not run_id:
+        return None
+    run = bind.execute(
+        sa.text(
+            "select session_id, status, delivery_id from agent_runs where id = :run_id"
+        ),
+        {"run_id": run_id},
+    ).mappings().first()
+    if run is None:
+        return None
+    if str(run["session_id"] or "") != str(row["session_id"] or ""):
+        raise RuntimeError(
+            f"0044 migration Run {run_id} belongs to a different Session"
+        )
+    if str(run["status"] or "") not in {"queued", "pending", "running", "processing"}:
+        return None
+    linked_delivery_id = str(run["delivery_id"] or "")
+    if linked_delivery_id and linked_delivery_id != str(row["id"]):
+        raise RuntimeError(
+            f"0044 migration Run {run_id} already belongs to Delivery "
+            f"{linked_delivery_id}"
+        )
+    return run_id
+
+
 def _message_snapshot(row: sa.RowMapping) -> dict[str, object]:
     legacy_type = str(row["type"])
     inbound_type = (
@@ -257,12 +292,10 @@ def _migrate_pseudo_messages(bind) -> None:
             if isinstance(provenance, dict)
             else None
         )
-        owned_agent_run = kind == "queued" and (
-            str(row["native_message_id"] or "").startswith("agent_run:")
-            or (
-                isinstance(provenance_spec, dict)
-                and provenance_spec.get("task_trigger_kind") == "agent_run"
-            )
+        live_run_id = (
+            _legacy_live_run_id(bind, row, provenance_spec)
+            if kind == "queued"
+            else None
         )
         dispatch_text = str(
             metadata.get("_queued_dispatch_text")
@@ -283,8 +316,8 @@ def _migrate_pseudo_messages(bind) -> None:
             and session_id not in seen_queued_sessions
         ):
             seen_queued_sessions.add(session_id)
-            if not owned_agent_run:
-                # Legacy startup resumed only an Agent-Run-owned queue head.
+            if not live_run_id:
+                # Legacy startup resumed only a live-Run-owned queue head.
                 # Keep an ordinary head held so upgrade cannot dispatch it.
                 bind.execute(
                     sa.text(
@@ -366,19 +399,29 @@ def _migrate_pseudo_messages(bind) -> None:
             ),
             {"id": row["id"]},
         )
-        if owned_agent_run:
-            run_id = str(
-                (provenance_spec or {}).get("task_execution_id")
-                or str(row["native_message_id"] or "").removeprefix("agent_run:")
-            ).strip()
-            if run_id:
-                bind.execute(
-                    sa.text(
-                        "update agent_runs set delivery_id = :delivery_id "
-                        "where id = :run_id and delivery_id is null"
-                    ),
-                    {"delivery_id": row["id"], "run_id": run_id},
-                )
+        if live_run_id:
+            linked = bind.execute(
+                sa.text(
+                    "update agent_runs set delivery_id = :delivery_id "
+                    "where id = :run_id and session_id = :session_id "
+                    "and status in ('queued','pending','running','processing') "
+                    "and delivery_id is null"
+                ),
+                {
+                    "delivery_id": row["id"],
+                    "run_id": live_run_id,
+                    "session_id": session_id,
+                },
+            )
+            if linked.rowcount != 1:
+                persisted_delivery_id = bind.execute(
+                    sa.text("select delivery_id from agent_runs where id = :run_id"),
+                    {"run_id": live_run_id},
+                ).scalar_one_or_none()
+                if persisted_delivery_id != row["id"]:
+                    raise RuntimeError(
+                        f"0044 migration Run {live_run_id} lost its Delivery binding"
+                    )
         bind.execute(
             sa.text("update media_objects set message_id = null where message_id = :id"),
             {"id": row["id"]},

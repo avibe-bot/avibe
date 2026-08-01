@@ -2912,6 +2912,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     harness-attributed ``queued`` row (so it runs AFTER the active turn via the
     existing flush) instead of preempting it — and it never starts a competing
     turn nor disturbs the in-flight Chat task (Codex P2)."""
+    from core.inbox_events import bus
     from storage import messages_service
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2928,6 +2929,12 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
         raise AssertionError("a busy scheduled run must enqueue, not dispatch a turn")
 
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _explode_dispatch_turn)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event, payload: published.append((event, payload)),
+    )
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -2964,6 +2971,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert queued[0]["scope_id"] == scope_id
     assert queued[0]["author"] == "harness"
     assert [row["text"] for row in transcript["messages"]] == ["active owner"]
+    assert ("queue.updated", {"session_id": session_id}) in published
 
 
 def test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head(monkeypatch, tmp_path):
@@ -5355,7 +5363,8 @@ def test_boot_queue_recovery_stops_when_durable_owner_recovery_fails(
 
     calls: list[str] = []
 
-    async def fail_delivery_recovery():
+    async def fail_delivery_recovery(*, service_restart=False):
+        assert service_restart is True
         calls.append("delivery")
         raise RuntimeError("owner recovery failed")
 
@@ -5402,7 +5411,8 @@ def test_boot_waits_for_backend_restore_before_delivery_recovery(
     restore_barrier = asyncio.Event()
     recovery_complete = asyncio.Event()
 
-    async def recover_deliveries():
+    async def recover_deliveries(*, service_restart=False):
+        assert service_restart is True
         calls.append("delivery")
         return []
 

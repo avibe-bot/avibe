@@ -424,6 +424,109 @@ def test_session_delivery_migration_uses_live_dedupe_for_harness_provenance(
     }
 
 
+def test_session_delivery_migration_binds_each_live_scheduled_run(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260729_0042")
+    now = "2026-07-31T00:00:00Z"
+    cases = (
+        ("task", "scheduled", "queued"),
+        ("watch", "watch", "pending"),
+        ("webhook", "hook", "processing"),
+    )
+    with sqlite3.connect(db_path) as conn:
+        for name, trigger_kind, run_status in cases:
+            session_id = f"ses_{name}_migration"
+            run_id = f"run_{name}_migration"
+            message_id = f"msg_{name}_migration"
+            native_id = f"{name}:migration"
+            conn.execute(
+                """
+                insert into agent_sessions (
+                    id, scope_id, agent_id, agent_name, agent_backend, agent_variant,
+                    model, reasoning_effort, session_anchor, workdir, native_session_id,
+                    title, status, visibility, pinned, agent_status, created_at,
+                    updated_at, last_active_at, metadata_json
+                ) values (
+                    ?, null, null, 'codex', 'codex', 'codex', null, null,
+                    ?, '/tmp', '', null, 'active', 'foreground', 0, 'idle',
+                    ?, ?, ?, '{}'
+                )
+                """,
+                (session_id, session_id, now, now, now),
+            )
+            conn.execute(
+                """
+                insert into agent_runs (
+                    id, run_type, status, session_id, cancel_requested,
+                    created_at, updated_at, metadata_json
+                ) values (?, ?, ?, ?, 0, ?, ?, '{}')
+                """,
+                (run_id, name, run_status, session_id, now, now),
+            )
+            metadata_json = json.dumps(
+                {
+                    "scheduled_provenance": {
+                        "platform_specific": {
+                            "task_execution_id": run_id,
+                            "task_trigger_kind": trigger_kind,
+                        }
+                    }
+                }
+            )
+            conn.execute(
+                """
+                insert into messages (
+                    id, scope_id, session_id, platform, author, type, author_id,
+                    author_name, source, native_message_id, parent_native_message_id,
+                    content_text, content_json, metadata_json, created_at, updated_at,
+                    delivered_at, read_at
+                ) values (
+                    ?, null, ?, 'avibe', 'harness', 'queued', null, ?, 'harness',
+                    ?, null, ?, json_object('text', ?), ?, ?, ?, null, null
+                )
+                """,
+                (
+                    message_id,
+                    session_id,
+                    name,
+                    native_id,
+                    name,
+                    name,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            """
+            select r.id, r.delivery_id, d.state, d.dedupe_key,
+                   s.queue_hold_state
+            from agent_runs r
+            join message_deliveries d on d.id = r.delivery_id
+            join agent_sessions s on s.id = r.session_id
+            where r.id like 'run_%_migration'
+            order by r.id
+            """
+        ).fetchall()
+    assert migrated == [
+        (
+            f"run_{name}_migration",
+            f"msg_{name}_migration",
+            "queued",
+            f"avibe:{name}:migration",
+            "open",
+        )
+        for name, _trigger_kind, _run_status in sorted(cases)
+    ]
+
+
 def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collisions(
     tmp_path: Path,
 ) -> None:

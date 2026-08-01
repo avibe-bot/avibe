@@ -113,6 +113,19 @@ def create_app(controller: "Controller") -> FastAPI:
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
 
+    def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
+        if state != "queued":
+            return
+        try:
+            from core.inbox_events import bus
+
+            bus.publish("queue.updated", {"session_id": session_id})
+        except Exception:
+            logger.exception(
+                "scheduled Delivery queue projection failed for Session=%s",
+                session_id,
+            )
+
     async def _submit_scheduled_turn(
         session_id: str,
         context: MessageContext,
@@ -390,6 +403,7 @@ def create_app(controller: "Controller") -> FastAPI:
                     execution_id,
                     delivery_id,
                 )
+            _publish_scheduled_queue_growth(session_id, delivery_status)
             return TurnSubmissionResult(
                 route="enqueued",
                 queue_persisted=True,
@@ -412,6 +426,7 @@ def create_app(controller: "Controller") -> FastAPI:
             ),
             delivery_owner_transferred=delivery_owner_transferred,
         )
+        _publish_scheduled_queue_growth(session_id, str(result.state))
         if effective_delivery_intent == "send_now":
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
@@ -809,7 +824,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
         recover_deliveries = getattr(manager, "recover_durable_delivery_state", None)
         if callable(recover_deliveries):
             try:
-                recovered = await recover_deliveries()
+                recovered = await recover_deliveries(service_restart=True)
                 if recovered:
                     logger.info(
                         "Recovered durable Session delivery owners for %s",

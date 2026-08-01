@@ -124,7 +124,7 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
-_UNKNOWN_START_REPLAY_BACKENDS = frozenset({"claude", "codex"})
+_NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
 _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
@@ -3253,14 +3253,24 @@ class SessionTurnManager:
             )
         return None
 
-    async def recover_durable_delivery_state(self, session_id: str | None = None) -> list[str]:
-        """Restore evidence, reconcile exact identities, then project status."""
+    async def recover_durable_delivery_state(
+        self,
+        session_id: str | None = None,
+        *,
+        service_restart: bool = False,
+    ) -> list[str]:
+        """Restore exact owners after backend restore, then project status.
+
+        ``service_restart`` is the proof that process-bound Claude/Codex runtimes
+        cannot still be executing in another live controller recovery pass.
+        """
 
         with self._sqlite_engine().connect() as conn:
             turns = delivery_store.recovery_turns(conn, session_id)
         pending_interrupts: list[tuple[str, str]] = []
         pending_steers: list[tuple[str, str]] = []
         unresolved_starts: list[tuple[str, str, str]] = []
+        lost_active_turns: list[tuple[str, str, str, str]] = []
         recovered: list[str] = []
         materialized_ids: set[str] = set()
         for turn in turns:
@@ -3367,7 +3377,7 @@ class SessionTurnManager:
                     and latest["state"] == "starting"
                     and latest.get("start_receipt_outcome") == "unknown"
                     and str(latest.get("backend") or "")
-                    in _UNKNOWN_START_REPLAY_BACKENDS
+                    in _NON_RESTORABLE_RUNTIME_BACKENDS
                 ):
                     unresolved_starts.append(
                         (
@@ -3376,6 +3386,41 @@ class SessionTurnManager:
                             str(latest.get("start_attempt_id") or ""),
                         )
                     )
+                elif (
+                    latest is not None
+                    and latest["state"] == "active"
+                    and latest.get("start_receipt_outcome") == "accepted"
+                    and service_restart
+                    and str(latest.get("backend") or "")
+                    in _NON_RESTORABLE_RUNTIME_BACKENDS
+                ):
+                    lost_active_turns.append(
+                        (
+                            target_session,
+                            turn_id,
+                            str(latest.get("start_attempt_id") or ""),
+                            str(latest.get("backend") or ""),
+                        )
+                    )
+
+        for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            terminal = self._terminalize_durable_turn(
+                turn_id,
+                "failed",
+                settled_by=SETTLED_BY_NO_TERMINAL_RESULT,
+                evidence_kind="restart_runtime_missing",
+                evidence={
+                    "backend": backend,
+                    "reason": "accepted_turn_runtime_not_restorable",
+                },
+                expected_start_attempt_id=attempt_id,
+            )
+            if not terminal.get("changed"):
+                continue
+            recovered.append(target_session)
+            successor_turn_id = str(terminal.get("successor_turn_id") or "")
+            if successor_turn_id:
+                await self._start_persisted_turn(successor_turn_id)
 
         for target_session, turn_id, attempt_id in unresolved_starts:
             terminal = self._terminalize_durable_turn(
