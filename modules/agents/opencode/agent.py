@@ -1373,18 +1373,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             existing_task = self._active_requests.get(poll_info.base_session_id)
             if existing_task is not None and not existing_task.done():
                 continue
-            try:
-                server = await self._get_server()
-                messages = await server.list_messages(
-                    session_id=poll_info.opencode_session_id,
-                    directory=poll_info.working_path,
-                )
-            except Exception as err:
-                logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
-                stale_poll_ids.append(session_id)
-                continue
-
-            baseline_message_ids = set(poll_info.baseline_message_ids)
             processing_snapshot = (
                 poll_info.processing_indicator
                 if isinstance(poll_info.processing_indicator, dict)
@@ -1399,6 +1387,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 if isinstance(steering_snapshot, dict)
                 else ""
             )
+            verification_unknown = False
+            try:
+                server = await self._get_server()
+                messages = await server.list_messages(
+                    session_id=poll_info.opencode_session_id,
+                    directory=poll_info.working_path,
+                )
+            except Exception as err:
+                logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
+                messages = []
+                verification_unknown = True
+
+            baseline_message_ids = set(poll_info.baseline_message_ids)
             start_attempt_found = any(
                 start_attempt_id
                 and message.get("info", {}).get("role") == "user"
@@ -1438,16 +1439,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 if has_post_assistant_user
                 else None
             )
-            try:
-                status_unknown = False
-                native_status = await server.get_session_status(
-                    poll_info.opencode_session_id,
-                    poll_info.working_path,
-                )
-            except Exception as err:
-                logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
-                status_unknown = True
-                native_status = None
+            status_unknown = verification_unknown
+            native_status = None
+            if not verification_unknown:
+                try:
+                    native_status = await server.get_session_status(
+                        poll_info.opencode_session_id,
+                        poll_info.working_path,
+                    )
+                except Exception as err:
+                    logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
+                    status_unknown = True
 
             native_status_is_active = (
                 native_status is not None

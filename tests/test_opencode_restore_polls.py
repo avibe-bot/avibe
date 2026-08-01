@@ -48,12 +48,15 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     class _Server:
         def __init__(self):
             self.messages = [{"info": {"role": "assistant", "time": {}}}]
+            self.messages_error = None
             self.status = {"type": "busy"}
             self.status_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
             # so the poll is restored (not pruned as stale).
+            if self.messages_error is not None:
+                raise self.messages_error
             return list(self.messages)
 
         async def mark_run_active(self, session_id):
@@ -233,6 +236,41 @@ def test_restore_publishes_workbench_status_after_native_identity_registration()
 
     assert asyncio.run(_run()) == 1
     assert observed == [(True, True)]
+
+
+def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavailable() -> None:
+    poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_wb",
+        opencode_session_id="oc-unknown",
+    )
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "delivery_start_attempt_id": "attempt-unknown",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-unknown",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-unknown": poll})
+    agent._test_server.messages_error = TimeoutError("temporary verification failure")
+
+    class _RecoveredPollLoop:
+        async def run_restored_poll_loop(self, poll_info):
+            agent._test_server.messages_error = None
+
+        async def remove_restored_ack(self, poll_info):
+            raise AssertionError("unknown verification must not retire the durable poll")
+
+    agent._poll_loop = _RecoveredPollLoop()
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert removed == []
 
 
 def test_restore_rebuilds_completed_exact_start_attempt() -> None:

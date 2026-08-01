@@ -8,7 +8,8 @@ coherent before dispatch, during a native Turn, and after acceptance.
 ## Ownership
 
 - `message_deliveries` owns submitted content until native acceptance. A queued
-  Delivery remains independently removable.
+  Delivery remains independently removable. Its submission snapshot is
+  immutable: Agent rename/archive and later routing changes never rewrite it.
 - `session_turns` owns one native dispatch, including its start attempt, exact
   merged dispatch text, ordered initial Delivery batch, control slot, runtime
   identity, and terminal snapshot.
@@ -27,25 +28,25 @@ settled only from the Turn's terminal evidence.
 
 ## Delivery State Matrix
 
-One runtime matrix defines the meaning of every Delivery state. It records five
-orthogonal facts: FIFO role, whether native work may have happened, whether the
-snapshot can still reach dispatch, and whether Run cancellation may retire the
-Delivery directly, plus whether durable admission has completed. Queue claiming,
-Run cancellation, Agent archive rewriting, Show admission, and recovery derive
-their state sets from those facts; they do not maintain local state lists.
+One runtime matrix defines the meaning of every Delivery state. It records four
+orthogonal facts: FIFO role, whether native work may have happened, whether Run
+cancellation may retire the Delivery directly, and whether durable admission
+has completed. Queue claiming, Run cancellation, Show admission, and recovery
+derive their state sets from those facts; they do not maintain local state
+lists.
 
-| State | Ordering | Native effect | May dispatch | Run cancel | Submission |
-| --- | --- | --- | --- | --- | --- |
-| `reserved` | fence | none | yes | retire | reserved |
-| `queued` | claimable | none | yes | retire | admitted |
-| `claimed` | Turn-owned | possible | yes | Turn owner | admitted |
-| `pending_steer` | fence | none | yes | retire | admitted |
-| `steering` | fence | possible | yes | Turn owner | admitted |
-| `interrupt_waiting` | Turn-owned | possible | yes | Turn owner | admitted |
-| `reconciling_steer` | fence | unknown | yes | Turn owner | admitted |
-| `reconciling_migration` | fence | unknown | no | Turn owner | admitted |
-| `accepted` | terminal | accepted | no | complete | admitted |
-| `retired` | terminal | none | no | complete | retired |
+| State | Ordering | Native effect | Run cancel | Submission |
+| --- | --- | --- | --- | --- |
+| `reserved` | fence | none | retire | reserved |
+| `queued` | claimable | none | retire | admitted |
+| `claimed` | Turn-owned | possible | Turn owner | admitted |
+| `pending_steer` | fence | none | retire | admitted |
+| `steering` | fence | possible | Turn owner | admitted |
+| `interrupt_waiting` | Turn-owned | possible | Turn owner | admitted |
+| `reconciling_steer` | fence | unknown | Turn owner | admitted |
+| `reconciling_migration` | fence | unknown | Turn owner | admitted |
+| `accepted` | terminal | accepted | complete | admitted |
+| `retired` | terminal | none | complete | retired |
 
 An empty send-now request also carries the exact Delivery ID observed by its
 caller. The writer transaction may promote only that ID if it is still the FIFO
@@ -78,6 +79,11 @@ time and `delivered_at` is the acceptance time. Positive steer evidence
 materializes that single Delivery as a participant Message on the exact Turn,
 including after the Turn became terminal.
 
+The Turn's persisted `start_receipt_outcome='accepted'` is the only gate for
+initial Message materialization. Terminal output alone cannot prove that native
+input was accepted: without the start receipt, the Turn remains owned and
+blocked for reconciliation rather than exposing a phantom Message or idle gap.
+
 Unknown start or steer outcomes never retry. A definitive pre-write start failure
 requeues the entire claimed batch in its original order. A late event for T1
 cannot mutate T2.
@@ -98,9 +104,18 @@ attempt after restart. OpenCode persists its poll/recovery address before the
 prompt call and restores even an already-completed exact start, so recovery can
 materialize and settle it without replaying native work.
 
+An OpenCode verification error is unknown evidence, not proof that a poll is
+stale. Startup preserves and restores that durable poll until exact positive or
+definitive-negative evidence is available.
+
 Turn-scoped consumers never infer the current input from transcript timestamps.
 They resolve `session_turns.initial_delivery_id`: before acceptance they read the
 Delivery snapshot, and afterward they read its linked Message.
+
+Delivery provenance never selects the Agent that executes later work. Dispatch
+rebuilds routing from the current Session and its stable `agent_id`; historical
+Agent names remain immutable attribution only. Agent archive or rename updates
+live Session/Run bindings and cannot mutate an unaccepted Delivery snapshot.
 
 ## Product Policy
 

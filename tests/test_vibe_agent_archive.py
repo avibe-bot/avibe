@@ -23,7 +23,6 @@ from storage.background import (
     definition_state_unchanged,
 )
 from storage import message_deliveries as delivery_store
-from storage.delivery_states import DISPATCHABLE_SNAPSHOT_STATES
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -222,7 +221,15 @@ def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
 
 
 def _seed_dispatchable_delivery_states(store: VibeAgentStore, agent_name: str) -> dict[str, str]:
-    states = DISPATCHABLE_SNAPSHOT_STATES
+    states = (
+        "reserved",
+        "queued",
+        "claimed",
+        "pending_steer",
+        "steering",
+        "interrupt_waiting",
+        "reconciling_steer",
+    )
     seeded: dict[str, str] = {}
 
     def snapshot(session_id: str) -> dict[str, object]:
@@ -475,9 +482,9 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
         queued_spec = json.loads(queued_snapshot["metadata_json"])["scheduled_provenance"][
             "platform_specific"
         ]
-        assert queued_spec["vibe_agent_name"] == result.archived_name
-        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
-        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
+        assert queued_spec["vibe_agent_name"] == "pm"
+        assert queued_spec["scheduled_target_agent_name"] == "pm"
+        assert queued_spec["agent_session_target"]["agent_name"] == "pm"
 
         replacement = store.create(name="pm", backend="claude")
         assert replacement.id != original.id
@@ -485,13 +492,24 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
         store.close()
 
 
-def test_archive_rewrites_every_delivery_state_that_can_still_dispatch(tmp_path) -> None:
+def test_archive_never_rewrites_immutable_delivery_snapshots(tmp_path) -> None:
     store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     try:
         store.create(name="claude-fallback", backend="claude")
         store.create(name="pm", backend="claude")
         _seed_references(store, "pm")
         seeded = _seed_dispatchable_delivery_states(store, "pm")
+
+        with store.engine.connect() as conn:
+            before = {
+                str(row["id"]): str(row["snapshot_json"])
+                for row in conn.execute(
+                    select(
+                        message_deliveries.c.id,
+                        message_deliveries.c.snapshot_json,
+                    ).where(message_deliveries.c.id.in_(tuple(seeded.values())))
+                ).mappings()
+            }
 
         result = store.archive("pm")
 
@@ -504,14 +522,12 @@ def test_archive_rewrites_every_delivery_state_that_can_still_dispatch(tmp_path)
                     message_deliveries.c.snapshot_json,
                 ).where(message_deliveries.c.id.in_(tuple(seeded.values())))
             ).mappings()
-            by_state = {str(row["state"]): json.loads(row["snapshot_json"]) for row in rows}
-        assert set(by_state) == set(DISPATCHABLE_SNAPSHOT_STATES)
-        for snapshot in by_state.values():
-            provenance = snapshot["metadata_json"]
-            platform = json.loads(provenance)["scheduled_provenance"]["platform_specific"]
-            assert platform["vibe_agent_name"] == result.archived_name
-            assert platform["scheduled_target_agent_name"] == result.archived_name
-            assert platform["agent_session_target"]["agent_name"] == result.archived_name
+            after = {
+                str(row["id"]): str(row["snapshot_json"])
+                for row in rows
+            }
+        assert result is not None
+        assert after == before
     finally:
         store.close()
 
@@ -1354,9 +1370,9 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
         queued_spec = json.loads(json.loads(queued_snapshot)["metadata_json"])[
             "scheduled_provenance"
         ]["platform_specific"]
-        assert queued_spec["vibe_agent_name"] == result.archived_name
-        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
-        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
+        assert queued_spec["vibe_agent_name"] == stored_name
+        assert queued_spec["scheduled_target_agent_name"] == stored_name
+        assert queued_spec["agent_session_target"]["agent_name"] == stored_name
     finally:
         store.close()
 

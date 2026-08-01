@@ -252,8 +252,26 @@ def _build_controller_double(handler=None):
 
     controller.pop_turn_sink = _pop
     controller.get_turn_sink = lambda session_key: sinks.get(session_key)
+    controller._session_id_from_context = lambda ctx: str(
+        (getattr(ctx, "platform_specific", None) or {}).get("workbench_session_id")
+        or (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id")
+        or ""
+    ) or None
 
     def _mark_turn_complete(ctx):
+        manager = getattr(controller, "session_turns", None)
+        if manager is not None:
+            spec = getattr(ctx, "platform_specific", None) or {}
+            logical_turn_id = str(spec.get("turn_token") or "")
+            target = spec.get("agent_session_target") or {}
+            backend = str(target.get("agent_backend") or "claude")
+            if logical_turn_id:
+                manager.on_native_start(
+                    ctx,
+                    backend=backend,
+                    runtime_key=f"runtime:{logical_turn_id}",
+                    runtime_turn_id=f"runtime-turn:{logical_turn_id}",
+                )
         sink = sinks.get(controller._get_session_key(ctx))
         if sink and sink.get("done_event") is not None:
             sink["done_event"].set()
@@ -757,11 +775,14 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
                 if session_id not in app.state.in_flight_dispatches:
                     break
                 await asyncio.sleep(0.02)
-            # Drain the bus: turn.start (at accept) + turn.end (at settle).
-            for _ in range(2):
+            # Materialization also emits message.new; collect until the
+            # lifecycle closes instead of assuming adjacent bus events.
+            for _ in range(12):
                 try:
                     evt, _data = await asyncio.wait_for(queue.get(), timeout=1.0)
                     events.append(evt)
+                    if evt == "turn.end":
+                        break
                 except asyncio.TimeoutError:
                     break
         finally:
@@ -773,7 +794,10 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
     assert resp.json()["ok"] is True
     controller.message_handler.handle_user_message.assert_awaited()
     assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
-    assert events == ["turn.start", "turn.end"], "publishes session turn lifecycle on the bus"
+    assert [event for event in events if event.startswith("turn.")] == [
+        "turn.start",
+        "turn.end",
+    ], "publishes session turn lifecycle on the bus"
 
 
 def test_dispatch_async_stop_receipt_waits_for_terminal_evidence(monkeypatch, tmp_path):
@@ -1609,6 +1633,7 @@ def test_startup_recovered_annotation_retries_reserved_dispatch_text(
         **_kwargs,
     ):
         dispatched.append((sid, context.message_id, text, source))
+        _bind_test_native_start(engine, context)
         manager._terminalize_durable_turn(
             logical_turn_id,
             "completed",
@@ -1728,6 +1753,7 @@ def test_idle_show_admission_starts_itself_without_releasing_held_backlog(
         **_kwargs,
     ):
         runs.append((sid, text, source))
+        _bind_test_native_start(engine, context)
         manager._terminalize_durable_turn(
             logical_turn_id,
             "completed",
@@ -1856,6 +1882,7 @@ def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
         delivery_id=None,
         **_kwargs,
     ):
+        _bind_test_native_start(create_sqlite_engine(), context)
         with create_sqlite_engine().begin() as conn:
             accepted = message_deliveries.materialize_start_acceptance(
                 conn,
@@ -2154,6 +2181,7 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     started = asyncio.Event()
 
     async def long_handler(ctx, text):
+        _bind_test_native_start(engine, ctx)
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -3220,8 +3248,8 @@ def test_concurrent_agent_run_send_now_callers_share_one_interrupt_and_drain_fif
 
     async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
         seen.append(text)
+        _bind_test_native_start(engine, ctx)
         if text == "original work":
-            _bind_test_native_start(engine, ctx)
             original_started.set()
             try:
                 await asyncio.sleep(60)
@@ -4424,6 +4452,7 @@ def _manager_accepting_runs():
         **_kwargs,
     ):
         runs.append((text, source, context))
+        _bind_test_native_start(manager._sqlite_engine(), context)
         with manager._sqlite_engine().begin() as conn:
             accepted = message_deliveries.materialize_start_acceptance(
                 conn,
@@ -4637,6 +4666,7 @@ def test_flush_background_agent_run_preserves_primary_prompt(tmp_path, monkeypat
         delivery_id=None,
         **_kwargs,
     ):
+        _bind_test_native_start(mgr._sqlite_engine(), context)
         with mgr._sqlite_engine().begin() as conn:
             accepted = message_deliveries.materialize_start_acceptance(
                 conn,
@@ -5178,7 +5208,7 @@ def test_flush_does_not_coalesce_scheduled_callbacks_with_different_agent(tmp_pa
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     text, source, ctx = runs[0]
     assert (text, source) == ("codex callback", SOURCE_SCHEDULED)
-    assert ctx.platform_specific["vibe_agent_name"] == "codex"
+    assert "vibe_agent_name" not in ctx.platform_specific
     with create_sqlite_engine().begin() as conn:
         remaining = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in remaining] == ["claude callback"]
@@ -5217,7 +5247,7 @@ def test_capture_scheduled_target_agent_splits_coalescing_key(tmp_path, monkeypa
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     text, source, ctx = runs[0]
     assert (text, source) == ("codex target callback", SOURCE_SCHEDULED)
-    assert ctx.platform_specific[session_turns.SCHEDULED_TARGET_AGENT_KEY] == "codex"
+    assert session_turns.SCHEDULED_TARGET_AGENT_KEY not in ctx.platform_specific
     with create_sqlite_engine().begin() as conn:
         remaining = message_deliveries.list_queued(conn, session_id)
     assert [row["text"] for row in remaining] == ["claude target callback"]

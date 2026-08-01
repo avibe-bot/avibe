@@ -110,6 +110,24 @@ def _evt(
     )
 
 
+def _accept_start(conn, turn_id: str) -> list[dict]:
+    turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert message_deliveries.bind_native_start(
+        conn,
+        turn_id,
+        expected_version=int(turn["version"]),
+        runtime_key=f"runtime:{turn_id}",
+        runtime_turn_id=f"runtime-turn:{turn_id}",
+        native_turn_id=f"native:{turn_id}",
+    ) is not None
+    return message_deliveries.materialize_start_acceptance(
+        conn,
+        turn_id=turn_id,
+        evidence={"kind": "test_native_acceptance"},
+    )
+
+
 def test_done_failed_interrupted_and_trailing_groups(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_act"
@@ -627,11 +645,7 @@ def test_silent_completion_marks_turn_done(isolated_state):
             turn_id=turn_id,
             attempt_id=attempt_id,
         ) is not None
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id=turn_id,
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, turn_id)
         _evt(conn, scope, sid, eid="e_s1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash` `{\"command\":\"a\"}`")
         _evt(conn, scope, sid, eid="e_s2", created_at="2026-06-01T10:00:02Z", text="🔧 `Read` `{\"file_path\":\"b\"}`")
         message_deliveries.terminalize_turn(
@@ -696,11 +710,7 @@ def test_replyless_terminal_keeps_subsecond_order_after_last_activity(isolated_s
             turn_id=turn_id,
             attempt_id=attempt_id,
         ) is not None
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id=turn_id,
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, turn_id)
         emitted_micros = int(time.time() * 1_000_000)
         emitted_at = datetime.fromtimestamp(
             emitted_micros / 1_000_000,
@@ -772,11 +782,7 @@ def test_not_written_successor_does_not_close_active_turn_activity(isolated_stat
             turn_id="trn_active",
             attempt_id="atm_active_initial",
         ) is not None
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id="trn_active",
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, "trn_active")
         _evt(
             conn,
             scope,
@@ -937,11 +943,7 @@ def test_queued_initial_message_opens_at_its_accepted_turn(
             turn=waiting_turn,
             delivery=waiting_delivery,
         ) is not None
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id="trn_queued_input",
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, "trn_queued_input")
         _evt(
             conn,
             scope,
@@ -1025,11 +1027,7 @@ def test_accepted_steer_participant_does_not_open_a_second_turn(isolated_state):
             turn_id="trn_shared",
             attempt_id="atm_initial",
         ) is not None
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id="trn_shared",
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, "trn_shared")
         _evt(
             conn,
             scope,
@@ -1140,11 +1138,7 @@ def test_merged_initial_deliveries_keep_one_turn_start(isolated_state, monkeypat
             dispatch_text="first\nsecond",
             attempt_id="atm_merged",
         )
-        assert message_deliveries.materialize_start_acceptance(
-            conn,
-            turn_id="trn_merged",
-            evidence={"kind": "test_native_acceptance"},
-        )
+        assert _accept_start(conn, "trn_merged")
         _evt(
             conn,
             scope,

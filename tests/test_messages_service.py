@@ -496,13 +496,24 @@ def test_show_annotation_reservation_flushes_as_annotation(isolated_state):
         delivery = message_deliveries.get_delivery(conn, queued["id"])
         assert delivery is not None
         attempt_id = message_deliveries.new_attempt_id()
-        message_deliveries.open_start_attempt(
+        claimed = message_deliveries.open_start_attempt(
             conn,
             queued["id"],
             expected_version=delivery["version"],
             turn_id=turn_id,
             attempt_id=attempt_id,
         )
+        assert claimed is not None
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key="annotation-runtime",
+            runtime_turn_id="annotation-runtime-turn",
+            native_turn_id="annotation-native-turn",
+        ) is not None
         message_deliveries.materialize_start_acceptance(
             conn,
             turn_id=turn_id,

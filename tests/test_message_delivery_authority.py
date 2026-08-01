@@ -133,6 +133,22 @@ def test_unaccepted_submission_has_no_message_and_materializes_once(tmp_path: Pa
         assert conn.execute(select(messages.c.id)).all() == []
 
     with engine.begin() as conn:
+        unproven = delivery_store.materialize_start_acceptance(
+            conn,
+            turn_id="turn_initial",
+            evidence={"kind": "terminal_result_without_start_receipt"},
+        )
+        turn = delivery_store.get_turn(conn, "turn_initial")
+        assert turn is not None
+        bound = delivery_store.bind_native_start(
+            conn,
+            "turn_initial",
+            expected_version=int(turn["version"]),
+            runtime_key="runtime-key",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        )
+        assert bound is not None
         materialized = delivery_store.materialize_start_acceptance(
             conn,
             turn_id="turn_initial",
@@ -143,6 +159,7 @@ def test_unaccepted_submission_has_no_message_and_materializes_once(tmp_path: Pa
             turn_id="turn_initial",
             evidence={"kind": "native_start_replay"},
         )
+    assert unproven == []
     assert materialized
     assert duplicate
     with engine.connect() as conn:

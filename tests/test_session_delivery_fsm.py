@@ -12,7 +12,12 @@ import pytest
 from sqlalchemy import select, update
 
 from core.services.agent_steering import SteerOutcome, result as steer_result
-from core.session_turns import DeliveryRequest, SessionTurnManager, Turn
+from core.session_turns import (
+    SCHEDULED_PROVENANCE_KEY,
+    DeliveryRequest,
+    SessionTurnManager,
+    Turn,
+)
 from modules.im import MessageContext
 from storage import message_deliveries as delivery_store
 from storage import messages_service
@@ -267,6 +272,117 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
         turn = delivery_store.get_turn(conn, admitted.turn_id)
     assert turn is not None
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
+
+
+def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    captured: dict[str, object] = {}
+    current = _context()
+    current.platform_specific.update(
+        {
+            "vibe_agent_id": "agent-stable",
+            "vibe_agent_name": "_pm-archived",
+            "agent_session_target": {
+                "id": "ses_fsm",
+                "agent_id": "agent-stable",
+                "agent_name": "_pm-archived",
+                "agent_backend": "codex",
+            },
+        }
+    )
+    manager._build_context = lambda _session_id: current
+
+    async def capture_run(_session_id, context, _text, **_kwargs):
+        captured.update(context.platform_specific or {})
+
+    manager._run = capture_run
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="scheduled",
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: {
+                        "message_id": "scheduled:old",
+                        "platform_specific": {
+                            "vibe_agent_id": "agent-stable",
+                            "vibe_agent_name": "pm",
+                            "scheduled_target_agent_name": "pm",
+                            "agent_session_target": {
+                                "agent_id": "agent-stable",
+                                "agent_name": "pm",
+                            },
+                            "task_trigger_kind": "agent_run",
+                            "task_definition_id": "run-definition",
+                        },
+                    }
+                },
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admitted.turn_id is not None
+    assert captured["vibe_agent_id"] == "agent-stable"
+    assert captured["vibe_agent_name"] == "_pm-archived"
+    assert captured["agent_session_target"]["agent_name"] == "_pm-archived"
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, str(admitted.delivery_id))
+    assert delivery is not None
+    provenance = json.loads(delivery["snapshot_json"])["metadata_json"]
+    persisted = json.loads(provenance)[SCHEDULED_PROVENANCE_KEY]["platform_specific"]
+    assert persisted["vibe_agent_name"] == "pm"
+
+
+def test_terminal_evidence_cannot_accept_an_unproven_native_start(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    first = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="unproven"),
+            context=_context(),
+        )
+    )
+    second = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="queued"),
+            context=_context(),
+        )
+    )
+    assert first.turn_id is not None
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_status="running")
+        )
+
+    terminal = manager._terminalize_durable_turn(
+        first.turn_id,
+        "failed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result_without_start_receipt",
+    )
+
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, first.turn_id)
+        first_delivery = delivery_store.get_delivery(conn, str(first.delivery_id))
+        second_delivery = delivery_store.get_delivery(conn, str(second.delivery_id))
+        message_ids = list(conn.execute(select(messages.c.id)).scalars())
+        status = conn.execute(
+            select(agent_sessions.c.agent_status).where(
+                agent_sessions.c.id == "ses_fsm"
+            )
+        ).scalar_one()
+    assert terminal["changed"] is False
+    assert terminal["reason"] == "start_acceptance_unproven"
+    assert turn is not None and turn["state"] == "starting"
+    assert first_delivery is not None and first_delivery["state"] == "claimed"
+    assert second_delivery is not None and second_delivery["state"] == "queued"
+    assert message_ids == []
+    assert status == "running"
 
 
 def test_terminal_transaction_claims_fifo_and_projects_running_atomically(managers) -> None:
@@ -1518,6 +1634,19 @@ def test_unresolved_p1_fence_blocks_later_but_not_older_fifo(managers) -> None:
         "turn_id"
     ]
     assert older_turn
+    older_context = _context()
+    older_context.platform_specific["turn_token"] = str(older_turn)
+    older_context.platform_specific["agent_runtime_turn_token"] = f"runtime-{older_turn}"
+    other._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    other.on_native_start(
+        older_context,
+        backend="codex",
+        runtime_key=f"runtime-key-{older_turn}",
+        runtime_turn_id=f"runtime-{older_turn}",
+    )
     assert asyncio.run(other.terminalize_turn(str(older_turn)))
     assert asyncio.run(other.drain_delivery_queue("ses_fsm")) is False
 

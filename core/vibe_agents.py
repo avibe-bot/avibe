@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -17,8 +16,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from storage import message_deliveries as delivery_store
-from storage.delivery_states import DISPATCHABLE_SNAPSHOT_STATES
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -27,7 +24,6 @@ from storage.models import (
     agent_runs,
     agent_sessions,
     agents,
-    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -288,28 +284,6 @@ def _rewrite_scheduled_agent_provenance(
         target["agent_name"] = new_name
         changed = True
     return (_json_dumps(payload), True) if changed else (raw or "{}", False)
-
-
-def _rewrite_delivery_agent_provenance(
-    raw: str | None,
-    reference_names: frozenset[str],
-    new_name: str,
-    *,
-    agent_id: str,
-) -> tuple[str, bool]:
-    snapshot = _json_loads(raw, {})
-    if not isinstance(snapshot, dict):
-        return raw or "{}", False
-    metadata, changed = _rewrite_scheduled_agent_provenance(
-        snapshot.get("metadata_json"),
-        reference_names,
-        new_name,
-        agent_id=agent_id,
-    )
-    if not changed:
-        return raw or "{}", False
-    snapshot["metadata_json"] = metadata
-    return _json_dumps(snapshot), True
 
 
 @dataclass(frozen=True)
@@ -930,7 +904,7 @@ class VibeAgentStore:
             conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id.in_(session_ids))
-                .values(agent_name=new_name)
+                .values(agent_id=agent_id, agent_name=new_name)
             )
 
         run_ids = [
@@ -950,42 +924,8 @@ class VibeAgentStore:
             conn.execute(
                 agent_runs.update()
                 .where(agent_runs.c.id.in_(run_ids))
-                .values(agent_name=new_name)
+                .values(agent_id=agent_id, agent_name=new_name)
             )
-
-        dispatchable_rows = conn.execute(
-            select(
-                message_deliveries.c.id,
-                message_deliveries.c.snapshot_json,
-                message_deliveries.c.version,
-                message_deliveries.c.state,
-            ).where(
-                message_deliveries.c.state.in_(
-                    DISPATCHABLE_SNAPSHOT_STATES
-                )
-            )
-        ).mappings().all()
-        for row in dispatchable_rows:
-            snapshot, changed = _rewrite_delivery_agent_provenance(
-                row["snapshot_json"],
-                reference_names,
-                new_name,
-                agent_id=agent_id,
-            )
-            if changed:
-                updated = delivery_store.cas_delivery(
-                    conn,
-                    str(row["id"]),
-                    expected_version=int(row["version"]),
-                    expected_states=(str(row["state"]),),
-                    values={
-                        "snapshot_json": snapshot,
-                        "snapshot_sha256": hashlib.sha256(snapshot.encode("utf-8")).hexdigest(),
-                    },
-                    history_event={"kind": "agent_reference_rewritten", "agent_id": agent_id},
-                )
-                if updated is None:
-                    raise AgentReferenceRewriteError()
 
         scope_rows = conn.execute(
             select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)

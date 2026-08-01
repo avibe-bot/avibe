@@ -107,6 +107,14 @@ _TERMINAL_RESULT_LATCH_KEY = "_avibe_terminal_result_latch"
 _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
+_EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
+    {
+        "vibe_agent_id",
+        "vibe_agent_name",
+        "scheduled_target_agent_name",
+        "resolved_vibe_agent",
+    }
+)
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
@@ -184,14 +192,17 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
         if isinstance(spec.get("scheduled_delivery_alias"), dict)
         else {}
     )
-    target = spec.get("agent_session_target") or {}
+    stable_agent_key = str(spec.get("vibe_agent_id") or "").strip()
+    if not stable_agent_key:
+        stable_agent_key = str(
+            spec.get("vibe_agent_name")
+            or spec.get(SCHEDULED_TARGET_AGENT_KEY)
+            or ""
+        )
     return (
         trigger_kind,
         definition_id,
-        str(spec.get("agent_session_id") or ""),
-        str(spec.get("vibe_agent_name") or ""),
-        str(spec.get(SCHEDULED_TARGET_AGENT_KEY) or ""),
-        str(target.get("agent_name") or "") if isinstance(target, dict) else "",
+        stable_agent_key,
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -2218,7 +2229,13 @@ class SessionTurnManager:
                 return False
             attempt_id = str(turn["start_attempt_id"])
         try:
-            resolved = context or self._delivery_context(str(turn["session_id"]))
+            resolved = (
+                self._delivery_context(str(turn["session_id"]))
+                if self._build_context is not None
+                else context
+            )
+            if resolved is None:
+                raise RuntimeError("durable native start has no Session routing context")
         except Exception:
             logger.exception("durable native start failed before dispatch for Turn=%s", turn_id)
             self._terminalize_durable_turn(
@@ -2238,10 +2255,20 @@ class SessionTurnManager:
                     agent_sessions.c.id == str(turn["session_id"])
                 )
             ).scalar_one_or_none()
-            if latest is None or latest["state"] != "starting" or latest.get(
-                "initial_delivery_id"
-            ) != delivery.get("id"):
+            fresh_deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+            fresh_delivery = fresh_deliveries[0] if fresh_deliveries else None
+            if (
+                latest is None
+                or latest["state"] != "starting"
+                or latest.get("start_attempt_id") != attempt_id
+                or fresh_delivery is None
+                or latest.get("initial_delivery_id") != fresh_delivery.get("id")
+                or any(row["state"] != "claimed" for row in fresh_deliveries)
+            ):
                 return False
+            turn = latest
+            deliveries = fresh_deliveries
+            delivery = fresh_delivery
             archived_before_dispatch = session_status != "active"
             run_ids = list(
                 dict.fromkeys(
@@ -2286,6 +2313,7 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
+            resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
             provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
@@ -2298,7 +2326,13 @@ class SessionTurnManager:
                 if isinstance(preserved, dict):
                     if resolved.platform_specific is None:
                         resolved.platform_specific = {}
-                    resolved.platform_specific.update(preserved)
+                    resolved.platform_specific.update(
+                        {
+                            key: value
+                            for key, value in preserved.items()
+                            if key not in _EXECUTION_ROUTING_KEYS
+                        }
+                    )
             else:
                 resolved.message_id = str(delivery["id"])
             text = str(turn.get("dispatch_text") or "")
@@ -2441,6 +2475,19 @@ class SessionTurnManager:
                     select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
                 ).scalar_one_or_none()
                 initial_batch = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+                if (
+                    initial_batch
+                    and all(row["state"] == "claimed" for row in initial_batch)
+                    and outcome != "not_written"
+                    and turn.get("start_receipt_outcome") != "accepted"
+                ):
+                    return {
+                        "changed": False,
+                        "successor_turn_id": None,
+                        "delivery_id": None,
+                        "preserve_queue": True,
+                        "reason": "start_acceptance_unproven",
+                    }
                 if initial_batch and all(row["state"] == "claimed" for row in initial_batch):
                     if outcome == "not_written":
                         for initial in initial_batch:

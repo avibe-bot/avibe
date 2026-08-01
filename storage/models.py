@@ -544,10 +544,18 @@ session_turns = Table(
     CheckConstraint(
         "(state = 'waiting' and start_attempt_id is null and dispatch_text is null "
         "and dispatch_sha256 is null and start_receipt_outcome is null) "
-        "or (state in ('starting', 'active') and start_attempt_id is not null "
-        "and dispatch_text is not null and dispatch_sha256 is not null) "
-        "or (state = 'terminal' and ((start_attempt_id is not null "
-        "and dispatch_text is not null and dispatch_sha256 is not null) "
+        "or (state = 'starting' and start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null "
+        "and (start_receipt_outcome is null or start_receipt_outcome = 'unknown')) "
+        "or (state = 'active' and start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null "
+        "and start_receipt_outcome = 'accepted') "
+        "or (state = 'terminal' and ((terminal_outcome <> 'not_written' "
+        "and start_attempt_id is not null and dispatch_text is not null "
+        "and dispatch_sha256 is not null and start_receipt_outcome = 'accepted') "
+        "or (terminal_outcome = 'not_written' and start_attempt_id is not null "
+        "and dispatch_text is not null and dispatch_sha256 is not null "
+        "and start_receipt_outcome = 'not_written') "
         "or (terminal_outcome = 'not_written' and start_attempt_id is null "
         "and dispatch_text is null and dispatch_sha256 is null)))",
         name="ck_session_turns_start_shape",

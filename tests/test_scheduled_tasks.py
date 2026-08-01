@@ -4296,6 +4296,16 @@ def test_recovered_agent_run_resubmits_through_real_session_gate(
 
     async def _dispatch(_controller, _context, text, **_kwargs):
         dispatched.append(text)
+        logical_turn_id = str(
+            (_context.platform_specific or {}).get("turn_token") or ""
+        )
+        assert logical_turn_id
+        _controller.session_turns.on_native_start(
+            _context,
+            backend="codex",
+            runtime_key=f"runtime:{logical_turn_id}",
+            runtime_turn_id=f"runtime-turn:{logical_turn_id}",
+        )
         return TurnDispatchOutcome(
             error=None,
             settled_by=SETTLED_BY_TERMINAL_RESULT,

@@ -11,7 +11,6 @@ from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
     DELIVERY_STATE_MATRIX,
     DELIVERY_STATES,
-    DISPATCHABLE_SNAPSHOT_STATES,
     FENCE_STATES,
     RUN_CANCEL_RETIRE_STATES,
 )
@@ -64,11 +63,6 @@ def test_delivery_state_matrix_derives_every_cross_cutting_state_set() -> None:
         for state, policy in DELIVERY_STATE_MATRIX.items()
         if policy.ordering == "fence"
     )
-    assert DISPATCHABLE_SNAPSHOT_STATES == tuple(
-        state
-        for state, policy in DELIVERY_STATE_MATRIX.items()
-        if policy.can_reach_dispatch
-    )
     assert RUN_CANCEL_RETIRE_STATES == tuple(
         state
         for state, policy in DELIVERY_STATE_MATRIX.items()
@@ -83,9 +77,6 @@ def test_delivery_state_matrix_derives_every_cross_cutting_state_set() -> None:
     for policy in DELIVERY_STATE_MATRIX.values():
         if policy.run_cancel == "retire":
             assert policy.native_effect == "none"
-            assert policy.can_reach_dispatch
-        if policy.ordering == "terminal":
-            assert not policy.can_reach_dispatch
 
 
 def test_cross_cutting_callers_consume_matrix_semantics() -> None:
@@ -98,7 +89,7 @@ def test_cross_cutting_callers_consume_matrix_semantics() -> None:
 
     assert "retire_for_run_cancellation" in cancel_source
     assert 'delivery["state"]' not in cancel_source
-    assert "DISPATCHABLE_SNAPSHOT_STATES" in archive_source
-    assert '("reserved", "queued")' not in archive_source
+    assert "message_deliveries" not in archive_source
+    assert "snapshot_json" not in archive_source
     assert "expected_delivery_id" in send_now_source
     assert "ADMITTED_DELIVERY_STATES" in show_dispatch_source

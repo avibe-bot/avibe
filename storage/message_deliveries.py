@@ -918,20 +918,8 @@ def materialize_start_acceptance(
     turn = get_turn(conn, turn_id)
     if turn is None or turn["state"] not in {"starting", "active", "terminal"}:
         return []
-    if turn["state"] == "starting" and turn.get("start_receipt_outcome") is None:
-        updated = cas_turn(
-            conn,
-            turn_id,
-            expected_version=int(turn["version"]),
-            expected_states=("starting",),
-            values={
-                "start_receipt_outcome": "accepted",
-                "start_receipt_json": _canonical_json(evidence),
-            },
-        )
-        if updated is None:
-            return []
-        turn = updated
+    if turn.get("start_receipt_outcome") != "accepted":
+        return []
     rows = [
         dict(row)
         for row in conn.execute(
@@ -1265,19 +1253,31 @@ def terminalize_turn(
     turn = get_turn(conn, turn_id)
     if turn is None or turn["state"] == "terminal":
         return {"changed": False, "turn": turn}
+    values = {
+        "state": "terminal",
+        "terminal_outcome": outcome,
+        "settled_by": settled_by,
+        "terminal_evidence_kind": evidence_kind,
+        "terminal_evidence_json": _canonical_json(evidence or {}),
+        "terminal_at": turn_now_iso(),
+    }
+    if outcome == "not_written" and turn.get("start_attempt_id"):
+        if turn.get("start_receipt_outcome") == "accepted":
+            return {"changed": False, "turn": turn}
+        values.update(
+            {
+                "start_receipt_outcome": "not_written",
+                "start_receipt_json": _canonical_json(
+                    {"kind": evidence_kind, **(evidence or {})}
+                ),
+            }
+        )
     settled = cas_turn(
         conn,
         turn_id,
         expected_version=int(turn["version"]),
         expected_states=(str(turn["state"]),),
-        values={
-            "state": "terminal",
-            "terminal_outcome": outcome,
-            "settled_by": settled_by,
-            "terminal_evidence_kind": evidence_kind,
-            "terminal_evidence_json": _canonical_json(evidence or {}),
-            "terminal_at": turn_now_iso(),
-        },
+        values=values,
     )
     return {"changed": settled is not None, "turn": settled or turn}
 
