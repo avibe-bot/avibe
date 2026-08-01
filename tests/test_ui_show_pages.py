@@ -4953,7 +4953,6 @@ def test_show_runtime_manager_can_disable_auto_install(tmp_path):
 
 
 def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, tmp_path):
-    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: True)
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
@@ -4979,20 +4978,18 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
     assert calls == [fake_install]
 
 
-def test_show_runtime_manager_defaults_to_archive_when_package_manifest_is_absent(monkeypatch, tmp_path):
-    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: False)
-
+def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
     )
 
-    assert manager.runtime_source == "archive"
+    assert manager.runtime_source == "manifest-cache"
+    assert manager.status()["reason"] == "runtime_manifest_missing"
 
 
-def test_show_runtime_manager_defaults_to_manifest_when_package_manifest_exists(monkeypatch, tmp_path):
-    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: True)
-
+def test_show_runtime_manager_defaults_to_manifest_provider(tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",

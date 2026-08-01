@@ -102,6 +102,8 @@ artifacts = [
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.targets.wheel]
 packages = ["vibe", "config", "core", "modules", "storage"]
 
@@ -117,7 +119,10 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
+    "hatch_build.py",
     "main.py",
+    "scripts/prepare_local_show_runtime_manifest.py",
+    "scripts/show_runtime_manifest_asset.py",
     "ui/dist/**",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
