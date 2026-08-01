@@ -32,7 +32,14 @@ import re
 from contextlib import ExitStack
 from typing import Any, Iterator, NamedTuple, Optional
 
-from storage.agent_session_rows import WORKDIR_MATCH_EXACT_ONLY
+# NO MODULE-LEVEL ``storage`` IMPORT, deliberately. This module sits on the
+# lightweight import chain the native-session contract pins
+# (``core.handlers.session_handler`` must import without ``sqlite3`` —
+# ``tests/test_native_session_providers.py``), and ANY ``storage.*`` import runs
+# ``storage/__init__`` → importer → backups → ``import sqlite3``. The one storage
+# constant this module needs is imported function-scoped at its single use site,
+# the house pattern ``core/session_turns.py`` already uses for its deferred
+# ``storage.background`` reads.
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +200,12 @@ def _anchor_names_any_row(
         "agent_backend": str(agent_backend or "").strip() or None,
     }
     if exact_workdir_only:
+        # Function-scoped on purpose — see the module docstring note: a module-level
+        # ``storage`` import here pulls ``sqlite3`` into the lightweight
+        # native-session import chain. This branch only runs when a probe is
+        # actually being made, i.e. storage is in play anyway.
+        from storage.agent_session_rows import WORKDIR_MATCH_EXACT_ONLY
+
         kwargs["workdir_match"] = WORKDIR_MATCH_EXACT_ONLY
     try:
         resolved = finder(anchor, **kwargs)

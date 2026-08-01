@@ -11,9 +11,17 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from config.v2_sessions import ActivePollInfo, SessionsStore
-from storage.agent_session_rows import WORKDIR_MATCH_EXACT_OR_FALLBACK
 
 logger = logging.getLogger(__name__)
+
+#: ``storage.agent_session_rows.WORKDIR_MATCH_EXACT_OR_FALLBACK``, spelled as a
+#: literal for the same reason ``config.v2_sessions`` spells it: this module must
+#: not import ``storage`` at module level — ``storage/__init__`` pulls ``sqlite3``,
+#: which the lightweight native-session import contract blocks
+#: (``tests/test_native_session_providers.py``). Drift is pinned by
+#: ``tests/test_sqlite_sessions_store.py`` asserting this literal equals the
+#: storage constant.
+_WORKDIR_MATCH_EXACT_OR_FALLBACK = "exact_or_fallback"
 
 
 class SessionsFacade:
@@ -77,7 +85,7 @@ class SessionsFacade:
         *,
         workdir: Optional[str] = None,
         agent_backend: Optional[str] = None,
-        workdir_match: str = WORKDIR_MATCH_EXACT_OR_FALLBACK,
+        workdir_match: str = _WORKDIR_MATCH_EXACT_OR_FALLBACK,
     ) -> list[str]:
         """Session ids for a runtime anchor with no scope key — teardown's resolve.
 
@@ -98,7 +106,7 @@ class SessionsFacade:
         finder = getattr(self.sessions_store, "find_session_ids_for_anchor", None)
         if not callable(finder):
             return []
-        if str(workdir_match or "") != WORKDIR_MATCH_EXACT_OR_FALLBACK:
+        if str(workdir_match or "") != _WORKDIR_MATCH_EXACT_OR_FALLBACK:
             return finder(
                 session_anchor,
                 workdir=workdir,

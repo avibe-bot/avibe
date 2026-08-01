@@ -7276,11 +7276,31 @@ def test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier(
     anchor it happens to spell, so read as a single bit it makes a WRONG reading of a
     key look real. ``workdir_match="exact_only"`` reports the top tier alone.
 
+    LITERAL PIN (post-CI fix): ``modules.sessions_facade`` and ``config.v2_sessions``
+    spell the default mode as a literal instead of importing the storage constant,
+    because a module-level ``storage`` import pulls ``sqlite3`` into the lightweight
+    native-session import chain (``tests/test_native_session_providers.py``). Tests
+    are not sqlite-blocked, so drift is pinned here.
+
     Pinned through all three layers the teardown probe can be handed — the SQLite
     service, ``SessionsStore``, ``SessionsFacade`` — because the probe reaches storage
     through whichever one the controller happens to hold, and a layer that dropped the
     keyword would silently answer the exact question with the lenient tier.
     """
+
+    # The literal pin: the two lightweight wrappers must spell exactly the storage
+    # vocabulary. Imported here (tests are not sqlite-blocked), asserted against the
+    # facade's module constant; config.v2_sessions spells the strings inline and is
+    # pinned behaviorally by the layered walk below.
+    from modules.sessions_facade import _WORKDIR_MATCH_EXACT_OR_FALLBACK
+    from storage.agent_session_rows import (
+        WORKDIR_MATCH_EXACT_ONLY,
+        WORKDIR_MATCH_EXACT_OR_FALLBACK,
+    )
+
+    assert _WORKDIR_MATCH_EXACT_OR_FALLBACK == WORKDIR_MATCH_EXACT_OR_FALLBACK
+    assert WORKDIR_MATCH_EXACT_ONLY == "exact_only"
+    assert WORKDIR_MATCH_EXACT_OR_FALLBACK == "exact_or_fallback"
 
     anchor = "slack_171717.123"
     exact_workdir = str(tmp_path / "repo")
