@@ -740,7 +740,9 @@ def test_composite_split_disambiguates_against_stored_anchors(tmp_path: Path) ->
     ``_WORKING_PATH_HEAD``, no rule over the string alone can know which colon the key
     added — both readings are well-formed. So the tie is broken against STORAGE, which
     is the only thing that actually knows: enumerate every candidate split, longest
-    anchor first, and take the first whose anchor resolves to a real row.
+    anchor first, and take the first whose anchor resolves to a real row at the
+    strongest workdir tier available (HFR-345 made the tier part explicit; here only
+    one reading resolves at all, so either rule answers the same).
     """
 
     workdir = str(tmp_path / "repo")
@@ -860,6 +862,10 @@ def test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone(
     none of the readings, HFR-129's answer stands unchanged. That is safe precisely
     BECAUSE nothing resolved: an anchor with no rows has no runs to settle, so a wrong
     split there is a wrong answer and never a wrong action.
+
+    Both are asserted against the probe sequence itself, which HFR-345 turned into two
+    tiered passes — the guarantees are about what the resolver READS, so the reads are
+    what the test looks at.
     """
 
     store = SessionsStore(tmp_path / "sessions.json")
@@ -868,9 +874,11 @@ def test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone(
         probes: list[tuple] = []
         real_finder = facade.find_session_ids_for_anchor
 
-        def _spy(anchor, *, workdir=None, agent_backend=None):
-            probes.append((anchor, workdir, agent_backend))
-            return real_finder(anchor, workdir=workdir, agent_backend=agent_backend)
+        def _spy(anchor, *, workdir=None, agent_backend=None, **kwargs):
+            probes.append((anchor, kwargs.get("workdir_match", "exact_or_fallback")))
+            return real_finder(
+                anchor, workdir=workdir, agent_backend=agent_backend, **kwargs
+            )
 
         controller = SimpleNamespace(
             sessions=SimpleNamespace(find_session_ids_for_anchor=_spy)
@@ -888,8 +896,33 @@ def test_composite_split_fast_path_and_fallback_leave_the_lexical_rule_alone(
         assert resolve_composite_teardown_split(
             controller, composite_key, agent_backend="claude"
         ) == split_composite_session_key(composite_key)
-        # It DID try, longest anchor first, and gave up rather than guessing further.
-        assert [probe[0] for probe in probes] == ["base:/review", "base"]
+        # It DID try, longest anchor first, and gave up rather than guessing further —
+        # once for the exact tier across both readings, then once for the fallback
+        # tier (HFR-345). Nothing resolved at either, so the lexical answer stands.
+        assert probes == [
+            ("base:/review", "exact_only"),
+            ("base", "exact_only"),
+            ("base:/review", "exact_or_fallback"),
+            ("base", "exact_or_fallback"),
+        ]
+
+        # A store that cannot answer the tier question at all — anything predating the
+        # keyword — is not guessed at: the exact pass is abandoned and HFR-335's single
+        # untiered walk decides alone, which is exactly the answer it gave before.
+        blind_probes: list[str] = []
+
+        def _tier_blind_spy(anchor, *, workdir=None, agent_backend=None):
+            blind_probes.append(anchor)
+            return real_finder(anchor, workdir=workdir, agent_backend=agent_backend)
+
+        assert resolve_composite_teardown_split(
+            SimpleNamespace(
+                sessions=SimpleNamespace(find_session_ids_for_anchor=_tier_blind_spy)
+            ),
+            composite_key,
+            agent_backend="claude",
+        ) == split_composite_session_key(composite_key)
+        assert blind_probes == ["base:/review", "base"]
 
         # A caller with no sessions facade at all (headless runs, test doubles) is the
         # same fallback, without raising on a path that is already tearing something
@@ -990,5 +1023,176 @@ def test_composite_split_takes_an_ambiguous_resolution_and_lets_the_refusal_stan
         assert second_done is False
         assert manager.in_flight[first_id].cancel_settled_by is None
         assert manager.in_flight[second_id].cancel_settled_by is None
+    finally:
+        store.close()
+
+
+def test_exact_workdir_split_outranks_a_legacy_null_workdir_reading(
+    tmp_path: Path,
+) -> None:
+    """HFR-345 (HFR-335 x HFR-128): a null-workdir row must not win the split race.
+
+    HFR-335 walks the candidate readings longest-anchor-first and stops at the first
+    whose anchor "names a real row". HFR-128 had already decided what naming a row
+    MEANS when a workdir is on the table: a row that names the caller's workdir
+    outranks a row that names none, and the null-workdir rows are the FALLBACK the
+    leniency was written for (rows bound before workdirs were recorded), never a
+    supplement. The probe never learned that distinction, so it read the two tiers as
+    one bit — and the fallback tier is exactly what makes a WRONG anchor look real.
+
+    The shape: the key is ``{anchor}:{workdir}`` for a workdir that itself contains a
+    colon, so two colons are followed by a path head and there are two readings. This
+    is the same geometry as the native-Windows ``base:C:/repo`` key that
+    ``test_composite_split_candidates_enumerate_the_path_shaped_readings`` pins
+    lexically; a POSIX directory with a colon in its name is the version of it that a
+    Linux ``agent_sessions`` row can actually hold.
+
+    The real session is the SHORT-anchor reading, with its workdir named exactly. An
+    unrelated legacy row happens to answer to the LONG-anchor reading and names no
+    workdir at all. Longest-first reaches the legacy row first, HFR-128's fallback
+    lets it answer, and the single-bit probe accepts it: the teardown then cancels a
+    stranger's turn while its own run stays ``running`` with no backend left to settle
+    it — both halves of the failure at once.
+
+    The rule that fixes it is HFR-128's own, lifted one level: exact outranks
+    null-workdir ACROSS candidates, not merely within one. An exact match on ANY
+    reading is taken before a fallback match on ANY reading, whatever the anchor
+    lengths say.
+    """
+
+    workdir = str(tmp_path / "x:" / "repo")
+    composite_key = f"{ANCHOR}:{workdir}"
+    legacy_anchor, _, legacy_path = composite_key.rpartition(":")
+    # The reading the longest-first walk reaches first, and the one that is wrong.
+    assert list(iter_composite_split_candidates(composite_key)) == [
+        (legacy_anchor, legacy_path),
+        (ANCHOR, workdir),
+    ]
+
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        owner_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_owner",
+            agent_backend="claude",
+            workdir=workdir,
+        )
+        # Same backend, no workdir, and an anchor that only the WRONG reading names.
+        legacy_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_legacy",
+            agent_backend="claude",
+            workdir=None,
+            session_anchor=legacy_anchor,
+        )
+        assert owner_id != legacy_id
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        # The split itself: the exact-workdir reading wins outright.
+        assert resolve_composite_teardown_split(
+            controller, composite_key, agent_backend="claude"
+        ) == (ANCHOR, workdir)
+
+        async def _exercise() -> tuple[bool, bool, str | None]:
+            owner_task = _live_turn(manager, owner_id, "claude")
+            legacy_task = _live_turn(manager, legacy_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                owner_turn = manager.in_flight.get(owner_id)
+                return (
+                    owner_task.done(),
+                    legacy_task.done(),
+                    getattr(owner_turn, "cancel_settled_by", None),
+                )
+            finally:
+                for task in (owner_task, legacy_task):
+                    task.cancel()
+                await asyncio.gather(owner_task, legacy_task, return_exceptions=True)
+
+        owner_done, legacy_done, owner_cause = asyncio.run(_exercise())
+
+        # Pre-fix half one: the evicted runtime's own run was never settled.
+        assert owner_done is True
+        assert owner_cause == SETTLED_BY_EVICTED
+        # Pre-fix half two: a stranger's live turn was cancelled in its place.
+        assert legacy_done is False
+        assert manager.in_flight[legacy_id].cancel_settled_by is None
+    finally:
+        store.close()
+
+
+def test_null_workdir_fallback_still_wins_when_no_exact_match_exists(
+    tmp_path: Path,
+) -> None:
+    """HFR-345's companion: the second tier is deprioritised, not removed.
+
+    HFR-128's leniency exists for rows bound before workdirs were recorded, and
+    HFR-335's residual — a teardown must still be able to name such a row — is not
+    weakened by ranking it below an exact match. Same legacy null-workdir row as the
+    test above, but with NO exact-workdir reading anywhere: the second pass accepts
+    the fallback and the run settles exactly as it did before HFR-345.
+    """
+
+    workdir = str(tmp_path / "x:" / "repo")
+    composite_key = f"{ANCHOR}:{workdir}"
+    legacy_anchor, _, legacy_path = composite_key.rpartition(":")
+
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        legacy_id = _seed_session(
+            store,
+            legacy_scope_key="slack::C_legacy",
+            agent_backend="claude",
+            workdir=None,
+            session_anchor=legacy_anchor,
+        )
+
+        controller = SimpleNamespace(
+            sessions=SessionsFacade(store),
+            config=SimpleNamespace(language="en"),
+            set_agent_status=lambda *_args, **_kwargs: None,
+        )
+        manager = SessionTurnManager(controller)
+        controller.session_turns = manager
+        controller.scheduled_task_service = ScheduledTaskService(controller=controller)
+
+        assert resolve_composite_teardown_split(
+            controller, composite_key, agent_backend="claude"
+        ) == (legacy_anchor, legacy_path)
+
+        async def _exercise() -> tuple[bool, str | None]:
+            legacy_task = _live_turn(manager, legacy_id, "claude")
+            await asyncio.sleep(0)
+            try:
+                await teardown_composite_session_runs(
+                    controller,
+                    composite_key,
+                    settled_by=SETTLED_BY_EVICTED,
+                    agent_backend="claude",
+                )
+                legacy_turn = manager.in_flight.get(legacy_id)
+                return legacy_task.done(), getattr(legacy_turn, "cancel_settled_by", None)
+            finally:
+                legacy_task.cancel()
+                await asyncio.gather(legacy_task, return_exceptions=True)
+
+        legacy_done, legacy_cause = asyncio.run(_exercise())
+
+        assert legacy_done is True
+        assert legacy_cause == SETTLED_BY_EVICTED
     finally:
         store.close()

@@ -7261,3 +7261,124 @@ def test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read(
         "nothing adopted the reservation, so the release must still remove it: a fix that "
         "makes the cleanup stop working is not a fix"
     )
+
+
+def test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier(
+    tmp_path: Path,
+) -> None:
+    """HFR-345: the workdir ranking is readable, not just applied, at every layer.
+
+    HFR-128 made a row that names the caller's workdir outrank a row that names none,
+    and returned the winning tier as a plain list — indistinguishable from the other
+    one. That is enough for a caller that already knows the anchor is right, and wrong
+    for the composite-split probe in ``core.session_teardown``, which is asking
+    whether an anchor is right at all: a lenient null-workdir row answers to any
+    anchor it happens to spell, so read as a single bit it makes a WRONG reading of a
+    key look real. ``workdir_match="exact_only"`` reports the top tier alone.
+
+    Pinned through all three layers the teardown probe can be handed — the SQLite
+    service, ``SessionsStore``, ``SessionsFacade`` — because the probe reaches storage
+    through whichever one the controller happens to hold, and a layer that dropped the
+    keyword would silently answer the exact question with the lenient tier.
+    """
+
+    anchor = "slack_171717.123"
+    exact_workdir = str(tmp_path / "repo")
+    other_workdir = str(tmp_path / "elsewhere")
+
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        service = store._service
+        assert service is not None
+        with service.engine.begin() as conn:
+            exact_scope = resolve_scope_from_legacy_key(
+                conn, "slack::C_exact", now="2026-07-28T00:00:00Z"
+            )
+            lenient_scope = resolve_scope_from_legacy_key(
+                conn, "slack::C_lenient", now="2026-07-28T00:00:00Z"
+            )
+            exact_id = create_agent_session_row(
+                conn,
+                scope_id=exact_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor=anchor,
+                native_session_id="claude-exact",
+                workdir=exact_workdir,
+                require_workdir=False,
+            )
+            lenient_id = create_agent_session_row(
+                conn,
+                scope_id=lenient_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor=anchor,
+                native_session_id="claude-lenient",
+                workdir=None,
+                require_workdir=False,
+            )
+        assert exact_id != lenient_id
+
+        # HFR-128's ranking, unchanged and still the default: the exact row wins and
+        # the lenient one is dropped rather than added.
+        assert service.find_session_ids_for_anchor(
+            anchor, workdir=exact_workdir, agent_backend="claude"
+        ) == [exact_id]
+        assert service.find_session_ids_for_anchor(
+            anchor,
+            workdir=exact_workdir,
+            agent_backend="claude",
+            workdir_match="exact_only",
+        ) == [exact_id]
+
+        # With no exact row in play the two tiers finally differ, which is the whole
+        # point: the default forgives the missing workdir, ``exact_only`` reports that
+        # nothing matched exactly.
+        assert service.find_session_ids_for_anchor(
+            anchor, workdir=other_workdir, agent_backend="claude"
+        ) == [lenient_id]
+        assert (
+            service.find_session_ids_for_anchor(
+                anchor,
+                workdir=other_workdir,
+                agent_backend="claude",
+                workdir_match="exact_only",
+            )
+            == []
+        )
+
+        # Naming no workdir at all leaves no second tier to suppress.
+        assert set(
+            service.find_session_ids_for_anchor(
+                anchor, agent_backend="claude", workdir_match="exact_only"
+            )
+        ) == {exact_id, lenient_id}
+
+        with pytest.raises(ValueError):
+            service.find_session_ids_for_anchor(
+                anchor, workdir=exact_workdir, workdir_match="whatever"
+            )
+
+        # The wrapper layers forward the mode; the default keeps the historic call.
+        facade = SessionsFacade(store)
+        for layer in (store, facade):
+            assert layer.find_session_ids_for_anchor(
+                anchor, workdir=other_workdir, agent_backend="claude"
+            ) == [lenient_id]
+            assert (
+                layer.find_session_ids_for_anchor(
+                    anchor,
+                    workdir=other_workdir,
+                    agent_backend="claude",
+                    workdir_match="exact_only",
+                )
+                == []
+            )
+            assert layer.find_session_ids_for_anchor(
+                anchor,
+                workdir=exact_workdir,
+                agent_backend="claude",
+                workdir_match="exact_only",
+            ) == [exact_id]
+    finally:
+        store.close()

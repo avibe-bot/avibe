@@ -32,6 +32,8 @@ import re
 from contextlib import ExitStack
 from typing import Any, Iterator, NamedTuple, Optional
 
+from storage.agent_session_rows import WORKDIR_MATCH_EXACT_ONLY
+
 logger = logging.getLogger(__name__)
 
 # The remainder of a composite key, at the colon that separates anchor from working
@@ -153,7 +155,8 @@ def _anchor_names_any_row(
     session_anchor: str,
     workdir: Optional[str],
     agent_backend: Optional[str],
-) -> bool:
+    exact_workdir_only: bool = False,
+) -> Optional[bool]:
     """Whether storage knows this anchor at all, WITHOUT the HFR-323 refusal.
 
     Deliberately not :func:`resolve_teardown_session_ids`, which answers ``[]`` both
@@ -161,6 +164,21 @@ def _anchor_names_any_row(
     opposite facts here: the first means this split is wrong, the second means it is
     RIGHT and its scope is unsafe. Collapsing them would make an ambiguous-but-correct
     split look unresolvable and hand the teardown on to a later, wronger candidate.
+
+    ``exact_workdir_only`` ASKS FOR THE TIER, not just the bit (HFR-345). "Names a
+    row" is not one fact when a workdir is on the table: ``agent_sessions.workdir`` is
+    nullable, so the lookup answers exact rows if it has any and lenient null-workdir
+    rows otherwise (HFR-128). Both come back as a bare non-empty list, and the lenient
+    tier is exactly what lets a WRONG reading of a composite key look real — an
+    unrelated legacy row that names no workdir will answer to any anchor it happens to
+    spell. Probing with this flag suppresses that tier so the caller can rank readings
+    against each other.
+
+    Returns ``None`` — distinct from ``False`` — when the store cannot answer THIS
+    KIND of probe (it predates the keyword). Answering the exact-only question with
+    the lenient tier is the one degradation that must not happen silently, so the
+    inability is reported and the caller falls back to the untiered walk that shipped
+    before HFR-345 rather than to a mis-tiered one.
     """
 
     anchor = str(session_anchor or "").strip()
@@ -170,12 +188,28 @@ def _anchor_names_any_row(
     finder = getattr(sessions, "find_session_ids_for_anchor", None)
     if not callable(finder):
         return False
+    kwargs: dict[str, Any] = {
+        "workdir": workdir or None,
+        "agent_backend": str(agent_backend or "").strip() or None,
+    }
+    if exact_workdir_only:
+        kwargs["workdir_match"] = WORKDIR_MATCH_EXACT_ONLY
     try:
-        resolved = finder(
+        resolved = finder(anchor, **kwargs)
+    except TypeError:
+        if exact_workdir_only:
+            logger.debug(
+                "Session teardown: store cannot rank workdir matches for anchor %s",
+                anchor,
+                exc_info=True,
+            )
+            return None
+        logger.debug(
+            "Session teardown: could not probe split candidate anchor %s",
             anchor,
-            workdir=workdir or None,
-            agent_backend=str(agent_backend or "").strip() or None,
+            exc_info=True,
         )
+        return False
     except Exception:
         logger.debug(
             "Session teardown: could not probe split candidate anchor %s",
@@ -209,23 +243,48 @@ def resolve_composite_teardown_split(
     NO RULE OVER THE STRING ALONE CAN FIX IT. Both readings are well-formed keys; the
     information about which colon the key added is simply not in the key once anchor
     suffixes may look like paths. So this asks the only party that knows: storage.
-    Candidates are walked longest-anchor-first and the FIRST whose anchor names a real
-    row wins.
+    Candidates are walked longest-anchor-first, and the first whose anchor names a real
+    row wins its TIER.
+
+    TWO TIERS, NOT ONE BIT (HFR-345). "Names a real row" is two different facts once a
+    workdir is involved, because ``agent_sessions.workdir`` is nullable: a row that
+    names THIS workdir, or a legacy row that names none and is admitted only as
+    HFR-128's fallback. Read as a single bit, the fallback tier decides split races it
+    has no business deciding — ``base:C:/repo`` whose real session is (``base``,
+    ``C:/repo``) is stolen by an unrelated legacy row that happens to be anchored
+    ``base:C`` with a null workdir, because longest-first reaches that reading first
+    and the lenient tier lets it answer. The teardown then cancels the stranger's turn
+    AND leaves its own run unsettled. So HFR-128's rule — exact outranks null-workdir —
+    is applied ACROSS candidates too, not only within one: pass one walks every
+    candidate for an EXACT match, and only if none exists anywhere does pass two walk
+    again accepting the fallback tier. Longest-anchor-first still orders each pass; it
+    is the tiebreak WITHIN a tier, never across them.
 
     THE COMMON CASE PAYS NOTHING. Ordinary anchors contain no path-looking segment, so
-    they produce a single candidate and take the fast path with ZERO extra reads —
-    ``preferred_anchor`` (End's row, which already carries its base session id) short-
-    circuits even the multi-candidate walk. Only genuinely ambiguous keys touch the DB,
-    and only until one candidate answers.
+    they produce a single candidate and take the fast path with ZERO reads — no probe
+    is issued at all — and ``preferred_anchor`` (End's row, which already carries its
+    base session id) short-circuits even the multi-candidate walk. Only genuinely
+    ambiguous keys touch the DB. Their cost is at most 2N cheap indexed reads rather
+    than N, and only when no candidate matches exactly; N is the number of colons in
+    the key that are followed by a path head, which is two in every case observed and
+    bounded by the key's shape. Ranking correctly is worth the second walk: the reads
+    are what stop a teardown from cancelling the wrong conversation.
 
-    AN AMBIGUOUS RESOLUTION STILL COUNTS AS RESOLVING (HFR-323). If the winning split's
-    anchor names several live sessions, this still returns it and lets
-    :func:`resolve_teardown_session_ids` refuse to cancel any of them. The refusal is
-    about SCOPE SAFETY — which of several same-everything sessions is provably this
+    A STORE THAT CANNOT RANK gets the pre-HFR-345 answer rather than a wrong one. If
+    the probe reports that the tier question is unsupported (a facade or test double
+    predating the keyword), pass one is abandoned outright and pass two — the untiered
+    first-match walk that shipped with HFR-335 — decides alone.
+
+    AN AMBIGUOUS RESOLUTION STILL COUNTS AS RESOLVING (HFR-323), WITHIN ITS TIER. If
+    the winning split's anchor names several live sessions, this still returns it and
+    lets :func:`resolve_teardown_session_ids` refuse to cancel any of them. The refusal
+    is about SCOPE SAFETY — which of several same-everything sessions is provably this
     runtime — and not about whether the split was read correctly. Skipping on to a
     later candidate would let a worse split slip past a guard that had already
     correctly identified the right anchor, converting a deliberate no-op into a wrong
-    teardown.
+    teardown. That holds per tier: an exact-tier anchor naming several rows wins pass
+    one and the refusal stands on IT — a demotion to pass two would be the same
+    skipping-on mistake, arrived at through the ranking instead of the walk.
 
     FALLS BACK TO THE LEXICAL ANSWER when no candidate resolves, which keeps HFR-129's
     behaviour byte-for-byte for every real anchor and for every caller with no sessions
@@ -247,6 +306,26 @@ def resolve_composite_teardown_split(
             if anchor == preferred:
                 return anchor, working_path
 
+    # PASS ONE -- the exact tier. A reading whose anchor names a row that also names
+    # this working directory is the strongest evidence available, at any anchor length.
+    for anchor, working_path in candidates:
+        exact_match = _anchor_names_any_row(
+            controller,
+            session_anchor=anchor,
+            workdir=working_path,
+            agent_backend=agent_backend,
+            exact_workdir_only=True,
+        )
+        if exact_match is None:
+            # The store cannot separate the tiers; ranking on its answers would be
+            # guesswork dressed as evidence. Leave the decision to the untiered pass.
+            break
+        if exact_match:
+            return anchor, working_path
+
+    # PASS TWO -- the fallback tier, reached only when no reading matched exactly.
+    # HFR-128's leniency still has to be able to name a row bound before workdirs
+    # were recorded; it just no longer outranks a reading that matched exactly.
     for anchor, working_path in candidates:
         if _anchor_names_any_row(
             controller,

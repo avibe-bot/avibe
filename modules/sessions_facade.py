@@ -11,6 +11,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from config.v2_sessions import ActivePollInfo, SessionsStore
+from storage.agent_session_rows import WORKDIR_MATCH_EXACT_OR_FALLBACK
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class SessionsFacade:
         *,
         workdir: Optional[str] = None,
         agent_backend: Optional[str] = None,
+        workdir_match: str = WORKDIR_MATCH_EXACT_OR_FALLBACK,
     ) -> list[str]:
         """Session ids for a runtime anchor with no scope key — teardown's resolve.
 
@@ -84,11 +86,25 @@ class SessionsFacade:
         is the runtime's own backend, and it is a NARROWING predicate: a teardown
         cancels every id it is handed, so a candidate from another backend is work
         this caller has no right to interrupt.
+
+        ``workdir_match`` selects HFR-128's workdir tier (see
+        ``storage.sessions_service.SessionsService.find_session_ids_for_anchor``). The
+        keyword is forwarded ONLY when it is not the default, so a store predating it
+        keeps answering the ordinary teardown resolve — and raises ``TypeError`` for an
+        ``exact_only`` request rather than silently widening it into the lenient tier,
+        which is the one degradation that would put HFR-345's bug back.
         """
 
         finder = getattr(self.sessions_store, "find_session_ids_for_anchor", None)
         if not callable(finder):
             return []
+        if str(workdir_match or "") != WORKDIR_MATCH_EXACT_OR_FALLBACK:
+            return finder(
+                session_anchor,
+                workdir=workdir,
+                agent_backend=agent_backend,
+                workdir_match=workdir_match,
+            )
         return finder(session_anchor, workdir=workdir, agent_backend=agent_backend)
 
     def find_session_for_anchor(self, user_id: Union[int, str], session_anchor: str) -> Optional[dict]:

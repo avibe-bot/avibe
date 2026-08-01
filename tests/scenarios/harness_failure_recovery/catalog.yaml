@@ -3501,6 +3501,13 @@ scenarios:
     # resolve_composite_teardown_split walks them, taking the first whose anchor names
     # a real row. Wired into teardown_composite_session_runs and into End's
     # _teardown_session_id fallback.
+    # SUPERSEDED IN PART BY HFR-345: "the first whose anchor names a real row" was one
+    # walk over one bit, and that let HFR-128's lenient null-workdir tier decide split
+    # races. The walk now runs twice -- every candidate for an EXACT workdir match
+    # first, the fallback tier only if none matched anywhere -- so "names a real row"
+    # means "names one at this tier". Longest-anchor-first still orders each pass, and
+    # everything else this entry states holds; the CONSERVATISM paragraph's Windows
+    # "one wasted read" is now at most two, bounded at 2N for a key with N readings.
     # THE PROBE IS NOT resolve_teardown_session_ids, deliberately: that answers [] both
     # for "no such anchor" and for HFR-323's ambiguity refusal, which are opposite facts
     # here. _anchor_names_any_row calls the finder directly, so AN AMBIGUOUS RESOLUTION
@@ -4000,6 +4007,59 @@ scenarios:
     # RED: pre-fix, the session-less begin_ call under the shutdown flag returned a
     # live token with the gate acquired.
     test: tests/test_claude_agent_initiated_turn.py::AgentInitiatedTurnTeardownAdmissionTests::test_shutdown_refuses_agent_initiated_turns_without_a_session_id
+  - id: HFR-345
+    name: >-
+      an exact-workdir split candidate outranks a candidate that only matches a
+      null-workdir row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 19. HFR-335 x HFR-128, and neither is wrong on its own.
+    # HFR-335 walks the path-shaped readings of a composite key LONGEST ANCHOR FIRST
+    # and takes the first whose anchor "names a real row". HFR-128 had already ruled
+    # that naming a row is TWO facts once a workdir is named, because
+    # agent_sessions.workdir is nullable: rows naming this workdir, or -- only when
+    # none exist -- legacy rows naming none. The probe (_anchor_names_any_row) read
+    # that as one bit, so the lenient tier got to decide split races.
+    # THE BUG: composite base:C:/repo whose real session is (anchor "base", workdir
+    # "C:/repo"). Candidates longest-first are (base:C, /repo) then (base, C:/repo).
+    # An UNRELATED legacy row anchored "base:C" with a NULL workdir and the same
+    # backend answers the first probe through HFR-128's exact-or-unset fallback, so
+    # the wrong reading wins: the teardown cancels that stranger's live turn AND
+    # leaves its own run running with no backend left to settle it -- both halves of
+    # the failure HFR-129 and HFR-323 each fixed one side of.
+    # FIX -- HFR-128's rule lifted from WITHIN one candidate to ACROSS candidates.
+    # The storage read now reports the tier instead of only applying it:
+    # find_session_ids_for_anchor gains workdir_match="exact_or_fallback" (the
+    # unchanged default) | "exact_only", threaded through both wrappers the probe can
+    # reach it by (config/v2_sessions.py SessionsStore, modules/sessions_facade.py),
+    # each forwarding the keyword ONLY when it is not the default so a store predating
+    # it still answers the ordinary resolve and REFUSES the exact question rather than
+    # widening it. resolve_composite_teardown_split then walks twice: pass one takes
+    # the first EXACT candidate at any anchor length, pass two runs only if no reading
+    # matched exactly and accepts the fallback tier. Longest-first is the tiebreak
+    # within a tier, never across them.
+    # PRESERVED, all three deliberately: single-candidate keys (every ordinary anchor)
+    # still take the ZERO-READ fast path and issue no probe at all; preferred_anchor
+    # still short-circuits; and HFR-323's ambiguity-refusal-counts-as-resolving applies
+    # WITHIN each tier -- an exact-tier anchor naming several rows wins pass one and the
+    # refusal stands on it, because demoting it to pass two is the same walking-on
+    # mistake through the ranking instead of the walk. HFR-335's residual is intact:
+    # with no exact match anywhere, the null-workdir reading still wins and settles.
+    # COST: at most 2N indexed reads instead of N for a multi-candidate key, and only
+    # when nothing matched exactly. N is the count of colons followed by a path head --
+    # two in every observed case. A store that cannot rank (a double predating the
+    # keyword) reports so and gets HFR-335's untiered single walk, not a mis-tiered one.
+    # RED: pre-fix the finding's shape returned (owner settled=False, cause=None,
+    # legacy turn cancelled=True, cause='evicted') -- the stranger torn down, the real
+    # run stranded.
+    # Companions: tests/test_session_teardown.py::
+    # test_null_workdir_fallback_still_wins_when_no_exact_match_exists (the residual),
+    # and tests/test_sqlite_sessions_store.py::
+    # test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier (the tier
+    # contract at the service and at both wrapper layers).
+    test: tests/test_session_teardown.py::test_exact_workdir_split_outranks_a_legacy_null_workdir_reading
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
