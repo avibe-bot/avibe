@@ -4060,6 +4060,94 @@ scenarios:
     # test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier (the tier
     # contract at the service and at both wrapper layers).
     test: tests/test_session_teardown.py::test_exact_workdir_split_outranks_a_legacy_null_workdir_reading
+  - id: HFR-346
+    name: >-
+      a timed-out scheduler stop converges the executions it abandoned, by run id
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 20, landed AFTER HFR-347 (round 21 was a pure ordering fix on
+    # the same call site and shipped first; this entry sits in numeric order, not in
+    # merge order). HFR-340's invariant -- NO BACKEND TEARDOWN WHILE A TERMINAL WRITER
+    # IS MID-WRITE -- one lane over: cleanup_sync runs ScheduledTaskService.stop()
+    # through the same bounded _stop_loop_coroutine, and stop() cancels every
+    # _inflight_executions task as restarted and then AWAITS the terminal row each one
+    # owes. On expiry the stop is cancelled and abandoned (HFR-342), and the settlement
+    # convergence that follows snapshots only SessionTurnManager ownership -- so a
+    # scheduler-owned run appears in neither busy_session_ids nor owned_agent_run_ids
+    # and nothing terminalizes it before the backends come apart.
+    # THE EMPIRICAL TRACE FIRST, because most of this hole is already closed by
+    # accident. All four combinations were driven through the real cleanup_sync on the
+    # real two-thread and stopped-loop shapes, with a real ScheduledTaskService over
+    # SQLite:
+    #   (a) an execution that ACKNOWLEDGES its cancel settles ITSELF on both loop
+    #       states, before the teardown seam. _begin_stop cancelled the execution tasks
+    #       independently of the stop, so cancelling the stop cannot un-cancel them, and
+    #       _execute_claimed_request's CancelledError handler terminalizes the claim
+    #       (HFR-101, never requeues). On a live loop it unwinds beside the cleanup
+    #       thread; on a stopped loop asyncio.wait drives it for the whole bounded wait.
+    #   (b) even a merely SLOW unwind acknowledges in the end: abandoning stop() cancels
+    #       the `await task` it is suspended in, that cancel is delivered INTO the
+    #       unwind and truncates it straight to the same handler.
+    #   (c) an unwind that SUPPRESSES its cancel -- the drain-lane twin of HFR-342's
+    #       turn, i.e. a finally awaiting a flush with its own shielded retry -- never
+    #       reaches the handler. Its row stayed running through the backend teardown and
+    #       past loop closure on BOTH loop states. That is the confirmed defect, and the
+    #       fix is scoped to it: PARTIALLY CONFIRMED, narrower than the report claimed.
+    # THE FIX: the scheduler stop gains the per-call timeout/on_timeout opt-in HFR-340
+    # introduced (SCHEDULER_STOP_TIMEOUT_SECONDS names the unchanged 5s default so a
+    # test can shorten it). Its debt is snapshotted BEFORE the coroutine is submitted --
+    # stop() clears _inflight_executions on its way out and _on_execution_done pops
+    # entries as they finish, so a later read answers "nothing was owed" for exactly the
+    # claims this exists to find. _shutdown_scheduler_debt REUSES the service's own
+    # _teardown_owned_run_id_lanes (HFR-324) and keeps its DRAIN half; the turn half
+    # belongs to the manager lane's convergence on the next stop. The cross-thread
+    # retry that read needs is now the shared Controller._snapshot_shutdown_map, which
+    # HFR-340's snapshot reads through too.
+    # RUN-ID-SCOPED, NOT reconcile_session_teardown, and that is the load-bearing
+    # choice: scheduler debt is a set of CLAIMS, and a claimed run may carry no
+    # session_id at all (a create_per_run request whose reservation never landed, one
+    # enqueued against a session key that never resolved). Such a row is invisible to
+    # every session-keyed query and is precisely the row with nobody else to settle it,
+    # so ScheduledTaskService.reconcile_abandoned_execution_stop starts from ids. What
+    # it keeps from the session-scoped reconciler is the ownership premise (only ids the
+    # caller PROVED this process was executing) and every exclusion that still applies
+    # to a run-id snapshot: non-running rows (a requeued gate-parked follower is FUTURE
+    # work; an already-terminal row is another writer's outcome to keep), rows carrying
+    # a deferred terminal intent (the Activity lifecycle owns those and the intent
+    # already records a cause, so re-parking would coarsen it to restarted), the
+    # workbench_queue_holds_run marker, and watch_runtime -- VERIFIED unreachable via
+    # the drain lane (those rows are written by write_watch_runtime, never enqueued as a
+    # request) and kept anyway because this reads rows back from the DB and one
+    # comparison is cheaper than an assertion about a row class.
+    # THE WRITE IS THE ONE THE CANCELLED HANDLER WOULD HAVE MADE: _park_or_settle_run,
+    # the DEFER/SETTLE pair _terminalize_cancelled_request already routes each owned run
+    # through, never update_run_status. Status and copy come from core/run_settlement.py
+    # and interrupt_reason={restarted} rides the same guarded UPDATE that stamps the owed
+    # notice. IDEMPOTENT BY CONSTRUCTION: every writer on the path is scoped to
+    # queued|running, so the abandoned execution settling itself concurrently is a race
+    # with no loser -- first write wins, the second no-ops, and the cause cannot be
+    # restated. Coalesced siblings are NOT reconstructed (they live on the in-memory
+    # request a set of ids cannot reach); they share the claim's session_id, so the
+    # manager lane's convergence and the staleness sweep stay their backstop.
+    # ORDERING: the convergence runs on the scheduler stop's own timeout, which is the
+    # third _stop_loop_coroutine call -- ahead of the settlement helper and every
+    # backend teardown. Both loop states inherit it from that one bounded path
+    # (HFR-341/342) rather than implementing it twice, which is why the test is
+    # parameterized over them instead of paired.
+    # RED, captured: "Codex was torn down while run <id> was still open --
+    # assert 'running' == 'failed'", on both loop states and for both rows.
+    # Companion: tests/test_running_agents_service.py::
+    # test_a_fast_acknowledging_execution_settles_itself_after_an_abandoned_stop pins
+    # trace results (a) and (b) -- the TRUE property that lets the convergence stay a
+    # narrow backstop. If a cancelled execution ever stops settling itself, that test
+    # fails at the property instead of leaving this convergence to silently take over
+    # the whole job with a coarser restarted outcome. Its immediate-ack half asserts the
+    # convergence settled 0; its slow-ack half asserts only that the outcome is
+    # identical whichever writer won, because the truncating cancel and the convergence
+    # genuinely race and asserting a winner would assert a scheduling order.
+    test: tests/test_running_agents_service.py::test_shutdown_converges_a_slow_scheduler_execution_before_teardown
   - id: HFR-347
     name: >-
       global admission closes before the first async cleanup step, not after the

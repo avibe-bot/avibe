@@ -59,6 +59,18 @@ logger = logging.getLogger(__name__)
 #: real ``cleanup_sync`` without spending the real wait.
 SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS = 8.0
 
+#: How long the scheduled task service's stop may take before it is abandoned.
+#:
+#: The generic default, kept at its audited value and only NAMED here — the point is
+#: not a new number but that this stop, like the settlement, now carries a convergence
+#: on expiry (HFR-346) and therefore needs a knob a test can shorten to drive the real
+#: ``cleanup_sync`` without spending the real wait.
+#:
+#: It stays SHORTER than the settlement's wait on purpose. This stop runs first, and
+#: what it abandons is converged from run ids alone, so lengthening it would only delay
+#: every later step for an execution that has already been told to stop.
+SCHEDULER_STOP_TIMEOUT_SECONDS = 5.0
+
 
 class _StopTimedOut(Exception):
     """One ``cleanup_sync`` stop outlasted its bounded wait, on either loop state.
@@ -1694,6 +1706,124 @@ class Controller:
                 )
                 await teardown_session_runs(self, session_id, settled_by=SETTLED_BY_RESTARTED)
 
+    def _snapshot_shutdown_map(self, reader, label: str, empty):
+        """Read one live ownership map from the cleanup thread, tolerating the race.
+
+        Shared by every "what does this stop OWE" snapshot (HFR-340's manager lane and
+        HFR-346's drain lane), because the hazard is a property of reading loop-owned
+        state from another thread, not of any one map.
+
+        CROSS-THREAD, so a read can lose a race with the loop mutating the map and
+        raise ``dictionary changed size during iteration``. That is a transient, not a
+        state: it is retried a couple of times and only then given up on, empty,
+        because a shutdown must not die trying to describe itself. An absent reader
+        (a half-built controller, a test double) is the same answer as an empty one.
+        """
+
+        if not callable(reader):
+            return empty
+        for _ in range(3):
+            try:
+                return reader()
+            except RuntimeError:
+                # The loop mutated the map mid-iteration. Read it again.
+                continue
+            except Exception:  # noqa: BLE001
+                break
+        logger.debug("Shutdown: could not snapshot %s", label, exc_info=True)
+        return empty
+
+    def _shutdown_scheduler_debt(self) -> frozenset[str]:
+        """Which runs the SCHEDULER is executing, snapshotted before its stop is submitted.
+
+        ``ScheduledTaskService.stop()`` goes through the same bounded
+        ``_stop_loop_coroutine`` as everything else, so it too can be cancelled and
+        abandoned mid-await (HFR-346). It cancels every ``_inflight_executions`` task as
+        ``restarted`` and then awaits them one by one; abandoning it does not un-cancel
+        them, so an execution that ACKNOWLEDGES its cancellation still terminalizes its
+        own row through ``_execute_claimed_request``'s handler. An unwind that
+        SUPPRESSES the cancel never reaches that handler, and its row is then left
+        ``running`` while the backends come apart underneath it.
+
+        Read here, on the cleanup thread and BEFORE the coroutine is submitted, for
+        exactly :meth:`_shutdown_settlement_debt`'s reason: ``stop()`` clears
+        ``_inflight_executions`` on its way out and ``_on_execution_done`` pops entries
+        as they finish, so a snapshot taken after the timeout answers "nothing was
+        owed" for precisely the claims the convergence exists to find.
+
+        REUSES THE SERVICE'S OWN TEARDOWN SNAPSHOT rather than reaching into the map:
+        ``_teardown_owned_run_id_lanes`` already splits ownership into the drain lane
+        and the turn lane at the one instant both are readable, and its first element IS
+        the drain half — the claims this process holds in ``_inflight_executions``. The
+        turn half is deliberately dropped here: it belongs to the manager lane's
+        session-scoped convergence, which runs on the next stop.
+        """
+
+        service = getattr(self, "scheduled_task_service", None)
+        lanes = getattr(service, "_teardown_owned_run_id_lanes", None)
+        drain_lane = self._snapshot_shutdown_map(
+            (lambda: lanes()[0]) if callable(lanes) else None,
+            "scheduler drain-lane claims",
+            set(),
+        )
+        return frozenset(str(run_id) for run_id in drain_lane if run_id)
+
+    def _converge_abandoned_scheduler_stop(self, run_ids: "frozenset[str]") -> int:
+        """Finish, synchronously, the executions the scheduler stop walked away from.
+
+        HFR-340's invariant — NO BACKEND TEARDOWN WHILE A TERMINAL WRITER IS MID-WRITE —
+        with the same shape one lane over. The settlement's convergence cannot serve the
+        drain lane: it snapshots ``SessionTurnManager`` ownership, and a scheduler-owned
+        run appears in neither ``busy_session_ids`` nor ``owned_agent_run_ids``. So a
+        scheduler-only run got no terminal write at all before the backends were
+        dismantled and the loop was closed under whatever writer was still pending.
+
+        RUN-ID-SCOPED, NOT SESSION-SCOPED, which is why this calls a different
+        reconciler than :meth:`_converge_abandoned_shutdown_settlement` rather than
+        reusing that one. Scheduler debt is a set of CLAIMS: the drain lane holds
+        ``_inflight_executions`` keys, and a claimed run may carry no ``session_id`` at
+        all (``create_per_run`` before its reservation lands, a run enqueued against a
+        session key that never resolved). ``reconcile_session_teardown`` starts from a
+        session id and returns 0 without one, so routing this through it would silently
+        skip the very rows that have nobody else to settle them.
+
+        THIS RUNS ON THE CLEANUP THREAD, WITHOUT THE LOOP, for HFR-340's reason: the
+        settlement writers are plain SQLite, so the thread that gave up waiting can do
+        the work itself.
+
+        IDEMPOTENT BY CONSTRUCTION. The abandoned ``stop()``'s own executions are still
+        cancelled and may settle themselves at any moment through the same
+        ``queued|running``-scoped guarded writers this convergence uses — first writer
+        wins, everyone after no-ops, and a row another actor already settled keeps that
+        actor's outcome. ``update_run_status`` is not involved anywhere on this path.
+        """
+
+        if not run_ids:
+            # The scheduler was executing nothing when the shutdown began, so there is
+            # provably nothing to converge.
+            return 0
+        service = getattr(self, "scheduled_task_service", None)
+        reconcile = getattr(service, "reconcile_abandoned_execution_stop", None)
+        if not callable(reconcile):
+            return 0
+        try:
+            settled = int(reconcile(run_ids, settled_by=SETTLED_BY_RESTARTED))
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Scheduler shutdown convergence could not settle its claimed run(s) %s",
+                ", ".join(sorted(run_ids)),
+                exc_info=True,
+            )
+            return 0
+        logger.warning(
+            "Scheduled task service stop exceeded its wait; converged %d of %d claimed "
+            "execution(s) synchronously — run id(s) %s — before tearing the backends down",
+            settled,
+            len(run_ids),
+            ", ".join(sorted(run_ids)),
+        )
+        return settled
+
     def _shutdown_settlement_debt(self) -> tuple[list[str], frozenset[str]]:
         """What the shutdown settlement OWES, snapshotted before it is submitted.
 
@@ -1710,33 +1840,22 @@ class Controller:
         narrowing, which is what lets it catch a row no session-keyed map ever knew
         about.
 
-        CROSS-THREAD, so a read can lose a race with the loop mutating ``in_flight``
-        and raise ``dictionary changed size during iteration``. That is a transient,
-        not a state: it is retried a couple of times and only then given up on, empty,
-        because a shutdown must not die trying to describe itself.
+        CROSS-THREAD, with the retry that hazard needs living in the shared
+        :meth:`_snapshot_shutdown_map` — the same helper HFR-346's drain-lane snapshot
+        reads through, because the race belongs to reading loop-owned state from the
+        cleanup thread rather than to either map.
         """
 
         manager = getattr(self, "session_turns", None)
-
-        def _read(reader, label, empty):
-            if not callable(reader):
-                return empty
-            for _ in range(3):
-                try:
-                    return reader()
-                except RuntimeError:
-                    # The loop mutated the map mid-iteration. Read it again.
-                    continue
-                except Exception:  # noqa: BLE001
-                    break
-            logger.debug("Shutdown: could not snapshot %s", label, exc_info=True)
-            return empty
-
         session_ids = sorted(
-            _read(getattr(manager, "busy_session_ids", None), "busy sessions", set())
+            self._snapshot_shutdown_map(
+                getattr(manager, "busy_session_ids", None), "busy sessions", set()
+            )
         )
         owned_run_ids = frozenset(
-            _read(getattr(manager, "owned_agent_run_ids", None), "owned runs", set())
+            self._snapshot_shutdown_map(
+                getattr(manager, "owned_agent_run_ids", None), "owned runs", set()
+            )
         )
         return session_ids, owned_run_ids
 
@@ -1882,10 +2001,11 @@ class Controller:
 
             ``on_timeout`` IS PER-CALL, not a blanket change (HFR-340). For most stops
             here a timeout is genuinely a shrug: the process is about to exit and an
-            un-closed watcher costs nothing. For ONE of them — the in-flight settlement
-            — giving up silently leaves durable rows open and lets the backends come
-            apart underneath writers that are still running. Only that call passes a
-            convergence, so the others keep the behaviour they were audited with.
+            un-closed watcher costs nothing. For the TWO that own terminal rows — the
+            scheduler's claimed executions (HFR-346) and the in-flight session turns —
+            giving up silently leaves durable rows open and lets the backends come apart
+            underneath writers that are still running. Only those calls pass a
+            convergence, so every other stop keeps the behaviour it was audited with.
 
             BOTH LOOP STATES ARE BOUNDED, and both reach that decision through ONE
             path (HFR-341). The stopped-loop branch is not an exotic corner — it is the
@@ -2073,10 +2193,26 @@ class Controller:
 
         _stop_loop_coroutine(_close_admission_for_shutdown(), "Shutdown admission close")
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
-        _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
-        # THE ONE STOP THAT MAY NOT BE ABANDONED (HFR-340). The debt is read BEFORE the
-        # coroutine is submitted, because a timed-out settlement has already erased the
-        # maps that record it; the wait stays bounded so a wedged turn cannot hang the
+        # THE SECOND STOP THAT MAY NOT BE ABANDONED SILENTLY (HFR-346). ``stop()``
+        # cancels every claimed execution as ``restarted`` and then awaits the terminal
+        # row each one owes; an unwind that suppresses its cancel never writes that row,
+        # and the settlement convergence below cannot cover it because it snapshots only
+        # ``SessionTurnManager`` ownership. The debt is read BEFORE the coroutine is
+        # submitted (``stop()`` clears ``_inflight_executions`` on its way out) and the
+        # convergence runs HERE, ahead of the settlement and every backend teardown.
+        scheduler_owed = self._shutdown_scheduler_debt()
+        _stop_loop_coroutine(
+            self.scheduled_task_service.stop(),
+            "Scheduled task service",
+            timeout=SCHEDULER_STOP_TIMEOUT_SECONDS,
+            on_timeout=lambda: self._converge_abandoned_scheduler_stop(scheduler_owed),
+        )
+        # THE TURN LANE'S HALF OF THE SAME RULE (HFR-340), and the reason the stop above
+        # cannot simply defer to it: this convergence is SESSION-scoped, so it reaches a
+        # run through a busy session the manager owns, never through a bare claim. The
+        # debt is read BEFORE the coroutine is submitted, because a timed-out settlement
+        # has already erased the maps that record it; the wait stays bounded so a wedged
+        # turn cannot hang the
         # shutdown; and the timeout is no longer lossy, because whatever the settlement
         # did not reach is finished synchronously, here, before any backend is touched.
         settlement_sessions, settlement_owned = self._shutdown_settlement_debt()

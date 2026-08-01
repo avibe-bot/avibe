@@ -1395,25 +1395,83 @@ def _running_harness_run(
     unclaimable one rather than relying on that.
     """
 
-    from sqlalchemy import update
-
-    from storage.db import create_sqlite_engine
-    from storage.models import agent_runs
-
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
         message=message,
         agent_name=agent_name,
         agent_backend=agent_backend,
     )
+    _stamp_run_running(request.id, session_id=session_id)
+    return request.id
+
+
+def _claimed_scheduler_request(
+    request_store,
+    *,
+    session_id: str | None,
+    message: str,
+):
+    """``_running_harness_run``'s sibling, returning the REQUEST the drain claimed.
+
+    The drain lane owns a run through a ``TaskExecutionRequest`` handed to
+    ``_execute_claimed_request``, so a test that wants the scheduler's own
+    ``_inflight_executions`` entry needs the request object, not just the row id.
+
+    ``session_id=None`` leaves the column NULL, which is the case HFR-346 exists for:
+    a run no session-keyed lookup can reach at all.
+    """
+
+    request = request_store.enqueue_agent_run(
+        session_key="slack::channel::C123",
+        message=message,
+        agent_name="codex",
+    )
+    _stamp_run_running(request.id, session_id=session_id)
+    request.session_id = session_id
+    return request
+
+
+#: The ``Controller`` methods ``cleanup_sync`` calls on ``self``, bound onto the
+#: lightweight doubles these shutdown tests drive it with.
+#:
+#: ONE LIST, shared by every such test (it was copied into each of them until HFR-346
+#: added two more names and every copy raised ``AttributeError`` instead of failing on
+#: a claim about behaviour). A ``SimpleNamespace`` cannot inherit them, so a stop that
+#: starts consulting a new helper must be visible in exactly one place.
+_CLEANUP_SYNC_CONTROLLER_METHODS = (
+    "_settle_inflight_turns_for_shutdown",
+    "_shutdown_settlement_debt",
+    "_converge_abandoned_shutdown_settlement",
+    "_snapshot_shutdown_map",
+    "_shutdown_scheduler_debt",
+    "_converge_abandoned_scheduler_stop",
+)
+
+
+def _bind_cleanup_sync_methods(controller) -> None:
+    """Bind the real ``Controller`` shutdown helpers onto a test double."""
+
+    from core.controller import Controller
+
+    for name in _CLEANUP_SYNC_CONTROLLER_METHODS:
+        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+
+
+def _stamp_run_running(run_id: str, *, session_id: str | None) -> None:
+    """Put an enqueued row where a teardown finds it: ``running``, on its session."""
+
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs
+
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         conn.execute(
             update(agent_runs)
-            .where(agent_runs.c.id == request.id)
+            .where(agent_runs.c.id == run_id)
             .values(session_id=session_id, status="running")
         )
-    return request.id
 
 
 def test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_notice(
@@ -1784,12 +1842,7 @@ def test_shutdown_converges_a_slow_settlement_before_teardown(tmp_path, monkeypa
     # AttributeError inside it.
     controller.set_agent_status = lambda *_args, **_kwargs: None
     service.controller = controller
-    for name in (
-        "_settle_inflight_turns_for_shutdown",
-        "_shutdown_settlement_debt",
-        "_converge_abandoned_shutdown_settlement",
-    ):
-        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+    _bind_cleanup_sync_methods(controller)
 
     turn_task = asyncio.run_coroutine_threadsafe(_arm_turn(), loop).result(timeout=5)
     try:
@@ -1966,12 +2019,7 @@ def test_stopped_loop_shutdown_converges_a_slow_settlement(tmp_path, monkeypatch
     # AttributeError inside it.
     controller.set_agent_status = lambda *_args, **_kwargs: None
     service.controller = controller
-    for name in (
-        "_settle_inflight_turns_for_shutdown",
-        "_shutdown_settlement_debt",
-        "_converge_abandoned_shutdown_settlement",
-    ):
-        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+    _bind_cleanup_sync_methods(controller)
 
     # THE STOPPED-LOOP SHAPE, exactly as ``Controller.run()`` produces it: the loop runs
     # (here just long enough to put a turn in flight), returns, and the SAME thread then
@@ -2087,12 +2135,7 @@ def test_admission_closes_before_the_scheduler_stop(tmp_path, monkeypatch):
     controller.im_client = types.SimpleNamespace()
     controller._im_thread = None
     controller.set_agent_status = lambda *_args, **_kwargs: None
-    for name in (
-        "_settle_inflight_turns_for_shutdown",
-        "_shutdown_settlement_debt",
-        "_converge_abandoned_shutdown_settlement",
-    ):
-        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+    _bind_cleanup_sync_methods(controller)
 
     assert manager.is_admission_closed_for_shutdown() is False
     try:
@@ -2228,12 +2271,7 @@ def test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind(
     controller._im_thread = None
     controller.set_agent_status = lambda *_args, **_kwargs: None
     service.controller = controller
-    for name in (
-        "_settle_inflight_turns_for_shutdown",
-        "_shutdown_settlement_debt",
-        "_converge_abandoned_shutdown_settlement",
-    ):
-        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+    _bind_cleanup_sync_methods(controller)
 
     # THE STOPPED-LOOP SHAPE, exactly as ``Controller.run()`` produces it.
     turn_task = loop.run_until_complete(_arm_turn())
@@ -2304,6 +2342,429 @@ def test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind(
     assert manager.is_admission_closed_for_shutdown() is True
     assert manager.is_teardown_admission_closed("ses-shutdown-342") is True
     assert manager.is_teardown_admission_closed("some-unrelated-session") is True
+
+
+def _scheduler_shutdown_harness(service, request_store, loop, *, on_codex_teardown):
+    """The ``cleanup_sync`` collaborator set, with an INSTRUMENTED backend teardown.
+
+    The same shape HFR-340/341/342/347 each build inline. Used by the two HFR-346
+    tests rather than retrofitted onto those four, deliberately: they are the pins this
+    change must not disturb, and rewriting their setup in the same commit that changes
+    ``cleanup_sync`` would make a regression there indistinguishable from a harness
+    edit. What they DO share is ``_bind_cleanup_sync_methods`` — the one part that has
+    to move in lockstep with the method list ``cleanup_sync`` consults. Migrating the
+    rest is a mechanical follow-up.
+
+    ``on_codex_teardown`` is called (as the Codex ``shutdown_runtime`` coroutine) at
+    the seam the whole HFR-340 family asserts at: whatever the rows say THERE is what
+    the shutdown was willing to dismantle a backend on top of.
+    """
+
+    from core import session_turns
+
+    async def _codex_shutdown():
+        on_codex_teardown()
+
+    async def _noop_stop():
+        return None
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(stop=lambda: None)
+    controller.scheduled_task_service = service
+    controller.watch_service = types.SimpleNamespace(stop=_noop_stop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop_stop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(
+        agents={"codex": types.SimpleNamespace(shutdown_runtime=_codex_shutdown)}
+    )
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    service.controller = controller
+    _bind_cleanup_sync_methods(controller)
+    return controller, manager
+
+
+@pytest.mark.parametrize("loop_state", ["running_loop", "stopped_loop"])
+def test_shutdown_converges_a_slow_scheduler_execution_before_teardown(
+    tmp_path, monkeypatch, loop_state
+):
+    """HFR-346: the SCHEDULER's stop is abandonable too, and its debt is run-id-scoped.
+
+    ``cleanup_sync`` runs ``ScheduledTaskService.stop()`` through the same bounded
+    ``_stop_loop_coroutine`` as everything else. ``stop()`` cancels every
+    ``_inflight_executions`` task as ``restarted`` and then AWAITS each one, so an
+    execution that outlasts the wait gets the stop cancelled out from under it — and
+    the convergence that follows (HFR-340) snapshots only ``SessionTurnManager``
+    ownership. A scheduler-only run is invisible to it: no busy session, no owned turn,
+    so nothing terminalized the row before the backends came apart.
+
+    WHAT THE TRACE ACTUALLY SHOWED, because most of this hole is already closed by
+    accident and only one shape is real (all four combinations were driven through the
+    real ``cleanup_sync``):
+
+    * An execution that ACKNOWLEDGES its cancel settles ITSELF, on both loop states,
+      before the teardown seam — ``_execute_claimed_request``'s ``CancelledError``
+      handler terminalizes it (HFR-101) and cancelling ``stop()`` does not un-cancel
+      the executions ``_begin_stop`` already cancelled. Pinned by
+      ``test_a_fast_acknowledging_execution_settles_itself_after_an_abandoned_stop``.
+    * Even a merely SLOW unwind acknowledges in the end: abandoning ``stop()`` cancels
+      the ``await task`` it is suspended in, which delivers a SECOND cancel into the
+      unwind and truncates it straight to that handler. Also pinned there.
+    * An unwind that SUPPRESSES its cancel — the drain-lane twin of HFR-342's turn, a
+      ``finally`` awaiting a flush with its own shielded retry — never reaches the
+      handler at all. The row stayed ``running`` through the backend teardown and past
+      loop closure on BOTH loop states, which is this test.
+
+    So the fix is deliberately narrow: it does not re-settle what the execution's own
+    handler already handles, it covers the case where no handler will ever run.
+
+    RUN-ID-SCOPED, NOT SESSION-SCOPED, and the second execution here is why: its row
+    carries NO ``session_id``, so ``reconcile_session_teardown`` cannot reach it
+    through any of its three legs no matter what sessions were busy. Scheduler debt is
+    a set of claims, not a set of conversations.
+
+    BOTH LOOP STATES, parameterized rather than paired into two tests, because the
+    claim is that they INHERIT the convergence from ``_stop_loop_coroutine``'s one
+    bounded path (HFR-341/342) instead of implementing it twice.
+    """
+
+    import threading
+
+    from core import controller as controller_module
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    # Parameterized so the real path can be driven without the real 5s wait.
+    monkeypatch.setattr(controller_module, "SCHEDULER_STOP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(controller_module, "SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS", 0.1)
+
+    session_id = f"ses-shutdown-346-{loop_state}"
+    on_session = _claimed_scheduler_request(
+        request_store,
+        session_id=session_id,
+        message="a claimed execution whose unwind never acknowledges its cancel",
+    )
+    # THE ROW NO SESSION-KEYED RECONCILER CAN REACH.
+    sessionless = _claimed_scheduler_request(
+        request_store,
+        session_id=None,
+        message="a claimed execution with no session association at all",
+    )
+
+    events: list[str] = []
+    observed: dict = {}
+
+    def _read_rows() -> dict:
+        return {
+            request.id: (request_store.get_run(request.id) or {})
+            for request in (on_session, sessionless)
+        }
+
+    def _at_codex_teardown() -> None:
+        events.append("codex_teardown")
+        observed["rows_at_teardown"] = _read_rows()
+        observed["open_at_teardown"] = [
+            item["id"]
+            for item in request_store.list_open_runs_for_session(session_id)
+            if item.get("status") in {"queued", "running"}
+        ]
+
+    async def _suppressing_execution(**_kwargs):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # The drain lane's version of HFR-342's unwind: every cancel delivered
+            # here is caught and the coroutine goes back to waiting, so
+            # ``_execute_claimed_request``'s own terminalizing handler is never
+            # reached and the second cancel from the abandoned ``stop()`` cannot
+            # truncate it either.
+            events.append("execution_unwind_started")
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    events.append("execution_suppressed_a_cancel")
+                    continue
+
+    service._execute_agent_run = _suppressing_execution
+
+    async def _arm_executions():
+        for request in (on_session, sessionless):
+            # THE REAL DISPATCH PATH, so the claims land in ``_inflight_executions``
+            # with ``_on_execution_done`` attached exactly as production leaves them.
+            service._spawn_execution(request, None)
+        await asyncio.sleep(0.05)
+        return [service._inflight_executions[request.id] for request in (on_session, sessionless)]
+
+    loop = asyncio.new_event_loop()
+    loop_thread = None
+    if loop_state == "running_loop":
+        loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+        tasks = asyncio.run_coroutine_threadsafe(_arm_executions(), loop).result(timeout=5)
+    else:
+        tasks = loop.run_until_complete(_arm_executions())
+        assert not loop.is_running() and not loop.is_closed()
+
+    controller, manager = _scheduler_shutdown_harness(
+        service, request_store, loop, on_codex_teardown=_at_codex_teardown
+    )
+    # THE PRECONDITION THAT MAKES THIS A SCHEDULER-ONLY RUN: the manager lane owns
+    # nothing, so HFR-340's convergence has an empty snapshot and provably cannot be
+    # what settles these rows.
+    assert manager.busy_session_ids() == set()
+    assert manager.owned_agent_run_ids() == set()
+
+    started_at = time.monotonic()
+    try:
+        Controller.cleanup_sync(controller)
+        elapsed = time.monotonic() - started_at
+        assert "execution_unwind_started" in events, (
+            "the scheduler stop never reached the execution's unwind"
+        )
+    finally:
+        for task in tasks:
+            if not task.done():
+                if loop_state == "running_loop":
+                    loop.call_soon_threadsafe(task.cancel)
+                else:
+                    task.cancel()
+        if loop_state == "running_loop":
+            asyncio.run_coroutine_threadsafe(
+                asyncio.wait(tasks, timeout=0.3), loop
+            ).result(timeout=5)
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=5)
+        else:
+            loop.run_until_complete(asyncio.wait(tasks, timeout=0.3))
+        loop.close()
+
+    # (1) THE DEADLINE STAYS HARD. A suppressing unwind may not extend the shutdown.
+    assert elapsed < 20, f"cleanup_sync took {elapsed:.1f}s despite a 0.2s scheduler wait"
+
+    # (2) THE INVARIANT, HFR-340's for the drain lane: both rows were ALREADY terminal
+    # when the backend teardown ran. Pre-fix both read ``running`` here — and stayed
+    # ``running`` past loop closure, since no handler was ever going to run.
+    rows = observed["rows_at_teardown"]
+    for request in (on_session, sessionless):
+        row = rows[request.id]
+        assert row.get("status") == "failed", (
+            f"Codex was torn down while run {request.id} was still open"
+        )
+        assert (row.get("metadata") or {}).get("interrupt_reason") == "restarted"
+        # (3) The user is owed the notice, stamped by the same guarded UPDATE that
+        # terminalized the row rather than by a second write.
+        notice = row["metadata"]["owed_failure_notice"]
+        assert notice["state"] == "pending"
+        assert notice["failure_id"] == f"interrupt:{request.id}:restarted"
+    # (4) Nothing left open for the session either — the two legs agree.
+    assert observed["open_at_teardown"] == []
+
+    # (5) THE CONVERGENCE IS WHAT WROTE THEM, not a late acknowledgment: the execution
+    # tasks were still pending at the deadline and are still suppressing.
+    assert "execution_suppressed_a_cancel" in events
+    assert "codex_teardown" in events
+    assert events.index("execution_unwind_started") < events.index("codex_teardown")
+
+    # (6) The abandonment is deliberate and referenced, not a silently dropped task —
+    # on the branch that actually parks one. The running-loop branch parks nothing by
+    # design (HFR-342): the loop still owns and drives the cancelled task, so there is
+    # no orphan to hold a reference to.
+    if loop_state == "stopped_loop":
+        assert controller._abandoned_shutdown_tasks
+    else:
+        assert controller._abandoned_shutdown_tasks == []
+    # (7) And it holds after the loop is gone: the rows are terminal on disk, which is
+    # the state a restart (or the staleness sweep) would otherwise have had to repair.
+    final = _read_rows()
+    for request in (on_session, sessionless):
+        assert final[request.id]["status"] == "failed"
+        assert final[request.id]["metadata"]["interrupt_reason"] == "restarted"
+
+
+@pytest.mark.parametrize("unwind", ["immediate_ack", "slow_but_cancellable_ack"])
+def test_a_fast_acknowledging_execution_settles_itself_after_an_abandoned_stop(
+    tmp_path, monkeypatch, unwind
+):
+    """HFR-346's other half: the property that keeps the convergence narrow.
+
+    This is the trace result pinned rather than left in a report. An execution that
+    acknowledges its cancellation settles its OWN row even though the ``stop()``
+    coroutine awaiting it was cancelled and abandoned — because ``_begin_stop``
+    cancelled the execution tasks independently, and cancelling the stop cannot
+    un-cancel them. ``_execute_claimed_request``'s ``CancelledError`` handler
+    terminalizes the claim (HFR-101, never requeues it) and the loop still runs it:
+    on a live loop beside the cleanup thread, and on a stopped loop while
+    ``asyncio.wait`` drives it for the duration of the bounded wait.
+
+    TWO ACKNOWLEDGING SHAPES, because they time the stop out for different reasons:
+
+    * ``immediate_ack`` — the execution re-raises at once, so ``stop()`` is not slow
+      because of IT at all. What times the stop out is the notice drain it awaits
+      FIRST, suspended in a transport send (``_begin_stop`` cancels it by name, and
+      this one refuses to acknowledge). The execution's row is already terminal by
+      then.
+    * ``slow_but_cancellable_ack`` — the unwind awaits real work and outlasts the
+      wait, so the stop times out on the execution itself. Abandoning the stop cancels
+      the ``await task`` it is suspended in, that cancel is delivered INTO the unwind,
+      and the truncated unwind lands in the same terminalizing handler.
+
+    Why this matters as a pin and not a footnote: it is the reason HFR-346's
+    convergence may be a narrow backstop rather than a second settlement lane. If a
+    later change made a cancelled execution stop settling itself, this test fails
+    HERE — loudly, at the property — instead of leaving the convergence to silently
+    take over the whole job with a coarser ``restarted`` outcome.
+    """
+
+    import threading
+
+    from core import controller as controller_module
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    service, request_store = _settlement_service(tmp_path)
+    monkeypatch.setattr(controller_module, "SCHEDULER_STOP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(controller_module, "SHUTDOWN_SETTLEMENT_TIMEOUT_SECONDS", 0.1)
+
+    session_id = f"ses-shutdown-346-self-{unwind}"
+    request = _claimed_scheduler_request(
+        request_store,
+        session_id=session_id,
+        message="a claimed execution that acknowledges its cancel",
+    )
+
+    events: list[str] = []
+    observed: dict = {}
+
+    def _at_codex_teardown() -> None:
+        events.append("codex_teardown")
+        row = request_store.get_run(request.id) or {}
+        observed["status_at_teardown"] = row.get("status")
+        observed["metadata_at_teardown"] = row.get("metadata") or {}
+
+    async def _acknowledging_execution(**_kwargs):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("execution_unwind_started")
+            if unwind == "slow_but_cancellable_ack":
+                # Real unwind work — a transport flush, a status stamp — that outlasts
+                # the bounded wait but does not REFUSE the cancel it is given.
+                await asyncio.sleep(30)
+            raise
+
+    service._execute_agent_run = _acknowledging_execution
+
+    # THE HANDLER'S OWN WRITE PATH, observed: reaching
+    # ``_terminalize_cancelled_request`` is what "the execution settled itself" MEANS,
+    # and it is the one fact that stays deterministic in the racy shape below.
+    terminalized: list[str] = []
+    real_terminalize = service._terminalize_cancelled_request
+
+    def _record_terminalize(request_arg, **kwargs):
+        terminalized.append(request_arg.id)
+        return real_terminalize(request_arg, **kwargs)
+
+    service._terminalize_cancelled_request = _record_terminalize
+
+    async def _suppressing_notice_drain():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("notice_drain_unwind_started")
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    continue
+
+    async def _arm():
+        service._spawn_execution(request, None)
+        if unwind == "immediate_ack":
+            # ``stop()`` awaits this BEFORE the executions, so it is what spends the
+            # whole wait while the execution settles itself beside it.
+            service._notice_drain_task = asyncio.ensure_future(_suppressing_notice_drain())
+        await asyncio.sleep(0.05)
+        return service._inflight_executions[request.id]
+
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+    task = asyncio.run_coroutine_threadsafe(_arm(), loop).result(timeout=5)
+
+    controller, manager = _scheduler_shutdown_harness(
+        service, request_store, loop, on_codex_teardown=_at_codex_teardown
+    )
+
+    # THE CONVERGENCE, OBSERVED RATHER THAN INFERRED: wrapped so the test can see what
+    # it found rather than guess from a row both writers would have written the same
+    # way. It must run (the stop DID time out) and it must find nothing to do.
+    real_converge = controller._converge_abandoned_scheduler_stop
+
+    def _spy(run_ids):
+        observed["converge_saw"] = {
+            run_id: (request_store.get_run(run_id) or {}).get("status")
+            for run_id in run_ids
+        }
+        observed["converged"] = real_converge(run_ids)
+        return observed["converged"]
+
+    controller._converge_abandoned_scheduler_stop = _spy
+
+    try:
+        Controller.cleanup_sync(controller)
+    finally:
+        if not task.done():
+            loop.call_soon_threadsafe(task.cancel)
+        asyncio.run_coroutine_threadsafe(
+            asyncio.wait([task], timeout=0.5), loop
+        ).result(timeout=5)
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=5)
+        loop.close()
+
+    # (1) The stop really was abandoned — otherwise this pins nothing.
+    assert "converged" in observed, "the scheduler stop's convergence never ran"
+    # (2) THE PROPERTY: the execution reached its OWN terminalizing handler. The
+    # abandoned stop did not un-cancel it, and the cancellation was not requeued
+    # (HFR-101).
+    assert terminalized == [request.id]
+    assert "execution_unwind_started" in events
+    # (3) ...and the row was terminal, with the cause ``_begin_stop`` recorded for it,
+    # by the time the backend teardown ran.
+    assert observed["status_at_teardown"] == "failed"
+    assert observed["metadata_at_teardown"].get("interrupt_reason") == "restarted"
+    notice = observed["metadata_at_teardown"]["owed_failure_notice"]
+    assert notice["state"] == "pending"
+    assert notice["failure_id"] == f"interrupt:{request.id}:restarted"
+    assert events.index("execution_unwind_started") < events.index("codex_teardown")
+    # (4) The outcome is the same whichever writer won, which is the idempotence claim
+    # stated as an observation: both write through the ``queued|running``-scoped guarded
+    # path, so the loser cannot take the row back or restate its cause.
+    final = request_store.get_run(request.id)
+    assert final["status"] == "failed"
+    assert final["metadata"]["interrupt_reason"] == "restarted"
+    if unwind == "immediate_ack":
+        # DETERMINISTIC HERE, and the sharper half of the pin: the execution
+        # acknowledged at the top of ``stop()`` and settled itself a whole bounded wait
+        # before the deadline, so the convergence found an already-terminal row and did
+        # nothing. The backstop does not duplicate the handler's work.
+        assert observed["converge_saw"] == {request.id: "failed"}
+        assert observed["converged"] == 0
+    else:
+        # A GENUINE RACE, not a weaker assertion: the truncating cancel is delivered on
+        # the loop at the same instant the convergence runs on the cleanup thread, so
+        # either may land the terminal write. Asserting a winner here would be
+        # asserting a scheduling order. What must hold either way is (4) above.
+        assert observed["converged"] in (0, 1)
 
 
 def test_end_idle_branch_does_not_settle_a_turn_owned_by_a_newer_backend(

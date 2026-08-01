@@ -3756,6 +3756,159 @@ class ScheduledTaskService:
             )
         return settled
 
+    def reconcile_abandoned_execution_stop(
+        self,
+        claimed_run_ids: "frozenset[str] | set[str]",
+        *,
+        settled_by: str,
+    ) -> int:
+        """Settle the claimed executions an abandoned ``stop()`` will never settle.
+
+        :meth:`stop` cancels every ``_inflight_executions`` task and then awaits each
+        one, so the terminal row each cancellation owes has landed before it returns.
+        ``cleanup_sync`` runs that coroutine under a bounded wait and ABANDONS it on
+        expiry (HFR-342), which is safe for an execution that acknowledges its cancel —
+        the cancels ``_begin_stop`` issued are independent of the stop, and
+        ``_execute_claimed_request``'s handler terminalizes the claim wherever the loop
+        next drives it. It is NOT safe for an unwind that suppresses its cancel: that
+        handler is never reached, and without this pass the row stays ``running`` while
+        the process dismantles its backends and closes the loop (HFR-346).
+
+        RUN-ID-SCOPED, deliberately not :meth:`reconcile_session_teardown`. That method
+        starts from a session id and intersects three legs; the drain lane's debt is a
+        set of CLAIMS, and a claimed run may carry no ``session_id`` at all — a
+        ``create_per_run`` request whose reservation never landed, or one enqueued
+        against a session key that never resolved. Such a row is invisible to every
+        session-keyed query, and it is exactly the row with nobody else to settle it.
+        What the two share is the ownership premise: this only ever touches ids the
+        caller PROVED this process was executing, snapshotted before the cancels erased
+        the map, so it can never terminalize a run another process owns.
+
+        THE EXCLUSIONS ARE THE TEARDOWN RECONCILER'S, restated for a run-id snapshot
+        and each verified against what the drain lane can actually hold:
+
+        - non-``running`` rows. A claim that was requeued (the gate-parked
+          ``workbench_queue_holds_run`` follower is requeued to ``queued`` by the
+          execution itself) is FUTURE work, and one already terminal is somebody
+          else's outcome to keep.
+        - ``watch_runtime`` rows: the waiter-process heartbeat. It cannot reach this
+          set — those rows are written by ``write_watch_runtime``, never enqueued as a
+          request — and the check is kept anyway because this reads rows back from the
+          DB and one comparison is cheaper than an assertion about a row class.
+        - rows carrying a deferred terminal intent: the Activity lifecycle owns their
+          terminal state and the intent already records the cause it will settle as, so
+          re-parking one here would overwrite that record with a coarser ``restarted``.
+        - the ``workbench_queue_holds_run`` metadata marker, for the same reason the
+          teardown reconciler honours it: ``running`` there means "accepted, not yet
+          started", so no prompt was sent and there is nothing to interrupt.
+
+        THE WRITE IS THE ONE THE CANCELLED HANDLER WOULD HAVE MADE.
+        :meth:`_terminalize_cancelled_request` routes each owned run through
+        :meth:`_park_or_settle_run`, and so does this: the DEFER/SETTLE pair, never
+        ``update_run_status``, with status and copy from ``core.run_settlement``'s
+        tables and ``interrupt_reason`` folded into the same guarded UPDATE that stamps
+        the owed notice. Park-or-settle is what keeps a row a background Activity still
+        owns from being terminalized early (HFR-127/325).
+
+        Coalesced siblings are NOT reconstructed here. They live on the in-memory
+        request the execution is holding, which this snapshot (a set of ids) cannot
+        reach; the sibling rows share the claim's ``session_id``, so the manager lane's
+        session-scoped convergence and the staleness sweep remain their backstop.
+
+        IDEMPOTENT: every writer on this path is scoped to ``queued|running``, so the
+        abandoned execution settling itself concurrently is a race with no loser — the
+        first write wins and the second no-ops.
+
+        Returns how many rows this pass terminalized (a parked intent is not counted:
+        nothing terminal was written).
+        """
+
+        owned = sorted({str(run_id) for run_id in claimed_run_ids if run_id})
+        if not owned:
+            return 0
+        if not self.request_store.supports_guarded_settlement():
+            # The legacy file store has no guarded writer and no deferred lane, so
+            # there is no safe way to converge from a bare id: ``complete()`` needs the
+            # request object this snapshot does not carry.
+            logger.debug(
+                "Abandoned scheduler stop: store has no guarded settlement, leaving "
+                "%d claimed run(s) to restart recovery",
+                len(owned),
+            )
+            return 0
+        terminal_status = SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed")
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(
+                settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_INTERRUPTED]
+            )
+        )
+        metadata = (
+            {"interrupt_reason": settled_by} if terminal_status != "canceled" else None
+        )
+        settled = 0
+        withheld = 0
+        for run_id in owned:
+            try:
+                row = self.request_store.get_run(run_id)
+            except Exception:
+                logger.warning(
+                    "Abandoned scheduler stop could not read claimed run %s",
+                    run_id,
+                    exc_info=True,
+                )
+                continue
+            if not row:
+                continue
+            if str(row.get("status") or "") != "running":
+                continue
+            if str(row.get("run_type") or "") == "watch_runtime":
+                continue
+            result_payload = row.get("result_payload")
+            if isinstance(result_payload, dict) and result_payload.get(
+                "deferred_terminal_status"
+            ):
+                continue
+            row_metadata = row.get("metadata")
+            if isinstance(row_metadata, dict) and row_metadata.get(
+                "workbench_queue_holds_run"
+            ):
+                continue
+            try:
+                if self._park_or_settle_run(
+                    run_id,
+                    terminal_status=terminal_status,
+                    error=error_text,
+                    metadata=metadata,
+                ):
+                    settled += 1
+                else:
+                    # The terminal write was WITHHELD, which has two causes and the
+                    # counter deliberately does not guess between them: a background
+                    # Activity still owns the row (the intent is parked and its
+                    # lifecycle will apply it), or the execution's own handler settled
+                    # it in the microseconds since the read above — first writer wins,
+                    # and the loser recording "already done" is the correct outcome.
+                    withheld += 1
+            except Exception:
+                logger.warning(
+                    "Abandoned scheduler stop failed to settle claimed run %s as %s",
+                    run_id,
+                    settled_by,
+                    exc_info=True,
+                )
+                continue
+        if settled or withheld:
+            self._drain_dirty = True
+            logger.warning(
+                "Abandoned scheduler stop reconciled %d claimed run(s) as %s (%s); %d "
+                "kept a parked intent or were already settled by another writer",
+                settled,
+                terminal_status,
+                settled_by,
+                withheld,
+            )
+        return settled
+
     async def teardown_session_runs(
         self,
         session_id: str,
