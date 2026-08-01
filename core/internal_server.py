@@ -150,8 +150,11 @@ def create_app(controller: "Controller") -> FastAPI:
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
         dedupe_key = f"avibe:{native_message_id}" if native_message_id else None
         delivery_id: str | None = None
+        delivery_request: DeliveryRequest | None = None
+        scope_id: str | None = None
         queue_owner_transferred = False
         target_was_busy = False
+        effective_delivery_intent = delivery_intent
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
         ).strip()
@@ -174,7 +177,12 @@ def create_app(controller: "Controller") -> FastAPI:
                     native_message_id=native_message_id,
                 )
             )
-            if existing is not None or legacy_accepted:
+            if existing is not None and (
+                existing["session_id"] != session_id
+                or existing["state"] != "reserved"
+            ):
+                return "duplicate"
+            if legacy_accepted:
                 return "duplicate"
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
@@ -182,46 +190,70 @@ def create_app(controller: "Controller") -> FastAPI:
             if status != "active":
                 raise ValueError("Session is archived")
             target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
-            scope_id = _scope_id_for_session(conn, session_id)
-            delivery_id = message_deliveries.new_delivery_id()
-            admitted_state = (
-                "queued"
-                if target_was_busy and delivery_intent != "send_now"
-                else "reserved"
-            )
-            message_deliveries.insert_delivery(
-                conn,
-                delivery_id=delivery_id,
-                session_id=session_id,
-                priority="p0" if delivery_intent == "send_now" else "p3",
-                state=admitted_state,
-                snapshot=message_deliveries.message_snapshot(
-                    scope_id=scope_id,
+            if existing is not None:
+                delivery_id = str(existing["id"])
+                delivery_request = manager._request_from_delivery(existing)
+                scope_id = delivery_request.scope_id
+                effective_delivery_intent = (
+                    "send_now" if delivery_request.priority == "p0" else "queue"
+                )
+                provenance = (delivery_request.metadata or {}).get(
+                    SCHEDULED_PROVENANCE_KEY
+                )
+                persisted_spec = (
+                    provenance.get("platform_specific")
+                    if isinstance(provenance, dict)
+                    else None
+                )
+                if isinstance(persisted_spec, dict):
+                    execution_id = str(
+                        persisted_spec.get("task_execution_id") or execution_id
+                    ).strip()
+            else:
+                scope_id = _scope_id_for_session(conn, session_id)
+                delivery_id = message_deliveries.new_delivery_id()
+                admitted_state = (
+                    "queued"
+                    if target_was_busy and delivery_intent != "send_now"
+                    else "reserved"
+                )
+                message_deliveries.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
                     session_id=session_id,
-                    platform="avibe",
-                    author="harness",
-                    source="harness",
-                    message_type="harness",
-                    text=text,
-                    metadata={
-                        SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
+                    priority="p0" if delivery_intent == "send_now" else "p3",
+                    state=admitted_state,
+                    snapshot=message_deliveries.message_snapshot(
+                        scope_id=scope_id,
+                        session_id=session_id,
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type="harness",
+                        text=text,
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                                context
+                            )
+                        },
+                        native_message_id=native_message_id or None,
+                    ),
+                    dispatch_text=text,
+                    dedupe_key=dedupe_key,
+                    history_event={
+                        "kind": "admission",
+                        "priority": "p0" if delivery_intent == "send_now" else "p3",
+                        "state": admitted_state,
                     },
-                    native_message_id=native_message_id or None,
-                ),
-                dispatch_text=text,
-                dedupe_key=dedupe_key,
-                history_event={
-                    "kind": "admission",
-                    "priority": "p0" if delivery_intent == "send_now" else "p3",
-                    "state": admitted_state,
-                },
-            )
-            if execution_id and (delivery_intent == "send_now" or target_was_busy):
+                )
+            if execution_id and (
+                effective_delivery_intent == "send_now" or target_was_busy
+            ):
                 if not hold_running_agent_run_for_workbench_in_connection(
                     conn,
                     execution_id,
                     delivery_outcome={
-                        "intent": delivery_intent,
+                        "intent": effective_delivery_intent,
                         "status": "admitted",
                         "target_was_busy": target_was_busy,
                     },
@@ -241,21 +273,8 @@ def create_app(controller: "Controller") -> FastAPI:
                     raise RuntimeError("Agent Run queue ownership transfer was refused")
                 queue_owner_transferred = True
 
-        if context.platform_specific is None:
-            context.platform_specific = {}
-        context.platform_specific.update(
-            {
-                "delivery_id": delivery_id,
-                "native_message_id": native_message_id or None,
-                "scope_id": scope_id,
-                "display_text": text,
-                "message_metadata": {
-                    SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
-                },
-            }
-        )
-        result = await manager.deliver(
-            DeliveryRequest(
+        if delivery_request is None:
+            delivery_request = DeliveryRequest(
                 session_id=session_id,
                 priority="p0" if delivery_intent == "send_now" else "p3",
                 content=text,
@@ -265,9 +284,25 @@ def create_app(controller: "Controller") -> FastAPI:
                 author="harness",
                 message_type="harness",
                 display_text=text,
-                metadata=context.platform_specific["message_metadata"],
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
+                },
                 native_message_id=native_message_id or None,
-            ),
+            )
+
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific.update(
+            {
+                "delivery_id": delivery_id,
+                "native_message_id": delivery_request.native_message_id,
+                "scope_id": scope_id,
+                "display_text": delivery_request.display_text,
+                "message_metadata": dict(delivery_request.metadata or {}),
+            }
+        )
+        result = await manager.deliver(
+            delivery_request,
             context=context,
         )
         route = "enqueued" if result.state in {
@@ -281,10 +316,12 @@ def create_app(controller: "Controller") -> FastAPI:
             route=route,
             queue_persisted=True,
             target_was_busy=target_was_busy,
-            delivery_status=result.state if delivery_intent == "send_now" else None,
+            delivery_status=(
+                result.state if effective_delivery_intent == "send_now" else None
+            ),
             queue_owner_transferred=queue_owner_transferred,
         )
-        if delivery_intent == "send_now":
+        if effective_delivery_intent == "send_now":
             with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
                 if not record_agent_run_delivery_outcome_in_connection(
                     conn,

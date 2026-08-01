@@ -4022,6 +4022,167 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
     assert [row["text"] for row in queued] == ["first"]
 
 
+def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tmp_path):
+    """A retry resumes a pre-claim reservation instead of completing as duplicate."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_sched_reserved_retry",
+    )
+    session_id = session["id"]
+    dispatched: list[str] = []
+
+    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        dispatched.append(text)
+        _bind_test_native_start(engine, ctx)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _accept_dispatch)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    submit_scheduled = controller.session_turn_gate.submit_scheduled
+    resolve_backend = manager._delivery_backend
+    fail_before_claim = True
+
+    def _resolve_backend(session_id, context):
+        nonlocal fail_before_claim
+        if fail_before_claim:
+            fail_before_claim = False
+            raise RuntimeError("backend temporarily unresolved")
+        return resolve_backend(session_id, context)
+
+    monkeypatch.setattr(manager, "_delivery_backend", _resolve_backend)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="watch:def-watch:reserved-retry",
+        platform_specific={
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_trigger_kind": "watch",
+            "task_definition_id": "def-watch",
+        },
+    )
+
+    async def _go():
+        with pytest.raises(RuntimeError, match="temporarily unresolved"):
+            await submit_scheduled(session_id, ctx, "original prompt")
+        with engine.connect() as conn:
+            reserved = message_deliveries.get_delivery_by_dedupe(
+                conn,
+                "avibe:watch:def-watch:reserved-retry",
+            )
+            assert reserved is not None
+            assert reserved["state"] == "reserved"
+
+        resumed = await submit_scheduled(
+            session_id,
+            ctx,
+            "changed retry payload",
+        )
+        duplicate = await submit_scheduled(session_id, ctx, "duplicate")
+        return resumed, duplicate, reserved["id"]
+
+    resumed, duplicate, delivery_id = asyncio.run(_go())
+    assert (resumed, duplicate) == ("ran", "duplicate")
+    assert dispatched == ["original prompt"]
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, delivery_id)
+        assert delivery is not None
+        assert delivery["state"] == "accepted"
+        assert delivery["message_id"] == delivery_id
+
+
+def test_scheduled_send_now_retry_resumes_transferred_reservation(monkeypatch, tmp_path):
+    """A pre-claim retry reuses both the reserved Delivery and held Agent Run."""
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_sched_send_now_reserved_retry",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="original send-now prompt",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    assert request_store.claim(run.id) is not None
+    dispatched: list[str] = []
+
+    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        dispatched.append(text)
+        _bind_test_native_start(engine, ctx)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _accept_dispatch)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    submit_scheduled = controller.session_turn_gate.submit_scheduled
+    resolve_backend = manager._delivery_backend
+    fail_before_claim = True
+
+    def _resolve_backend(session_id, context):
+        nonlocal fail_before_claim
+        if fail_before_claim:
+            fail_before_claim = False
+            raise RuntimeError("backend temporarily unresolved")
+        return resolve_backend(session_id, context)
+
+    monkeypatch.setattr(manager, "_delivery_backend", _resolve_backend)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{run.id}",
+        platform_specific={
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        with pytest.raises(RuntimeError, match="temporarily unresolved"):
+            await submit_scheduled(
+                session_id,
+                ctx,
+                "original send-now prompt",
+                delivery_intent="send_now",
+            )
+        held = request_store.get_run(run.id)
+        assert held is not None
+        assert held["status"] == "queued"
+        assert held["metadata"]["workbench_queue_holds_run"] is True
+
+        resumed = await submit_scheduled(
+            session_id,
+            ctx,
+            "changed retry payload",
+            delivery_intent="send_now",
+        )
+        duplicate = await submit_scheduled(
+            session_id,
+            ctx,
+            "duplicate",
+            delivery_intent="send_now",
+        )
+        return resumed, duplicate
+
+    resumed, duplicate = asyncio.run(_go())
+    assert isinstance(resumed, session_turns.TurnSubmissionResult)
+    assert resumed.route == "ran"
+    assert duplicate == "duplicate"
+    assert dispatched == ["original send-now prompt"]
+
+
 def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     """Stop works for a scheduled run: because the run goes through ``_run_turn``
     it registers the scheduled ``context`` in ``in_flight``, so

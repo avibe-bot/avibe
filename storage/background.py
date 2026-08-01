@@ -1783,7 +1783,9 @@ def hold_running_agent_run_for_workbench_in_connection(
 
     The caller persists the matching queued message in the same write
     transaction. The queue row therefore cannot become flushable while the
-    scheduler still owns the Run as ``running``.
+    scheduler still owns the Run as ``running``. Re-entering the exact durable
+    admission after a pre-claim failure is idempotent when this Run is already
+    queued under Workbench ownership.
     """
 
     normalized_run_id = str(run_id or "").strip()
@@ -1799,6 +1801,12 @@ def hold_running_agent_run_for_workbench_in_connection(
     metadata = _json_loads(row["metadata_json"], {})
     if not isinstance(metadata, dict):
         metadata = {}
+    if (
+        normalize_run_status(row["status"]) == "queued"
+        and not bool(row["cancel_requested"])
+        and metadata.get("workbench_queue_holds_run") is True
+    ):
+        return True
     metadata["workbench_queue_holds_run"] = True
     if delivery_outcome is not None:
         metadata["delivery_outcome"] = dict(delivery_outcome)
