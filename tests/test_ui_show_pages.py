@@ -4989,13 +4989,26 @@ def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
     assert manager.status()["reason"] == "runtime_manifest_missing"
 
 
-def test_show_runtime_manager_defaults_to_manifest_provider(tmp_path):
+def test_show_runtime_manager_defaults_to_manifest_provider_outside_development_checkout(monkeypatch, tmp_path):
+    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: False)
+    monkeypatch.setattr("core.show_runtime._running_from_development_checkout", lambda: False)
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
     )
 
     assert manager.runtime_source == "manifest-cache"
+
+
+def test_show_runtime_manager_uses_github_source_in_development_checkout_without_manifest(monkeypatch, tmp_path):
+    monkeypatch.setattr("core.show_runtime._packaged_runtime_manifest_exists", lambda: False)
+    monkeypatch.setattr("core.show_runtime._running_from_development_checkout", lambda: True)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    assert manager.runtime_source == "github"
 
 
 def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path):

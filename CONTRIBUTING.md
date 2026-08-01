@@ -10,7 +10,9 @@ Thanks for your interest in contributing!
 
 ## Development
 
-- Run locally: `python main.py`
+- Run locally: `python main.py`. A source checkout without a packaged Show
+  Runtime manifest uses the GitHub source provider for development; installed
+  wheels still require their pinned manifest.
 - Build an installable local wheel: build `ui/`, run
   `python scripts/prepare_local_show_runtime_manifest.py`, then run
   `uv build --wheel`. The preparation step inherits the latest official

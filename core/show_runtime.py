@@ -109,6 +109,14 @@ class ShowRuntimeManager:
         source_value = runtime_source or os.environ.get("VIBE_SHOW_RUNTIME_SOURCE")
         if source_value is None and (archive_path_value or archive_url is not None or archive_url_env):
             source_value = _RUNTIME_SOURCE_ARCHIVE
+        if (
+            source_value is None
+            and not self.manifest_path
+            and not self.manifest_url
+            and not _packaged_runtime_manifest_exists()
+            and _running_from_development_checkout()
+        ):
+            source_value = _RUNTIME_SOURCE_GITHUB
         self.auto_install = _auto_install_enabled() if auto_install is None else auto_install
         self.package_spec = package_spec or os.environ.get("VIBE_SHOW_RUNTIME_PACKAGE_SPEC") or _RUNTIME_PACKAGE
         self.runtime_source = _normalize_runtime_source(source_value)
@@ -1431,6 +1439,19 @@ def _env_flag_enabled(name: str, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in _FALSE_VALUES
+
+
+def _packaged_runtime_manifest_exists() -> bool:
+    try:
+        resource = package_resources.files("vibe").joinpath(_RUNTIME_MANIFEST_RESOURCE)
+    except Exception:
+        return False
+    return resource.is_file()
+
+
+def _running_from_development_checkout() -> bool:
+    source_root = Path(__file__).resolve().parents[1]
+    return (source_root / "pyproject.toml").is_file() and (source_root / "main.py").is_file()
 
 
 def _normalize_runtime_source(value: str | None) -> str:
