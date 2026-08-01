@@ -623,6 +623,28 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
 
     from storage.models import agent_events, messages, session_turns
 
+    active_initial = conn.execute(
+        select(messages.c.id, messages.c.author, messages.c.type)
+        .select_from(
+            session_turns.join(
+                messages,
+                messages.c.id == session_turns.c.initial_delivery_id,
+            )
+        )
+        .where(
+            session_turns.c.session_id == source_session_id,
+            session_turns.c.state.in_(("starting", "active")),
+        )
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    if active_initial is not None:
+        return SourceMessageAnchor(
+            message_id=str(active_initial["id"]),
+            author=str(active_initial["author"] or "").strip() or None,
+            message_type=str(active_initial["type"] or "").strip() or None,
+        )
+
     row = conn.execute(
         select(messages.c.id, messages.c.author, messages.c.type, messages.c.created_at)
         .where(

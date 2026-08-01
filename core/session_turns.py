@@ -323,6 +323,12 @@ class SessionTurnManager:
         if not isinstance(spec, dict):
             return set()
         found: set[str] = set()
+        accepted_ids = spec.get("accepted_agent_run_ids")
+        if isinstance(accepted_ids, list):
+            for value in accepted_ids:
+                execution_id = str(value or "").strip()
+                if execution_id:
+                    found.add(execution_id)
         primary = str(spec.get("task_execution_id") or "").strip()
         if primary:
             found.add(primary)
@@ -334,6 +340,31 @@ class SessionTurnManager:
                 if execution_id:
                     found.add(execution_id)
         return found
+
+    def _settle_agent_run_ids(
+        self,
+        run_ids: set[str] | list[str],
+        settled_by: Optional[str],
+    ) -> None:
+        if settled_by not in SETTLEMENTS_WITHOUT_RESULT or not run_ids:
+            return
+        normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        if not normalized:
+            return
+        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
+        settle = getattr(service, "settle_agent_runs_without_result", None)
+        if not callable(settle):
+            logger.debug("turn settlement: no harness settlement writer available")
+            return
+        try:
+            settle(normalized, settled_by=settled_by)
+        except Exception:
+            logger.warning(
+                "turn settlement: failed to settle runs %s as %s",
+                normalized,
+                settled_by,
+                exc_info=True,
+            )
 
     def _settle_turn_owned_agent_runs(self, context: "MessageContext", settled_by: Optional[str]) -> None:
         """Settle the ``agent_runs`` rows this turn owned when no result arrived.
@@ -359,30 +390,51 @@ class SessionTurnManager:
         terminal result is safe in both directions.
         """
 
-        if settled_by not in SETTLEMENTS_WITHOUT_RESULT:
-            return
         run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        self._settle_agent_run_ids(run_ids, settled_by)
+
+    @staticmethod
+    def _append_accepted_agent_run_ids(spec: dict[str, Any], run_ids: list[str]) -> None:
+        accepted = spec.get("accepted_agent_run_ids")
+        values = list(accepted) if isinstance(accepted, list) else []
+        for run_id in run_ids:
+            normalized = str(run_id or "").strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+        if values:
+            spec["accepted_agent_run_ids"] = values
+
+    def _attach_accepted_agent_runs(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        run_ids: list[str],
+        context: Optional["MessageContext"],
+    ) -> None:
         if not run_ids:
             return
-        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
-        settle = getattr(service, "settle_agent_runs_without_result", None)
-        if not callable(settle):
-            # A fake/partial controller (tests, a boot window before the service
-            # exists). The sweep remains the backstop; guessing is not an option.
-            logger.debug("turn settlement: no harness settlement writer available")
-            return
-        try:
-            settle(sorted(run_ids), settled_by=settled_by)
-        except Exception:
-            logger.warning(
-                "turn settlement: failed to settle runs %s as %s",
-                sorted(run_ids),
-                settled_by,
-                exc_info=True,
+        projected = self.in_flight.get(session_id)
+        if projected is not None and projected.logical_turn_id == turn_id:
+            if projected.context.platform_specific is None:
+                projected.context.platform_specific = {}
+            self._append_accepted_agent_run_ids(
+                projected.context.platform_specific,
+                run_ids,
             )
+        context_token = str(
+            ((getattr(context, "platform_specific", None) or {}).get("turn_token") or "")
+        )
+        if context is not None and context_token == turn_id:
+            if context.platform_specific is None:
+                context.platform_specific = {}
+            self._append_accepted_agent_run_ids(context.platform_specific, run_ids)
+        for sink in self.active_turn_sinks.values():
+            if str(sink.get("turn_token") or "") == turn_id:
+                self._append_accepted_agent_run_ids(sink, run_ids)
 
     def owned_agent_run_ids(self) -> set[str]:
-        """Run ids a live turn in THIS process is currently executing.
+        """Run ids currently owned by a live process-local or durable Turn.
 
         The staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.1) needs
         to know which ``running`` rows still have an owner before it declares any of
@@ -396,7 +448,8 @@ class SessionTurnManager:
         A coalesced turn owns EVERY id it is settling, not just the primary, or the
         sweep would fail the siblings out from under a live flush.
 
-        Live streaming sinks are unioned in as well. They carry the same attribution
+        Durable accepted Deliveries keep ownership visible across restart. Live
+        streaming sinks are unioned in as well. They carry the same attribution
         and are registered/popped on a different boundary than ``in_flight``, so a run
         visible through either one is owned. Over-reporting an owner only delays a
         sweep; under-reporting one fails a live run.
@@ -410,7 +463,29 @@ class SessionTurnManager:
             owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
         for sink in list(self.active_turn_sinks.values()):
             owned |= self._agent_run_ids_from_spec(sink)
+        if self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                turn_ids = conn.execute(
+                    select(session_turn_rows.c.id).where(
+                        session_turn_rows.c.state.in_(delivery_store.TURN_OWNER_STATES)
+                    )
+                ).scalars()
+                for turn_id in turn_ids:
+                    owned.update(
+                        delivery_store.accepted_agent_run_ids_for_turn(
+                            conn,
+                            str(turn_id),
+                        )
+                    )
         return owned
+
+    def accepted_agent_run_ids_for_turn(self, turn_id: str) -> list[str]:
+        """Read restart-stable Run attribution for one exact logical Turn."""
+
+        if not turn_id or not self._durable_schema_available():
+            return []
+        with self._sqlite_engine().connect() as conn:
+            return delivery_store.accepted_agent_run_ids_for_turn(conn, turn_id)
 
     def busy_session_ids(self) -> set[str]:
         """Sessions whose gate is occupied by a live turn RIGHT NOW.
@@ -1228,6 +1303,8 @@ class SessionTurnManager:
         start_turn_id: str | None = None
         materialized = False
         saved: dict[str, Any] | None = None
+        accepted_run_ids: list[str] = []
+        session_id = ""
         try:
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
@@ -1240,7 +1317,37 @@ class SessionTurnManager:
                         reason="missing_delivery",
                     )
                 target_turn_id = str(delivery.get("current_target_turn_id") or "")
+                session_id = str(delivery["session_id"])
                 if outcome_value == SteerOutcome.ACCEPTED.value:
+                    accepted_run_ids = delivery_store.agent_run_ids_for_delivery(
+                        conn,
+                        delivery,
+                    )
+                    if accepted_run_ids:
+                        from storage.background import (
+                            claim_queued_runs_for_workbench_in_connection,
+                        )
+
+                        run_statuses = {
+                            str(row["id"]): normalize_run_status(row["status"])
+                            for row in conn.execute(
+                                select(agent_runs.c.id, agent_runs.c.status).where(
+                                    agent_runs.c.id.in_(accepted_run_ids)
+                                )
+                            ).mappings()
+                        }
+                        queued_ids = [
+                            run_id
+                            for run_id in accepted_run_ids
+                            if run_statuses.get(run_id) == "queued"
+                        ]
+                        if queued_ids and (
+                            claim_queued_runs_for_workbench_in_connection(conn, queued_ids)
+                            != queued_ids
+                        ):
+                            raise RuntimeError(
+                                "accepted steer could not claim its queued Agent Runs"
+                            )
                     saved = delivery_store.materialize_acceptance(
                         conn,
                         delivery_id=delivery_id,
@@ -1338,6 +1445,12 @@ class SessionTurnManager:
             )
 
         if materialized:
+            self._attach_accepted_agent_runs(
+                session_id=session_id,
+                turn_id=target_turn_id,
+                run_ids=accepted_run_ids,
+                context=context,
+            )
             self._publish_materialized_delivery(delivery_id)
             return DeliveryResult(delivery_id, delivery_id, "accepted", target_turn_id or None)
         if start_turn_id:
@@ -2067,6 +2180,7 @@ class SessionTurnManager:
             }
         result: dict[str, Any]
         materialized_id: str | None = None
+        terminal_run_ids: list[str] = []
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
@@ -2260,6 +2374,12 @@ class SessionTurnManager:
                         "delivery_id": materialized_id,
                         "preserve_queue": delivery_store.queue_is_held(conn, session_id),
                     }
+                    terminal_run_ids = delivery_store.accepted_agent_run_ids_for_turn(
+                        conn,
+                        turn_id,
+                    )
+        if result.get("changed"):
+            self._settle_agent_run_ids(terminal_run_ids, settled_by)
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
@@ -3219,17 +3339,18 @@ class SessionTurnManager:
                     backend_alive = probe(entry.context)
                 except Exception:
                     logger.debug("turn_state: backend liveness probe failed", exc_info=True)
-            coalesced = payload.get("coalesced_queue")
-            owner_run_ids = (
-                [str(value) for value in coalesced.get("execution_ids", []) if str(value or "").strip()]
-                if isinstance(coalesced, dict) and isinstance(coalesced.get("execution_ids"), list)
-                else []
-            )
+            owner_run_ids = sorted(self._agent_run_ids_from_spec(payload))
             owner_run_id = str(payload.get("task_execution_id") or "").strip()
             if owner_run_id and owner_run_id not in owner_run_ids:
                 owner_run_ids.insert(0, owner_run_id)
+            if not owner_run_id and owner_run_ids:
+                owner_run_id = owner_run_ids[0]
             owner = {
-                "source": str(payload.get("task_trigger_kind") or payload.get("turn_source") or "human"),
+                "source": str(
+                    payload.get("task_trigger_kind")
+                    or payload.get("turn_source")
+                    or ("agent_run" if payload.get("accepted_agent_run_ids") else "human")
+                ),
                 "acquired_at": entry.started_at or None,
                 "run_id": owner_run_id or None,
                 "run_ids": owner_run_ids,
@@ -3272,6 +3393,12 @@ class SessionTurnManager:
                             else {}
                         )
                         owner_run_ids = sorted(self._agent_run_ids_from_spec(restored_spec))
+                        for run_id in delivery_store.accepted_agent_run_ids_for_turn(
+                            conn,
+                            str(durable_turn["id"]),
+                        ):
+                            if run_id not in owner_run_ids:
+                                owner_run_ids.append(run_id)
                         native_message_id = str(record.get("native_message_id") or "")
                         if native_message_id.startswith("agent_run:"):
                             native_run_id = native_message_id.removeprefix("agent_run:")
@@ -4067,6 +4194,9 @@ class SessionTurnManager:
             identity["coalesced_queue"] = copied_queue
         elif coalesced_queue is not None:
             identity["coalesced_queue"] = coalesced_queue
+        accepted_run_ids = spec.get("accepted_agent_run_ids")
+        if isinstance(accepted_run_ids, list):
+            identity["accepted_agent_run_ids"] = list(accepted_run_ids)
         return identity
 
     def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None, context=None) -> None:
@@ -4152,7 +4282,12 @@ class SessionTurnManager:
         ):
             return None
         token = sink.get("turn_token")
-        attribution_keys = ("task_trigger_kind", "task_execution_id", "coalesced_queue")
+        attribution_keys = (
+            "task_trigger_kind",
+            "task_execution_id",
+            "coalesced_queue",
+            "accepted_agent_run_ids",
+        )
         if token or any(key in sink for key in attribution_keys):
             if context.platform_specific is None:
                 context.platform_specific = {}
@@ -4168,6 +4303,8 @@ class SessionTurnManager:
                 if isinstance(execution_ids, list):
                     copied_value["execution_ids"] = list(execution_ids)
                 value = copied_value
+            elif isinstance(value, list):
+                value = list(value)
             context.platform_specific[key] = value
         return {
             "session_key": session_key,

@@ -59,6 +59,21 @@ def _coalesced_task_execution_ids(payload: dict[str, Any]) -> list[str]:
     return run_ids
 
 
+def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
+    run_ids: list[str] = []
+    accepted = payload.get("accepted_agent_run_ids")
+    if isinstance(accepted, list):
+        for value in accepted:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+    if payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
+        for run_id in _coalesced_task_execution_ids(payload):
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+    return run_ids
+
+
 def _run_is_cancelled(run: Any) -> bool:
     if not isinstance(run, dict):
         return False
@@ -1031,6 +1046,15 @@ class ConsolidatedMessageDispatcher:
     ) -> None:
         payload = context.platform_specific or {}
         run_ids = _coalesced_task_execution_ids(payload)
+        accepted_run_ids = payload.get("accepted_agent_run_ids")
+        if isinstance(accepted_run_ids, list):
+            for value in accepted_run_ids:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        for run_id in self._durable_accepted_agent_run_ids(context):
+            if run_id not in run_ids:
+                run_ids.append(run_id)
         if not run_ids:
             return
         store = None
@@ -1152,8 +1176,11 @@ class ConsolidatedMessageDispatcher:
                 run_id = str(value or "").strip()
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-        if not run_ids and payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
-            run_ids = _coalesced_task_execution_ids(payload)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(payload)
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
         if not run_ids:
             return
         terminal_status = None
@@ -1179,6 +1206,25 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
+
+    def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        if not turn_id:
+            return []
+        manager = getattr(self.controller, "session_turns", None)
+        read = getattr(manager, "accepted_agent_run_ids_for_turn", None)
+        if not callable(read):
+            return []
+        try:
+            return list(read(turn_id))
+        except Exception:
+            logger.warning(
+                "Failed to read durable Agent Run attribution for Turn %s",
+                turn_id,
+                exc_info=True,
+            )
+            return []
+
     def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,

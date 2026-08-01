@@ -1579,6 +1579,83 @@ def test_not_written_successor_does_not_mask_accepted_source_turn(tmp_path: Path
     assert completed.fork.trim_latest_running_turn is False
 
 
+def test_fork_anchor_uses_active_turn_initial_delivery_before_transcript_order(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous result persisted after the queued submission",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == previous_result["id"])
+                .values(
+                    created_at="2026-08-01T00:02:00Z",
+                    updated_at="2026-08-01T00:02:00Z",
+                )
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="start_attempting",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="queued before the previous result",
+                ),
+                dispatch_text="queued before the previous result",
+                current_attempt_id=attempt_id,
+                current_attempt_kind="start",
+                current_target_turn_id=turn_id,
+                now="2026-08-01T00:01:00Z",
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                initial_delivery_id=delivery_id,
+                state="active",
+                backend="codex",
+                now="2026-08-01T00:03:00Z",
+            )
+            assert message_deliveries.materialize_acceptance(
+                conn,
+                delivery_id=delivery_id,
+                expected_attempt_id=attempt_id,
+                accepted_turn_id=turn_id,
+                evidence={"kind": "delayed_start_acceptance"},
+            ) is not None
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == delivery_id
+    assert result.fork.trim_latest_running_turn is True
+
+
 def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

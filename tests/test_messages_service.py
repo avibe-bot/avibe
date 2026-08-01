@@ -1458,6 +1458,68 @@ def test_inbox_ignores_not_written_successor_as_terminal_evidence(isolated_state
     assert rows[0]["replied"] is True
 
 
+def test_inbox_awaiting_uses_active_accepted_turn_not_submission_order(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_delayed_accept", "Delayed acceptance")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_delayed_accept",
+            "agent",
+            "previous reply",
+            "2026-05-30T10:02:00Z",
+        )
+        delivery_id = "msg_delayed_accept"
+        turn_id = "trn_delayed_accept"
+        attempt_id = "atm_delayed_accept"
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_delayed_accept",
+            priority="p3",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_delayed_accept",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="submitted before the previous turn completed",
+            ),
+            dispatch_text="submitted before the previous turn completed",
+            current_attempt_id=attempt_id,
+            current_attempt_kind="start",
+            current_target_turn_id=turn_id,
+            now="2026-05-30T10:01:00Z",
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_delayed_accept",
+            initial_delivery_id=delivery_id,
+            state="active",
+            backend="codex",
+            now="2026-05-30T10:03:00Z",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id=delivery_id,
+            expected_attempt_id=attempt_id,
+            accepted_turn_id=turn_id,
+            evidence={"kind": "delayed_start_acceptance"},
+        ) is not None
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+
+    assert row["replied"] is True
+
+
 def test_list_session_messages_tail_returns_recent_window(isolated_state):
     """``tail=True`` returns the most-recent ``limit`` rows in chronological
     order (not the oldest page), so the Chat page's gap recovery sees the latest

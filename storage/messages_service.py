@@ -25,6 +25,7 @@ from storage.db import escape_sql_like
 from storage.models import (
     agent_runs,
     agent_sessions,
+    message_deliveries,
     messages,
     scope_settings,
     scopes,
@@ -953,6 +954,18 @@ def list_inbox_sessions(
         "created_at", conversation_only=True, input_turn_only=True
     )
     last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
+    last_input_turn_state = (
+        select(session_turns.c.state)
+        .select_from(
+            message_deliveries.join(
+                session_turns,
+                session_turns.c.id == message_deliveries.c.accepted_turn_id,
+            )
+        )
+        .where(message_deliveries.c.message_id == last_input_id)
+        .limit(1)
+        .scalar_subquery()
+    )
 
     # Unread agent messages per session.
     m = messages
@@ -987,6 +1000,7 @@ def list_inbox_sessions(
             last_turn_terminal_at.label("last_turn_terminal_at"),
             last_input_at.label("last_input_at"),
             last_input_id.label("last_input_id"),
+            last_input_turn_state.label("last_input_turn_state"),
         )
         .select_from(
             agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
@@ -1072,12 +1086,16 @@ def list_inbox_sessions(
             key=lambda candidate: _timestamp_key(candidate[0], candidate[1]),
             default=(None, None),
         )
-        awaiting_reply = bool(
-            last_input_at is not None
-            and terminal_at is not None
-            and _timestamp_key(last_input_at, last_input_id)
-            > _timestamp_key(terminal_at, terminal_id)
-        )
+        accepted_turn_state = str(row["last_input_turn_state"] or "")
+        if accepted_turn_state:
+            awaiting_reply = accepted_turn_state in {"starting", "active"}
+        else:
+            awaiting_reply = bool(
+                last_input_at is not None
+                and terminal_at is not None
+                and _timestamp_key(last_input_at, last_input_id)
+                > _timestamp_key(terminal_at, terminal_id)
+            )
         sessions.append(
             {
                 "session_id": row["session_id"],

@@ -1011,6 +1011,82 @@ def owned_agent_run_id(delivery: dict[str, Any]) -> str | None:
     return run_id or None
 
 
+def _agent_run_ids_from_record(
+    *,
+    native_message_id: Any,
+    metadata_json: Any,
+) -> list[str]:
+    run_ids: list[str] = []
+
+    def _add(value: Any) -> None:
+        run_id = str(value or "").strip()
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+
+    native_id = str(native_message_id or "")
+    if native_id.startswith("agent_run:"):
+        _add(native_id.removeprefix("agent_run:"))
+    metadata = _json_object(metadata_json)
+    provenance = metadata.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        return run_ids
+    _add(provenance.get("task_execution_id"))
+    spec = provenance.get("platform_specific")
+    if not isinstance(spec, dict):
+        return run_ids
+    _add(spec.get("task_execution_id"))
+    coalesced = spec.get("coalesced_queue")
+    execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+    if isinstance(execution_ids, list):
+        for value in execution_ids:
+            _add(value)
+    return run_ids
+
+
+def agent_run_ids_for_delivery(
+    conn: Connection,
+    delivery: dict[str, Any],
+) -> list[str]:
+    """Return the Agent Runs operationally represented by one Delivery."""
+
+    snapshot = _json_object(delivery.get("snapshot_json"))
+    if snapshot:
+        return _agent_run_ids_from_record(
+            native_message_id=snapshot.get("native_message_id"),
+            metadata_json=snapshot.get("metadata_json"),
+        )
+    message_id = str(delivery.get("message_id") or "")
+    if not message_id:
+        return []
+    message = conn.execute(
+        select(messages.c.native_message_id, messages.c.metadata_json).where(
+            messages.c.id == message_id
+        )
+    ).mappings().first()
+    if message is None:
+        return []
+    return _agent_run_ids_from_record(
+        native_message_id=message["native_message_id"],
+        metadata_json=message["metadata_json"],
+    )
+
+
+def accepted_agent_run_ids_for_turn(conn: Connection, turn_id: str) -> list[str]:
+    """Return every accepted Agent Run participant owned by an exact Turn."""
+
+    run_ids: list[str] = []
+    for delivery in deliveries_for_turn(conn, turn_id):
+        if (
+            delivery.get("state") != "accepted"
+            or delivery.get("accepted_turn_id") != turn_id
+        ):
+            continue
+        for run_id in agent_run_ids_for_delivery(conn, delivery):
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+    return run_ids
+
+
 def retire_queued_with_run(
     conn: Connection,
     session_id: str,

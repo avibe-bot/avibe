@@ -3530,6 +3530,94 @@ def test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop(
     assert "stop" not in settled["error"].lower()
 
 
+def test_backend_refresh_settles_restored_durable_agent_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="restored before backend refresh",
+        agent_name="codex",
+    ).id
+    _force_run_columns(request_store, run_id, status="running", started_at=_ago(30))
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = conn.execute(
+            select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+        ).scalar_one()
+        delivery_id = message_deliveries.new_delivery_id()
+        turn_id = message_deliveries.new_turn_id()
+        attempt_id = message_deliveries.new_attempt_id()
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="start_attempting",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="restored before backend refresh",
+                native_message_id=f"agent_run:{run_id}",
+                metadata={
+                    "scheduled_provenance": {
+                        "task_execution_id": run_id,
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                        },
+                    }
+                },
+            ),
+            dispatch_text="restored before backend refresh",
+            current_attempt_id=attempt_id,
+            current_attempt_kind="start",
+            current_target_turn_id=turn_id,
+        )
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            initial_delivery_id=delivery_id,
+            state="active",
+            backend="codex",
+        )
+        assert message_deliveries.materialize_acceptance(
+            conn,
+            delivery_id=delivery_id,
+            expected_attempt_id=attempt_id,
+            accepted_turn_id=turn_id,
+            evidence={"kind": "restored_native_acceptance"},
+        ) is not None
+
+    manager = SessionTurnManager(controller=None)
+    manager._engine = engine
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        set_agent_status=lambda *_args, **_kwargs: None,
+    )
+    assert run_id in manager.owned_agent_run_ids()
+
+    released = asyncio.run(
+        manager.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={session_id},
+        )
+    )
+
+    assert released == 1
+    settled = request_store.get_run(run_id)
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_BACKEND_REFRESH
+
+
 def test_turn_only_result_leaves_an_activity_owned_run_alone(
     tmp_path: Path, monkeypatch
 ) -> None:

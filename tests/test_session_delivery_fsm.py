@@ -313,6 +313,85 @@ def test_two_empty_p1_requests_claim_exact_same_head_only(managers) -> None:
     assert _row(engine, str(results[0].delivery_id))["accepted_turn_id"] in {None, turn_id}
 
 
+@pytest.mark.anyio
+async def test_empty_p1_accepted_agent_run_joins_active_turn_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, active_context = await _activate(manager)
+    holder = asyncio.Event()
+    holder_task = asyncio.create_task(holder.wait())
+    manager.in_flight["ses_fsm"] = Turn(
+        task=holder_task,
+        context=active_context,
+        logical_turn_id=turn_id,
+    )
+    sink_done = asyncio.Event()
+    manager.register_turn_sink(
+        "avibe::ses_fsm",
+        on_chunk=AsyncMock(),
+        done_event=sink_done,
+        turn_token=turn_id,
+        context=active_context,
+    )
+    run_id = "run-steered-fifo-head"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="queued",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                created_at=now,
+                updated_at=now,
+                metadata_json=json.dumps({"workbench_queue_holds_run": True}),
+            )
+        )
+
+    queued = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content="queued Agent Run prompt",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            native_message_id=f"agent_run:{run_id}",
+            metadata={
+                "scheduled_provenance": {
+                    "task_execution_id": run_id,
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": run_id,
+                    },
+                }
+            },
+        ),
+        context=_context(),
+    )
+    assert queued.state == "queued"
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    accepted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p1", content=None),
+        context=_context(),
+    )
+
+    assert accepted.state == "accepted"
+    with engine.connect() as conn:
+        run = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id)).mappings().one()
+    assert run["status"] == "running"
+    assert json.loads(run["metadata_json"])["workbench_queue_holds_run"] is False
+    assert active_context.platform_specific["accepted_agent_run_ids"] == [run_id]
+    assert manager.get_turn_sink("avibe::ses_fsm")["accepted_agent_run_ids"] == [run_id]
+
+    manager.in_flight.pop("ses_fsm", None)
+    manager.pop_turn_sink("avibe::ses_fsm", sink_done)
+    holder_task.cancel()
+    await asyncio.gather(holder_task, return_exceptions=True)
+
+
 def test_empty_p1_refuses_when_exact_turn_changes_before_head_claim(managers) -> None:
     manager, replacement_manager, engine, _engine_b, _starts = managers
     old_turn_id, _ = asyncio.run(_activate(manager))
