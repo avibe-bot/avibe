@@ -779,6 +779,117 @@ def test_a_winning_park_replaces_the_whole_incumbent_intent(tmp_path: Path) -> N
     assert health["recent_failures"] == 0
 
 
+def test_deferred_intent_arbitration_is_atomic_across_connections(tmp_path: Path) -> None:
+    """HFR-355: two parkers arbitrate against one serialized incumbent.
+
+    ``engine.begin()`` does not reserve SQLite's writer slot before a bare SELECT.
+    Two connections could therefore both read "no parked intent", then a weaker
+    success writer could land its stale whole-blob UPDATE after an eviction's stronger
+    failure and erase it. The store must become the writer before reading so the second
+    parker re-reads the first one's committed intent and applies the strength/tie rule
+    to current state.
+
+    The hooks pause each connection immediately after its decision read. Pre-fix both
+    reads are reached concurrently; the strong failure is allowed to commit first and
+    the stale weak writer overwrites it last. With the write reservation, the second
+    read cannot occur until the first transaction commits, so it sees the weak intent
+    and correctly replaces it with the stronger failure.
+    """
+
+    import threading
+
+    sqlite_a, requests = _store(tmp_path)
+    sqlite_b = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    _task(sqlite_a, "task-atomic-park", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-atomic-park")
+    assert requests.claim(run.id) is not None
+
+    weak_read = threading.Event()
+    strong_read = threading.Event()
+    allow_weak = threading.Event()
+    allow_strong = threading.Event()
+    errors: list[BaseException] = []
+
+    def _pause_after_run_read(label, reached, allowed):
+        def _hook(_conn, _cursor, statement, _parameters, _context, _many):
+            normalized = " ".join(str(statement).lower().split())
+            if " from agent_runs " not in normalized or " where agent_runs.id" not in normalized:
+                return
+            if reached.is_set():
+                return
+            reached.set()
+            if not allowed.wait(timeout=5):
+                raise TimeoutError(f"{label} deferred-intent read was never released")
+
+        return _hook
+
+    weak_hook = _pause_after_run_read("weak", weak_read, allow_weak)
+    strong_hook = _pause_after_run_read("strong", strong_read, allow_strong)
+    event.listen(sqlite_a.engine, "after_cursor_execute", weak_hook)
+    event.listen(sqlite_b.engine, "after_cursor_execute", strong_hook)
+
+    def _park(store, **kwargs):
+        try:
+            store.defer_run_terminal(run.id, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 - forwarded to the test thread
+            errors.append(exc)
+
+    weak = threading.Thread(
+        target=_park,
+        args=(sqlite_a,),
+        kwargs={"terminal_status": "succeeded", "result_text": "stale success"},
+    )
+    strong = threading.Thread(
+        target=_park,
+        args=(sqlite_b,),
+        kwargs={
+            "terminal_status": "failed",
+            "error": "the session was evicted",
+            "metadata": {"interrupt_reason": "evicted"},
+        },
+    )
+
+    try:
+        weak.start()
+        assert weak_read.wait(timeout=5), "the first parker never reached its read"
+        strong.start()
+
+        if strong_read.wait(timeout=0.25):
+            # Pre-fix interleaving: both writers read the same empty incumbent. Let the
+            # stronger one commit first, then expose the stale weaker overwrite.
+            allow_strong.set()
+            strong.join(timeout=5)
+            allow_weak.set()
+        else:
+            # Fixed interleaving: the strong writer is blocked on BEGIN IMMEDIATE.
+            # Commit the weak intent, then let the strong writer re-read and replace it.
+            allow_weak.set()
+            weak.join(timeout=5)
+            assert strong_read.wait(timeout=5), (
+                "the serialized second parker never reached its post-commit read"
+            )
+            allow_strong.set()
+        weak.join(timeout=5)
+        strong.join(timeout=5)
+    finally:
+        allow_weak.set()
+        allow_strong.set()
+        event.remove(sqlite_a.engine, "after_cursor_execute", weak_hook)
+        event.remove(sqlite_b.engine, "after_cursor_execute", strong_hook)
+
+    assert not weak.is_alive() and not strong.is_alive()
+    assert errors == []
+    parked = sqlite_a.get_run(run.id)
+    assert parked is not None
+    payload = parked["result_payload"]
+    assert payload["deferred_terminal_status"] == "failed"
+    assert payload["deferred_terminal_error"] == "the session was evicted"
+    assert payload["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+    assert "deferred_terminal_result_text" not in payload
+
+
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:
     """Subordinate to HFR-060/061 — the guard must not cost an ordinary settlement.
 

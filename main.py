@@ -194,8 +194,13 @@ def main():
                 controller.cleanup_sync()
             except Exception as cleanup_err:
                 logger.error(f"Cleanup failed: {cleanup_err}")
-            finally:
-                release_service_instance_lock()
+            # Do NOT release the process-lifetime lock here (HFR-353). When cleanup
+            # was requested on the controller's own loop it deliberately deferred
+            # until ``Controller.run`` unwinds. Releasing now lets a replacement
+            # process start while the old one is still tearing down shared sockets and
+            # backends. The outer ``controller.run()`` finally below releases only
+            # after that deferred cleanup has actually finished; process exit remains
+            # the fallback for a signal in the tiny pre-run window.
             raise SystemExit(0)
 
         signal.signal(signal.SIGTERM, _handle_shutdown)

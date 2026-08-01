@@ -4112,6 +4112,14 @@ class SQLiteBackgroundTaskStore:
         now = updated_at or _utc_now_iso()
         row_to_publish = None
         with self.engine.begin() as conn:
+            # Arbitration is a read/decide/write UNIT (HFR-355). ``engine.begin`` does
+            # not make it one under pysqlite: a bare SELECT emits no BEGIN, so two
+            # parkers can both read the same incumbent and the later stale whole-blob
+            # UPDATE can overwrite the winner. Become SQLite's writer BEFORE reading;
+            # the second parker then re-reads after the first commits and arbitrates
+            # against the intent that actually won. This is the same established
+            # primitive used by the other store paths whose decisions span reads.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()

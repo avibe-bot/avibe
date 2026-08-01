@@ -2153,6 +2153,87 @@ def test_admission_closes_before_the_scheduler_stop(tmp_path, monkeypatch):
     assert manager.is_admission_closed_for_shutdown() is True
 
 
+def test_admission_closes_before_update_checker_drives_the_stopped_loop(
+    tmp_path, monkeypatch
+):
+    """HFR-354: no shutdown-time loop drive may precede the global admission close.
+
+    HFR-347 moved the close before the scheduler stop, but the stopped-loop path still
+    drove ``update_checker.wait_stopped`` first. That drive also runs ready Web/IM
+    callbacks, so a message could dispatch a prompt before admission closed and then
+    be cancelled as restarted. Observe the flag from the update wait itself: it must
+    already be closed before this first non-admission loop drive begins.
+    """
+
+    from core import session_turns
+    from core.controller import Controller
+    from modules.agents.opencode import OpenCodeServerManager
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(OpenCodeServerManager, "terminate_instance_sync", lambda: None)
+
+    loop = asyncio.new_event_loop()
+    observed: dict[str, bool] = {}
+
+    class _PendingUpdateTask:
+        @staticmethod
+        def done() -> bool:
+            return False
+
+    class _UpdateChecker:
+        def stop(self):
+            observed["closed_at_update_stop"] = (
+                manager.is_admission_closed_for_shutdown()
+            )
+            return _PendingUpdateTask()
+
+        async def wait_stopped(self, _task):
+            observed["closed_inside_update_wait"] = (
+                manager.is_admission_closed_for_shutdown()
+            )
+
+    async def _noop():
+        return None
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = _UpdateChecker()
+    controller.scheduled_task_service = types.SimpleNamespace(stop=_noop)
+    controller.watch_service = types.SimpleNamespace(stop=_noop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(agents={})
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    _bind_cleanup_sync_methods(controller)
+
+    # Already ready BEFORE cleanup begins. The first run_until_complete must not give
+    # this submission-shaped callback an open-admission observation.
+    loop.call_soon(
+        lambda: observed.__setitem__(
+            "closed_in_prequeued_callback",
+            manager.is_admission_closed_for_shutdown(),
+        )
+    )
+
+    try:
+        Controller.cleanup_sync(controller)
+    finally:
+        loop.close()
+
+    assert observed == {
+        "closed_in_prequeued_callback": True,
+        "closed_at_update_stop": True,
+        "closed_inside_update_wait": True,
+    }
+
+
 def test_loop_thread_cleanup_defers_without_blocking_then_runs_after_stop(
     tmp_path, monkeypatch
 ):

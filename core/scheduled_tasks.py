@@ -3823,7 +3823,14 @@ class ScheduledTaskService:
                 # Leg 3b: parked behind the gate, i.e. accepted but not started.
                 continue
             try:
-                written = self.request_store.settle_without_result(
+                # The ownership snapshot proves THIS PROCESS interrupted the run; it
+                # does not prove the interrupted turn is the run's last live owner.
+                # A background Activity can still own work or pending output even when
+                # the cancelled handler never reached its own defer call (HFR-352).
+                # Route through the same Activity-aware park-or-settle path as both
+                # ordinary cancellation lanes so reconciliation cannot make callbacks
+                # eligible before that lifecycle finishes.
+                written = self._park_or_settle_run(
                     run_id,
                     terminal_status=terminal_status,
                     error=error_text,

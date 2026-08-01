@@ -4306,6 +4306,57 @@ scenarios:
     # RED: pre-fix the nested-End shape scheduled the drain at the outermost
     # release.
     test: tests/test_session_teardown.py::test_a_stop_semantics_hold_vetoes_an_overlapping_evictions_drain
+  - id: HFR-352
+    name: teardown reconciliation preserves Activity ownership until terminal output
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 23 (F1). The reconcile backstop exists for cancelled handlers
+    # that never reached their own terminal writer. Such a run can still have a
+    # blocking Activity or pending Activity output while carrying no deferred intent.
+    # The old direct settle_without_result call made its callback eligible immediately
+    # and forced later Activity output onto a closed row. Reconciliation now uses the
+    # shared _park_or_settle_run path both ordinary cancellation lanes already use.
+    test: tests/test_scheduled_tasks.py::test_teardown_reconciliation_parks_while_an_activity_still_owns_the_run
+  - id: HFR-353
+    name: signal shutdown keeps the service lock until deferred cleanup has finished
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 23 (F2). HFR-348 makes cleanup_sync return immediately when a
+    # signal interrupts the controller's own running loop, deferring real cleanup to
+    # Controller.run's finally. The nested signal-handler finally still released the
+    # process lock at that earlier return, so a replacement process could start while
+    # the old process later unlinked its dispatch socket and terminated shared runtime
+    # state. Only the outer controller.run finally releases now.
+    test: tests/test_service_logging_handlers.py::test_signal_shutdown_keeps_service_lock_until_controller_run_unwinds
+  - id: HFR-354
+    name: shutdown admission closes before the update checker drives a stopped loop
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 23 (F3). HFR-347 closed admission before the scheduler stop but
+    # normal cleanup still ran update_checker.wait_stopped first. Its
+    # run_until_complete also advances ready Web/IM callbacks, allowing a prompt to
+    # dispatch before the close. The admission coroutine now precedes the update task
+    # and therefore every shutdown-time loop drive owned by cleanup_sync.
+    test: tests/test_running_agents_service.py::test_admission_closes_before_update_checker_drives_the_stopped_loop
+  - id: HFR-355
+    name: deferred terminal intents arbitrate atomically across SQLite connections
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 23 (F4). A bare SELECT under pysqlite's engine.begin reserves no
+    # writer slot, so two parkers could read the same incumbent and a stale weaker
+    # whole-blob UPDATE could overwrite the stronger winner. defer_run_terminal now
+    # takes the established reserve_write_lock before reading, serializing the
+    # read/decide/write unit. The regression forces the former two-reader interleaving
+    # across independent store connections and proves the eviction failure wins.
+    test: tests/test_harness_failure_visibility.py::test_deferred_intent_arbitration_is_atomic_across_connections
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

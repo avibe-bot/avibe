@@ -3888,6 +3888,69 @@ def test_reconciler_does_not_settle_an_unrelated_running_row_on_the_same_session
     assert not (untouched["metadata"] or {}).get("interrupt_reason")
 
 
+def test_teardown_reconciliation_parks_while_an_activity_still_owns_the_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-352: the reconcile backstop preserves live Activity ownership.
+
+    The cancellation handler normally parks its terminal intent before the teardown
+    reconciler runs, but convergence exists precisely for handlers that never reach
+    that write. A blocking Activity can still own the run in that shape. The old
+    reconcile path called ``settle_without_result`` directly, making the callback
+    eligible while the Activity was live and forcing its later output onto a closed
+    row. The backstop must use the same park-or-settle path as both cancel lanes.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    registry = SessionActivityRegistry()
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(activities=registry),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    controller.scheduled_task_service = service
+    run_id = _running_run_for_session(
+        request_store,
+        session_id="session-teardown-352",
+        prompt="a cancelled handler that never parked its intent",
+    )
+    _blocking_activity(registry, run_id, "bg-352")
+
+    reconciled = service.reconcile_session_teardown(
+        "session-teardown-352",
+        settled_by=SETTLED_BY_EVICTED,
+        claimed_run_ids=frozenset({run_id}),
+    )
+
+    assert reconciled == 0, "parking an intent is not a terminal reconciliation"
+    parked = request_store.get_run(run_id)
+    assert parked is not None
+    assert parked["status"] == "running"
+    assert parked["completed_at"] is None
+    assert parked["result_payload"]["deferred_terminal_status"] == "failed"
+    assert parked["result_payload"]["deferred_terminal_metadata"] == {
+        "interrupt_reason": "evicted"
+    }
+
+    activity = registry.complete(
+        backend="codex",
+        runtime_key="runtime-325",
+        activity_id="bg-352",
+        status="failed",
+    )
+    assert activity is not None
+    assert service.settle_activity_runs(activity) == [run_id]
+    settled = request_store.get_run(run_id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == "evicted"
+
+
 def test_self_evicting_execution_is_not_reconciled_mid_flight(
     tmp_path: Path,
     monkeypatch,

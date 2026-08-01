@@ -2193,7 +2193,57 @@ class Controller:
             except Exception as e:
                 logger.debug(f"{label} cleanup skipped: {e}")
 
-        # Stop update checker
+        async def _cancel_cleanup_task() -> None:
+            if self.cleanup_task and not self.cleanup_task.done():
+                self.cleanup_task.cancel()
+                try:
+                    await self.cleanup_task
+                except asyncio.CancelledError:
+                    pass
+            self.cleanup_task = None
+
+        def _close_admission_for_shutdown_now() -> None:
+            # ADMISSION CLOSES BEFORE THE FIRST ASYNC CLEANUP STEP (HFR-347). The
+            # HFR-339 flag used to be set inside ``_settle_inflight_turns_for_shutdown``
+            # — two stops later. ``scheduled_task_service.stop()`` below can spend its
+            # whole bounded wait unwinding a slow execution, and for that entire window
+            # the IM runtime kept dispatching fresh Web/IM messages onto backends this
+            # method is about to dismantle: a prompt could be SENT and then cancelled
+            # as ``restarted``, risking interrupted or repeated effects. Closing first
+            # makes every arrival in the whole shutdown take the durable queue instead.
+            # The flag is loop-state: on a running loop the coroutine below preserves
+            # HFR-339's single-threaded mutation invariant; on a stopped loop there is
+            # no concurrent owner, so the synchronous call below safely closes before
+            # that loop is driven again. The settlement helper's own set stays
+            # (idempotent) — belt and suspenders, and it keeps that helper correct for
+            # any caller that reaches it without passing through here.
+            manager = getattr(self, "session_turns", None)
+            close = getattr(manager, "close_admission_for_shutdown", None)
+            if callable(close):
+                close()
+
+        async def _close_admission_for_shutdown() -> None:
+            _close_admission_for_shutdown_now()
+
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            # A stopped loop has no concurrent owner, so mutate its admission state
+            # synchronously BEFORE the first run_until_complete (HFR-354). Scheduling
+            # even this tiny coroutine would append it behind callbacks already in the
+            # ready queue; those callbacks could submit work before the close ran.
+            _close_admission_for_shutdown_now()
+        else:
+            _stop_loop_coroutine(
+                _close_admission_for_shutdown(), "Shutdown admission close"
+            )
+
+        # Stop the update checker only AFTER global admission is closed (HFR-354).
+        # On the normal stopped-loop shutdown path ``wait_stopped`` drives this same
+        # event loop; doing that first also advances any ready Web/IM submission
+        # callbacks while admission is still open. A prompt can then dispatch and be
+        # cancelled as ``restarted`` moments later. The close above is therefore not
+        # merely before the scheduler stop (HFR-347), but before EVERY shutdown-time
+        # loop drive owned by this method.
         try:
             update_task = self.update_checker.stop()
             if update_task and not update_task.done():
@@ -2206,36 +2256,6 @@ class Controller:
         except Exception as e:
             logger.debug(f"Update checker cleanup skipped: {e}")
 
-        async def _cancel_cleanup_task() -> None:
-            if self.cleanup_task and not self.cleanup_task.done():
-                self.cleanup_task.cancel()
-                try:
-                    await self.cleanup_task
-                except asyncio.CancelledError:
-                    pass
-            self.cleanup_task = None
-
-        async def _close_admission_for_shutdown() -> None:
-            # ADMISSION CLOSES BEFORE THE FIRST ASYNC CLEANUP STEP (HFR-347). The
-            # HFR-339 flag used to be set inside ``_settle_inflight_turns_for_shutdown``
-            # — two stops later. ``scheduled_task_service.stop()`` below can spend its
-            # whole bounded wait unwinding a slow execution, and for that entire window
-            # the IM runtime kept dispatching fresh Web/IM messages onto backends this
-            # method is about to dismantle: a prompt could be SENT and then cancelled
-            # as ``restarted``, risking interrupted or repeated effects. Closing first
-            # makes every arrival in the whole shutdown take the durable queue instead.
-            # A tiny coroutine because the flag is loop-state: HFR-339's
-            # single-threaded-mutation invariant says it is only ever written on the
-            # loop, and ``_stop_loop_coroutine`` runs this on the loop in both loop
-            # states. The settlement helper's own set stays (idempotent) — belt and
-            # suspenders, and it keeps that helper correct for any caller that reaches
-            # it without passing through here.
-            manager = getattr(self, "session_turns", None)
-            close = getattr(manager, "close_admission_for_shutdown", None)
-            if callable(close):
-                close()
-
-        _stop_loop_coroutine(_close_admission_for_shutdown(), "Shutdown admission close")
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         # THE SECOND STOP THAT MAY NOT BE ABANDONED SILENTLY (HFR-346). ``stop()``
         # cancels every claimed execution as ``restarted`` and then awaits the terminal

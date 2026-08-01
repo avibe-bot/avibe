@@ -7,6 +7,7 @@ import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from types import SimpleNamespace
 
 import main
 import pytest
@@ -141,6 +142,75 @@ def test_main_acquires_lock_before_loading_config(monkeypatch):
 
     assert exc.value.code == 1
     assert events == ["lock", "load_config", "release"]
+
+
+def test_signal_shutdown_keeps_service_lock_until_controller_run_unwinds(monkeypatch):
+    """HFR-353: deferred loop cleanup keeps exclusive process ownership.
+
+    The signal handler's first ``cleanup_sync`` call can intentionally return before
+    doing work when it runs on the controller loop. Releasing the service lock at that
+    point lets a replacement process start before ``Controller.run`` reaches its real
+    stopped-loop cleanup; the old process can then unlink the replacement's dispatch
+    socket or terminate its shared OpenCode instance. Lock release belongs to the
+    outer run-finally, after the controller has unwound.
+    """
+
+    import config.v2_compat
+    import core.controller
+    import core.process_diagnostics
+    import vibe.sentry_integration
+
+    events: list[str] = []
+    handlers = {}
+
+    class FakeController:
+        def __init__(self, _config) -> None:
+            pass
+
+        def cleanup_sync(self) -> None:
+            # The HFR-348 shape: this call defers and returns to the signal handler.
+            events.append("cleanup.deferred")
+
+        def run(self) -> None:
+            events.append("controller.run")
+            try:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            finally:
+                # The real Controller reaches its stopped-loop cleanup before this
+                # frame unwinds. This marker is the lock's earliest safe release seam.
+                events.append("controller.unwound")
+
+    loaded_config = SimpleNamespace(
+        runtime=SimpleNamespace(log_level="INFO", default_cwd="/tmp"),
+        platform="avibe",
+    )
+    report = SimpleNamespace(imported=False, db_path="test.db", backup_path=None)
+
+    monkeypatch.setattr(main, "acquire_service_instance_lock", lambda: events.append("lock.acquire"))
+    monkeypatch.setattr(main, "release_service_instance_lock", lambda: events.append("lock.release"))
+    monkeypatch.setattr(main, "load_config", lambda: loaded_config)
+    monkeypatch.setattr(main, "setup_logging", lambda _level: None)
+    monkeypatch.setattr(main, "apply_claude_sdk_patches", lambda: None)
+    monkeypatch.setattr(main, "prepare_sqlite_state", lambda _config: report)
+    monkeypatch.setattr(main, "start_macos_session_diagnostics", lambda _logger: None)
+    monkeypatch.setattr(main, "shutdown_intent_required", lambda: False)
+    monkeypatch.setattr(main, "_log_shutdown_signal", lambda *_args: None)
+    monkeypatch.setattr(main, "_log_shutdown_intent", lambda *_args: None)
+    monkeypatch.setattr(vibe.sentry_integration, "init_sentry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(core.process_diagnostics, "log_process_snapshot", lambda *_args: None)
+    monkeypatch.setattr(core.controller, "Controller", FakeController)
+    monkeypatch.setattr(config.v2_compat, "to_app_config", lambda loaded: loaded)
+    monkeypatch.setattr(main.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+
+    assert exc.value.code == 0
+    assert events.count("lock.release") == 1
+    assert events.index("cleanup.deferred") < events.index("controller.unwound")
+    assert events.index("controller.unwound") < events.index("lock.release"), (
+        "the replacement-process lock was released before deferred cleanup could run"
+    )
 
 
 def test_shutdown_intent_missing_is_logged_not_ignored(monkeypatch, caplog):
