@@ -80,10 +80,11 @@ import {
   savedSourcesKey,
   seedStep,
   startNeedsStatusRead,
+  sourcesWithEcho,
   terminalArrivalMovedRows,
   type FlowView,
 } from './asyncLifetime';
-import type { AgentSupply, OAuthFlow } from './types';
+import type { AgentSupply, OAuthFlow, Source } from './types';
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
@@ -216,6 +217,50 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
     // The shared manual-model dialog is a source write and intentionally has no
     // Agent echo; it refreshes the model surface instead.
     expect(page).toMatch(/<AddCustomModelDialog[\s\S]*?onSaved=\{\(\) => void refreshSourcesAgents\(\)\}/);
+  });
+});
+
+describe('sourcesWithEcho — one refresh result inside the shared authority', () => {
+  const source = (id: string, models: string[]): Source => ({
+    id,
+    kind: 'api_key',
+    vendor: 'anthropic',
+    display_name: id,
+    protocol: 'anthropic',
+    supply_channel: 'hub',
+    billing: 'metered',
+    state: { status: 'standby', retry_at: null, detail_key: null },
+    last_discovered_at: '2026-07-31T05:00:00Z',
+    models: models.map((id) => ({ id, provenance: 'discovered' })),
+  });
+
+  it('replaces only the source named by the server echo', () => {
+    const first = source('src_first000', ['old-model']);
+    const second = source('src_second00', ['other-model']);
+    const echoed = source('src_first000', ['old-model', 'claude-opus-5']);
+
+    expect(sourcesWithEcho([first, second], echoed)).toEqual([echoed, second]);
+  });
+
+  it('does not append a row the inventory read never saw', () => {
+    const first = source('src_first000', ['old-model']);
+
+    expect(sourcesWithEcho([first], source('src_missing00', ['new-model']))).toEqual([first]);
+  });
+
+  it('routes refresh and full reads through the same latest-result authority', () => {
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+
+    expect(page).toMatch(/const refreshed = await modelsApi\.refreshSource\(source\.id\);\s*await refreshAuthority\.run/);
+    expect(page).toMatch(/if \(landing\.kind === 'source'\)[\s\S]*?sourcesWithEcho\(previous, landing\.source\)/);
+  });
+
+  it('keeps the mutating refresh failure outside stale-read suppression', () => {
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+    const refresh = page.slice(page.indexOf('const refreshSource ='), page.indexOf('// Resolve an open drawer'));
+
+    expect(refresh.indexOf('modelsApi.refreshSource')).toBeLessThan(refresh.indexOf('refreshAuthority.run'));
+    expect(refresh).toMatch(/catch \{[\s\S]*?sourceActions\.refreshFailed/);
   });
 });
 

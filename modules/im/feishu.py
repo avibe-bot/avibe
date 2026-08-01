@@ -397,9 +397,17 @@ class FeishuBot(BaseIMClient):
         root_id = context.thread_id or reply_to
         if root_id:
             message_id = await self._reply_message(root_id, text, subtext=subtext)
+            # Post-send bookkeeping: the message is ALREADY delivered, so a raise
+            # here must never destroy the native id on its way out. Callers such as
+            # the message dispatcher treat any exception from the adapter as a send
+            # failure with no delivery evidence, which would re-send an
+            # already-delivered message. Same guard as discord.py send_message.
             if self.settings_manager:
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                except Exception:
+                    pass
             return message_id
 
         request = (
@@ -425,10 +433,15 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu send_message failed: {response.msg}")
 
         message_id = response.data.message_id
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see the thread-reply branch above).
         if self.settings_manager and (context.thread_id or reply_to):
             thread = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
+            except Exception:
+                pass
         return message_id
 
     async def _reply_message(self, parent_id: str, text: str, subtext: Optional[str] = None) -> str:
@@ -621,9 +634,14 @@ class FeishuBot(BaseIMClient):
         if root_id:
             message_id = await self._reply_message_with_card(root_id, card_json)
             self._remember_message_text(message_id, text, subtext=subtext)
+            # Post-send bookkeeping must not destroy the delivered message id
+            # (see send_message); mirrors discord.py send_message_with_buttons.
             if self.settings_manager:
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                except Exception:
+                    pass
             return message_id
 
         request = (
@@ -650,9 +668,14 @@ class FeishuBot(BaseIMClient):
 
         message_id = response.data.message_id
         self._remember_message_text(message_id, text, subtext=subtext)
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and context.thread_id:
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
+            except Exception:
+                pass
         return message_id
 
     async def _reply_message_with_card(self, parent_id: str, card_json: str) -> str:

@@ -53,6 +53,7 @@
     "disable": "禁用",
     "disabled": "已禁用",
     "archived": "已归档",
+    "systemSession": "系统",
     "default": "默认",
     "running": "运行中",
     "stopped": "已停止",
@@ -635,6 +636,8 @@
         "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
         "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
         "modelCount": "{{count}} 个型号",
+        "lastDiscovery": "上次自动获取 {{time}}",
+        "neverDiscovered": "尚未自动获取",
         "addModel": "添加型号",
         "modelsEmpty": "还没有可供给的型号，请手动添加。",
         "modelsEmptySubscription": "还没有发现可供给的型号。"
@@ -648,7 +651,6 @@
         "reorder": "拖动排序",
         "oauthSignedOut": "CLI 订阅未登录"
       },
-      "current": "当前",
       "order": {
         "title": "来源顺序 · {{backend}}",
         "subtitle": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。这里的顺序只影响 {{backend}}。",
@@ -666,8 +668,8 @@
         "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用"
       },
       "billing": {
-        "monthly": "包月",
-        "metered": "按量"
+        "monthly": "订阅",
+        "metered": "按量付费"
       },
       "state": {
         "active": "正常",
@@ -687,7 +689,13 @@
         "direct": "直连 Direct"
       },
       "errors": {
-        "engineDown": "模型引擎未就绪,请稍后重试"
+        "engineDown": "模型引擎未就绪,请稍后重试",
+        "startFailed": "模型引擎启动失败"
+      },
+      "runtime": {
+        "notStarted": "未启动 · 首次使用时自动启动",
+        "startNow": "立即启动",
+        "starting": "正在启动"
       },
       "experimental": "实验",
       "agents": {
@@ -732,11 +740,6 @@
         "retry": "重试",
         "runtime": "模型服务未就绪",
         "runtimeAction": "去处理"
-      },
-      "emptySelection": {
-        "title": "尚未选择型号",
-        "body": "这个 Agent 现在没有当前型号，下一次运行前需要选择。",
-        "action": "选择型号"
       },
       "routes": {
         "title": "供给方式",
@@ -1012,7 +1015,8 @@
       "sourceActions": {
         "more": "更多操作",
         "rename": "重命名",
-        "rediscover": "重新发现模型",
+        "refresh": "刷新模型",
+        "refreshing": "正在刷新模型",
         "reauth": "重新登录",
         "replaceKey": "更换 API Key",
         "delete": "删除来源",
@@ -1021,8 +1025,8 @@
         "renamePlaceholder": "例如 生产环境 Key",
         "renamed": "已重命名",
         "renameFailed": "重命名失败，请重试",
-        "rediscovered": "已重新发现 {{count}} 个模型",
-        "rediscoverFailed": "重新发现失败，请重试",
+        "refreshed": "已更新 {{count}} 个模型",
+        "refreshFailed": "未能获取最新模型，仍显示上次成功获取的清单。",
         "deleteTitle": "删除来源？",
         "deleteBody": "将从中枢移除「{{name}}」并撤销其凭证，此操作不可撤销。",
         "deleteConfirm": "删除",
@@ -1032,7 +1036,6 @@
         "deleted": "已删除来源",
         "deleteFailed": "删除失败，请重试",
         "renameHint": "只改显示名，不动凭证",
-        "rediscoverHint": "重新拉取这个来源能供给的模型",
         "deleteHint": "删除前会再确认一次",
         "reauthHint": "旧登录立即失效",
         "replaceKeyHint": "填入新 Key，地址与显示名不变"
@@ -1178,7 +1181,9 @@
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
     "missing_share_id": "请先输入自定义链接。",
     "not_public": "请先把展示页面设为公开，再修改链接。",
+    "session_agent_unavailable": "源会话的 Agent 已不可用。请选择一个已启用的 Agent 来复刻此会话。",
     "session_archived": "该会话已归档，无法修改它的展示页面。",
+    "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
     "invalid_icon_type": "图标必须是 SVG、PNG、ICO、JPEG 或 WebP 图片。",
     "icon_too_large": "图标太大了，请使用不超过 2 MiB 的图片。",
     "icon_required": "请选择要上传的图标文件。",
@@ -2584,7 +2589,6 @@
     "importFailed": "导入失败:{{error}}",
     "importNoneFound": "磁盘上没有找到可导入的 {{backend}} Agent。",
     "renameSuccess": "Agent 已重命名",
-    "renameKeptOld": "Agent 已重命名(旧名因被引用而保留)",
     "searchPlaceholder": "搜索 Agent…",
     "backendFilter": "Backend",
     "backendAll": "全部",
@@ -2593,8 +2597,7 @@
     "noSearchMatch": "没有匹配的 Agent。",
     "selectPrompt": "选择一个 Agent 查看配置。",
     "makeDefault": "设为默认",
-    "deleteConfirm": "确认删除 Agent \"{{name}}\"？此操作不可撤销。",
-    "deleteInUse": "Agent \"{{name}}\" 正被一个或多个频道使用,无法删除。",
+    "deleteConfirm": "确认归档 Agent \"{{name}}\"？它将从 Agent 列表中消失，但已有会话和自动化仍会使用已保存的配置。",
     "detail": {
       "enabled": "已启用",
       "enabledHint": "关掉后此 Agent 不会被新会话选用,已运行的会话不受影响",
@@ -2612,7 +2615,6 @@
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
-      "modelDefault": "使用后端默认",
       "effort": "推理强度",
       "systemPrompt": "系统提示词",
       "systemPromptCount": "~{{count}} tokens",
@@ -2917,6 +2919,11 @@
     "run": {
       "definitionDeleted": "（已删除）"
     },
+    "health": {
+      "failing": "连续失败",
+      "degraded": "近期失败",
+      "unknown": "状态未知"
+    },
     "lifecycle": {
       "running": "运行中",
       "waiting": "等待中",
@@ -3064,6 +3071,7 @@
       "placeholder": "输入消息…",
       "placeholderBusy": "Agent 处理中，输入将排队…",
       "placeholderArchived": "会话已归档，仅可查看",
+      "placeholderSystem": "Avibe 在这里发布工作区通知，该会话不接受发送消息",
       "hint": "Enter 发送",
       "send": "发送",
       "queueSend": "排队发送",

@@ -779,12 +779,20 @@ class SlackBot(BaseIMClient):
                 reply_to=reply_to,
             )
 
-            # Mark thread as active if we sent a message to a thread
+            # Mark thread as active if we sent a message to a thread. This is
+            # post-send bookkeeping: the message is ALREADY delivered, so a raise
+            # here must never destroy the native id on its way out. Callers such as
+            # the message dispatcher treat any exception from the adapter as a send
+            # failure with no delivery evidence, which would re-send an
+            # already-delivered message. Same guard as discord.py send_message.
             if self.settings_manager and (context.thread_id or reply_to):
                 thread_ts = context.thread_id or reply_to
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-                logger.debug(f"Marked thread {thread_ts} as active after bot message")
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                    logger.debug(f"Marked thread {thread_ts} as active after bot message")
+                except Exception:
+                    pass
 
             return response["ts"]
 
@@ -833,10 +841,15 @@ class SlackBot(BaseIMClient):
         except SlackApiError as e:
             logger.error(f"Error sending Slack status bubble: {e}")
             raise
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and (context.thread_id or reply_to):
             thread_ts = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+            except Exception:
+                pass
         return response["ts"]
 
     async def send_markdown_message(
@@ -921,11 +934,16 @@ class SlackBot(BaseIMClient):
                 )
             return await self.send_message(context, body, parse_mode="markdown", reply_to=reply_to)
 
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and (context.thread_id or reply_to):
             thread_ts = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-            logger.debug(f"Marked thread {thread_ts} as active after bot native markdown message")
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                logger.debug(f"Marked thread {thread_ts} as active after bot native markdown message")
+            except Exception:
+                pass
 
         return response["ts"]
 
@@ -1589,12 +1607,16 @@ class SlackBot(BaseIMClient):
                 log_label="message-with-buttons send",
             )
 
-            # Mark thread as active if we sent a message to a thread
+            # Post-send bookkeeping must not destroy the delivered message id
+            # (see send_message); mirrors discord.py send_message_with_buttons.
             if self.settings_manager and (context.thread_id or reply_to):
                 thread_ts = context.thread_id or reply_to
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-                logger.debug(f"Marked thread {thread_ts} as active after bot message with buttons")
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                    logger.debug(f"Marked thread {thread_ts} as active after bot message with buttons")
+                except Exception:
+                    pass
 
             return response["ts"]
 

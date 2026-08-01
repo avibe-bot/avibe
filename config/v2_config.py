@@ -290,7 +290,6 @@ class OpenCodeConfig:
     enabled: bool = True
     cli_path: str = "opencode"
     default_agent: Optional[str] = None
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
     # Provider the user picked in Settings → Backends → OpenCode. The provider
@@ -306,7 +305,6 @@ class OpenCodeConfig:
 class ClaudeConfig:
     enabled: bool = True
     cli_path: str = "claude"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" relies on Claude Code's own credential storage;
     # "api_key" injects ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL)
@@ -331,7 +329,6 @@ class ClaudeConfig:
 class CodexConfig:
     enabled: bool = True
     cli_path: str = "codex"
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     # Auth model: "oauth" defers to whatever ~/.codex/config.toml already
     # has (typically `auth.method = "ChatGPT"`); "api_key" writes the
@@ -502,6 +499,7 @@ class ModelHubSourceConfig:
     state: ModelHubSourceStateConfig
     models: list[ModelHubModelConfig]
     created_at: str = MODEL_HUB_LEGACY_CREATED_AT
+    last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
     experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
@@ -544,6 +542,7 @@ class ModelHubSourceConfig:
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
         created_at = payload.get("created_at")
+        last_discovered_at = payload.get("last_discovered_at")
         if base_url is not None and not isinstance(base_url, str):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
         if credential_ref is not None and not isinstance(credential_ref, str):
@@ -569,6 +568,10 @@ class ModelHubSourceConfig:
                 )
                 or MODEL_HUB_LEGACY_CREATED_AT
             ),
+            last_discovered_at=_validate_optional_datetime(
+                last_discovered_at,
+                "model_hub.sources.last_discovered_at",
+            ),
             base_url=base_url,
             experimental_consent_at=_validate_optional_datetime(
                 consent_at,
@@ -584,6 +587,7 @@ class ModelHubSourceConfig:
         payload = {
             "id": self.id,
             "created_at": self.created_at,
+            "last_discovered_at": self.last_discovered_at,
             "kind": self.kind,
             "vendor": self.vendor,
             "display_name": self.display_name,

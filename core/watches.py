@@ -387,6 +387,8 @@ class ManagedWatchStore:
         expect: DefinitionWriteExpectation,
         *,
         queued_run: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> bool:
         """Persist a whole watch row; ``False`` means the guard refused the write.
 
@@ -415,7 +417,12 @@ class ManagedWatchStore:
                 self._save()
                 return True
             if queued_run is None:
-                landed = self._sqlite.upsert_watch(watch.to_dict(), expect=expect)
+                landed = self._sqlite.upsert_watch(
+                    watch.to_dict(),
+                    expect=expect,
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
             else:
                 landed = self._sqlite.upsert_watch_with_queued_run(
                     watch.to_dict(), expect=expect, run_payload=queued_run
@@ -454,7 +461,13 @@ class ManagedWatchStore:
             self._signature = None
             self._reload_required = True
 
-    def upsert_watch(self, watch: ManagedWatch) -> ManagedWatch:
+    def upsert_watch(
+        self,
+        watch: ManagedWatch,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+    ) -> ManagedWatch:
         """Create or adopt a whole watch row (unguarded: the payload is not a re-read).
 
         The mirror rolls back with the write here too (HFR-275). This is the one entry
@@ -470,7 +483,14 @@ class ManagedWatchStore:
             if self._sqlite is not None:
                 # No ``expect``: the create/adopt entry point (``add_watch``), whose
                 # payload is not derived from a stored row.
-                self._sqlite.upsert_watch(watch.to_dict())
+                self._sqlite.upsert_watch(
+                    watch.to_dict(),
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
+                if expected_reference_agent_id is not None:
+                    self.load()
+                    return self._watches[watch.id]
                 return watch
             self._save()
         except Exception:
@@ -499,6 +519,8 @@ class ManagedWatchStore:
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ManagedWatch:
         watch = ManagedWatch(
             id=uuid4().hex[:12],
@@ -521,7 +543,11 @@ class ManagedWatchStore:
             deliver_key=deliver_key,
             metadata=dict(metadata or {}),
         )
-        return self.upsert_watch(watch)
+        return self.upsert_watch(
+            watch,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        )
 
     def remove_watch(self, watch_id: str) -> bool:
         """Delete a watch; the mirror rolls back with the delete (HFR-275).
@@ -586,6 +612,8 @@ class ManagedWatchStore:
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ManagedWatch:
         watch = self._watches[watch_id]
         # Captured before the first mutation: the state ``vibe watch update`` read and
@@ -618,10 +646,18 @@ class ManagedWatchStore:
         if metadata is not None:
             watch.metadata = dict(metadata)
         watch.updated_at = _utc_now_iso()
-        if not self._write_watch(watch, expect):
+        if not self._write_watch(
+            watch,
+            expect,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        ):
             # The edit did NOT land. ``cmd_watch_update`` turns this into a non-zero
             # exit with an error payload instead of echoing an unwritten watch.
             raise DefinitionWriteConflict(watch_id, definition_type="watch")
+        if expected_reference_agent_id is not None:
+            self.load()
+            return self._watches[watch_id]
         return watch
 
     @staticmethod

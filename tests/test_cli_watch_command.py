@@ -113,6 +113,66 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "--deliver-key" not in captured.out
 
 
+def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
+    db_path = cli.paths.get_sqlite_state_path()
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        agent = agent_store.create(name="pm", backend="codex")
+        agent_store.create(name="zz-fallback", backend="codex")
+        store = ManagedWatchStore()
+        watch = store.add_watch(
+            name="Review watch",
+            session_key="slack::channel::C123",
+            agent_name=agent.name,
+            command=["python3", "wait.py"],
+            shell_command=None,
+            prefix=None,
+            cwd=None,
+            mode="once",
+            timeout_seconds=600,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=30,
+            post_to=None,
+            deliver_key=None,
+        )
+        archived = agent_store.archive(agent.name)
+        assert archived is not None
+        store.load()
+        runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+
+        args = _parse_watch_update([watch.id, "--name", "Renamed watch"])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=store),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            assert cli.cmd_watch_update(args) == 0
+
+        assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
+        assert ManagedWatchStore().get_watch(watch.id).agent_name == archived.archived_name
+
+        explicit = _parse_watch_update([watch.id, "--agent", archived.archived_name])
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+            patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch(
+                "vibe.cli._agent_store",
+                side_effect=lambda: cli.VibeAgentStore(db_path),
+            ),
+        ):
+            result, payload = _capture_stderr_json(cli.cmd_watch_update, explicit)
+        assert result == 1
+        assert "disabled" in payload["error"]
+    finally:
+        agent_store.close()
+
+
 def test_watch_list_help_describes_bounded_history(capsys) -> None:
     parser = cli.build_parser()
 
@@ -242,12 +302,26 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
             "echo done",
         ]
     )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    original_add_watch = store.add_watch
+    captured: dict[str, object] = {}
+
+    def add_watch(**kwargs):
+        captured.update(kwargs)
+        return original_add_watch(**kwargs)
 
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2])),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(store, "add_watch", side_effect=add_watch),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2]),
+        ),
     ):
         result = cli.cmd_watch_add(args)
 
@@ -255,6 +329,63 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["definition"]["agent_name"] == default_agent.name
+    assert captured["expected_enabled_agent_id"] == default_agent.id
+
+
+def test_watch_add_releases_create_once_session_when_definition_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    args = _parse_watch_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-cleanup-watch",
+            "--cwd",
+            str(tmp_path),
+            "--shell",
+            "true",
+        ]
+    )
+    released: list[tuple[str, str]] = []
+    agent = SimpleNamespace(id="agent-pm", name="pm", backend="claude")
+
+    with (
+        patch(
+            "vibe.cli._resolve_agent_target",
+            return_value=SimpleNamespace(agent=agent, requires_enabled_write_guard=True),
+        ),
+        patch(
+            "vibe.cli._resolve_definition_scope_key",
+            return_value="avibe::project::proj-cleanup-watch",
+        ),
+        patch("vibe.cli._resolve_definition_session_cwd", return_value=str(tmp_path)),
+        patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-watch"),
+        patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
+        patch(
+            "vibe.cli._watch_store",
+            return_value=SimpleNamespace(
+                add_watch=lambda **_kwargs: (_ for _ in ()).throw(
+                    ValueError("agent 'pm' was archived before the write")
+                )
+            ),
+        ),
+        patch(
+            "vibe.cli._release_cli_session_reservation",
+            side_effect=lambda session_id, *, reason: released.append((session_id, reason)) or True,
+        ),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+
+    assert result == 1
+    assert "archived before the write" in payload["error"]
+    assert released == [
+        (
+            "ses-reserved-watch",
+            "watch creation failed before its Session reservation was adopted",
+        )
+    ]
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
@@ -1682,4 +1813,199 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
         f"name={None if live is None else live.name!r} "
         f"enabled={None if live is None else live.enabled!r} while the row says "
         f"name={stored.name!r} enabled={stored.enabled!r}"
+    )
+
+
+# --- the reserved workspace-notifications Session is not a Watch target -------
+#
+# Round-16 review thread 3678900318 (blocking, comment 5124692513), the Watch half of
+# the same admission contract the Task and direct Agent Run lanes carry in
+# ``tests/test_cli_task_command.py``. A watch is the WORST lane to leave open: it is
+# long-lived and self-firing, so one accepted definition dispatches a turn into the
+# runtime's own notice row on every event, not once.
+#
+# Subordinate coverage under HFR-094; no new scenario id.
+
+
+def _capture_stderr_text(func, *args) -> tuple[int, str]:
+    """Like ``_capture_stderr_json``, but WITHOUT parsing.
+
+    The refusal test below asserts the EXIT CODE before it touches the payload. Against
+    ``d00bc038`` the command succeeds, writes to stdout and leaves stderr empty, so a
+    helper that parses first reports a ``JSONDecodeError`` about an empty string instead
+    of the real regression ("this watch was admitted").
+    """
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        result = func(*args)
+    return result, stderr.getvalue()
+
+
+def _no_caller_context(monkeypatch) -> None:
+    """Run the command as a BARE terminal invocation.
+
+    ``caller_context_from_env`` keys off ``AVIBE_SESSION_ID``, which is set inside every
+    Avibe-hosted Agent shell — including the one a coding agent runs these tests from.
+    Left alone it defaults the target Session and relaxes session-policy validation, so the
+    same test would exercise a different path locally than in CI.
+    """
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+
+def _reserved_session_cli_db(tmp_path: Path):
+    """A migrated CLI state DB holding the reserved row plus one ordinary session.
+
+    Both rows in ONE database: the point is DISCRIMINATION — the same command and store
+    must refuse one id and accept the other.
+
+    Returns ``(db_path, agent_store, ordinary_session_id)``.
+    """
+    from storage.agent_session_rows import resolve_workspace_notice_session
+    from storage.importer import ensure_sqlite_state
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
+            "ses-workspace-notices"
+        )
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        ordinary = service.bind_agent_session(
+            scope_key="slack::channel::C900",
+            agent_name="worker",
+            session_anchor="slack_C900",
+            native_session_id="native-C900",
+        )
+    finally:
+        service.close()
+    assert ordinary
+    return db_path, agent_store, ordinary
+
+
+def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
+    from sqlalchemy import text as sa_text
+
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        return [
+            tuple(row)
+            for row in conn.execute(
+                sa_text(
+                    "SELECT author, type, content_text FROM messages "
+                    "WHERE session_id = :sid ORDER BY created_at, id"
+                ),
+                {"sid": session_id},
+            )
+        ]
+
+
+def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """``vibe watch add --session-id ses-workspace-notices`` is refused at ADMISSION.
+
+    ``cmd_watch_add`` resolves the pin through ``_resolve_agent_for_target`` — and so
+    through the shared ``resolve_session_id_target`` — before it stores the definition or
+    starts a waiter, so the resolver guard closes this door with no watch-local
+    exception. Zero side effects, per comment 5124692513: no watch row, no waiter
+    started, nothing written into the reserved transcript.
+
+    ``_wait_for_watch_startup`` is patched to a spy that MUST NOT be called: on this lane
+    the absence of a dispatch is the claim, and a startup that fired would mean a real
+    waiter subprocess was launched against a definition that should never have existed.
+
+    POSITIVE CONTROL in the same test: the ordinary session id, same command, same store,
+    is accepted and does start.
+    """
+    _no_caller_context(monkeypatch)
+    db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path)
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    started: list[str] = []
+
+    def _spy_startup(*args, **kwargs):
+        started.append(args[2])
+        return _startup_ok(store, runtime_store, args[2])
+
+    args = _parse_watch_add(
+        ["--session-id", "ses-workspace-notices", "--shell", "python3 scripts/wait.py"]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=_spy_startup),
+    ):
+        result, stderr_text = _capture_stderr_text(cli.cmd_watch_add, args)
+
+    assert result == 1, (
+        "``vibe watch add --session-id ses-workspace-notices`` was ADMITTED. A watch is "
+        "long-lived and self-firing, so this definition would dispatch a turn into the "
+        f"runtime's own notice row on every event. stdout={capsys.readouterr().out!r} "
+        f"started={started}"
+    )
+    payload = json.loads(stderr_text)
+    assert payload["ok"] is False
+    assert payload["code"] == "reserved_session", (
+        "the refusal must be TYPED here too, with the same token the Web surface and the "
+        f"other two admission doors use — one contract, every surface: {payload}"
+    )
+    assert "reserved for the runtime" in payload["error"], (
+        f"the refusal has to say WHY, in the resolver's own diagnostic: {payload}"
+    )
+    assert "ses-workspace-notices" in payload["error"], (
+        f"and it has to name the session that was refused: {payload}"
+    )
+    assert payload["details"] == {
+        "session_id": "ses-workspace-notices",
+        "reason": "reserved",
+    }, f"and it must carry the machine-readable subject and reason: {payload}"
+
+    # --- zero side effects --------------------------------------------------
+    assert ManagedWatchStore(tmp_path / "watches.json").list_watches() == [], (
+        "a watch pinned to a row that takes no turns must never be PERSISTED: it would "
+        "dispatch a turn into the runtime's notice row on every event, not once"
+    )
+    assert store.list_watches() == [], "and the live store the command used must agree"
+    assert started == [], (
+        f"no waiter may be started for a definition that was never admitted: {started}"
+    )
+    assert runtime_store.load().get("watches", {}) == {}, (
+        "and no runtime state may be recorded for it"
+    )
+    assert _message_rows(db_path, "ses-workspace-notices") == [], (
+        "nothing may be written into the runtime's own row"
+    )
+
+    # --- positive control: the ordinary session is accepted -----------------
+    ok_args = _parse_watch_add(
+        ["--session-id", ordinary, "--shell", "python3 scripts/wait.py"]
+    )
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=_spy_startup),
+    ):
+        assert cli.cmd_watch_add(ok_args) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["ok"] is True
+    assert accepted["definition"]["session_id"] == ordinary, (
+        f"the guard must not have narrowed ordinary Watch targeting: {accepted['definition']}"
+    )
+    assert [watch.session_id for watch in store.list_watches()] == [ordinary]
+    assert started == [accepted["definition"]["id"]], (
+        f"and an admitted watch really does start: {started}"
     )

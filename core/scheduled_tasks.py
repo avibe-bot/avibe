@@ -8,9 +8,10 @@ import logging
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional, Sequence
+from types import MappingProxyType
+from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from config.platform_registry import PLATFORM_REGISTRY
 from config.v2_config import (
     DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS,
     DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS,
@@ -34,8 +36,11 @@ from core.message_context import (
     resolve_context_thread_id,
     thread_id_from_session_anchor,
 )
+from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
 from core.run_settlement import (
+    INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
+    RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
@@ -44,10 +49,27 @@ from core.run_settlement import (
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
+from storage.agent_session_rows import (
+    INBOX_SESSION_VISIBILITIES,
+    WORKSPACE_NOTICE_SESSION_ID,
+    session_is_runtime_owned,
+)
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
+from core import failure_notices
+from core.backend_failure import emit_replayed_backend_failure
+from core.delivery_evidence import (
+    ACK_EVIDENCE_DELIVERY_ONLY,
+    ACK_EVIDENCE_RECEIPT,
+    STAGE_PERSIST,
+    DeliveryEvidence,
+)
 from storage.background import (
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
+    NOTICE_FAILED,
+    NOTICE_PENDING,
+    NOTICE_SENT,
+    NOTICE_SKIPPED,
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
@@ -55,6 +77,9 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    compute_next_run_at,
+    notice_write_expectation,
+    owed_notice_eligible,
     resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -80,6 +105,24 @@ class _ScopeAgentTarget(NamedTuple):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _adopt_delivery_evidence(target: DeliveryEvidence, source: DeliveryEvidence) -> None:
+    """Copy one ladder rung's evidence onto the object the caller holds.
+
+    The owed-notice drain hands ``_emit_failure_notice`` a single
+    ``DeliveryEvidence`` and then reads it back, but a LADDER needs one per rung:
+    ``delivered`` is a latch, so evidence shared across rungs cannot say which rung
+    proved what. The walk therefore builds its own per rung and copies the decisive
+    one out here, by field rather than by rebinding — the caller's reference is the
+    contract.
+    """
+
+    target.delivered_id = source.delivered_id
+    target.persisted_row = source.persisted_row
+    target.send_returned = source.send_returned
+    target.error = source.error
+    target.error_stage = source.error_stage
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -154,6 +197,20 @@ def _normalize_file_run_status(payload: dict[str, Any], state: str) -> str:
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "canceled"}
 
 
+#: The scope types a SESSION KEY may name. A session key addresses a conversation,
+#: so it is narrower than a scope id on purpose.
+SESSION_KEY_SCOPE_TYPES = frozenset({"channel", "user"})
+#: The scope types a SCOPE ID may name — the same two plus the workbench's
+#: ``project``, which is not a conversation and cannot carry a thread.
+SCOPE_ID_SCOPE_TYPES = frozenset({"channel", "user", "project"})
+#: Every scope type a failure-notice delivery target can carry, because ``_add``
+#: builds every rung through exactly those two parsers and neither admits anything
+#: else. One of the two axes of ``LADDER_ACK_SOURCES`` below, named here rather
+#: than spelled inline in the parsers so the acknowledgement policy can be checked
+#: against the real vocabulary instead of a hand-copied echo of it.
+LADDER_SCOPE_TYPES = SESSION_KEY_SCOPE_TYPES | SCOPE_ID_SCOPE_TYPES
+
+
 @dataclass(frozen=True)
 class ParsedSessionKey:
     platform: str
@@ -185,7 +242,7 @@ def parse_session_key(value: str) -> ParsedSessionKey:
     platform, scope_type, scope_id = parts[:3]
     if not platform or not scope_id:
         raise ValueError("session key platform and scope id are required")
-    if scope_type not in {"channel", "user"}:
+    if scope_type not in SESSION_KEY_SCOPE_TYPES:
         raise ValueError("session key scope type must be 'channel' or 'user'")
 
     thread_id: Optional[str] = None
@@ -211,7 +268,7 @@ def parse_scope_id(value: str) -> ParsedSessionKey:
     platform, scope_type, native_id = parts
     if not platform or not scope_type or not native_id:
         raise ValueError("scope id platform, scope type, and native id are required")
-    if scope_type not in {"channel", "user", "project"}:
+    if scope_type not in SCOPE_ID_SCOPE_TYPES:
         raise ValueError("scope id scope type must be 'channel', 'user', or 'project'")
 
     return ParsedSessionKey(
@@ -219,6 +276,127 @@ def parse_scope_id(value: str) -> ParsedSessionKey:
         scope_type=scope_type,
         scope_id=native_id,
         thread_id=None,
+    )
+
+
+# --- the failure-notice ladder's target x acknowledgement policy -------------
+#
+# WHICH evidence is allowed to acknowledge an owed failure notice depends on WHAT
+# was addressed, and getting that wrong in the permissive direction is the worst
+# outcome the drain has: a notice marked ``sent`` with nothing durable behind it is
+# lost forever, which is strictly worse than the visible dead letter it replaces.
+#
+# It was three separate review findings before it was a table — an ``avibe``
+# special case bolted onto a boolean, which answered for the target classes anyone
+# had thought about and fell through to the permissive branch for the rest. So the
+# policy is ENUMERATED over the two axes a target actually has, the lookup is
+# TOTAL, and the answer for a class nobody declared is the strict one.
+
+#: The transport returned an id that the PLATFORM minted, so the id itself is proof
+#: a person was told; re-sending because the bookkeeping write failed afterwards
+#: would spam a notice that already arrived. A persisted receipt is admitted too —
+#: it is the same claim, only stronger.
+ACK_SOURCE_NATIVE_DELIVERY_ID = "native_delivery_id"
+#: Only a durable ``messages`` row acknowledges. For the workbench that is not
+#: strictness for its own sake, it is what delivery MEANS: the inbox reads rows, an
+#: SSE fan-out with no browser attached reaches nobody, and
+#: ``AvibeBot.send_message`` mints and returns a synthetic ``msg_<hex>`` id
+#: unconditionally — no subscriber required and nothing persisted. Its id therefore
+#: proves nothing at all. Includes the dedup receipt: the duplicate short-circuit
+#: reports the row it FOUND (``persist_agent_message`` already committed it before
+#: the crash), which is the strongest receipt there is, so a crash-then-retry on a
+#: workbench rung acknowledges instead of re-sending forever.
+ACK_SOURCE_PERSISTED_RECEIPT = "persisted_receipt"
+
+#: Which ``DeliveryEvidence.ack_evidence`` values each source admits. Spelled as
+#: sets rather than as a comparison so a third evidence strength cannot be added
+#: without deciding, per source, whether it acknowledges.
+ACK_EVIDENCE_BY_ACK_SOURCE: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        ACK_SOURCE_NATIVE_DELIVERY_ID: frozenset(
+            {ACK_EVIDENCE_RECEIPT, ACK_EVIDENCE_DELIVERY_ONLY}
+        ),
+        ACK_SOURCE_PERSISTED_RECEIPT: frozenset({ACK_EVIDENCE_RECEIPT}),
+    }
+)
+
+#: The platform-kind of a target naming a platform the registry does not know. A
+#: deliver key is a free string and ``parse_session_key`` does not check it against
+#: the registry, so this class is reachable and needs a name rather than an
+#: accident.
+LADDER_PLATFORM_KIND_UNREGISTERED = "unregistered"
+
+#: THE policy: one row per (platform kind, scope type) a ladder target can be.
+#: ``PLATFORM_REGISTRY``'s ``kind`` is the axis, not the platform id, so a new IM
+#: transport inherits the IM answer instead of needing a row of its own — and a new
+#: KIND (a transport that is neither, say a future cloud relay) does need one, and
+#: ``test_every_ladder_target_class_declares_its_acknowledgement_source`` fails
+#: until it gets one.
+#:
+#: THE TRUST BOUNDARY THAT MAKES THAT SAFE, stated because it is a premise this table
+#: cannot check for itself: ``kind == "im"`` means the id a send RETURNS was minted by
+#: a platform that reached a person. That is what entitles the two ``im`` conversation
+#: rows below to acknowledge on a delivery id alone. A transport that mints its own id
+#: locally does not qualify, however IM-shaped it looks — the workbench is exactly that
+#: case (``AvibeBot.send_message`` returns a synthetic ``msg_<hex>`` unconditionally),
+#: which is why it has a kind of its own rather than a platform-id exception here.
+#: ``PlatformDescriptor.kind`` DEFAULTS to ``"im"``, so a transport added to the
+#: registry without stating its kind would silently take the permissive rows and no
+#: structural test here would notice: the kind axis would be unchanged, the table would
+#: still be total. ``test_every_registry_platform_declares_its_kind_explicitly``
+#: guards that specific accident at the registry, where the claim is made.
+LADDER_ACK_SOURCES: Mapping[tuple[str, str], str] = MappingProxyType(
+    {
+        # A real IM conversation: the send id came from Slack/Discord/Telegram/
+        # Lark/WeChat, so it is evidence the user was told.
+        ("im", "channel"): ACK_SOURCE_NATIVE_DELIVERY_ID,
+        ("im", "user"): ACK_SOURCE_NATIVE_DELIVERY_ID,
+        # An IM platform with a ``project`` scope is not a conversation — the id is
+        # an internal scope row, not a native channel — so a returned id does not
+        # locate a person. Reachable through a hand-written ``deliver_key`` or
+        # creator scope, and receipt-gated rather than trusted.
+        ("im", "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+        # The workbench, uniformly, for every scope type: the reason is the
+        # TRANSPORT (a synthetic id minted whether or not anything landed), not the
+        # scope shape, so ``avibe::user::…`` from a workbench creator's provenance
+        # is exactly as unproven as ``avibe::project::…``.
+        ("workbench", "channel"): ACK_SOURCE_PERSISTED_RECEIPT,
+        ("workbench", "user"): ACK_SOURCE_PERSISTED_RECEIPT,
+        ("workbench", "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+        # A platform the registry has never heard of: nothing is known about what
+        # its send id means, so nothing is assumed.
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "channel"): ACK_SOURCE_PERSISTED_RECEIPT,
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "user"): ACK_SOURCE_PERSISTED_RECEIPT,
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+    }
+)
+
+#: The answer for a target class the table does not name. Deliberately the STRICT
+#: source: an undeclared class that acked on a send id would lose the notice
+#: permanently, while one that demands a receipt it cannot produce retries and then
+#: dead-letters — visibly, with ``last_error``, the health badge and
+#: ``vibe task show`` all still reporting the failure.
+UNDECLARED_LADDER_ACK_SOURCE = ACK_SOURCE_PERSISTED_RECEIPT
+
+
+def failure_notice_target_class(target: ParsedSessionKey) -> tuple[str, str]:
+    """Which enumerated class this ladder target belongs to.
+
+    Total by construction: an unregistered platform gets a named kind, and
+    ``scope_type`` comes from a parser whose vocabulary is ``LADDER_SCOPE_TYPES``.
+    """
+
+    descriptor = PLATFORM_REGISTRY.get(target.platform)
+    kind = descriptor.kind if descriptor is not None else LADDER_PLATFORM_KIND_UNREGISTERED
+    return (kind, target.scope_type)
+
+
+def failure_notice_ack_source(target: ParsedSessionKey) -> str:
+    """The one evidence source that may acknowledge a notice sent to *target*."""
+
+    return LADDER_ACK_SOURCES.get(
+        failure_notice_target_class(target),
+        UNDECLARED_LADDER_ACK_SOURCE,
     )
 
 
@@ -252,6 +430,7 @@ class TaskExecutionResult:
     error: Optional[str]
     session_key: str
     session_id: Optional[str]
+    failure_code: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +451,12 @@ class AgentRunExecutionResult:
 #: definition that keeps hitting the same dead session is reported once and not
 #: once per cron minute.
 BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
+
+#: Stable terminal code written only after the target resolver has proved that
+#: a pinned Session cannot accept a turn. Human-readable error text is allowed
+#: to evolve; the three-failure auto-pause policy must never parse it.
+FAILURE_CODE_UNRESOLVABLE_TARGET = "unresolvable_target"
+UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES = 3
 
 #: Durable definition-metadata flag: this definition deliberately pins NO Agent
 #: of its own and follows whatever Agent its bound Session carries.
@@ -351,6 +536,7 @@ class SessionBindingChange:
     """What the scheduler did about a pinned session that no longer exists."""
 
     # "rebound"   -- a replacement session was reserved AND stored
+    # "failing"   -- a user-pinned binding failed below the auto-pause threshold
     # "paused"    -- the definition was user-pinned, so it was disabled instead
     # "reclaimed" -- a replacement was reserved but the guarded write refused it, so
     #                nothing was stored and the fire did not run (HFR-268), AND the
@@ -418,6 +604,42 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
     if row is None:
         raise UnresolvableSessionTarget(
             f"agent session id not found: {raw}", session_id=raw, reason="missing"
+        )
+    # A RUNTIME-OWNED session accepts no turn from anybody, so it is not a target.
+    #
+    # THE ROUTE-LOCAL GUARD WAS NOT ENOUGH (review thread 3678900318). Refusing the
+    # send in ``POST /api/sessions/<id>/messages`` closed the composer, which is the
+    # door a human finds; it left every OTHER turn entry point open, because they all
+    # come through HERE instead. ``vibe agent run --session-id ses-workspace-notices``
+    # (``cmd_agent_run`` resolves the pin at ``vibe/cli.py``'s ``session_policy in
+    # {"existing", "fork"}`` branch), a task or watch pinned with ``--session-id``, and
+    # ``enqueue_session_callback`` all resolve first and enqueue a real turn second. So
+    # the ownership check belongs in the SHARED resolver: one line, and every present
+    # and future backend entry point inherits the no-turn contract instead of having to
+    # remember it. Same reasoning as ``archive_session`` / ``update_session`` owning the
+    # write refusals rather than each caller.
+    #
+    # BEFORE the archived check, deliberately, even though the two barely overlap. The
+    # reserved row may not be archived at all (``archive_session`` refuses its id) and
+    # ``resolve_workspace_notice_session`` heals a corrupted ``archived`` status on the
+    # next notice, so the ordering only decides which refusal a CORRUPTED row reports
+    # in that window — and "reserved for the runtime" is both the more specific fact
+    # and the one that stays true after the heal. Existence still wins over both: a
+    # missing row is ``missing``, whatever its id claimed to be.
+    #
+    # ``reason="reserved"`` IS A NEW VALUE, not a reuse of the two above, and it is
+    # deliberately left OUT of the ``delivery_target_missing`` classification in
+    # ``_execute_claimed_request`` (which keys on ``missing`` alone). This row exists
+    # and is healthy; nothing about the DESTINATION is dead. Pointing a definition at
+    # it is a CONFIGURATION error, and labelling it as a vanished delivery target would
+    # send the reader looking for a session that is sitting right there in their inbox.
+    # The run still settles ``failed`` naming the reserved session, which is the
+    # visible outcome that matters.
+    if session_is_runtime_owned(session_id=raw, visibility=row["visibility"]):
+        raise UnresolvableSessionTarget(
+            f"agent session is reserved for the runtime and accepts no turn: {raw}",
+            session_id=raw,
+            reason="reserved",
         )
     # Archived sessions are terminal + inert. A task/watch/run that still targets
     # one by id must NOT fire into it — treat it as an unresolvable target so the
@@ -561,6 +783,22 @@ def build_session_key_for_context(
     )
 
 
+def _created_by_caller(task: Any, run_metadata: Any) -> Optional[dict[str, Any]]:
+    """The ``created_by.caller`` provenance a definition was created with, or ``None``.
+
+    Read from the DEFINITION's metadata when the definition row still exists and from
+    the run's own copy otherwise, so a deleted definition keeps whatever the run
+    recorded. Shared by the failure ladder (rungs 3 and 4, which ADDRESS the origin) and
+    the notice body (which NAMES it): the two must never disagree about who created a
+    definition, and before this they read the same nested shape from two places.
+    """
+
+    source = (getattr(task, "metadata", None) if task is not None else run_metadata) or {}
+    created_by = source.get("created_by") if isinstance(source, dict) else None
+    caller = created_by.get("caller") if isinstance(created_by, dict) else None
+    return caller if isinstance(caller, dict) else None
+
+
 @dataclass
 class ScheduledTask:
     id: str
@@ -625,6 +863,7 @@ class TaskExecutionRequest:
     deliver_key: Optional[str] = None
     prompt: Optional[str] = None
     message: Optional[str] = None
+    message_payload: Any = None
     source_kind: Optional[str] = None
     source_actor: Optional[str] = None
     parent_run_id: Optional[str] = None
@@ -654,6 +893,7 @@ class TaskExecutionRequest:
             deliver_key=payload.get("deliver_key"),
             prompt=payload.get("prompt"),
             message=payload.get("message") or payload.get("prompt"),
+            message_payload=payload.get("message_payload"),
             source_kind=payload.get("source_kind"),
             source_actor=payload.get("source_actor"),
             parent_run_id=payload.get("parent_run_id"),
@@ -896,6 +1136,24 @@ class ScheduledTaskStore:
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         return self._tasks.get(task_id)
 
+    def get_watch_definition(self, definition_id: str) -> Optional[Dict[str, Any]]:
+        """The watch row for *definition_id*, or ``None`` when it is not a watch.
+
+        ``get_task`` mirrors ``scheduled_task`` rows only, so a WATCH looked up
+        through it reads as "no definition at all": no name, and no signal that
+        ``vibe task …`` is the wrong vocabulary for it. Watches and tasks are both
+        ``run_definitions`` rows and this store already holds the backend that reads
+        them, so a caller that must describe whichever definition a run belongs to
+        (the owed-failure-notice copy) can resolve either one without a second store.
+
+        ``None`` on the file backend, which has no definition table to read.
+        """
+
+        identifier = str(definition_id or "").strip()
+        if not identifier or self._sqlite is None:
+            return None
+        return self._sqlite.get_watch(identifier)
+
     @staticmethod
     def _read_state(task: ScheduledTask) -> DefinitionWriteExpectation:
         """The guarded state a full-row payload for ``task`` is derived from.
@@ -914,7 +1172,14 @@ class ScheduledTaskStore:
             metadata=task.metadata,
         )
 
-    def _write_task(self, task: ScheduledTask, expect: DefinitionWriteExpectation) -> bool:
+    def _write_task(
+        self,
+        task: ScheduledTask,
+        expect: DefinitionWriteExpectation,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+    ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
         On refusal the in-memory mirror is reloaded, so the store never keeps serving
@@ -930,7 +1195,12 @@ class ScheduledTaskStore:
             if self._sqlite is None:
                 self._save()
                 return True
-            landed = self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect)
+            landed = self._sqlite.upsert_scheduled_task(
+                task.to_dict(),
+                expect=expect,
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
+            )
         except Exception:
             self._reload_after_lost_write(task.id)
             raise
@@ -963,7 +1233,13 @@ class ScheduledTaskStore:
             self._signature = None
             self._reload_required = True
 
-    def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
+    def upsert_task(
+        self,
+        task: ScheduledTask,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+    ) -> ScheduledTask:
         """Create or adopt a whole task row (unguarded: the payload is not a re-read).
 
         The mirror rolls back with the write here too (HFR-275, the watch store's twin).
@@ -979,7 +1255,14 @@ class ScheduledTaskStore:
             if self._sqlite is not None:
                 # No ``expect``: this is the create/adopt entry point (``add_task``),
                 # where the payload is not derived from a stored row.
-                self._sqlite.upsert_scheduled_task(task.to_dict())
+                self._sqlite.upsert_scheduled_task(
+                    task.to_dict(),
+                    expected_enabled_agent_id=expected_enabled_agent_id,
+                    expected_reference_agent_id=expected_reference_agent_id,
+                )
+                if expected_reference_agent_id is not None:
+                    self.load()
+                    return self._tasks[task.id]
                 return task
             self._save()
         except Exception:
@@ -1004,6 +1287,8 @@ class ScheduledTaskStore:
         run_at: Optional[str] = None,
         timezone_name: str,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -1022,7 +1307,11 @@ class ScheduledTaskStore:
             timezone=timezone_name,
             metadata=dict(metadata or {}),
         )
-        return self.upsert_task(task)
+        return self.upsert_task(
+            task,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        )
 
     def remove_task(self, task_id: str) -> bool:
         """Delete a task; the mirror rolls back with the delete (HFR-275).
@@ -1077,6 +1366,8 @@ class ScheduledTaskStore:
         cwd: Optional[str] = None,
         update_cwd: bool = False,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
     ) -> ScheduledTask:
         task = self._tasks[task_id]
         # Captured before the first mutation: this is the state the CALLER read
@@ -1102,20 +1393,36 @@ class ScheduledTaskStore:
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
-        if not self._write_task(task, expect):
+        if not self._write_task(
+            task,
+            expect,
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
+        ):
             # The edit did NOT land, and its payload would have restored the Session
             # binding, enabled state and reclaim snapshot the teardown just changed.
             # Raising is the contract: ``cmd_task_update`` prints an error and exits
             # non-zero instead of echoing a task the database never accepted.
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
+        if expected_reference_agent_id is not None:
+            self.load()
+            return self._tasks[task_id]
         return task
 
-    def record_binding_recovery(self, task_id: str, payload: dict[str, Any]) -> bool:
+    def record_binding_recovery(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        *,
+        binding_notice: Optional[dict[str, Any]] = None,
+    ) -> bool:
         """Durably stamp what was done about a broken session binding.
 
         Written through the store (not by mutating a task the next
         ``maybe_reload`` may replace) because it is what makes the notification
-        once-per-transition instead of once-per-fire.
+        once-per-transition instead of once-per-fire. When a successful rebind
+        needs its own notice, both rows commit in one SQLite transaction: a failed
+        notice write therefore cannot leave a marker that suppresses every retry.
         """
 
         self.maybe_reload()
@@ -1130,6 +1437,20 @@ class ScheduledTaskStore:
         # A runtime stamp, not a user action: a lost write is reported by the return
         # value (the caller already treats ``False`` as "nothing recorded") rather than
         # by an exception through the fire path.
+        if self._sqlite is not None and binding_notice is not None:
+            try:
+                landed = self._sqlite.upsert_scheduled_task_with_binding_notice(
+                    task.to_dict(),
+                    expect=expect,
+                    notice=binding_notice,
+                )
+            except Exception:
+                self._reload_after_lost_write(task.id)
+                raise
+            if landed:
+                return True
+            self.load()
+            return False
         return self._write_task(task, expect)
 
     def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
@@ -1276,9 +1597,24 @@ class TaskExecutionStore:
         payload["updated_at"] = request.created_at
         return payload
 
-    def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+    def enqueue(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+    ) -> TaskExecutionRequest:
         if self._sqlite is not None:
-            self._sqlite.enqueue_run(self.queued_run_payload(request))
+            self._sqlite.enqueue_run(
+                self.queued_run_payload(request),
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
+            )
+            if expected_reference_agent_id is not None:
+                stored = self._sqlite.get_run(request.id)
+                if stored is not None:
+                    request.agent_id = stored.get("agent_id")
+                    request.agent_name = stored.get("agent_name")
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1341,25 +1677,41 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
-        return self.enqueue(
-            TaskExecutionRequest(
-                id=uuid4().hex[:12],
-                request_type=run_type,
-                task_id=definition_id,
-                session_key=session_key,
-                session_id=session_id,
-                post_to=post_to,
-                deliver_key=deliver_key,
-                prompt=prompt,
-                message=prompt,
-                source_kind=source_kind,
-                source_actor=source_actor,
-                parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                session_policy=session_policy,
-                metadata=dict(metadata or {}),
-            )
+        request = TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type=run_type,
+            task_id=definition_id,
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            prompt=prompt,
+            message=prompt,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            session_policy=session_policy,
+            metadata=dict(metadata or {}),
         )
+        if self._sqlite is None:
+            return self.enqueue(request)
+        snapshot = self._sqlite.enqueue_definition_run(self.queued_run_payload(request))
+        for field_name in (
+            "agent_name",
+            "agent_id",
+            "session_policy",
+            "session_id",
+            "session_key",
+            "post_to",
+            "deliver_key",
+            "prompt",
+            "message",
+            "message_payload",
+            "metadata",
+        ):
+            setattr(request, field_name, snapshot.get(field_name))
+        return request
 
     def enqueue_hook_send(
         self,
@@ -1377,6 +1729,9 @@ class TaskExecutionStore:
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
+        expected_reference_agent_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
             self.build_hook_send(
@@ -1386,6 +1741,7 @@ class TaskExecutionStore:
                 post_to=post_to,
                 deliver_key=deliver_key,
                 agent_name=agent_name,
+                agent_id=agent_id,
                 session_policy=session_policy,
                 run_type=run_type,
                 definition_id=definition_id,
@@ -1393,7 +1749,9 @@ class TaskExecutionStore:
                 source_actor=source_actor,
                 parent_run_id=parent_run_id,
                 metadata=metadata,
-            )
+            ),
+            expected_enabled_agent_id=expected_enabled_agent_id,
+            expected_reference_agent_id=expected_reference_agent_id,
         )
 
     def build_hook_send(
@@ -1405,6 +1763,7 @@ class TaskExecutionStore:
         post_to: Optional[str] = None,
         deliver_key: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         session_policy: Optional[str] = None,
         run_type: str = "hook_send",
         definition_id: Optional[str] = None,
@@ -1434,6 +1793,7 @@ class TaskExecutionStore:
             source_actor=source_actor,
             parent_run_id=parent_run_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             session_policy=session_policy,
             metadata=dict(metadata or {}),
         )
@@ -1459,6 +1819,7 @@ class TaskExecutionStore:
         callback_active: bool = True,
         delivery_intent: str = AGENT_RUN_DELIVERY_QUEUE,
         metadata: Optional[dict[str, Any]] = None,
+        expected_enabled_agent_id: Optional[str] = None,
     ) -> TaskExecutionRequest:
         if not (message or "").strip():
             # Refuse at the door: a blank prompt never reaches an agent backend
@@ -1491,7 +1852,8 @@ class TaskExecutionStore:
                 reasoning_effort=reasoning_effort,
                 session_policy=session_policy,
                 metadata=run_metadata,
-            )
+            ),
+            expected_enabled_agent_id=expected_enabled_agent_id,
         )
 
     def list_pending(self) -> list[TaskExecutionRequest]:
@@ -1519,6 +1881,43 @@ class TaskExecutionStore:
         if self._sqlite is not None:
             return self._sqlite.list_runs(status=status)
         return self._list_file_runs(status=status)
+
+    def consecutive_definition_failures_with_code(
+        self,
+        definition_id: str,
+        failure_code: str,
+        *,
+        limit: int,
+    ) -> int:
+        """Count the newest consecutive failed verdicts carrying one stable code."""
+
+        if limit <= 0:
+            return 0
+        if self._sqlite is not None:
+            return self._sqlite.consecutive_definition_failures_with_code(
+                definition_id,
+                failure_code,
+                limit=limit,
+            )
+        verdicts = [
+            run
+            for run in self._list_file_runs()
+            if str(run.get("definition_id") or run.get("task_id") or "") == str(definition_id)
+            and (_normalize_requested_run_status(run.get("status")) or run.get("status")) in {"succeeded", "failed"}
+            and not (
+                isinstance(run.get("metadata"), dict)
+                and run["metadata"].get("interrupt_reason") in RUN_INTERRUPTION_REASONS
+            )
+        ]
+        count = 0
+        for run in reversed(verdicts[-limit:]):
+            if (_normalize_requested_run_status(run.get("status")) or run.get("status")) != "failed":
+                break
+            metadata = run.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("failure_code") != failure_code:
+                break
+            count += 1
+        return count
 
     def list_pending_callbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
         if self._sqlite is not None:
@@ -1970,6 +2369,18 @@ class TaskExecutionStore:
         payload = json.loads(processing_path.read_text(encoding="utf-8"))
         return TaskExecutionRequest.from_dict(payload)
 
+    def refresh_claimed_request(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+        """Refresh the Agent name that a catalog rename may rewrite after claim."""
+
+        if self._sqlite is None:
+            return request
+        payload = self._sqlite.refresh_run_agent_reference(request.id)
+        if payload is None:
+            return request
+        request.agent_name = payload.get("agent_name")
+        request.agent_id = payload.get("agent_id")
+        return request
+
     def requeue(self, request_id: str, *, metadata: Optional[dict[str, Any]] = None) -> None:
         if self._sqlite is not None:
             if metadata is not None:
@@ -1995,18 +2406,49 @@ class TaskExecutionStore:
         task_id: Optional[str] = None,
         session_key: Optional[str] = None,
         session_id: Optional[str] = None,
+        interrupt_reason: Optional[str] = None,
+        failure_code: Optional[str] = None,
     ) -> None:
+        """Settle one claimed request.
+
+        ``interrupt_reason`` is the caller's structured CLASS for a failure that has
+        one — today only ``delivery_target_missing`` (see ``_execute_claimed_request``).
+        It rides the SAME statement as the terminal transition, because that statement
+        is also the one that stamps the owed failure notice: ``_merge_owed_failure_notice``
+        applies ``extra_metadata`` to the run's ``metadata_json`` BEFORE
+        ``_owed_failure_notice_for_transition`` reads ``interrupt_reason`` out of it, so
+        the notice is born already carrying its class. A second UPDATE afterwards would
+        be too late — the notice never overwrites an existing one, by design, so a class
+        written after the stamp would be recorded on the run and missing from the very
+        blob the drain renders from.
+
+        Named keywords rather than a general ``metadata`` dict, deliberately: these
+        arguments are merged verbatim into a run's metadata, and a wide-open
+        passthrough at a completion site is how an unrelated key comes to overwrite
+        ``interrupt_reason``, ``failure_code`` or the notice blob itself.
+        """
+
+        extra_metadata: dict[str, Any] = {"ok": ok}
+        if interrupt_reason:
+            extra_metadata["interrupt_reason"] = interrupt_reason
+        if failure_code:
+            extra_metadata["failure_code"] = failure_code
         if self._sqlite is not None:
-            self._sqlite.update_run_status(
+            # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
+            # predicate, so an ordinary completion rewrote a status another actor had
+            # already settled — a real terminal ``succeeded`` result became ``failed``
+            # whenever the claimed-request layer finished with an error. The identity
+            # columns are still written either way (see ``settle_run_terminal``), so
+            # routing through the guard costs nothing a caller depended on.
+            self._sqlite.settle_run_terminal(
                 request.id,
-                status="succeeded" if ok else "failed",
+                terminal_status="succeeded" if ok else "failed",
                 error=error,
-                completed_at=_utc_now_iso(),
                 updated_at=_utc_now_iso(),
                 task_id=task_id if task_id is not None else request.task_id,
                 session_key=session_key if session_key is not None else request.session_key,
                 session_id=session_id if session_id is not None else request.session_id,
-                metadata={"ok": ok},
+                metadata=extra_metadata,
             )
             return
         processing_path = self._request_path(request.id, state="processing")
@@ -2023,6 +2465,17 @@ class TaskExecutionStore:
                 "callback_session_id": request.callback_session_id,
             }
         )
+        if interrupt_reason or failure_code:
+            # The file backend has no owed-notice machinery at all, so this records the
+            # class where its only reader — an operator looking at the completed JSON —
+            # can see it, rather than dropping the one fact the caller went to the
+            # trouble of classifying.
+            existing = payload.get("metadata")
+            payload["metadata"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
+                **({"failure_code": failure_code} if failure_code else {}),
+            }
         with tempfile.NamedTemporaryFile(
             mode="w",
             dir=self.completed_dir,
@@ -2080,6 +2533,10 @@ class ScheduledTaskService:
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
+        # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
+        # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
+        # be torn down by name: cancelling the watch no longer stops it.
+        self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
         self._running = False
         self._watch_store_restart_count = 0
@@ -2367,6 +2824,12 @@ class ScheduledTaskService:
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
+        # Cancelled by name, and not gated on ``cancel_reconcile``: the notice drain is
+        # no longer part of the watch coroutine, so stopping the watch leaves it running
+        # — a delivery on behalf of a service this process no longer owns, or one that
+        # outlives shutdown. The identity check is the only exemption it needs.
+        if self._notice_drain_task and self._notice_drain_task is not current_task:
+            self._notice_drain_task.cancel()
         for task in list(self._inflight_executions.values()):
             if task is not current_task:
                 task.cancel()
@@ -2393,6 +2856,17 @@ class ScheduledTaskService:
             except asyncio.CancelledError:
                 pass
             self._reconcile_task = None
+        # And the dispatched notice drain, awaited rather than merely cancelled: a
+        # delivery suspended in a transport send has to be given the chance to unwind
+        # before the process leaves, or shutdown races a coroutine that is still
+        # writing to the notice row it claimed.
+        if self._notice_drain_task:
+            self._notice_drain_task.cancel()
+            try:
+                await self._notice_drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._notice_drain_task = None
         # Cancel any in-flight executions so shutdown is clean. Cancellation is
         # caught by ``_execute_claimed_request``, which requeues the run, so it
         # is picked up again on the next start (and ``recover_processing`` on
@@ -2426,6 +2900,11 @@ class ScheduledTaskService:
                     except Exception:
                         self._drain_dirty = True
                         raise
+                # A failed run emits no store change anyone else notices, so — like
+                # the vault and sweep passes below — only a periodic pass finds it.
+                # Cheap: one indexed lookup that no-ops when nothing is owed.
+                # DISPATCHED, not awaited: see ``_spawn_failure_notice_drain``.
+                self._spawn_failure_notice_drain()
                 # Vault requests resolve via the web/API layer, which emits no run-store change,
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
@@ -2825,6 +3304,1346 @@ class ScheduledTaskService:
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
             self._drain_dirty = True
 
+    # --- the owed-failure-notice drain ---------------------------------------
+    #
+    # Rides the existing 2 s tick beside ``_drain_callbacks``, for the same reason:
+    # a failed run emits no store change anyone else notices, so only a periodic
+    # pass finds it. The durable notice is stamped by whichever UPDATE terminalizes
+    # the row, so a crash between the failure and the delivery loses nothing — which
+    # is the whole point of persisting it rather than notifying inline.
+
+    def _spawn_failure_notice_drain(self) -> None:
+        """Start the owed-notice drain OUTSIDE the store watch, one pass at a time.
+
+        ``_watch_store`` is a single coroutine running every periodic pass in sequence,
+        so awaiting the drain there puts external message delivery on the critical path
+        of the whole service tick. One notice whose delivery does not return stops
+        request draining, callbacks, vault callbacks, the stale-run sweep — and every
+        LATER notice, including the ones reporting the failures that wedge is a symptom
+        of. Nothing looks broken, because the loop is suspended rather than crashed.
+
+        ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` alone would only shorten that stall to the
+        deadline, and a deadline short enough to hold the tick would cancel legitimate
+        deliveries. So the two halves are both required: dispatch takes delivery off the
+        watch, and the deadline bounds the dispatched work.
+
+        SINGLE-FLIGHT is the other half of dispatching. A task per tick would replace a
+        stalled loop with a delivery attempt every 2 s — the durable claim would make
+        most of them stand down, but the pile of coroutines is unbounded and each one
+        re-reads and re-claims. One pass at a time, and a tick that finds the previous
+        pass still running simply skips: the drain is idempotent across ticks by
+        construction, since eligibility is re-read from the row every pass.
+        """
+
+        task = self._notice_drain_task
+        if task is not None and not task.done():
+            return
+        self._notice_drain_task = asyncio.create_task(self._drain_failure_notices())
+        self._notice_drain_task.add_done_callback(self._on_notice_drain_done)
+
+    @staticmethod
+    def _on_notice_drain_done(task: "asyncio.Task[Any]") -> None:
+        """Retrieve the dispatched pass's exception so it is logged, never swallowed.
+
+        The inline await propagated failures into the watch's own handler. A fire-and-
+        forget task has no such reader, and an unretrieved exception surfaces only as an
+        asyncio "never retrieved" warning at garbage-collection time — which is how a
+        drain that has been failing every tick for a week goes unnoticed.
+        """
+
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("owed failure notice drain pass failed: %r", exc, exc_info=exc)
+
+    async def _drain_failure_notices(self) -> None:
+        if not self._owns_service_instance():
+            return
+        store = self.request_store._sqlite
+        if store is None:
+            return
+        try:
+            owed = store.list_owed_failure_notices(limit=10)
+        except Exception:
+            logger.exception("failed to list owed failure notices")
+            return
+        # THE FAIRNESS BUDGET, checked between notices and never against one in flight.
+        #
+        # Deliveries inside a pass are serial on purpose (see
+        # ``NOTICE_DRAIN_PASS_BUDGET_SECONDS``), so a batch of wedged rows costs
+        # batch x deadline before the pass returns and every notice stamped in the
+        # meantime waits behind it. Truncating the pass bounds that wait by the budget
+        # plus one delivery instead of by the batch size.
+        #
+        # Between, not during: cancelling a delivery already on the wire would trade a
+        # slow pass for a duplicate, and the walk already has its own deadline. So the
+        # pass always finishes what it started and only stops PULLING more.
+        #
+        # Rows left behind cost nothing — unclaimed, so no attempt consumed and no
+        # backoff armed — and ``list_owed_failure_notices`` orders by
+        # ``next_attempt_at ASC``, so the next pass starts with the oldest of them.
+        started = time.monotonic()
+        budget = failure_notices.NOTICE_DRAIN_PASS_BUDGET_SECONDS
+        for index, run in enumerate(owed):
+            if index and time.monotonic() - started > budget:
+                logger.info(
+                    "owed failure notice pass stopped at its %ss budget with %d of %d "
+                    "notices unattempted; they keep their attempts and stay eligible",
+                    budget,
+                    len(owed) - index,
+                    len(owed),
+                )
+                break
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            try:
+                await self._deliver_one_failure_notice(store, run)
+            except Exception:
+                logger.exception("owed failure notice drain failed for run=%s", run_id)
+
+    async def _deliver_one_failure_notice(self, store: Any, run: dict[str, Any]) -> None:
+        run_id = str(run["id"])
+        definition_id = str(run.get("task_id") or run.get("definition_id") or "") or None
+        notice = store.owed_failure_notice(run_id)
+        # Re-read and re-check ELIGIBILITY, not merely the state. The batch was listed
+        # before this pass began and each row is then delivered one at a time, so by
+        # the time a row is reached another owner may already have claimed it — and a
+        # claim is expressed as ``pending`` plus a lease on ``next_attempt_at``, so a
+        # state-only check would read it as free and send a duplicate. This is the same
+        # predicate the listing query used, deliberately: whatever the claim writes has
+        # to be visible to every later reader through one shared definition of
+        # eligibility.
+        now = datetime.now(timezone.utc)
+        if not owed_notice_eligible(notice, now.isoformat()):
+            return
+        # Every write below re-asserts the notice this pass DECIDED FROM. Ownership is
+        # checked once, at the top of the pass, and then the pass awaits delivery — so a
+        # service-lock handoff can leave this coroutine writing behind the new owner's
+        # completed delivery. The expectation makes the loser a no-op instead.
+        expect = notice_write_expectation(notice)
+
+        streak_facts: Optional[dict[str, Any]] = None
+        earlier_unsettled = None
+        # ``bypasses_suppression``, not ``is_interruption``: a binding-change notice is
+        # already scoped by the transition's signature, and reading the streak for one
+        # would be actively wrong — the anchor run SUCCEEDED, so
+        # ``failure_streak_decision`` would sweep in the definition's surrounding
+        # failures and defer the notice behind a canonical row it has nothing to do
+        # with.
+        if definition_id and not failure_notices.bypasses_suppression(notice):
+            earlier_unsettled = store.earliest_unsettled_run_before(
+                definition_id,
+                created_at=str(run.get("created_at") or ""),
+                run_id=run_id,
+                stale_after_seconds=failure_notices.DEFERRAL_STALE_AFTER_SECONDS,
+            )
+            if earlier_unsettled is None:
+                # The DECISION facts, not the streak's rows. One statement, so the
+                # boundaries and the notice states inside them come from one SQLite
+                # read snapshot: read separately, a success settling between the
+                # boundary seek and the row read merges two streaks, and a ``sent``
+                # notice from the earlier outage then skips a live one.
+                streak_facts = store.failure_streak_decision(definition_id, run_id)
+
+        # The callback's status is read FRESH, not taken from the listed row: the
+        # batch predates this decision by up to a whole pass, and ``_drain_callbacks``
+        # runs on the same ticks — a stale ``pending`` here would defer a notice whose
+        # callback already landed, and a stale absence would deliver beside it. A
+        # read failure propagates to the drain loop's per-row handler and the row is
+        # retried later, which errs toward one message rather than two.
+        decision = failure_notices.decide(
+            run_id=run_id,
+            definition_id=definition_id,
+            notice=notice,
+            streak_facts=streak_facts,
+            earlier_unsettled=earlier_unsettled,
+            callback_status=store.run_callback_state(run_id),
+        )
+        if decision.action == failure_notices.ACTION_DEFER:
+            # No attempt consumed — this row has not been tried. But the deferral is
+            # written down rather than merely skipped: a row left immediately-eligible
+            # is re-selected by every tick and keeps occupying the batch, so one
+            # definition with more than a batch worth of pending failures starved
+            # every other definition's notices indefinitely.
+            store.update_owed_failure_notice(
+                run_id,
+                expect=expect,
+                next_attempt_at=(
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=failure_notices.DEFERRAL_RECHECK_SECONDS)
+                ).isoformat(),
+                defer_reason=decision.reason,
+            )
+            logger.debug("failure notice for %s deferred (%s)", run_id, decision.reason)
+            return
+        if decision.action == failure_notices.ACTION_SKIP:
+            store.update_owed_failure_notice(
+                run_id,
+                expect=expect,
+                state=NOTICE_SKIPPED,
+                skip_reason=decision.reason,
+            )
+            return
+
+        attempt, retry_after = failure_notices.next_attempt(notice)
+
+        # THE CLAIM, and it must precede the external side effect.
+        #
+        # This one guarded UPDATE does two things at once: it CONSUMES the attempt (so
+        # the number is durable before anything can go wrong with the send — the bound
+        # the raising-rung handler below exists to keep) and it arms a LEASE on
+        # ``next_attempt_at`` marking the row as somebody's until that instant.
+        #
+        # Why here and not after the send. Ownership is checked once per pass and then
+        # the pass AWAITS delivery, so two owners can both hold a listed row: they both
+        # read ``pending``, both walk the ladder, both send, and only then does either
+        # write. A predicate on the write catches the second WRITE and nothing else —
+        # the user already has two messages, and no database can recall one. Nothing
+        # downstream closes it either: ``emit_agent_message`` checks
+        # ``agent_message_exists`` BEFORE the send and persists AFTER it, so both owners
+        # pass that lookup while neither receipt exists. Single-flight has to be
+        # established before the irreversible act, which means before this line.
+        #
+        # The primitive is the CAS that is already here. SQLite evaluates ``expect`` in
+        # the writing statement under its single-writer lock, so a guarded transition
+        # from ``(pending, N)`` is atomic across connections and processes — exactly an
+        # atomic claim, just used earlier. An owner that read before this write loses
+        # the CAS; one that reads after it sees the lease and stands down at the
+        # eligibility check at the top of this method.
+        #
+        # And because the lease is an INSTANT rather than a held lock, a claimant that
+        # dies mid-send releases it by expiry: ``CLAIM_LEASE_SECONDS`` is the recovery
+        # bound, and the recovered pass consumes its own attempt rather than inheriting
+        # the dead one, so the retry ladder stays finite. The residual is at-least-once
+        # delivery, documented on that constant.
+        claimed = store.update_owed_failure_notice(
+            run_id,
+            expect=expect,
+            attempts=attempt,
+            # Armed at CLAIM time, not from the instant the eligibility check read:
+            # the streak reads above sit between the two, and the lease has to bound
+            # the delivery that is about to start rather than one that already has.
+            next_attempt_at=(
+                datetime.now(timezone.utc)
+                + timedelta(seconds=failure_notices.CLAIM_LEASE_SECONDS)
+            ).isoformat(),
+        )
+        if claimed is None:
+            # Another owner moved this row between our read and our claim. Nothing to
+            # repair and nothing to report: the winner is delivering it, and this pass
+            # must not send. Silent for the same reason the losing write is — a lock
+            # handoff is normal, and an error here would be logged on every one.
+            logger.debug("failure notice for %s already claimed by another owner", run_id)
+            return
+        # Every write below re-asserts what the CLAIM left behind, not what was read
+        # before it.
+        expect = notice_write_expectation(claimed)
+
+        evidence = DeliveryEvidence()
+        # THE DEADLINE, over the whole ladder walk rather than one rung.
+        #
+        # The claim above makes a competing owner stand down for the lease, and lease
+        # expiry recovers a claimant that DIES. Neither covers one that never returns:
+        # a transport that accepted the request and hung leaves this coroutine
+        # suspended with the row ineligible and nothing reporting it, so the notice is
+        # owed indefinitely. See ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` for the two-sided
+        # argument for the value; what matters here is the scope and the disposal.
+        #
+        # Scope is the WALK, not the rung: a per-rung bound would let five slow rungs
+        # add up past the lease, and the thing being bounded is how long this claim can
+        # be held.
+        #
+        # Disposal: ``wait_for`` cancels the inner task and AWAITS that cancellation
+        # before raising, so the transport coroutine is dead — not detached to send
+        # behind a replacement claimant's back — by the time the handler below writes
+        # anything. ``asyncio.wait_for`` rather than ``asyncio.timeout`` because the
+        # package supports 3.10, where the latter does not exist.
+        # The ATTEMPT IS NOT THREADED INTO THE WALK, and it used to be. An earlier
+        # revision passed it down because the workspace rung's presence depended on the
+        # attempt number; that design is retired (see ``_failure_notice_targets``' WHEN
+        # block) and the ladder is now the same on every attempt, so the walk needs
+        # nothing from the counter. ``attempt`` still governs everything BELOW — the
+        # backoff instant, ``MAX_ATTEMPTS``, and the dead letter — because those are
+        # properties of the row, not of the address.
+        emit = asyncio.ensure_future(self._emit_failure_notice(run, notice, evidence))
+        try:
+            delivered = await asyncio.wait_for(
+                emit, timeout=failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            # WHOSE timeout, asked rather than assumed: from 3.11 ``asyncio.TimeoutError``
+            # is the builtin ``TimeoutError``, so an adapter's own HTTP timeout arrives
+            # here indistinguishable from the deadline. ``emit.cancelled()`` is the
+            # discriminator — only the deadline cancels the walk — and without it the
+            # notice would be stamped with a confident lie about which one happened.
+            delivered = False
+            if emit.cancelled():
+                logger.error(
+                    "failure notice delivery timed out for run=%s after %ss; transport cancelled",
+                    run_id,
+                    failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS,
+                )
+                # The timeout CONSUMES the attempt the claim already made durable: the
+                # retry write below arms the ordinary backoff under the claim's own
+                # expectation, which cannot lose while this claimant's lease holds. A
+                # release (rewinding ``attempts``) would let a permanently hanging
+                # transport retry without bound and never dead-letter.
+                stamped: BaseException = TimeoutError(
+                    "failure notice delivery timed out after "
+                    f"{failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS}s; transport cancelled"
+                )
+            else:
+                # A rung's OWN timeout, reported as itself: it is an ordinary raising
+                # rung that happens to have picked this exception type.
+                logger.exception("failure notice delivery raised for run=%s", run_id)
+                stamped = exc
+            if evidence.error is None:
+                evidence.error = stamped
+                evidence.error_stage = "deliver"
+        except Exception as exc:
+            # A raising rung CONSUMES an attempt. Previously the exception escaped
+            # between computing the attempt number and persisting it, so the next
+            # 2 s tick recomputed the same number and raised again — an unbounded
+            # retry loop, which is exactly what the backoff exists to prevent. The
+            # bound has to hold for any rung, not just the one that was observed
+            # raising, so this catches rather than enumerating call sites.
+            logger.exception("failure notice delivery raised for run=%s", run_id)
+            delivered = False
+            if evidence.error is None:
+                evidence.error = exc
+                evidence.error_stage = "deliver"
+
+        if delivered and evidence.delivered:
+            # Acknowledged on a durable receipt or on a returned delivery id — never
+            # on a function return. ``emit_replayed_backend_failure`` discards the
+            # notify result and returns normally either way, so a returns-cleanly ack
+            # would flip a lost notice to ``sent`` permanently.
+            store.update_owed_failure_notice(
+                run_id,
+                expect=expect,
+                state=NOTICE_SENT,
+                # Re-asserting the attempt the CLAIM already consumed, deliberately
+                # rather than omitting it: this write is the one a reader reconstructs
+                # the delivery from, and it should say which attempt succeeded instead
+                # of leaving that to be inferred from an earlier row version.
+                attempts=attempt,
+                ack_evidence=evidence.ack_evidence,
+                # A post-delivery error (the SSE fan-out raised) is recorded for
+                # diagnosis and must NOT trigger a resend.
+                error=evidence.error_text,
+            )
+            self._drain_dirty = True
+            return
+
+        error_text = evidence.error_text or "failure notice delivery produced no evidence"
+        if retry_after is None:
+            # Dead letter, carrying the raised exception's own message rather than a
+            # generic string. Visible rather than silently retrying forever.
+            store.update_owed_failure_notice(
+                run_id,
+                expect=expect,
+                state=NOTICE_FAILED,
+                attempts=attempt,
+                error=error_text,
+            )
+            logger.error("failure notice for run %s dead-lettered: %s", run_id, error_text)
+            return
+        next_attempt_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+        ).isoformat()
+        store.update_owed_failure_notice(
+            run_id,
+            expect=expect,
+            state=NOTICE_PENDING,
+            attempts=attempt,
+            next_attempt_at=next_attempt_at,
+            error=error_text,
+        )
+
+    async def _emit_failure_notice(
+        self,
+        run: dict[str, Any],
+        notice: dict[str, Any],
+        evidence: "DeliveryEvidence",
+    ) -> bool:
+        """Walk D5's delivery ladder for one failed run. True once one rung emitted.
+
+        Evidence is per RUNG, then adopted into the caller's object. One shared
+        ``DeliveryEvidence`` cannot express a ladder: ``delivered`` latches true the
+        moment any rung records an id, so a rung whose ack is REJECTED (see
+        ``_rung_acknowledges``) would both stop the walk and hand the eventual
+        ack/dead-letter another rung's ``ack_evidence``. The caller ends up with the
+        winning rung's evidence, or — when no rung was accepted — the last one's, so
+        the dead letter reports what actually went wrong on the final attempt.
+
+        A rung that RAISES is an unusable rung, not the end of the walk. Every other
+        way a rung can fail to deliver already continues — ``_build_context`` raising,
+        a stale synthetic candidate, an un-acked send — so a delivery that throws
+        (a platform whose settings manager is gone, an adapter that fails before its
+        transport) has to continue too, or the notice spends every attempt on rung (1)
+        and dead-letters without rungs (2)…(5) ever being tried. ``Exception`` and not
+        ``BaseException``: the walk-level deadline cancels this coroutine, and
+        cancellation must unwind the walk rather than advance it past the bound it was
+        cancelled to respect.
+
+        The cost is real and is recorded rather than hidden. A rung that raises AFTER
+        its transport accepted the send, leaving no evidence behind, now delivers again
+        on the next rung. The adapters no longer manufacture that state — post-send
+        bookkeeping is guarded in every one of them, so an already-delivered id is not
+        destroyed on its way out — and what remains is the same at-least-once residual
+        documented on ``CLAIM_LEASE_SECONDS``, narrowed on the retry by the duplicate
+        short-circuit's persisted receipt.
+
+        THE WORKSPACE RUNG IS RESOLVED HERE, NOT WHERE THE LADDER IS BUILT, and that
+        split is the whole reason this method knows the reserved id at all.
+        ``_failure_notice_targets`` appends the reserved id as a CONSTANT — no database
+        access, no row minted — and the resolve-or-create-or-heal happens below, once
+        the walk has actually reached that rung. Two consequences, both wanted:
+
+        * an installation whose rung (1) always delivers never grows the reserved row,
+          even though every ladder it builds ends with the reserved id. The rung is
+          appended to every ladder unconditionally (the round-14 gate), so a
+          build-time resolve would create the row on the FIRST failure of every
+          install, which is the one surviving argument from the design this replaced;
+        * ``_failure_notice_targets`` stays a pure address computation. It is called
+          directly by tests and by ad-hoc inspection, and under a build-time resolve
+          each of those calls would be a write.
+
+        The cost is that the rung can turn out to be UNUSABLE mid-walk, when the
+        workbench database cannot be read or written. That is not a new state — every
+        other rung can be unusable too (``_build_context`` raising, a stale candidate,
+        a send that throws) — and it takes the same disposal: the rung is skipped, the
+        walk continues, and with nothing left to try the notice keeps its ``pending``
+        state and its backoff. It dead-letters visibly only if the database never
+        answers.
+        """
+
+        body = self._failure_notice_body(run, notice)
+        failure_id = str(notice.get("failure_id") or f"failure:{run['id']}")
+        last_rung: Optional[DeliveryEvidence] = None
+        first_raise: Optional[DeliveryEvidence] = None
+        try:
+            for target, session_id in self._failure_notice_targets(run):
+                if session_id == WORKSPACE_NOTICE_SESSION_ID:
+                    # THE LAZY HALF of the reserved rung: resolve-or-create-or-heal now
+                    # that the walk has reached it. ``resolve_workspace_notice_session``
+                    # always answers with this same reserved id, so nothing about the
+                    # target changes — the call is made for its WRITE (create the row,
+                    # or repair one that was archived or hidden), not for its return.
+                    if self._workspace_notice_session_id() is None:
+                        # An unusable rung, disposed of like any other. Recorded only
+                        # when no earlier rung left evidence: a preferred rung's own
+                        # refusal ("returned send id … without a persisted receipt") is
+                        # the more useful diagnosis, and this must not displace it.
+                        logger.warning(
+                            "failure notice rung unusable: the workspace-notifications "
+                            "session could not be resolved for run=%s",
+                            run["id"],
+                        )
+                        if last_rung is None:
+                            unusable = DeliveryEvidence()
+                            unusable.error = RuntimeError(
+                                f"{target.to_key()} rung unusable: the "
+                                "workspace-notifications session could not be resolved"
+                            )
+                            unusable.error_stage = "deliver"
+                            last_rung = unusable
+                        continue
+                try:
+                    context = await self._build_context(
+                        target,
+                        delivery_target=target,
+                        execution_id=str(run["id"]),
+                        task_id=str(run.get("task_id") or "") or None,
+                        trigger_kind=str(run.get("run_type") or "scheduled"),
+                        session_id=session_id,
+                    )
+                except Exception:
+                    logger.debug("failure notice rung unusable: %s", target, exc_info=True)
+                    continue
+                rung = DeliveryEvidence()
+                last_rung = rung
+                # The REPLAY emitter, not the live failure path. A notice is owed only for
+                # a run that is already settled, so this delivers one visible ``notify``
+                # and nothing else: no terminal result, no turn settlement, no auth
+                # prompt, and an identity taken from the durable row rather than from
+                # whatever ``task_execution_id`` this rebuilt context happens to supply.
+                # See ``emit_replayed_backend_failure`` for why each of those is a
+                # property of the emitter instead of an argument to the live one.
+                try:
+                    await emit_replayed_backend_failure(
+                        self.controller,
+                        context,
+                        str(run.get("agent_backend") or "harness"),
+                        str(run.get("error") or "").strip() or body,
+                        display_text=body,
+                        failure_id=failure_id,
+                        delivery=rung,
+                    )
+                except Exception as exc:
+                    # This rung is unusable; the ladder is not. See the docstring for
+                    # why ``Exception`` and not ``BaseException``.
+                    logger.warning(
+                        "failure notice rung raised, continuing the walk: %s",
+                        target.to_key(),
+                        exc_info=True,
+                    )
+                    if rung.error is None:
+                        rung.error = exc
+                        rung.error_stage = "deliver"
+                    if first_raise is None:
+                        first_raise = rung
+                    continue
+                if self._rung_acknowledges(target, rung):
+                    return True
+        finally:
+            if last_rung is not None:
+                _adopt_delivery_evidence(evidence, last_rung)
+            if evidence.error is None and first_raise is not None:
+                # The winning rung carries no error of its own, so the skipped rung's
+                # does not compete with anything: it is recorded on the acknowledged
+                # row purely for diagnosis, the same way a post-delivery stream error
+                # is, and — like that one — must never be read as a delivery failure.
+                evidence.error = first_raise.error
+                evidence.error_stage = first_raise.error_stage
+        return False
+
+    @staticmethod
+    def _rung_acknowledges(target: ParsedSessionKey, rung: "DeliveryEvidence") -> bool:
+        """Whether THIS rung's evidence satisfies its target class's ack source.
+
+        One table lookup and one membership test, deliberately: the question "who may
+        ack on what" is answered once, declaratively, by ``LADDER_ACK_SOURCES`` — see
+        that table for why each class gets the source it does. A predicate that
+        special-cased platforms here is exactly how three review rounds each found a
+        different target class acking on evidence that proved nothing.
+
+        A rejected rung is not a silent one. When the send DID return an id and only
+        the durable receipt is missing, that is recorded on the rung so the eventual
+        retry or dead letter can say why, instead of reporting "produced no
+        evidence" about a send that in fact returned.
+        """
+
+        source = failure_notice_ack_source(target)
+        if rung.ack_evidence in ACK_EVIDENCE_BY_ACK_SOURCE[source]:
+            return True
+        if (
+            source == ACK_SOURCE_PERSISTED_RECEIPT
+            and rung.error is None
+            and rung.delivered_id is not None
+        ):
+            rung.error = RuntimeError(
+                f"{target.to_key()} rung returned send id {rung.delivered_id} "
+                "without a persisted receipt"
+            )
+            rung.error_stage = STAGE_PERSIST
+        return False
+
+    def _failure_notice_targets(
+        self,
+        run: dict[str, Any],
+    ) -> list[tuple[ParsedSessionKey, Optional[str]]]:
+        """D5's ladder, in order, skipping rungs this run cannot address.
+
+        (1) the definition's delivery key; (2) the bound session's scope while the
+        session is still alive; (3) the scope the definition was created from;
+        (4) a DM to the owner; (5) the workbench inbox.
+
+        Rung (5) carries the definitions no person is addressable for. For one
+        created by a plain ``vibe task add`` at a terminal there is no caller
+        provenance at all, so rungs (3) and (4) are both empty; an unscoped
+        ``create_per_run`` definition can also have no delivery key, and once its
+        per-run session is gone rung (2) goes with it.
+
+        What rung (5) does and does not guarantee, stated honestly because the
+        earlier "always resolves" claim was wrong. The distinction it turns on is
+        between a REAL PERSISTED project scope and a STALE SYNTHETIC project
+        candidate, and the key alone does not tell them apart: rung (5) is spelled
+        ``avibe::project::<session id>``, a candidate this method MANUFACTURES for
+        every run carrying a session id. It becomes a real scope only downstream,
+        where ``persist_agent_message`` looks the session's ``agent_sessions`` row up
+        and takes that row's ``scope_id``.
+
+        AN ARCHIVED OR BACKGROUND ROW IS NOT A DELIVERY SURFACE, and rung (5) is
+        rerouted when the run names one — see ``_rung_five_session_id``. The previous
+        revision claimed
+        the opposite ("the real difference between this rung and rung (2)": that
+        ``_session_row`` has no status filter while ``resolve_session_id_target``
+        refuses an archived session outright). The mechanism is real; the conclusion
+        was wrong, and it is the round-13 P1 on this method (review thread
+        3676292667). ``persist_agent_message`` does write the row, which is the
+        workbench class's ack source, so the notice is stamped ``sent`` — while
+        ``list_inbox_sessions`` excludes archived and background sessions, so there
+        is no card, no
+        ``inbox.session.updated`` and no push, and the acked notice is never retried.
+        Same class as the round-12 reserved-session hole, opposite remedy: the
+        reserved row is HEALED because nobody may archive it, whereas an ordinary
+        session was archived by its owner ON PURPOSE. Resurrecting it would overrule
+        the user, so the fix is ROUTING.
+
+        With a hard-deleted row the candidate resolves to nothing and
+        ``persist_agent_message`` returns before writing — yet ``AvibeBot.send_message``
+        still hands back a synthetic ``msg_…`` id, so the rung LOOKS delivered. That is
+        why the workbench target class may only acknowledge on a persisted receipt (see
+        ``LADDER_ACK_SOURCES``): a stale candidate leaves the notice retryable instead
+        of marking it ``sent`` against a row that was never written. Pinned by
+        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``.
+
+        AND EVERY LADDER ENDS WITH THE RESERVED WORKSPACE RUNG (plan :3193, :3215-3222;
+        round-14 gate, review comment 5121007240). One distinct
+        WORKSPACE-NOTIFICATIONS rung is appended after every person/context target, on
+        every attempt, whatever the four rungs above produced — see the WHEN block at
+        the end of this method for why that is unconditional and what it costs. It
+        resolves without a person to address because it is addressed to the workspace
+        instead.
+
+        This method takes NO attempt number and performs NO database access. The
+        reserved rung is appended as a CONSTANT (``WORKSPACE_NOTICE_SESSION_ID``); the
+        resolve-or-create-or-heal happens in ``_emit_failure_notice``, when the walk
+        actually reaches that rung. So the ladder is a pure address computation that is
+        safe to call from a test or an ad-hoc probe, and an installation whose rung (1)
+        always delivers never grows the reserved row even though every ladder it builds
+        names it.
+
+        The rung is therefore appended UNCONDITIONALLY but is not guaranteed USABLE, and
+        that distinction is stated here rather than left to be discovered because an
+        earlier revision's unqualified "always resolves" is the exact claim the plan's
+        own correction had to retract. ``_workspace_notice_session_id`` returns ``None``
+        when the workbench database cannot be read or written; the walk then skips the
+        rung. The consequence is a RETRY, not a loss: the notice keeps its ``pending``
+        state, arms its backoff, and delivers on a later pass once the database answers
+        — and only dead-letters if it never does. That is the same shape as any other
+        unusable rung, which is why it needs no special handling in the drain.
+        """
+
+        rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
+        seen: set[tuple[str, Optional[str]]] = set()
+
+        def _add(raw_key: Any, session_id: Optional[str]) -> None:
+            key = str(raw_key or "").strip()
+            if not key:
+                return
+            try:
+                parsed = parse_session_key(key)
+            except Exception:
+                # ``parse_session_key`` rejects every scope type outside
+                # ``{channel, user}``, and EVERY avibe rung is
+                # ``avibe::project::…`` — rung (2) for any workbench-bound session
+                # (``resolve_session_id_target`` hands back a ``project`` scope for
+                # one), rung (3) for a workbench-created definition, and rung (5)
+                # always. Swallowing that ``ValueError`` silently discarded all of
+                # them, so an Avibe-only definition had an entirely empty ladder.
+                #
+                # Only a bare three-part key falls back. A five-part
+                # ``::thread::`` key is a session key by construction and
+                # ``parse_scope_id`` cannot express one, so it stays on the strict
+                # parser rather than being downgraded to its scope prefix (which
+                # would silently retarget a thread notice at its parent channel).
+                if len(key.split("::")) != 3:
+                    return
+                try:
+                    parsed = parse_scope_id(key)
+                except Exception:
+                    return
+            identity = (parsed.to_key(), session_id)
+            if identity in seen:
+                return
+            seen.add(identity)
+            rungs.append((parsed, session_id))
+
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        task = self.store.get_task(str(run.get("task_id") or "")) if run.get("task_id") else None
+
+        # (1) the definition's delivery key.
+        _add((task.deliver_key if task else None) or run.get("deliver_key"), None)
+
+        # (2) the bound session's scope, only while the session resolves to a visible
+        # delivery surface. Background sessions deliberately suppress delivery, so
+        # persisting and acknowledging a notice there would hide it permanently.
+        session_id = str((task.session_id if task else None) or run.get("session_id") or "").strip()
+        if session_id:
+            try:
+                resolved = resolve_session_id_target(session_id)
+            except Exception:
+                resolved = None
+            if resolved is not None and not resolved.suppress_delivery:
+                _add(resolved.session_key.to_key(), session_id)
+
+        # (3) caller provenance, written at definition creation.
+        caller = _created_by_caller(task, metadata)
+        if caller is not None:
+            _add(caller.get("session_key") or caller.get("scope_id"), None)
+
+        # (4) a DM to the owner, from the same provenance.
+        if caller is not None:
+            platform = str(caller.get("platform") or "").strip()
+            user_id = str(caller.get("user_id") or "").strip()
+            if platform and user_id:
+                _add(f"{platform}::user::{user_id}", None)
+
+        # (5) the workbench inbox, addressed through the run's own session — the rung
+        # that survives rung (2)'s refusal, because ``persist_agent_message`` resolves
+        # the avibe scope from ``_session_row`` (no status filter) where
+        # ``resolve_session_id_target`` demands a live, usable session.
+        #
+        # The key below is a CANDIDATE, not a resolved scope: the session id sits in
+        # the ``project`` slot and, for a MISSING row, nothing here checks that the row
+        # it names still exists. Whether it is real is settled downstream, by whether a
+        # durable ``messages`` row appears — which is exactly what the workbench class's
+        # receipt-only ack source measures, so a candidate for a deleted session
+        # cannot pass itself off as a delivery.
+        #
+        # An archived or background row is the case that measurement CANNOT catch,
+        # so it is caught here instead: see ``_rung_five_session_id``.
+        #
+        # So this rung covers every definition that has ever had a session — every
+        # ``create_once`` / ``create_per_run`` / session-bound definition — addressing
+        # the run's own session while that row is a surface a user can see, and the
+        # workspace inbox when it is not.
+        if session_id:
+            rung_five_session_id = self._rung_five_session_id(session_id)
+            _add(f"avibe::project::{rung_five_session_id}", rung_five_session_id)
+
+        # …AND THE LAST RUNG, for the definitions the four above cannot address at all
+        # (plan :3193, :3215-3222; PR6's own step list, :1256-1259).
+        #
+        # THE EARLIER POSITION HERE WAS WRONG, and the plan says so with a date. It read
+        # that ``persist_agent_message`` returns before writing when an avibe context
+        # resolves neither a scope nor a session row, therefore a session-less
+        # definition has nowhere to put the row, therefore the notice dead-letters
+        # VISIBLY and that is a declared Known-By-Design limitation under #1044. The
+        # first two clauses are still true; the conclusion was not. "Visible in
+        # ``last_error`` and the health badge" is visible to somebody who goes LOOKING,
+        # and D1's whole subject is the runs nobody is watching. A notice with nowhere
+        # to go is a notice that is never written.
+        #
+        # What was actually missing was a HOME, not a widened writer: the blocker is a
+        # session row, so the fix supplies one. ``_workspace_notice_session_id``
+        # resolves-or-creates a single reserved workspace-notifications session, and
+        # rung (5) then addresses it exactly like any other avibe session — the same
+        # ``avibe::project::<session id>`` candidate, satisfied by the same
+        # ``_session_row`` lookup, acked by the same receipt-only policy. Nothing
+        # downstream learns a new row shape.
+        #
+        # WHAT THAT ACTUALLY GETS THE USER, enumerated rather than waved at, because the
+        # previous revision's "the same inbox / unread / realtime / Web Push machinery"
+        # claimed three surfaces the row does not reach:
+        #
+        # * an INBOX CARD (``list_inbox_sessions`` accepts a terminal ``notify``) and the
+        #   ``inbox.session.updated`` realtime event that patches an open browser — the
+        #   two surfaces the plan's "readable inbox row" is about;
+        # * a LOCAL Web Push, via ``maybe_notify_inbox_message``.
+        #
+        # Residuals, all three properties of pre-existing policy rather than of this rung:
+        # the notice does NOT bump the unread badge (``notify`` carries no ``unread`` in
+        # ``vibe/message_types.json`` and the unread counts are ``result``-only, on purpose
+        # — a failure report is not an unread reply); it is NOT reachable by message
+        # search, which is also ``result``-scoped; and on a REMOTE-ACCESS install push can
+        # find no owner to address, because owner resolution falls back to the local user
+        # only while remote access is off (``core/web_push_notifications.py``). The inbox
+        # card and the realtime event are unaffected by all three.
+        #
+        # WHEN. UNCONDITIONALLY, ONCE, LAST. One distinct workspace-notifications rung
+        # after every person/context target, on every attempt, whether or not the four
+        # rungs above produced anything and whether or not what they produced is stale,
+        # unavailable, or failing delivery. This is the round-14 gate ruling (review
+        # comment 5121007240) and it is a settled decision, not a preference to be
+        # re-litigated by a later revision.
+        #
+        # TWO RETIRED DESIGNS, named so neither comes back:
+        #
+        # (i)  round 12's "ONLY WHEN NOTHING ELSE RESOLVED" — the fallback fired only for
+        #      an empty ladder. Too narrow by exactly the case #1060 reported (maintainer
+        #      note 5120451508): a NON-EMPTY ladder is not a DELIVERABLE one. Rung (5)
+        #      above is manufactured from the run's session id and nothing checks that the
+        #      row it names still exists, and rungs (3)/(4) can point at the same dead
+        #      session. A watch bound to a HARD-DELETED session therefore builds a ladder
+        #      that can never persist a receipt: every attempt sends to a candidate that
+        #      resolves to nothing, the receipt-only ack source correctly refuses it, the
+        #      ``if not rungs`` gate never fires, all six attempts burn, and the notice
+        #      dead-letters into ``NOTICE_FAILED`` with nothing written anywhere. That
+        #      silent dead letter is the 3.5 hours of silence in #1060's field evidence,
+        #      and "visible in ``last_error``" was refuted above for exactly this reason.
+        #
+        # (ii) round 13's FINAL-ATTEMPT fallback (commit ``ce695b42``) — appended last,
+        #      but only on attempt ``MAX_ATTEMPTS``. It closed (i)'s hole and was
+        #      overruled anyway. Its argument was that a workspace rung present from
+        #      attempt 1 converts a TRANSIENT preferred-rung failure into a permanently
+        #      workspace-routed notice, since the walk acks the FIRST rung that succeeds.
+        #      That reading of the mechanism is correct; the gate weighed the trade and
+        #      decided the other way, in terms that leave no conditional room:
+        #      "Workspace fallback is mandatory rung 5. Append one distinct
+        #      workspace-notifications target after every person/context target, even
+        #      when earlier candidates exist but are stale, unavailable, or fail
+        #      delivery. It cannot be conditional on rungs being empty."
+        #
+        # THE TRADE, RECORDED RATHER THAN LEFT SILENT, because it is a real behaviour
+        # change and the next reader deserves to find it stated: any walk in which every
+        # preferred rung fails to deliver now reaches this rung on THAT walk, delivers,
+        # and ACKS. So a preferred rung that failed TRANSIENTLY — a platform blip on
+        # attempt 1 — permanently routes that one notice to the workspace inbox; the
+        # notice is never retried to the preferred target, and the user's own channel
+        # does not receive a copy it would have received a minute later. Accepted
+        # explicitly by the maintainer in the ruling above ("…or fail delivery"), on the
+        # judgement that a misrouted notice a user can find beats a notice nobody
+        # receives. Scope of the residual: ONE notice, not the definition — the next
+        # failure builds a fresh ladder and the recovered preferred rung wins it again.
+        #
+        # WHAT KEEPS IT FROM BEING NOISY is the ORDER, which is the one property of
+        # round 12's argument that survives intact. The rung is appended STRICTLY LAST,
+        # after every preferred rung, and the walk returns on the first rung that
+        # acknowledges — so a HEALTHY preferred rung wins every walk and never produces a
+        # workspace card at all. Duplicate cards for a delivered notice's silent per-rung
+        # failures are therefore not reachable; only a walk where NOTHING preferred
+        # delivered gets here. Pinned by
+        # ``test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox``.
+        #
+        # AND ONCE. The reserved id is appended as a CONSTANT, so it collides by identity
+        # with rung (5)'s archived-session reroute (which returns the same constant) and
+        # the ``_add`` seen-set collapses the two into a single rung. An archived-session
+        # ladder holds exactly ONE workspace rung, not two — pinned by
+        # ``test_an_archived_session_ladder_holds_exactly_one_workspace_rung``.
+        #
+        # NO DATABASE ACCESS HERE. Appending the constant costs nothing; the
+        # resolve-or-create-or-heal is done by ``_emit_failure_notice`` when the walk
+        # reaches this rung. That is what keeps the reserved row from being minted on the
+        # first failure of an installation whose rung (1) always delivers — the only part
+        # of round 12's "would create the reserved row for installations that never need
+        # it" that is still load-bearing once the ordering argument above is granted.
+        #
+        # RESIDUAL: ``_workspace_notice_session_id`` returns ``None`` when the workbench
+        # database cannot be read or written, and the walk then SKIPS this rung on every
+        # attempt — so the notice dead-letters exactly as it did before, visibly, with the
+        # last rung's own refusal in ``error``. That path must stay reachable: a fallback
+        # that swallowed the dead letter when it could not itself deliver would replace
+        # one silence with a worse one.
+        _add(f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}", WORKSPACE_NOTICE_SESSION_ID)
+        return rungs
+
+    def _rung_five_session_id(self, session_id: str) -> str:
+        """Which session rung (5) may address: the run's own, or the workspace inbox.
+
+        THE INVISIBLE-SESSION REROUTE. An archived or background
+        ``agent_sessions`` row is WRITABLE but is not a VISIBLE delivery surface,
+        and the notice machinery reads those two as one thing:
+        ``persist_agent_message`` resolves the avibe scope through ``_session_row``,
+        which has no status filter, so the message persists; a persisted receipt is the
+        workbench class's ack source (``LADDER_ACK_SOURCES``), so the rung ACKS and the
+        notice is stamped ``sent`` and never retried; but ``list_inbox_sessions`` and
+        ``get_inbox_session`` exclude archived sessions, so there is no inbox card, no
+        ``inbox.session.updated`` patch for an open browser, and no Web Push. The user is
+        told nothing and the system believes it told them — the exact silence D1 exists
+        to close, and worse than a dead letter, which at least says so.
+
+        The receipt-only ack source CANNOT catch this one. It is the right measurement
+        for a MISSING row (nothing persists, so nothing acks — see
+        ``_failure_notice_targets``' rung-(5) comment and
+        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``), and it is blind
+        here precisely because the write really does happen. So the check has to be a
+        read, and it has to be here, where the address is chosen.
+
+        WHY REROUTING RATHER THAN HEALING, which is what round 12 did for the same class
+        of hole (``2ceaa865``, the reserved workspace session). That row may never be
+        archived at all — ``archive_session`` refuses its id — so an archived one is
+        corruption and repairing it in place restores the invariant. An ORDINARY session
+        was archived by its owner deliberately. Un-archiving it to deliver a failure
+        notice would overrule a user decision to make a bookkeeping row visible, and it
+        would resurface the whole session, not the notice. The session is not broken; the
+        ADDRESS is. So the notice moves.
+
+        Three outcomes, and only the middle one changes anything:
+
+        * row ABSENT (hard-deleted, or the DB cannot be read): the caller's own
+          candidate, unchanged. Nothing persists, so nothing acks, and the appended
+          workspace rung plus the ``delivery_target_missing`` classification carry the
+          case on the SAME walk. The candidate is
+          also kept for what it documents: rung (5) is a candidate by construction, and
+          removing it here would hide the shape of the ladder from the ack policy that
+          depends on it.
+        * row ARCHIVED OR HIDDEN: the reserved workspace-notifications session, so the
+          notice lands somewhere ``list_inbox_sessions`` will show it. Returned as the
+          bare CONSTANT — this method does not resolve or create the reserved row, so
+          the reroute is a pure address change and the id it returns is identical to the
+          one ``_failure_notice_targets`` appends last, which is what lets the
+          ``_add`` seen-set collapse the two into ONE rung. Whether that row can
+          actually be written is settled later, by the walk. If it cannot, the rung is
+          skipped and the notice stays retryable rather than acking invisibly into the
+          archived row — which is what keeping the caller's candidate here used to do.
+        * an active row whose visibility is explicitly admitted by the inbox: the
+          caller's candidate. The visibility whitelist is shared with inbox queries,
+          so a future value stays hidden until both surfaces opt it in.
+
+        ONE READ, and the TOCTOU is real and bounded: a session archived or hidden
+        between this SELECT and ``persist_agent_message``'s write still acks there.
+        The residual is ONE notice, not a class — the next notice re-reads and reroutes —
+        and closing it would need the status check inside the persisting transaction,
+        which is a writer-side change of a different shape. Not worth trading a
+        per-notice window for a widened writer.
+        """
+
+        try:
+            with get_cached_sqlite_engine().begin() as conn:
+                row = conn.execute(
+                    select(agent_sessions.c.status, agent_sessions.c.visibility).where(
+                        agent_sessions.c.id == session_id
+                    )
+                ).first()
+        except Exception:
+            logger.warning(
+                "failure notice: cannot read session %s status/visibility for rung (5)",
+                session_id,
+                exc_info=True,
+            )
+            return session_id
+        if row is None:
+            return session_id
+        status, visibility = row
+        if str(status) != "archived" and str(visibility) in INBOX_SESSION_VISIBILITIES:
+            return session_id
+        logger.info(
+            "failure notice: session %s is archived or hidden, rerouting rung (5) to the "
+            "workspace-notifications inbox",
+            session_id,
+        )
+        return WORKSPACE_NOTICE_SESSION_ID
+
+    def _workspace_notice_session_id(self) -> Optional[str]:
+        """The reserved workspace-notifications session id, created on first need.
+
+        Lazy on purpose: an installation whose definitions all have a delivery key or a
+        session never grows the row. See
+        ``storage.agent_session_rows.resolve_workspace_notice_session`` for why the
+        identity is a reserved primary key and why the row carries no Scope.
+
+        THREE MECHANISMS KEEP THE ROW USABLE, and they cover three different ways of
+        losing it — the first one alone was not enough:
+
+        * RECREATION covers REMOVAL. Nothing asks the ``/new`` clear path or session
+          eviction for an exemption; if the row is deleted the next notice makes it again.
+        * HEALING covers ARCHIVE and a flipped ``visibility``, which recreation cannot
+          see: the reserved primary key is still there, so nothing recreates, while the
+          row has stopped being a delivery surface. That state fails SILENTLY — the
+          notice still persists through ``_session_row`` (no status filter), still acks
+          on the receipt, and ``list_inbox_sessions`` shows nothing — so
+          ``resolve_workspace_notice_session`` repairs the row in place instead.
+        * THE ``archive_session`` AND ``update_session`` GUARDS cover the UI paths.
+          The row is ``visibility='system'`` — absent from ordinary session lists,
+          admitted by the inbox surfaces — so the remaining door to it is its own
+          inbox card, and ``storage.workbench_sessions_service`` refuses the id on
+          both archive and modify (403). The heal is still needed for a database
+          archived or re-flagged out of band, or before the guards existed.
+
+        Called from the WALK (``_emit_failure_notice``), not from the ladder build. The
+        ladder appends the reserved id as a constant, so this — the only part of the rung
+        that writes — runs exactly when the walk has actually reached it. An install
+        whose preferred rung always delivers therefore never grows the row.
+
+        Returns ``None`` rather than raising: this runs mid-walk for a failure that is
+        already recorded, and an unwritable workbench DB must leave the notice retryable
+        — the pre-existing behaviour — instead of turning one unusable rung into an
+        exception the drain has to classify.
+        """
+
+        try:
+            from storage.agent_session_rows import resolve_workspace_notice_session
+            from storage.db import get_cached_sqlite_engine
+
+            with get_cached_sqlite_engine().begin() as conn:
+                return resolve_workspace_notice_session(
+                    conn,
+                    # Named once, at CREATE time, by whoever's notice needed it first.
+                    title=self._t("harness.notice.workspaceSession"),
+                )
+        except Exception:
+            logger.warning(
+                "failure notice: workspace-notifications session unavailable", exc_info=True
+            )
+            return None
+
+    def _origin_lines(self, caller: Optional[dict[str, Any]]) -> list[str]:
+        """The creation-origin line, plus a deep link when one can be built honestly.
+
+        Zero, one or two lines — never a placeholder. Three separate refusals, each of
+        which independently yields FEWER lines rather than vaguer ones:
+
+        * **No provenance at all.** Every definition created before the origin capture
+          landed, and every definition created from the CLI with no conversation behind
+          it. There is nothing to say, so nothing is said.
+        * **An unmapped platform.** The label is rendered inside a translated sentence,
+          so the wire value goes through ``NOTICE_ORIGIN_PLATFORM_I18N_KEYS`` — a closed
+          map — and never gets interpolated. Same call as
+          ``notice_failure_class_i18n_key``'s: ``None`` means no line, because "Created
+          in: mystery_platform" leaks an identifier into product copy for no benefit.
+        * **No followable link.** ``origin_link`` returns ``None`` for a Feishu/Lark or
+          WeChat origin, for a Workbench origin (a localhost URL is not reachable from
+          the IM notice this may be delivered to), and for any platform whose permalink
+          grammar needs an id that was not captured. The origin TEXT still renders; only
+          the second line is dropped.
+
+        The channel and thread are rendered from the CAPTURED ids — a raw ``C0123`` is
+        the identifier the user's own client shows in a URL, and inventing a display
+        name that was never captured would be a different kind of dishonesty from
+        inventing a link, but the same kind of mistake. The scope is read back out of
+        the same ``session_key`` that rung (3) is addressed to, so the notice cannot
+        name one conversation while the ladder targets another.
+        """
+
+        if not caller:
+            return []
+        platform = str(caller.get("platform") or "").strip()
+        platform_key = failure_notices.notice_origin_platform_i18n_key(platform)
+        if not platform_key:
+            return []
+        platform_label = self._t(platform_key)
+
+        parsed: Optional[ParsedSessionKey] = None
+        raw_key = str(caller.get("session_key") or caller.get("scope_id") or "").strip()
+        if raw_key:
+            for parser in (parse_session_key, parse_scope_id):
+                try:
+                    parsed = parser(raw_key)
+                    break
+                except Exception:
+                    parsed = None
+        scope_type = parsed.scope_type if parsed is not None else ""
+        scope_id = parsed.scope_id if parsed is not None else ""
+        thread_id = parsed.thread_id if parsed is not None else None
+
+        if scope_type == "channel" and scope_id:
+            if thread_id:
+                origin = self._t(
+                    "harness.notice.originChannelThread",
+                    platform=platform_label,
+                    channel=scope_id,
+                    thread=thread_id,
+                )
+            else:
+                origin = self._t(
+                    "harness.notice.originChannel",
+                    platform=platform_label,
+                    channel=scope_id,
+                )
+        elif scope_type == "user" and scope_id:
+            origin = self._t(
+                "harness.notice.originDirect",
+                platform=platform_label,
+                user=scope_id,
+            )
+        else:
+            # A known platform with no usable scope — a Workbench (``project``) origin,
+            # or a caller recorded before the session key could be resolved. The
+            # platform alone is still true and still narrows the search.
+            origin = platform_label
+
+        lines = [self._t("harness.notice.origin", origin=origin)]
+        link = origin_link(
+            platform,
+            caller.get("channel_id"),
+            thread_id,
+            caller.get("message_id"),
+            caller.get("workspace_id"),
+        )
+        if link:
+            lines.append(self._t("harness.notice.originLink", url=link))
+        return lines
+
+    def _failure_notice_body(self, run: dict[str, Any], notice: dict[str, Any]) -> str:
+        """Actionable copy: what failed, why, its state, and how to re-run.
+
+        A DM is context-free by construction and rung (5) is not attached to any
+        conversation, so the body has to carry its own context rather than relying on
+        where it happened to land.
+
+        Two classifications decide the copy, and BOTH are asked here by the same
+        predicate the rest of the system uses:
+
+        * the LANE — ``failure_notices.is_interruption``, i.e. membership in
+          ``RUN_INTERRUPTION_REASONS``. Asking by the mere presence of
+          ``interrupt_reason`` told a user "nothing is wrong with the definition
+          itself" for ``no_terminal_result`` / ``refused_concurrent_turn`` /
+          ``transport_unavailable`` / ``queue_hold_expired`` — the recurring per-fire
+          verdicts where the definition is exactly what IS wrong.
+        * the DEFINITION KIND. A watch is not a task: ``vibe task run`` /
+          ``vibe task show`` do not accept a watch id, and ``vibe watch run`` does not
+          exist at all, so a failed watch was handed commands it could not use and an
+          id in place of its name (``get_task`` mirrors scheduled tasks only).
+        """
+
+        definition_id = str(run.get("task_id") or "") or None
+        task = self.store.get_task(definition_id) if definition_id else None
+        # Only for a run whose definition is not a task: the run's own ``run_type``
+        # says so for a watch hook send (``watch``) and for the supervisor heartbeat
+        # (``watch_runtime``), and the definition row is the fallback for a row
+        # rebuilt without one.
+        watch = (
+            self.store.get_watch_definition(definition_id)
+            if task is None and definition_id
+            else None
+        )
+        is_watch = watch is not None or str(run.get("run_type") or "").strip().startswith("watch")
+        name = (
+            (task.name if task else None)
+            or (str((watch or {}).get("name") or "").strip() or None)
+            or definition_id
+            or str(run["id"])
+        )
+        run_id = str(run.get("id") or "").strip()
+        if failure_notices.is_binding_change(notice):
+            return self._binding_notice_body(
+                notice,
+                name=name,
+                definition_id=definition_id,
+                definition_exists=task is not None,
+                run_id=run_id,
+            )
+        reason = str(notice.get("interrupt_reason") or "").strip()
+        error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
+        if failure_notices.is_interruption(notice):
+            # The reason is rendered INSIDE a translated sentence, so it is copy: the
+            # wire value went through a closed label map, never interpolated raw. An
+            # unmapped reason takes the map's localized generic rather than leaking the
+            # identifier — see ``NOTICE_REASON_UNKNOWN_I18N_KEY``.
+            headline = self._t(
+                "harness.notice.interrupted",
+                name=name,
+                reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
+            )
+        else:
+            headline = self._t("harness.notice.failed", name=name)
+        lines = [headline, self._t("harness.notice.error", error=error)]
+        if not failure_notices.is_interruption(notice):
+            # D5 asks for "the error and its CLASS", and on this lane the class was
+            # dropped: the interrupted headline was the only place any reason was
+            # rendered, while the per-fire verdicts — ``no_terminal_result``,
+            # ``refused_concurrent_turn``, ``transport_unavailable``,
+            # ``queue_hold_expired`` — stay in the FAILED lane by design and carry a
+            # reason all the same. Its own closed vocabulary, and ``None`` (no line)
+            # when there is no class to name: see ``notice_failure_class_i18n_key``.
+            class_key = failure_notices.notice_failure_class_i18n_key(reason)
+            if class_key:
+                lines.append(
+                    self._t("harness.notice.failureClass", failureClass=self._t(class_key))
+                )
+        last_success = self._last_success_instant(definition_id)
+        if last_success:
+            # "When it last succeeded" — D5's own list. Omitted rather than rendered as
+            # "never" for a definition that has never succeeded: the notice already says
+            # this fire failed, and a line about the absence of history is noise.
+            lines.append(self._t("harness.notice.lastSucceeded", when=last_success))
+        # WHERE IT CAME FROM — the last item on D5's list, and the one a DM or a
+        # workspace card needs most, because neither is attached to the conversation
+        # that asked for the definition. Omitted whole when nothing was captured, which
+        # is EVERY definition created before this round: there is no backfill and no
+        # migration, because the ids were never recorded and inventing them is the one
+        # thing a provenance line may not do.
+        lines.extend(
+            self._origin_lines(
+                _created_by_caller(task, run.get("metadata") if isinstance(run.get("metadata"), dict) else {})
+            )
+        )
+        if definition_id:
+            lines.append(self._t("harness.notice.definition", id=definition_id))
+            if task is None and watch is None:
+                # The definition row is GONE while the run keeps its ``definition_id``
+                # forever, so EVERY definition-level command is a dead end — checked
+                # before the task/watch split because both halves of that split print
+                # one. ``vibe task run <deleted id>`` parses and then reports "not
+                # found", which is the same class of defect HFR-094 closed for
+                # watches: copy naming an action the user cannot take.
+                lines.extend(self._deleted_definition_lines(run_id))
+            elif is_watch:
+                if watch is not None and not watch.get("enabled", True):
+                    # RETIRED IS NOT PAUSED, and the row already says which. A watch
+                    # that ran out its ``once`` cycle carries ``retired_at``; a user who
+                    # pressed pause leaves it null. Both land on ``enabled = 0``, which
+                    # is exactly the ambiguity #1060 reported ("``enabled=0`` is carrying
+                    # three meanings") — and printing the resume copy for a retired
+                    # watch contradicts the lifecycle projection this same round makes
+                    # authoritative: the definition reads FINISHED while its notice
+                    # offers ``vibe watch resume``, an action that would arm a watch the
+                    # user never paused.
+                    #
+                    # The distinction is read from the same column the projection's
+                    # ``ended`` predicate uses, so the copy and the badge cannot
+                    # disagree. A legacy row with no marker keeps the resume copy: its
+                    # history genuinely cannot prove which of the two happened, and
+                    # ``definition_lifecycle_expression`` makes the same call.
+                    if str(watch.get("retired_at") or "").strip():
+                        lines.append(self._t("harness.notice.watchRetired"))
+                    else:
+                        lines.append(self._t("harness.notice.watchPaused", id=definition_id))
+                # No re-run affordance, because there is no ``vibe watch run``: a watch
+                # fires when the thing it waits on happens. ``show`` is the action a
+                # user actually has.
+                lines.append(self._t("harness.notice.watchShow", id=definition_id))
+            else:
+                if task is not None and not task.enabled:
+                    # FINISHED IS NOT PAUSED, the task-side twin of the watch branch
+                    # above. A failed one-shot is disabled by ``mark_task_result``
+                    # (``disable_one_shot``), so ``enabled = 0`` here carries two
+                    # meanings — and the paused copy offers ``vibe task resume`` for
+                    # a definition the canonical lifecycle projection reads as
+                    # FINISHED, an action that re-arms nothing. The distinction is
+                    # read from the projection ITSELF (``definition_lifecycle_state``
+                    # evaluates the badge's own CASE for this row) rather than
+                    # re-derived in Python, so the copy and the badge cannot
+                    # disagree — not even in the window where a naive ``run_at`` in
+                    # a non-UTC task timezone reads differently to
+                    # ``compute_next_run_at`` and to SQLite's UTC clock. The
+                    # explicit re-run affordance below stays either way: unlike a
+                    # watch, ``vibe task run`` is real and is the honest next step.
+                    lifecycle = self._task_lifecycle_state(definition_id, task)
+                    if lifecycle == "finished":
+                        lines.append(self._t("harness.notice.taskFinished"))
+                    elif lifecycle == "paused":
+                        lines.append(self._t("harness.notice.paused", id=definition_id))
+                    # ``running`` (``vibe task run`` accepts a disabled one-shot, and
+                    # an in-flight execution outranks the ended predicate) and
+                    # ``waiting`` (a switch the mirror has not caught up with): no
+                    # lifecycle line at all. Either copy would contradict the badge,
+                    # and the re-run/show affordance below stands on its own.
+                elif task is not None:
+                    next_run = compute_next_run_at(
+                        enabled=task.enabled,
+                        schedule_type=task.schedule_type,
+                        cron=task.cron,
+                        run_at=task.run_at,
+                        timezone_name=task.timezone,
+                    )
+                    if next_run:
+                        lines.append(self._t("harness.notice.nextRun", when=next_run))
+                lines.append(self._t("harness.notice.rerun", id=definition_id))
+        return "\n".join(lines)
+
+    def _task_lifecycle_state(self, definition_id: Optional[str], task: Any) -> str:
+        """The lifecycle state the badge shows for this task — asked of the badge.
+
+        The authoritative answer is ``definition_lifecycle_state``, the same SQL CASE
+        every list and count surface evaluates, so the notice copy and the badge share
+        one clock and one parse of ``run_at`` — and one priority order: an in-flight
+        execution outranks the ended predicate, so the caller sees ``running`` rather
+        than a boolean that flattened it into "not finished". The Python inference
+        below it is a FALLBACK for the file backend and for a row the read cannot
+        reach: there is no SQL badge in those worlds to disagree with, and the
+        inference asks the same question the projection encodes
+        (``compute_next_run_at`` returns ``None`` exactly when the named instant is
+        behind us, with ``enabled=True`` so the switch cannot mask the clock).
+        """
+
+        if definition_id:
+            store = getattr(self.request_store, "_sqlite", None)
+            if store is not None:
+                try:
+                    state = store.definition_lifecycle_state(
+                        definition_id, definition_type="task"
+                    )
+                except Exception:
+                    logger.debug(
+                        "failure notice: lifecycle-state read failed", exc_info=True
+                    )
+                    state = None
+                if state is not None:
+                    return state
+        if task.schedule_type == "at" and not compute_next_run_at(
+            enabled=True,
+            schedule_type=task.schedule_type,
+            cron=task.cron,
+            run_at=task.run_at,
+            timezone_name=task.timezone,
+        ):
+            return "finished"
+        return "paused"
+
+    def _last_success_instant(self, definition_id: Optional[str]) -> Optional[str]:
+        """When this definition last succeeded, for the body's own context.
+
+        Read through the request store's SQLite handle, which is where run history lives
+        (the task mirror holds definitions, not runs). ``None`` on the file backend, on a
+        run with no definition, and on any read error: this is one context line on a
+        notice that must still be delivered, so an unanswerable question drops the line
+        rather than the notice.
+        """
+
+        if not definition_id:
+            return None
+        store = getattr(self.request_store, "_sqlite", None)
+        if store is None:
+            return None
+        try:
+            return store.last_success_settled_at(definition_id)
+        except Exception:
+            logger.debug("failure notice: last-success read failed", exc_info=True)
+            return None
+
+    def _deleted_definition_lines(self, run_id: str) -> list[str]:
+        """The only recovery copy a definition that no longer exists can honestly print.
+
+        One place, because both bodies need it and both had the same hole. The run row
+        outlives its definition, so the RUN is what is left to inspect — and
+        ``vibe runs show`` is a real subcommand with an optional positional run id,
+        vetted against the real parser by
+        ``test_a_deleted_definition_notice_names_only_run_level_recovery``.
+
+        No run id (a body rendered from a row rebuilt without one) prints the
+        explanation alone rather than ``vibe runs show`` with nothing after it: an
+        incomplete command is the WI-2 failure mode again, one argument smaller.
+        """
+
+        lines = [self._t("harness.notice.definitionDeleted")]
+        if run_id:
+            lines.append(self._t("harness.notice.runInspect", id=run_id))
+        return lines
+
+    def _binding_notice_body(
+        self,
+        notice: dict[str, Any],
+        *,
+        name: str,
+        definition_id: Optional[str],
+        definition_exists: bool,
+        run_id: str,
+    ) -> str:
+        """Copy for "your pinned session was replaced", which is not a failure report.
+
+        Two things the failure body must not do here. It opens with "failed" and
+        always prints an ``Error:`` line — for a run that SUCCEEDED that reads as a
+        false alarm, and with ``error=None`` the line degrades to "no error text was
+        recorded", which is noise about nothing. And its call to action is ``vibe task
+        run``, whereas the action a user actually wants after an unrequested rebind is
+        to pin the session back or look at what the definition is bound to now.
+
+        Every command named below is a real subcommand (``vibe task update
+        --session-id``, ``vibe task show``); the WI-2 lesson is that invented copy
+        fails nothing but the user. ``definition_exists`` is the second half of that
+        lesson: a rebind notice can outlive its definition by the whole retry/backoff
+        window, and a command that names a row which no longer exists is invented copy
+        by a slower route — it parses, and then reports "not found".
+        """
+
+        binding = notice.get("binding") if isinstance(notice.get("binding"), dict) else {}
+        previous = str(binding.get("previous_session_id") or "").strip()
+        new = str(binding.get("new_session_id") or "").strip()
+        lines = [self._t("harness.notice.rebound", name=name)]
+        if previous and new:
+            lines.append(self._t("harness.notice.reboundSessions", previous=previous, new=new))
+        if binding.get("settings_preserved"):
+            lines.append(self._t("harness.notice.reboundSettingsPreserved"))
+        else:
+            lines.append(self._t("harness.notice.reboundSettingsReset"))
+        if definition_id:
+            lines.append(self._t("harness.notice.definition", id=definition_id))
+            if definition_exists:
+                lines.append(self._t("harness.notice.reboundRepin", id=definition_id))
+                lines.append(self._t("harness.notice.show", id=definition_id))
+            else:
+                # Nothing left to re-pin OR to show. The rebind itself still happened
+                # and the lines above still report it — the news is not suppressed,
+                # only the actions that no longer address anything.
+                lines.extend(self._deleted_definition_lines(run_id))
+        return "\n".join(lines)
+
     def settle_activity_runs(self, activity: Any) -> list[str]:
         """Settle deferred Runs when a failed/stopped owned Activity is last."""
 
@@ -3128,7 +4947,13 @@ class ScheduledTaskService:
             logger.error("Claimed request %s crashed: %r", request_id, exc, exc_info=exc)
 
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
+        request = self.request_store.refresh_claimed_request(request)
         error: Optional[str] = None
+        #: The structured CLASS of this run's failure, when the failure has one. Kept
+        #: beside ``error`` rather than parsed back out of it: the text is a sentence
+        #: for a human, this is the value the notice's lane and label are chosen from.
+        interrupt_reason: Optional[str] = None
+        failure_code: Optional[str] = None
         should_complete = True
         settled_out_of_band = False
         recover_queue_on_return = False
@@ -3145,20 +4970,28 @@ class ScheduledTaskService:
                 task_id = task.id
                 session_key = task.session_key
                 session_id = task.session_id
+                task_agent_id = (
+                    request.agent_id
+                    if task.agent_name and task.agent_name == request.agent_name
+                    else None
+                )
                 result = await self._execute_task(
                     task,
                     execution_id=request.id,
                     disable_one_shot=request.source_kind == "scheduler",
+                    agent_id=task_agent_id,
                 )
                 error = result.error
                 session_key = result.session_key
                 session_id = result.session_id
+                failure_code = result.failure_code
             elif request.request_type in {"hook_send", "watch", "webhook"}:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
                 if request.session_policy == "create_per_run":
                     session_id = self._reserve_runtime_session(
                         agent_name=request.agent_name,
+                        agent_id=request.agent_id,
                         deliver_key=request.deliver_key,
                         metadata=request.metadata,
                         workdir=request.metadata.get("session_workdir") if isinstance(request.metadata, dict) else None,
@@ -3176,6 +5009,7 @@ class ScheduledTaskService:
                     task_id=task_id,
                     trigger_kind=request.request_type if request.request_type != "hook_send" else "hook",
                     agent_name=request.agent_name,
+                    **({"agent_id": request.agent_id} if request.agent_id else {}),
                 )
             elif request.request_type == "agent_run":
                 message = _agent_run_message_for_request(request)
@@ -3195,6 +5029,7 @@ class ScheduledTaskService:
                     message=message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
+                    **({"agent_id": request.agent_id} if request.agent_id else {}),
                     metadata={
                         **(request.metadata or {}),
                         "source_kind": request.source_kind,
@@ -3223,6 +5058,54 @@ class ScheduledTaskService:
             self.request_store.requeue(request.id)
             should_complete = False
             raise
+        except UnresolvableSessionTarget as exc:
+            # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
+            # than one more error string. #1060's field evidence is the case: a watch
+            # pinned to a session that ceased to exist failed three deliveries and
+            # stopped, and the only recorded cause anywhere was ``last_exit_code = 75``
+            # — the user's own ``--retry-exit-code``, i.e. the waiter's healthy
+            # "nothing new yet" signal. The error TEXT was already right here (it names
+            # the missing session id); what was missing was a structured class, so the
+            # notice could say the failure is about the DESTINATION and a reader could
+            # tell it apart from the work itself breaking.
+            #
+            # Placed at the top level, not nested around the hook branch, so a run type
+            # added later inherits the classification instead of having to remember it.
+            # It cannot over-reach: ``UnresolvableSessionTarget`` is a distinct type
+            # raised only by ``resolve_session_id_target``, never by a transient fault.
+            #
+            # Which branches actually arrive here. ``watch`` / ``hook_send`` / ``webhook``
+            # and ``agent_run`` do — none of them resolves the target before dispatch, so
+            # this is their first and only handler. ``task_run`` does NOT: ``_execute_task``
+            # catches the same type first, runs the binding recovery
+            # (``_recover_pinned_session_binding``), and absorbs a failed rebind retry in
+            # its own ``except``. That asymmetry is deliberate and predates this handler —
+            # a task has a definition to rebind or pause, and its recovery already stamps
+            # a ``binding_change`` notice of its own.
+            #
+            # ONLY ``reason == "missing"`` IS CLASSIFIED. ``archived`` is left
+            # unclassified on purpose: an archived session's row still exists, and the
+            # honest description of that failure is "the session is inert", not "it no
+            # longer exists". Its NOTICE is still deliverable — rung (5) reroutes an
+            # archived session to the workspace inbox rather than writing into a row
+            # ``list_inbox_sessions`` hides (see ``_rung_five_session_id``) — so the
+            # reader is not left with an unnamed failure they cannot see. A wrong class
+            # is worse than no class — the label is the one line in the notice a reader
+            # trusts about the shape of the failure — and
+            # ``notice_failure_class_i18n_key`` already renders NO line rather than a
+            # generic one when there is nothing to name. Same for ``unusable``.
+            error = str(exc)
+            failure_code = FAILURE_CODE_UNRESOLVABLE_TARGET
+            if exc.reason == "missing":
+                interrupt_reason = INTERRUPT_REASON_DELIVERY_TARGET_MISSING
+            logger.error(
+                "Task execution request %s cannot reach its delivery target: %s",
+                request.id,
+                exc,
+                exc_info=True,
+            )
+            should_complete = True
+            settled_out_of_band = False
         except Exception as exc:
             error = str(exc)
             logger.error("Task execution request %s failed: %s", request.id, exc, exc_info=True)
@@ -3245,6 +5128,13 @@ class ScheduledTaskService:
                         task_id=task_id,
                         session_key=session_key,
                         session_id=session_id,
+                        # ``None`` for every ordinary completion, so the settlement
+                        # writer's metadata merge is a no-op exactly as before. Only
+                        # ``complete`` carries it: ``complete_coalesced`` settles
+                        # ``agent_run`` fan-outs, which reserve their own session per
+                        # run and so cannot reach the branch above.
+                        interrupt_reason=interrupt_reason,
+                        failure_code=failure_code,
                     )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes
@@ -3280,8 +5170,10 @@ class ScheduledTaskService:
         *,
         execution_id: str,
         disable_one_shot: bool,
+        agent_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         error: Optional[str] = None
+        failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
         binding_change: Optional[SessionBindingChange] = None
@@ -3295,6 +5187,7 @@ class ScheduledTaskService:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
                     agent_name=task.agent_name,
+                    agent_id=agent_id,
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
                     workdir=task.cwd,
@@ -3310,6 +5203,7 @@ class ScheduledTaskService:
                 task_id=task.id,
                 trigger_kind="scheduled",
                 agent_name=task.agent_name,
+                **({"agent_id": agent_id} if agent_id else {}),
             )
         except asyncio.CancelledError:
             self.reconcile_jobs()
@@ -3323,7 +5217,12 @@ class ScheduledTaskService:
             logger.error("Scheduled task %s has an unresolvable session binding: %s", task.id, exc)
             binding_change = self._recover_pinned_session_binding(task, exc)
             error = binding_change.detail
+            failure_code = FAILURE_CODE_UNRESOLVABLE_TARGET
             if binding_change.action == "rebound" and binding_change.new_session_id:
+                # The binding failure was repaired. Any error from the retried turn
+                # is a new backend/dispatch outcome, not another member of the
+                # unresolvable-target auto-pause streak.
+                failure_code = None
                 session_id = binding_change.new_session_id
                 session_key = ""
                 try:
@@ -3337,6 +5236,11 @@ class ScheduledTaskService:
                         task_id=task.id,
                         trigger_kind="scheduled",
                         agent_name=task.agent_name,
+                        **(
+                            {"agent_id": agent_id}
+                            if agent_id and task.agent_name
+                            else {}
+                        ),
                     )
                 except asyncio.CancelledError:
                     self.reconcile_jobs()
@@ -3374,9 +5278,23 @@ class ScheduledTaskService:
             if not error:
                 error = _TASK_RESULT_NOT_RECORDED_ERROR
         if binding_change is not None:
-            await self._emit_binding_change(binding_change)
+            # ``execution_id`` IS the run row's id on every path that reaches here
+            # (``_execute_claimed_request`` passes ``request.id``), and this runs
+            # BEFORE ``complete()`` settles the row — so a notice stamped now rides
+            # into the terminal write instead of racing it. ``run_error`` decides
+            # whether the binding news may take the notice slot at all: a rebind whose
+            # retry failed already owes an ordinary failure notice, and that one must
+            # not be displaced.
+            await self._emit_binding_change(
+                binding_change, run_id=execution_id, run_error=error
+            )
         self.reconcile_jobs()
-        return TaskExecutionResult(error=error, session_key=session_key, session_id=session_id)
+        return TaskExecutionResult(
+            error=error,
+            session_key=session_key,
+            session_id=session_id,
+            failure_code=failure_code if error else None,
+        )
 
     async def _execute_agent_run(
         self,
@@ -3388,6 +5306,7 @@ class ScheduledTaskService:
         execution_id: str,
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> AgentRunExecutionResult:
         """Execute one direct Agent Run and wait for the real terminal result.
@@ -3422,6 +5341,7 @@ class ScheduledTaskService:
             trigger_kind="agent_run",
             session_id=session_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             target_info=target_info,
             metadata=metadata,
         )
@@ -3819,17 +5739,37 @@ class ScheduledTaskService:
                     settings_preserved=settings_preserved,
                 )
 
+        prior_failures = self.request_store.consecutive_definition_failures_with_code(
+            task.id,
+            FAILURE_CODE_UNRESOLVABLE_TARGET,
+            limit=UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES - 1,
+        )
+        failure_number = prior_failures + 1
+        if failure_number < UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES:
+            return SessionBindingChange(
+                action="failing",
+                task_id=task.id,
+                reason=exc.reason,
+                previous_session_id=previous,
+                detail=self._t(
+                    "harness.run.bindingUnresolvedRetry",
+                    session=previous or "",
+                    attempt=failure_number,
+                    threshold=UNRESOLVABLE_TARGET_AUTO_PAUSE_FAILURES,
+                    id=task.id,
+                ),
+            )
+
         self._pause_task(task)
         return SessionBindingChange(
             action="paused",
             task_id=task.id,
             reason=exc.reason,
             previous_session_id=previous,
-            detail=(
-                f"paused: {exc}. The bound agent session no longer exists, so this "
-                "definition would fail on every run. Re-point it with "
-                f"`vibe task update {task.id} --session-id <id>` and resume it with "
-                f"`vibe task resume {task.id}`."
+            detail=self._t(
+                "harness.run.bindingUnresolvedPaused",
+                session=previous or "",
+                id=task.id,
             ),
         )
 
@@ -3963,7 +5903,13 @@ class ScheduledTaskService:
             # from this stale mirror would only restore what the teardown cleared.
             logger.debug("Task %s was already reclaimed before it could be paused", task.id)
 
-    async def _emit_binding_change(self, change: SessionBindingChange) -> None:
+    async def _emit_binding_change(
+        self,
+        change: SessionBindingChange,
+        *,
+        run_id: Optional[str] = None,
+        run_error: Optional[str] = None,
+    ) -> None:
         """Notify once per binding transition, never once per fire.
 
         A daily cron on a dead session would otherwise notify every day. The
@@ -3986,28 +5932,58 @@ class ScheduledTaskService:
         recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
         if isinstance(recorded, dict) and recorded.get("signature") == change.signature:
             return
-        if not self.store.record_binding_recovery(
-            change.task_id,
-            {
+        recovery_payload = {
+            "signature": change.signature,
+            "action": change.action,
+            "reason": change.reason,
+            "previous_session_id": change.previous_session_id,
+            "new_session_id": change.new_session_id,
+            "settings_preserved": change.settings_preserved,
+            "at": _utc_now_iso(),
+            # Only on the HFR-276 branch, so the recorded shape of every other
+            # transition is unchanged.
+            **(
+                {
+                    "orphaned_session_id": change.orphaned_session_id,
+                    "orphan_tracked": change.orphan_tracked,
+                }
+                if change.orphaned_session_id
+                else {}
+            ),
+        }
+        binding_notice = None
+        if (
+            run_id
+            and change.action == "rebound"
+            and change.new_session_id
+            and not run_error
+            and self.store._sqlite is not None
+        ):
+            binding_notice = {
+                "run_id": run_id,
+                "task_id": change.task_id,
                 "signature": change.signature,
                 "action": change.action,
                 "reason": change.reason,
                 "previous_session_id": change.previous_session_id,
                 "new_session_id": change.new_session_id,
                 "settings_preserved": change.settings_preserved,
-                "at": _utc_now_iso(),
-                # Only on the HFR-276 branch, so the recorded shape of every other
-                # transition is unchanged.
-                **(
-                    {
-                        "orphaned_session_id": change.orphaned_session_id,
-                        "orphan_tracked": change.orphan_tracked,
-                    }
-                    if change.orphaned_session_id
-                    else {}
-                ),
-            },
-        ):
+            }
+        try:
+            recorded_recovery = self.store.record_binding_recovery(
+                change.task_id,
+                recovery_payload,
+                binding_notice=binding_notice,
+            )
+        except Exception:
+            logger.exception(
+                "Not notifying the binding %s for task %s: its recovery marker and "
+                "notice could not be committed together",
+                change.action,
+                change.task_id,
+            )
+            return
+        if not recorded_recovery:
             logger.warning(
                 "Not notifying the binding %s for task %s: the recovery record was "
                 "refused, so the definition was reclaimed, repointed or removed and "
@@ -4021,11 +5997,22 @@ class ScheduledTaskService:
     async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
         """Single delivery seam for a binding change.
 
-        Deliberately the only place that decides how the user hears about this. The
-        durable half is already written (``last_error`` plus
-        ``metadata.binding_recovery``), which the CLI and the Harness detail pane
-        read today; the delivery ladder for definitions whose session is gone is
-        built on top of this seam and is not this change's job.
+        Deliberately the only place that decides how the user hears about this.
+
+        The durable half was already written by the time we get here (``last_error``
+        plus ``metadata.binding_recovery``), and the run row's owed notice — which the
+        drain delivers through D5's ladder — carries the user-visible half. For
+        ``paused`` / ``reclaimed`` / ``orphaned`` that notice comes from the terminal
+        transition, because those fires end failed. For ``rebound`` the retry succeeds
+        and no transition owes anything, so ``record_binding_recovery`` commits the
+        marker and notice together before this log seam is reached.
+
+        Either way this seam does not deliver anything itself: doing so would produce
+        a SECOND message for one event, and it would be the un-retried one, since only
+        the owed notice has a receipt/backoff/dead-letter protocol behind it.
+
+        What it does own is the log line, which is the operator's view of a
+        transition that is per-BINDING rather than per-fire.
         """
 
         logger.warning(
@@ -4069,6 +6056,7 @@ class ScheduledTaskService:
         self,
         *,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         deliver_key: Optional[str],
         metadata: Optional[dict[str, Any]] = None,
         workdir: Optional[str] = None,
@@ -4126,9 +6114,18 @@ class ScheduledTaskService:
         ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(config_paths.get_state_dir()))
         agent_store = VibeAgentStore()
         try:
-            scope_target = self._resolve_scope_agent_target(scope_id) if scope_id and not agent_name else _ScopeAgentTarget(None)
+            scope_target = (
+                self._resolve_scope_agent_target(scope_id)
+                if scope_id and not agent_name and not agent_id
+                else _ScopeAgentTarget(None)
+            )
             resolved_agent_name = agent_name or scope_target.agent_name
-            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
+            if agent_id:
+                agent = agent_store.require_reference_by_id(agent_id)
+            elif resolved_agent_name:
+                agent = agent_store.require_reference(resolved_agent_name)
+            else:
+                agent = agent_store.get_default_agent()
         finally:
             agent_store.close()
         if agent is None:
@@ -4534,6 +6531,7 @@ class ScheduledTaskService:
         trigger_kind: str,
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Optional[str]:
         target_info = resolve_session_id_target(session_id) if session_id else None
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
@@ -4550,6 +6548,7 @@ class ScheduledTaskService:
             trigger_kind=trigger_kind,
             session_id=session_id,
             agent_name=agent_name,
+            agent_id=agent_id,
             target_info=target_info,
         )
         # A scheduled avibe turn drives the sidebar dot through the SAME two
@@ -4588,6 +6587,7 @@ class ScheduledTaskService:
         trigger_kind: str = "scheduled",
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        agent_id: Optional[str] = None,
         target_info: Optional[ResolvedSessionIdTarget] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> MessageContext:
@@ -4652,6 +6652,7 @@ class ScheduledTaskService:
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
                 "vibe_agent_name": agent_name,
+                "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),

@@ -18,12 +18,24 @@ export const SourcesCard: React.FC<{
   onConnectClaude: () => void;
   onConnectChatGPT: () => void;
   onAddApiKey: () => void;
-  /** Re-fetch after a per-row action (rename / re-discover / delete). */
+  /** Re-fetch after a per-row action (rename / delete). */
   onSourceChanged: () => void;
+  onRefreshSource: (source: Source) => void;
+  refreshingSourceId: string | null;
   /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
   onRepair?: (source: Source, kind: RaisedRepair) => void;
   onAddModel: (source: Source) => void;
-}> = ({ sources, onConnectClaude, onConnectChatGPT, onAddApiKey, onSourceChanged, onRepair, onAddModel }) => {
+}> = ({
+  sources,
+  onConnectClaude,
+  onConnectChatGPT,
+  onAddApiKey,
+  onSourceChanged,
+  onRefreshSource,
+  refreshingSourceId,
+  onRepair,
+  onAddModel,
+}) => {
   const { t } = useTranslation();
 
   return (
@@ -50,6 +62,9 @@ export const SourcesCard: React.FC<{
               key={source.id}
               source={source}
               onChanged={onSourceChanged}
+              onRefresh={onRefreshSource}
+              refreshing={refreshingSourceId === source.id}
+              refreshDisabled={refreshingSourceId !== null}
               onRepair={onRepair}
               onAddModel={onAddModel}
             />

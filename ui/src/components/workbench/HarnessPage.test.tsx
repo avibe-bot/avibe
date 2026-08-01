@@ -6,15 +6,24 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
+import type {
+  ApiContextType,
+  HarnessRun,
+  HarnessSessionSummary,
+  HarnessWatch,
+  VibeAgentBrief,
+} from '../../context/ApiContext';
 import {
   DetailSession,
+  HealthBadge,
   RunDetail,
   RunTriggerChip,
   WatchDetail,
+  agentDisplayName,
   harnessEmptyStateKey,
   harnessTabFromParam,
 } from './HarnessPage';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -128,6 +137,36 @@ describe('harnessEmptyStateKey', () => {
   });
 });
 
+describe('loadHarnessAgentCatalog', () => {
+  it('bypasses the read cache and indexes a newly archived Agent by its internal name', async () => {
+    const archived = {
+      id: 'agent-pm',
+      name: '_pm-a1b2',
+      display_name: 'pm',
+      description: null,
+      backend: 'codex',
+      model: null,
+      reasoning_effort: null,
+      enabled: false,
+      archived: true,
+      archived_at: '2026-07-31T21:00:00Z',
+      source: 'custom',
+      updated_at: '2026-07-31T21:00:00Z',
+    } satisfies VibeAgentBrief;
+    let params: Parameters<ApiContextType['listVibeAgents']>[0] = undefined;
+
+    const catalog = await loadHarnessAgentCatalog({
+      listVibeAgents: async (nextParams) => {
+        params = nextParams;
+        return { ok: true, agents: [archived], default_agent_name: 'codex' };
+      },
+    });
+
+    expect(params).toEqual({ includeDisabled: true, includeArchived: true, cache: false });
+    expect(catalog).toEqual({ '_pm-a1b2': archived });
+  });
+});
+
 describe('runRowTitle', () => {
   it("uses the message's first non-empty line, whitespace collapsed", () => {
     expect(
@@ -166,6 +205,28 @@ describe('RunDetail title', () => {
     expect(html).toContain('break-words');
     expect(html).toContain(`title="${message.trim()}"`);
     expect(html).toContain(message);
+  });
+
+  it('uses the archived Agent display name instead of its routing name', () => {
+    const agent: VibeAgentBrief = {
+      id: 'agent-pm',
+      name: '_pm-8dd7',
+      display_name: 'pm',
+      description: null,
+      backend: 'codex',
+      model: null,
+      reasoning_effort: null,
+      enabled: false,
+      archived: true,
+      archived_at: '2026-07-31T00:00:00Z',
+      source: 'user',
+      updated_at: '2026-07-31T00:00:00Z',
+    };
+    const html = render(<RunDetail run={run({ agent_name: agent.name })} agent={agent} />);
+
+    expect(agentDisplayName(agent.name, agent)).toBe('pm');
+    expect(html).toContain('>pm<');
+    expect(html).not.toContain('_pm-8dd7');
   });
 });
 
@@ -286,6 +347,50 @@ describe('DetailSession', () => {
 
     expect(html).toContain('No bound session');
     expect(html).not.toContain('<a ');
+  });
+});
+
+describe('HealthBadge', () => {
+  // The projection contract: ``unknown`` means health could not be computed, and
+  // must not read as a clean bill of health. Rendering it as nothing gave the
+  // operator a spotless Harness list at exactly the moment the failure signal
+  // was unavailable.
+  it('names an unknown health instead of dropping it', () => {
+    const label = i18n.t('harness.health.unknown');
+    expect(label).not.toBe('harness.health.unknown');
+
+    const html = render(<HealthBadge row={watch({ health: 'unknown', consecutive_failures: 3, recent_failures: 7 })} />);
+
+    expect(html).toContain(`>${label}<`);
+    // Muted, not pink or amber: a fault in the reporting path is not a verdict
+    // that the definition itself is failing.
+    expect(html).toContain('text-muted');
+    expect(html).not.toContain('text-pink');
+    expect(html).not.toContain('text-amber');
+  });
+
+  it('shows no count on an unknown row', () => {
+    // The counters come from the same unreadable history, so printing them
+    // would put a number on a row whose runs could not be read at all.
+    const label = i18n.t('harness.health.unknown');
+    const html = render(<HealthBadge row={watch({ health: 'unknown', consecutive_failures: 3, recent_failures: 7 })} />);
+
+    expect(html).toContain(`>${label}<`);
+    expect(html).not.toContain(`${label} 3`);
+    expect(html).not.toContain(`${label} 7`);
+  });
+
+  it('renders nothing for a healthy row', () => {
+    // A badge on every passing row is noise; silence here is what makes the
+    // unknown badge above worth looking at.
+    expect(render(<HealthBadge row={watch({ health: 'healthy', consecutive_failures: 0, recent_failures: 0 })} />)).toBe('');
+  });
+
+  it('still counts a failing row', () => {
+    const html = render(<HealthBadge row={watch({ health: 'failing', consecutive_failures: 4, recent_failures: 4 })} />);
+
+    expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
+    expect(html).toContain('text-pink');
   });
 });
 

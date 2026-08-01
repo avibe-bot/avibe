@@ -33,9 +33,10 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     create_default_service,
 )
-from vibe.model_hub_client import ModelHubRemoteService, _decode
+from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
+from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.ui_server import app
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -66,12 +67,16 @@ class MemoryStore:
                 for backend in ("claude", "codex", "opencode")
             }
         )
+        self.requested_models = {}
 
     def load(self):
         return self.config
 
     def save(self, config):
         self.config = config
+
+    def requested_model(self, backend):
+        return self.requested_models.get(backend, "")
 
 
 class FakeInvokeHandle:
@@ -101,11 +106,13 @@ class FakeAdapter:
         self.orphan_cleanup_calls = []
         self.orphan_cleanup_succeeds = False
         self.cancel_disposition = RetainedMaterialDisposition.NONE
+        self.start_calls = 0
 
     async def ensure_installed(self):
         return await self.status()
 
     async def start(self):
+        self.start_calls += 1
         return await self.status()
 
     async def stop(self):
@@ -233,6 +240,7 @@ def _service(tmp_path):
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        requested_model_override=lambda backend: store.requested_model(backend),
     )
     return service, store, adapter
 
@@ -321,6 +329,204 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
         "linux-amd64",
         "linux-arm64",
     ]
+
+
+def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
+    service, _store, adapter = _service(tmp_path)
+
+    runtime = asyncio.run(service.runtime_start())
+
+    assert adapter.start_calls == 1
+    assert runtime["contract_version"] == 4
+    assert runtime["status"]["health"] == "ok"
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_start_syncs_sources_before_starting_once(tmp_path):
+    class OrderedAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        async def sync_sources(self, bindings):
+            self.calls.append("sync")
+            await super().sync_sources(bindings)
+
+        async def start(self):
+            self.calls.append("start")
+            return await super().start()
+
+    store = MemoryStore()
+    store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_runtime01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Runtime source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="gpt-5", provenance="manual")],
+            credential_ref="cred_runtime01",
+        )
+    )
+    adapter = OrderedAdapter()
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    async def start_then_enter_normal_gateway_path():
+        runtime = await service.runtime_start()
+        await service._ensure_engine_synced()
+        return runtime
+
+    runtime = asyncio.run(start_then_enter_normal_gateway_path())
+
+    assert runtime["status"]["health"] == "ok"
+    assert adapter.calls == ["sync", "start"]
+    assert [binding.source_id for binding in adapter.synced[0]] == ["src_runtime01"]
+
+
+@pytest.mark.parametrize(
+    ("idle_health", "installed_version", "verified", "recovered_health"),
+    [
+        (EngineHealth.NOT_STARTED, "v7.2.95", True, "not_started"),
+        (EngineHealth.NOT_INSTALLED, None, False, "not_installed"),
+    ],
+)
+def test_runtime_start_sync_failure_is_reported_as_down(
+    tmp_path,
+    idle_health,
+    installed_version,
+    verified,
+    recovered_health,
+):
+    class IdleAdapter(FakeAdapter):
+        async def status(self):
+            return EngineStatus(
+                health=idle_health,
+                installed_version=installed_version,
+                verified=verified,
+                listen_host="127.0.0.1",
+                listen_port=None,
+                last_check_iso=None,
+            )
+
+    store = MemoryStore()
+    store.config.sources.append(
+        ModelHubSourceConfig(
+            id="src_runtime01",
+            kind="api_key",
+            vendor="openai",
+            display_name="Runtime source",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="gpt-5", provenance="manual")],
+            credential_ref="cred_runtime01",
+        )
+    )
+    adapter = IdleAdapter()
+    adapter.fail_sync = True
+    service = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    with pytest.raises(ModelHubError, match="engine_down"):
+        asyncio.run(service.runtime_start())
+    runtime = asyncio.run(service.runtime_status())
+
+    assert adapter.start_calls == 0
+    assert runtime["status"]["health"] == "down"
+
+    adapter.fail_sync = False
+    config = store.load()
+    asyncio.run(service._commit_synced(config, service._clone_config(config)))
+
+    recovered = asyncio.run(service.runtime_status())
+    assert recovered["status"]["health"] == recovered_health
+
+
+def test_runtime_start_in_progress_remains_not_started(tmp_path):
+    class IdleAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.started = False
+
+        async def start(self):
+            self.started = True
+            return await super().start()
+
+        async def status(self):
+            return EngineStatus(
+                health=(EngineHealth.OK if self.started else EngineHealth.NOT_STARTED),
+                installed_version="v7.2.95",
+                verified=True,
+                listen_host="127.0.0.1",
+                listen_port=15220 if self.started else None,
+                last_check_iso=None,
+            )
+
+    service = ModelHubService(
+        store=MemoryStore(),
+        adapter=IdleAdapter(),
+        events=BoundedEventLog(tmp_path / "events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+    )
+
+    async def status_while_start_waits_for_sync():
+        await service._mutation_lock.acquire()
+        start = asyncio.create_task(service.runtime_start())
+        await asyncio.sleep(0)
+        assert not start.done()
+        pending = await service.runtime_status()
+        service._mutation_lock.release()
+        started = await start
+        return pending, started
+
+    pending, started = asyncio.run(status_while_start_waits_for_sync())
+
+    assert pending["status"]["health"] == "not_started"
+    assert started["status"]["health"] == "ok"
+
+
+def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
+    from vibe import model_hub_client
+
+    calls = []
+
+    async def rpc(operation, payload=None):
+        calls.append((operation, payload))
+        return {"contract_version": 4, "status": {"health": "ok"}}
+
+    monkeypatch.setattr(model_hub_client, "_rpc", rpc)
+
+    runtime = asyncio.run(ModelHubRemoteService().runtime_start())
+
+    assert runtime["status"]["health"] == "ok"
+    assert calls == [("runtime_start", None)]
+
+
+def test_runtime_start_is_allowlisted_by_controller_rpc(tmp_path):
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, adapter = _service(tmp_path)
+
+    runtime = asyncio.run(dispatch_model_hub_rpc(service, "runtime_start", {}))
+
+    assert runtime["status"]["health"] == "ok"
+    assert adapter.start_calls == 1
 
 
 def test_runtime_status_reports_observed_not_installed_state(tmp_path):
@@ -419,8 +625,8 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "codex": "gpt-5.3-codex",
     }.get(backend)
     service.named_agents_override = lambda backend: {
-        "claude": [("pm", None), ("reviewer", "claude-opus-4-6")],
-        "codex": [("codex", None)],
+        "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
+        "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],
     }[backend]
 
@@ -520,7 +726,7 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("PUT", "/api/models/sources/src_test0001/credential"),
         ("POST", "/api/models/sources/src_test0001/reauth"),
         ("DELETE", "/api/models/sources/src_test0001"),
-        ("POST", "/api/models/sources/src_test0001/test"),
+        ("POST", "/api/models/sources/src_test0001/refresh"),
         ("GET", "/api/models/agents"),
         ("GET", "/api/models/agents/claude/sources"),
         ("PUT", "/api/models/agents/claude/sources"),
@@ -537,6 +743,7 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("POST", "/api/models/migration/scan"),
         ("POST", "/api/models/migration/apply"),
         ("GET", "/api/models/runtime/status"),
+        ("POST", "/api/models/runtime/start"),
     ],
 )
 def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtime_work(
@@ -621,7 +828,7 @@ def test_disabled_gate_preserves_existing_model_hub_config_bytes(monkeypatch):
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
-    """Scenarios: MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
+    """Scenarios: MH-SRC-REFRESH-001, MH-PRI-001, MH-OAUTH-A-001, MH-OAUTH-ERR-001."""
 
     service, store, adapter = _service(tmp_path)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
@@ -768,20 +975,44 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         status="needs_action",
         detail_key="models.source.needs_action.balance_exhausted",
     )
+    previous_discovered_at = persisted_source.last_discovered_at
+    unauthorized = client.post(
+        f"/api/models/sources/{source_id}/refresh",
+        base_url=base_url,
+    )
+    assert unauthorized.status_code == 403
+    assert store.config.sources[0].last_discovered_at == previous_discovered_at
+
+    async def refreshed_models(vendor, protocol, endpoint, credential_ref):
+        return ("claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-5")
+
+    adapter.discover_models = refreshed_models
+    original_now = service.now
+    service.now = lambda: datetime(2026, 7, 31, 5, 15, tzinfo=timezone.utc)
     response = client.post(
-        f"/api/models/sources/{source_id}/test",
+        f"/api/models/sources/{source_id}/refresh",
         headers=headers,
         base_url=base_url,
     )
     body = response.get_json()
     _assert_envelope(body)
-    assert body["discovered"] == 2
+    assert set(body) == {"ok", "contract_version", "source", "discovered"}
+    assert body["discovered"] == 3
+    _assert_valid("source.schema.json", body["source"])
+    assert {model["id"] for model in body["source"]["models"]} == {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-5",
+    }
+    assert body["source"]["last_discovered_at"] == "2026-07-31T05:15:00+00:00"
+    assert store.config.sources[0].last_discovered_at == body["source"]["last_discovered_at"]
     assert store.config.sources[0].state.status == "standby"
     assert (
         store.config.sources[0].id,
         store.config.sources[0].created_at,
         store.config.sources[0].credential_ref,
     ) == immutable_identity
+    service.now = original_now
 
     response = client.post(
         "/api/models/custom-models",
@@ -834,7 +1065,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         headers=headers,
         base_url=base_url,
     )
-    assert response.get_json()["agent"]["current"] is None
+    assert "current" not in response.get_json()["agent"]
     response = client.get(
         "/api/models/agents/codex/chain?model=gpt-5",
         base_url=base_url,
@@ -850,7 +1081,6 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
             "selected_by_agent",
             "selected_model_id",
             "selected_model_explicit",
-            "current",
             "sources",
             "supply_status",
             "model_supply",
@@ -1226,6 +1456,9 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
     store.config.sources.append(source)
     store.config.refresh_follow_orders()
     store.requested_model = lambda backend: ("claude-opus-4-6" if backend == "claude" else "")
+    service.named_agents_override = lambda backend: (
+        [("claude", "claude-opus-4-6")] if backend == "claude" else []
+    )
     flow = asyncio.run(
         service.reauth_source(
             source.id,
@@ -1251,7 +1484,7 @@ def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path
         {
             "backend": "claude",
             "model_id": "claude-opus-4-6",
-            "agents": [],
+                "agents": ["claude"],
         }
     ]
     assert store.config.sources[0].models == []
@@ -2644,6 +2877,9 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
     store.requested_model = lambda backend: (
         "claude-opus-4-6" if backend == "claude" else ""
     )
+    service.named_agents_override = lambda backend: (
+        [("claude", "claude-opus-4-6")] if backend == "claude" else []
+    )
 
     async def discover_narrower(vendor, protocol, base_url, credential_ref):
         return ("replacement-only-model",)
@@ -2669,7 +2905,7 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
         {
             "backend": "claude",
             "model_id": "claude-opus-4-6",
-            "agents": [],
+            "agents": ["claude"],
         }
     ]
     committed = client.put(
@@ -3047,6 +3283,44 @@ def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tm
     assert model_response.get_json() == config_response.get_json()
 
 
+def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, tmp_path):
+    service, _, adapter = _service(tmp_path)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    rejected = client.post("/api/models/runtime/start", base_url=base_url)
+
+    assert rejected.status_code == 403
+    assert adapter.start_calls == 0
+
+    accepted = client.post(
+        "/api/models/runtime/start",
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert accepted.status_code == 200
+    runtime = accepted.get_json()["runtime"]
+    assert adapter.start_calls == 1
+    assert runtime["contract_version"] == 4
+    _assert_valid("runtime-dependency.schema.json", runtime)
+
+
+def test_runtime_start_route_requires_remote_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    response = app.test_client().post(
+        "/api/models/runtime/start",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
+
+
 def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     store = MemoryStore()
     native = FakeAdapter()
@@ -3091,7 +3365,7 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
         retry_at="2026-07-23T03:05:00Z",
     )
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.test_source(source["id"]))
+        asyncio.run(service.refresh_source(source["id"]))
 
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].state.status == "cooldown"

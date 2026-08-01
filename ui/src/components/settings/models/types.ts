@@ -87,6 +87,9 @@ export type Source = {
    *  sources array itself is explicitly unordered). May be null on rows
    *  persisted before the field existed; `id` ascending is the tie-breaker. */
   created_at?: string | null;
+  /** Latest successful full model discovery for this source. null means the
+   *  source predates the field or has no known successful discovery. */
+  last_discovered_at: string | null;
   kind: SourceKind;
   /** Standard vendor id (anthropic|openai|zhipuai|kimi|xai|…) or 'custom'. */
   vendor: string;
@@ -120,12 +123,6 @@ export type Source = {
 export type AgentBackend = 'claude' | 'codex' | 'opencode';
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
-
-export type AgentCurrent = {
-  model_id: string;
-  source_id: string;
-  channel: SupplyChannel;
-};
 
 export type AgentMapping = {
   /** real built-in model id, e.g. claude-opus-4-6. */
@@ -185,13 +182,12 @@ export type AgentSources = {
 
 /** Agent-level supply rollup (§4.5). `waiting` = every enabled source is
  *  cooling and one will come back; `interrupted` = nothing can serve the
- *  selection without the user acting. Both pin `current` to null, so a stale
- *  使用中 can never render. */
+ *  selection without the user acting. */
 export type SupplyStatus = 'ok' | 'degraded' | 'waiting' | 'interrupted';
 
 /** AC-9's per-Agent read projection: the ENABLED named Agents on this backend,
- *  each with the model it effectively runs (explicit selection or the backend
- *  default) and its own rollup. Empty for direct-mode backends. */
+ *  each with its explicitly configured model and its own rollup. Empty for
+ *  direct-mode backends. */
 export type NamedAgentSupply = {
   name: string;
   effective_model_id: string | null;
@@ -211,20 +207,15 @@ export type AgentSupply = {
   backend: AgentBackend;
   mode: AgentMode;
   menu_kind: MenuKind;
-  /** The named Agent whose selection `selected_model_id` came from, or null when
-   *  the backend default supplies it. null whenever `selected_model_id` is. */
+  /** The named Agent whose explicit selection `selected_model_id` came from.
+   *  null whenever `selected_model_id` is null. */
   selected_by_agent?: string | null;
   /** The model the next turn would ask for. null in direct mode and when no
    *  selection resolves — an honest null, never a guessed default. */
   selected_model_id?: string | null;
-  /** TRUE iff `selected_model_id` originates from the user's explicit
-   *  configuration request; FALSE also covers a resolver-picked value. The
-   *  server derives it from the stored request BEFORE resolving, which is what
-   *  makes it the one health-free way to read the id — see `dryRunChainKey`. */
+  /** TRUE iff `selected_model_id` originates from the Agent's explicit
+   *  configuration. FALSE covers a resolver-picked value. */
   selected_model_explicit?: boolean;
-  /** What the next turn would actually use (composite pill). null in exactly
-   *  three cases: mode=direct, supply_status=waiting, supply_status=interrupted. */
-  current?: AgentCurrent | null;
   /** Per-backend enabled subset + order + policy. null when mode=direct. */
   sources?: AgentSources | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
@@ -471,9 +462,10 @@ export type OAuthFlow = {
 };
 
 // ── runtime-dependency.schema.json ──────────────────────────────────────
-export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_installed';
+export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed';
 
 export type RuntimeDependency = {
+  contract_version: 4;
   manifest: {
     name: 'cliproxyapi';
     version: string;

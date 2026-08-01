@@ -7,6 +7,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
 
 from config import paths
+from storage.sqlite_semantics import sqlite_run_at_epoch
 
 
 def escape_sql_like(value: str) -> str:
@@ -36,6 +37,12 @@ def create_sqlite_engine(db_path: Path | None = None) -> Engine:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.create_function(
+            "avibe_run_at_epoch",
+            2,
+            sqlite_run_at_epoch,
+            deterministic=True,
+        )
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")

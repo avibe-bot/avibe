@@ -371,6 +371,34 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             {"x-opencode-directory": "/tmp/%E5%B0%8F%E8%AF%B4/a%2520b"},
         )
 
+    async def test_get_session_status_uses_installed_status_map_shape(self):
+        class _StatusSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                return _FakeResponse(
+                    status=200,
+                    json_data={"ses-active": {"type": "busy"}, "ses-idle": {"type": "idle"}},
+                )
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _StatusSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        status = await manager.get_session_status("ses-active", "/tmp/小说")
+        missing = await manager.get_session_status("ses-missing", "/tmp/小说")
+
+        self.assertEqual(status, {"type": "busy"})
+        self.assertIsNone(missing)
+        self.assertEqual(fake_session.gets[0]["url"], "http://127.0.0.1:4096/session/status")
+        self.assertEqual(
+            fake_session.gets[0]["headers"],
+            {"x-opencode-directory": "/tmp/%E5%B0%8F%E8%AF%B4"},
+        )
+
     async def test_prompt_async_includes_tools_when_provided(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
@@ -390,6 +418,31 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake_session.posts), 1)
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
+
+    async def test_prompt_async_exposes_definitive_http_rejection(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        def _post(url, json=None, headers=None):
+            fake_session.posts.append({"url": url, "json": json, "headers": headers})
+            return _FakeResponse(status=409, text="active input refused")
+
+        fake_session.post = _post
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        with self.assertRaises(SERVER_MODULE.OpenCodePromptRejectedError) as raised:
+            await manager.prompt_async(
+                session_id="ses-1",
+                directory="/tmp/work",
+                text="hello",
+            )
+
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.response_text, "active input refused")
 
     async def test_prompt_async_omits_default_variant(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

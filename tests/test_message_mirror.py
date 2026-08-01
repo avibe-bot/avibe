@@ -123,6 +123,27 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     assert agent_row["scope_id"] == user_row["scope_id"]
 
 
+def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(
+        ctx,
+        "result",
+        "pong\n\n✅ ⏱️ 5s · 🪙 1.2k tok",
+        result_footer="✅ ⏱️ 5s · 🪙 1.2k tok",
+    )
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().one()
+
+    content = json.loads(row["content_json"])
+    assert content["kind"] == "result"
+    assert content["result_footer"] == "✅ ⏱️ 5s · 🪙 1.2k tok"
+
+
 def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_state):
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")

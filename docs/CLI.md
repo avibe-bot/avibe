@@ -466,6 +466,8 @@ vibe doctor
 vibe restart --delay-seconds 60
 ```
 
+The Model Hub engine process is named `cli-proxy-api` (hyphenated); `pgrep cliproxyapi` therefore always returns no match.
+
 ## Web UI Controls
 
 The web UI (`http://127.0.0.1:5123`) provides the same controls:

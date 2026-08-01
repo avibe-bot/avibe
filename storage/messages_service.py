@@ -20,15 +20,18 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
+from storage.agent_session_rows import INBOX_SESSION_VISIBILITIES
 from storage.db import escape_sql_like
 from storage.models import (
     agent_runs,
     agent_sessions,
+    agents,
     messages,
     scope_settings,
     scopes,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sessions_service import session_agent_display_label
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 from vibe.message_types import types_with, types_without
 
@@ -184,11 +187,35 @@ def _attach_agent_run_provenance(
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
     for row in conn.execute(
-        select(agent_sessions.c.id, agent_sessions.c.title, agent_sessions.c.agent_name).where(
+        select(
+            agent_sessions.c.id,
+            agent_sessions.c.title,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_backend,
+            agents.c.name.label("catalog_agent_name"),
+            agents.c.archived_at.label("catalog_agent_archived_at"),
+            agents.c.metadata_json.label("catalog_agent_metadata_json"),
+        )
+        .select_from(
+            agent_sessions.outerjoin(
+                agents,
+                or_(
+                    agents.c.id == agent_sessions.c.agent_id,
+                    and_(
+                        agent_sessions.c.agent_id.is_(None),
+                        agents.c.name == agent_sessions.c.agent_name,
+                    ),
+                ),
+            )
+        )
+        .where(
             agent_sessions.c.id.in_(set(source_by_exec.values()))
         )
     ).mappings():
-        meta_by_session[row["id"]] = {"title": row["title"], "agent_name": row["agent_name"]}
+        meta_by_session[row["id"]] = {
+            "title": row["title"],
+            "agent_name": session_agent_display_label(row),
+        }
 
     for payload in payloads:
         source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))
@@ -331,6 +358,15 @@ def search_messages(
         # Archived sessions are soft-deleted — never surface their messages
         # unless the caller explicitly opted in via ``include_archived``.
         .where(*archived_session_filters)
+        # DELIBERATELY ``foreground`` ALONE, i.e. narrower than the inbox
+        # (``INBOX_SESSION_VISIBILITIES``, which also admits ``system``). Search
+        # returns RESULTS a user goes on to open and read in context, and the only
+        # system session is the runtime's workspace-notifications row: machine-authored
+        # failure notices, already surfaced as inbox cards, with no conversation around
+        # a hit to read. Admitting it would put runtime bookkeeping into every user text
+        # search for no reachable next action. (Today's notices are additionally not
+        # ``searchable`` by TYPE — this predicate is the one that stays true if that
+        # ever changes.)
         .where(agent_sessions.c.visibility == "foreground")
         # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
         # sessions stay active), so exclude a disabled scope's messages too. A
@@ -1120,7 +1156,12 @@ def unread_counts(
                     select(agent_sessions.c.id).where(
                         or_(
                             agent_sessions.c.status == "archived",
-                            agent_sessions.c.visibility != "foreground",
+                            # NEGATIVE form, so it has to name every visibility the
+                            # inbox admits or the badge would disagree with the feed
+                            # it is supposed to count. Spelling it as "not one of the
+                            # admitted values" also keeps a future fourth visibility
+                            # hidden by default rather than silently badged.
+                            agent_sessions.c.visibility.notin_(INBOX_SESSION_VISIBILITIES),
                         )
                     )
                 ),
@@ -1161,7 +1202,9 @@ def unread_counts_by_session(
                 select(agent_sessions.c.id).where(
                     or_(
                         agent_sessions.c.status == "archived",
-                        agent_sessions.c.visibility != "foreground",
+                        # See ``unread_counts``: negative form, so it names the
+                        # admitted set rather than one value.
+                        agent_sessions.c.visibility.notin_(INBOX_SESSION_VISIBILITIES),
                     )
                 )
             )
@@ -1301,9 +1344,15 @@ def list_inbox_sessions(
         )
     )
     # Archived sessions are hidden everywhere — keep them out of the inbox feed too.
+    # Visibility is the ADMISSION list, not "foreground": the runtime's
+    # workspace-notifications row is ``system`` — deliberately absent from every
+    # ordinary session list — and the inbox is the surface it is delivered on, so
+    # excluding it here would hide the notice this session exists to show while the
+    # notice was still recorded as sent. ``background`` remains excluded (it also
+    # sets ``suppress_delivery``).
     session_rows = session_rows.where(
         agent_sessions.c.status != "archived",
-        agent_sessions.c.visibility == "foreground",
+        agent_sessions.c.visibility.in_(INBOX_SESSION_VISIBILITIES),
     )
     if only_session:
         session_rows = session_rows.where(agent_sessions.c.id == only_session)

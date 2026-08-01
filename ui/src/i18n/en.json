@@ -53,6 +53,7 @@
     "disable": "Disable",
     "disabled": "Disabled",
     "archived": "Archived",
+    "systemSession": "System",
     "default": "Default",
     "running": "Running",
     "stopped": "Stopped",
@@ -635,6 +636,8 @@
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
         "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
         "modelCount": "{{count}} model(s)",
+        "lastDiscovery": "Last fetched {{time}}",
+        "neverDiscovered": "Not fetched yet",
         "addModel": "Add model",
         "modelsEmpty": "No supplied models yet. Add one manually.",
         "modelsEmptySubscription": "No supplied models were discovered."
@@ -648,7 +651,6 @@
         "reorder": "Reorder",
         "oauthSignedOut": "CLI subscription is signed out"
       },
-      "current": "Current",
       "order": {
         "title": "Source order · {{backend}}",
         "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
@@ -666,8 +668,8 @@
         "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
       },
       "billing": {
-        "monthly": "Monthly",
-        "metered": "Metered"
+        "monthly": "Subscription",
+        "metered": "Pay as you go"
       },
       "state": {
         "active": "Healthy",
@@ -687,7 +689,13 @@
         "direct": "Direct"
       },
       "errors": {
-        "engineDown": "Model engine is not ready yet; try again shortly"
+        "engineDown": "Model engine is not ready yet; try again shortly",
+        "startFailed": "Model engine could not be started"
+      },
+      "runtime": {
+        "notStarted": "Not started · starts automatically on first use",
+        "startNow": "Start now",
+        "starting": "Starting"
       },
       "experimental": "Experimental",
       "agents": {
@@ -732,11 +740,6 @@
         "retry": "Retry",
         "runtime": "Model service is not ready",
         "runtimeAction": "Resolve"
-      },
-      "emptySelection": {
-        "title": "No model selected",
-        "body": "This agent has no current model and needs one before its next run.",
-        "action": "Choose model"
       },
       "routes": {
         "title": "Supply method",
@@ -1012,7 +1015,8 @@
       "sourceActions": {
         "more": "More actions",
         "rename": "Rename",
-        "rediscover": "Re-discover models",
+        "refresh": "Refresh models",
+        "refreshing": "Refreshing models",
         "reauth": "Sign in again",
         "replaceKey": "Replace API key",
         "delete": "Delete source",
@@ -1021,8 +1025,8 @@
         "renamePlaceholder": "e.g. Production key",
         "renamed": "Renamed",
         "renameFailed": "Couldn't rename, please retry",
-        "rediscovered": "Re-discovered {{count}} model(s)",
-        "rediscoverFailed": "Couldn't re-discover, please retry",
+        "refreshed": "Updated {{count}} model(s)",
+        "refreshFailed": "Couldn't fetch the latest models. The last successful list is still shown.",
         "deleteTitle": "Delete source?",
         "deleteBody": "This removes “{{name}}” from the Hub and revokes its credential. This can't be undone.",
         "deleteConfirm": "Delete",
@@ -1032,7 +1036,6 @@
         "deleted": "Source deleted",
         "deleteFailed": "Couldn't delete, please retry",
         "renameHint": "Changes the display name only — the credential is untouched",
-        "rediscoverHint": "Re-fetch the models this source can supply",
         "deleteHint": "You'll be asked to confirm first",
         "reauthHint": "The old sign-in stops working right away",
         "replaceKeyHint": "Enter a new key — the endpoint and name stay"
@@ -1178,7 +1181,9 @@
     "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
     "missing_share_id": "Enter a custom link first.",
     "not_public": "Make the Show Page public first to change its link.",
+    "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
+    "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
     "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
     "icon_required": "Choose an icon file to upload.",
@@ -2584,7 +2589,6 @@
     "importFailed": "Import failed: {{error}}",
     "importNoneFound": "No {{backend}} agents found on disk to import.",
     "renameSuccess": "Agent renamed",
-    "renameKeptOld": "Agent renamed (old one kept due to references)",
     "searchPlaceholder": "Search agents…",
     "backendFilter": "Backend",
     "backendAll": "All",
@@ -2593,8 +2597,7 @@
     "empty": "No agents yet. Create one to start a conversation.",
     "selectPrompt": "Select an agent to view its configuration.",
     "makeDefault": "Make default",
-    "deleteConfirm": "Delete agent \"{{name}}\"? This cannot be undone.",
-    "deleteInUse": "Agent \"{{name}}\" is currently in use by one or more channels and cannot be deleted.",
+    "deleteConfirm": "Archive agent \"{{name}}\"? It will disappear from Agents, while existing sessions and automations keep their saved configuration.",
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
@@ -2612,7 +2615,6 @@
       "model": "Model",
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
-      "modelDefault": "Backend default",
       "effort": "Reasoning effort",
       "systemPrompt": "System prompt",
       "systemPromptCount": "~{{count}} tokens",
@@ -2917,6 +2919,11 @@
     "run": {
       "definitionDeleted": "(deleted)"
     },
+    "health": {
+      "failing": "failing",
+      "degraded": "degraded",
+      "unknown": "health unknown"
+    },
     "lifecycle": {
       "running": "Running",
       "waiting": "Waiting",
@@ -3064,6 +3071,7 @@
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
       "placeholderArchived": "This session is archived — read-only",
+      "placeholderSystem": "Avibe posts workspace notifications here — this session does not accept messages",
       "hint": "Enter to send",
       "send": "Send",
       "queueSend": "Send to queue",

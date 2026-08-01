@@ -5,9 +5,10 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from core.services.session_fork import (
+    SESSION_AGENT_UNAVAILABLE_CODE,
     SessionForkError,
     SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
@@ -29,8 +30,13 @@ from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
 
-def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
+def _seed_source_session(db_path: Path, tmp_path: Path, *, backend: str = "codex") -> str:
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend=backend)
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -48,8 +54,8 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
                     role=None,
                     workdir=str(tmp_path),
                     agent_name="worker",
-                    agent_backend="codex",
-                    agent_variant="codex",
+                    agent_backend=backend,
+                    agent_variant=backend,
                     model="gpt-5",
                     reasoning_effort="medium",
                     require_mention=None,
@@ -63,9 +69,9 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
                 conn,
                 scope_id=scope_id,
                 session_anchor=None,
-                agent_backend="codex",
-                agent_variant="codex",
-                agent_id="agent-worker",
+                agent_backend=backend,
+                agent_variant=backend,
+                agent_id=worker.id,
                 agent_name="worker",
                 model="gpt-5",
                 reasoning_effort="medium",
@@ -228,7 +234,7 @@ def test_reserve_forked_session_infers_running_input_anchor_without_live_hint(
 
 def test_reserve_forked_session_does_not_infer_trim_for_claude(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -304,7 +310,7 @@ def test_reserve_forked_opencode_running_fork_records_frozen_native_message(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -378,7 +384,7 @@ def test_reserve_forked_opencode_active_run_freezes_native_boundary_without_live
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -466,7 +472,7 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -513,7 +519,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", ["user"])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -561,7 +567,7 @@ def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
     _seed_opencode_messages(xdg_home, "oc-source", [])
-    source_id = _seed_source_session(db_path, tmp_path)
+    source_id = _seed_source_session(db_path, tmp_path, backend="opencode")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -694,6 +700,11 @@ def test_reserve_forked_session_keeps_im_anchor_and_resets_variant_for_agent_ove
 def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend="codex")
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -736,7 +747,7 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
                 session_anchor="slack_171717.123",
                 agent_backend="codex",
                 agent_variant="codex",
-                agent_id="agent-worker",
+                agent_id=worker.id,
                 agent_name="worker",
                 workdir=str(tmp_path),
                 native_session_id="thread-source",
@@ -794,6 +805,11 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
 def test_reserve_forked_session_reanchors_explicit_parent_scope(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        worker = store.create(name="worker", backend="codex")
+    finally:
+        store.close()
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -828,7 +844,7 @@ def test_reserve_forked_session_reanchors_explicit_parent_scope(tmp_path: Path) 
                 session_anchor="slack_171717.123",
                 agent_backend="codex",
                 agent_variant="codex",
-                agent_id="agent-worker",
+                agent_id=worker.id,
                 agent_name="worker",
                 workdir=str(tmp_path),
                 native_session_id="thread-source",
@@ -875,6 +891,79 @@ def test_reserve_forked_session_rejects_backend_change(tmp_path: Path) -> None:
             agent_name="claude-worker",
             db_path=db_path,
         )
+
+
+def test_reserve_forked_session_rejects_archived_inherited_agent(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    store = VibeAgentStore(db_path)
+    try:
+        replacement = store.create(name="reviewer", backend="codex")
+        archived = store.archive("worker")
+        assert archived is not None
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            session_count = conn.execute(
+                select(func.count()).select_from(agent_sessions)
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    with pytest.raises(SessionForkError, match="source session Agent is unavailable") as exc_info:
+        reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert exc_info.value.code == SESSION_AGENT_UNAVAILABLE_CODE
+    assert exc_info.value.details == {"source_session_id": source_id}
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert (
+                conn.execute(select(func.count()).select_from(agent_sessions)).scalar_one()
+                == session_count
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(
+        source_session_id=source_id,
+        agent_name=replacement.name,
+        db_path=db_path,
+    )
+    assert result.agent_id == replacement.id
+    assert result.agent_name == replacement.name
+
+
+def test_reserve_forked_session_canonicalizes_legacy_inherited_agent_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(agent_name="WORKER")
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.agent_name == "worker"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(
+                select(agent_sessions.c.agent_name).where(
+                    agent_sessions.c.id == result.session_id
+                )
+            ).scalar_one() == "worker"
+    finally:
+        engine.dispose()
 
 
 def test_reserve_forked_session_agent_override_keeps_source_model_when_not_overridden(tmp_path: Path) -> None:
@@ -1490,11 +1579,12 @@ def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
 
     agent_store = VibeAgentStore(db_path)
     try:
-        # Pins neither a model nor an effort, exactly like the session below.
+        # The Agent model is explicit by invariant; the session below pins it away.
         source_agent = agent_store.create(name="nightly", backend="claude")
     finally:
         agent_store.close()
-    assert source_agent.model is None and source_agent.reasoning_effort is None
+    assert source_agent.model == "claude-opus-5"
+    assert source_agent.reasoning_effort is None
 
     engine = create_sqlite_engine(db_path)
     with engine.begin() as conn:

@@ -50,10 +50,6 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 
-// Sentinel option that clears the model override back to the backend default
-// (a combobox can't submit an empty value, so this is the explicit clear path).
-const MODEL_DEFAULT_OPTION = '__default__';
-
 type AgentsTabKey = 'definitions' | 'running';
 const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
 
@@ -302,8 +298,6 @@ export const AgentsPage: React.FC = () => {
       if (result.ok) {
         setSelected(null);
         refresh();
-      } else if (result.code === 'agent_in_use') {
-        setError(t('agents.deleteInUse', { name: selected.name }));
       } else if (result.message) {
         setError(result.message);
       }
@@ -659,8 +653,8 @@ interface DetailProps {
 // Mirrors design.pen s7QaWQ. Header (name + close X) → Enable card →
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
-// for user agents (rename = create-then-delete since backend keeps name
-// as the immutable reference id). System agents lock the name.
+// for user agents. The backend renames the row and its references atomically;
+// system agents keep their locked identity.
 const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -729,9 +723,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
 
-  // Backend rejects PATCH /agents/<name> with a new name; the supported
-  // way to rename is create-then-delete. We only let user agents do this
-  // (system agents block both delete and name change).
+  // Only user Agents can be renamed; the backend moves every durable name
+  // reference in the same transaction.
   const commitRename = async () => {
     const trimmed = name.trim();
     if (!trimmed || trimmed === agent.name) {
@@ -744,37 +737,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
     }
     setRenaming(true);
     try {
-      // Clone with new name first so we never end up nameless on failure.
-      await api.createVibeAgent({
-        name: trimmed,
-        backend: agent.backend,
-        description: agent.description,
-        model: agent.model,
-        reasoning_effort: agent.reasoning_effort,
-        system_prompt: agent.system_prompt,
-        metadata: agent.metadata,
-        enabled: agent.enabled,
-      });
-      const removeResult = await api.removeVibeAgent(agent.name);
-      if (!removeResult.ok) {
-        // Old name still has references — keep it but tell the user the
-        // new one exists too.
-        showToast(removeResult.message || t('agents.renameKeptOld'), 'warning');
-      } else {
-        showToast(t('agents.renameSuccess'), 'success');
-      }
-      // Carry the default over to the new name. removeVibeAgent() drops the
-      // old row without moving default_agent_name, so renaming the default
-      // agent would otherwise silently fall the default back to another agent.
-      if (isDefault) {
-        try {
-          await api.setDefaultVibeAgent(trimmed);
-        } catch (defErr: any) {
-          showToast(defErr?.message ?? String(defErr), 'warning');
-        }
-      }
-      // Refresh the list and re-select the renamed agent so the old name
-      // drops out and the clone shows as the selected detail row.
+      await api.updateVibeAgent(agent.name, { name: trimmed });
+      showToast(t('agents.renameSuccess'), 'success');
       onRenamed(trimmed);
     } catch (err: any) {
       showToast(err?.message ?? String(err), 'error');
@@ -928,18 +892,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. The
-          leading "backend default" option lets the user clear the override
-          back to model: null (a combobox can't otherwise submit an empty
-          value, so picking it is the only clear path). */}
+      {/* Model — Combobox with chevron + searchable + custom values. */}
       <Field label={t('agents.detail.model')}>
         <Combobox
-          options={[{ value: MODEL_DEFAULT_OPTION, label: t('agents.detail.modelDefault') }, ...modelOptions]}
+          options={modelOptions}
           value={model}
           onValueChange={(next) => {
-            const value = next === MODEL_DEFAULT_OPTION ? '' : next;
+            const value = next.trim();
+            if (!value) return;
             setModel(value);
-            const patch: Partial<VibeAgentFull> = { model: value.trim() || null };
+            const patch: Partial<VibeAgentFull> = { model: value };
             // If the new model can't use the current effort, fall back to a
             // valid one and persist it in the same patch — otherwise the record
             // keeps an effort the model can't run (Codex P2).

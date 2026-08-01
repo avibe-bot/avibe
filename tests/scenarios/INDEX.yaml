@@ -20,6 +20,7 @@ capabilities:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_runtime.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active

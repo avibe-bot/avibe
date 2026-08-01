@@ -1,7 +1,7 @@
 // Model-centric settings surface. The page reads model chains from the server,
 // hosts shared source repair journeys, and serializes Agent writes by backend.
 import * as React from 'react';
-import { CheckCircle2, ListFilter, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, ListFilter, LoaderCircle, Play, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -16,7 +16,13 @@ import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { RepairJourney, type RepairTarget } from './RepairJourney';
-import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import {
+  agentsWithEcho,
+  createLatestAsyncAuthority,
+  createPendingWrites,
+  mapWithConcurrency,
+  sourcesWithEcho,
+} from './asyncLifetime';
 import {
   emptyFeed,
   feedAfterHeadRead,
@@ -26,7 +32,7 @@ import {
 } from './eventFeed';
 import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
-import { modelsApi } from './modelsApi';
+import { modelsApi, type ModelsApi } from './modelsApi';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import {
   manualModelSources,
@@ -61,6 +67,108 @@ const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick
   );
 };
 
+export const RuntimeNotStartedAction: React.FC<{
+  starting: boolean;
+  showIdleCopy?: boolean;
+  onStart: () => void;
+}> = ({
+  starting,
+  showIdleCopy = true,
+  onStart,
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 text-[13px] text-muted sm:max-w-none">
+      {showIdleCopy && <span>{t('settings.models.runtime.notStarted')}</span>}
+      <Button variant="secondary" size="xs" onClick={onStart} disabled={starting}>
+        {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
+        {t(starting ? 'settings.models.runtime.starting' : 'settings.models.runtime.startNow')}
+      </Button>
+    </div>
+  );
+};
+
+export const ModelsPageActions: React.FC<{
+  runtimeHealth: RuntimeDependency['status']['health'] | null;
+  runtimeRecoveryPending?: boolean;
+  startingRuntime: boolean;
+  issueCount: number;
+  issuesOnly: boolean;
+  onStartRuntime: () => void;
+  onFocusIssues: () => void;
+}> = ({
+  runtimeHealth,
+  runtimeRecoveryPending = false,
+  startingRuntime,
+  issueCount,
+  issuesOnly,
+  onStartRuntime,
+  onFocusIssues,
+}) => {
+  const runtimeNotStarted = runtimeHealth === 'not_started';
+  const runtimeStartable = runtimeRecoveryPending
+    || runtimeNotStarted
+    || runtimeHealth === 'not_installed'
+    || runtimeHealth === 'down'
+    || runtimeHealth === 'degraded';
+  if (!runtimeStartable) {
+    return <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />;
+  }
+  return (
+    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 sm:max-w-none">
+      {issueCount > 0 && (
+        <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />
+      )}
+      <RuntimeNotStartedAction
+        starting={startingRuntime}
+        showIdleCopy={runtimeNotStarted}
+        onStart={onStartRuntime}
+      />
+    </div>
+  );
+};
+
+export async function startRuntimeWithStatusRefresh(
+  api: Pick<ModelsApi, 'startRuntime' | 'getRuntimeStatus'>,
+): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
+  try {
+    const runtime = await api.startRuntime();
+    return { runtime, failed: runtime.status.health !== 'ok' };
+  } catch {
+    // A failed start changes supervisor health. Read that authoritative state
+    // back so the persistent page does not keep presenting lazy-start idleness.
+    const runtime = await api.getRuntimeStatus().catch(() => null);
+    return { runtime, failed: runtime?.status.health !== 'ok' };
+  }
+}
+
+export function pollRuntimeStatus(
+  api: Pick<ModelsApi, 'getRuntimeStatus'>,
+  onRuntime: (runtime: RuntimeDependency) => void,
+  intervalMs = 5_000,
+): () => void {
+  let active = true;
+  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const schedule = () => {
+    timeout = globalThis.setTimeout(() => void refresh(), intervalMs);
+  };
+  const refresh = async () => {
+    try {
+      const runtime = await api.getRuntimeStatus();
+      if (active) onRuntime(runtime);
+    } catch {
+      // Keep the last authoritative snapshot and try again on the next tick.
+    } finally {
+      if (active) schedule();
+    }
+  };
+  schedule();
+  return () => {
+    active = false;
+    if (timeout !== undefined) globalThis.clearTimeout(timeout);
+  };
+}
+
 const CHAIN_READ_CONCURRENCY = 6;
 
 const readModelChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => {
@@ -84,6 +192,16 @@ const readModelSurface = async (): Promise<[Source[], AgentSupply[], ModelChainI
   return [sources, agents, await readModelChains(agents)];
 };
 
+type ModelSurfaceLanding =
+  | {
+      kind: 'surface';
+      sources: Source[];
+      agents: AgentSupply[];
+      events: ResolutionEvent[] | null;
+      chains: ModelChainIndex;
+    }
+  | { kind: 'source'; source: Source };
+
 // 最近切换 is a cursor feed, not a fixed window: `/events` pages with `before`,
 // so 「查看全部」 over one fetched page could never reach row 21. One page size for
 // the first read and every 加载更早 read after it.
@@ -101,10 +219,12 @@ export const SettingsModelsPage: React.FC = () => {
   const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
+  const [startingRuntime, setStartingRuntime] = React.useState(false);
+  const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [connecting, setConnecting] = React.useState<string | null>(null);
-  const [retestingSourceId, setRetestingSourceId] = React.useState<string | null>(null);
+  const [refreshingSourceId, setRefreshingSourceId] = React.useState<string | null>(null);
   const [issuesOnly, setIssuesOnly] = React.useState(false);
   const agentSectionRef = React.useRef<HTMLDivElement>(null);
 
@@ -153,6 +273,21 @@ export const SettingsModelsPage: React.FC = () => {
     };
   }, []);
 
+  const runtimeHealth = runtime?.status.health ?? null;
+  React.useEffect(() => {
+    const runtimeCanRecover = runtimeRecoveryPending
+      || runtimeHealth === 'not_started'
+      || runtimeHealth === 'not_installed'
+      || runtimeHealth === 'down'
+      || runtimeHealth === 'degraded';
+    if (!runtimeCanRecover || startingRuntime) return undefined;
+    return pollRuntimeStatus(modelsApi, (nextRuntime) => {
+      if (!aliveRef.current) return;
+      setRuntime(nextRuntime);
+      setRuntimeRecoveryPending(false);
+    });
+  }, [runtimeHealth, runtimeRecoveryPending, startingRuntime]);
+
   // 最近切换 is re-read here with the rows, because the writes this refresh exists
   // for are the writes that FILE events: a failing 试跑 cools its head down through
   // `_cooldown`, which records the `cooldown` row that explains the state change
@@ -166,9 +301,14 @@ export const SettingsModelsPage: React.FC = () => {
   // this refresh's job. A feed left one write behind is not wrong, only not newer,
   // and the next mutation or reload catches it up.
   const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<[Source[], AgentSupply[], ResolutionEvent[] | null, ModelChainIndex]>(
-      ([nextSources, nextAgents, headEvents, nextChains]) => {
+    createLatestAsyncAuthority<ModelSurfaceLanding>(
+      (landing) => {
         if (!aliveRef.current) return;
+        if (landing.kind === 'source') {
+          setSources((previous) => sourcesWithEcho(previous, landing.source));
+          return;
+        }
+        const { sources: nextSources, agents: nextAgents, events: headEvents, chains: nextChains } = landing;
         setSources(nextSources);
         setAgents(nextAgents);
         agentsRef.current = nextAgents;
@@ -216,7 +356,13 @@ export const SettingsModelsPage: React.FC = () => {
           readModelSurface(),
           modelsApi.listEvents(EVENT_PAGE).catch(() => null),
         ]);
-        return [nextSources, nextAgents, headEvents, nextChains];
+        return {
+          kind: 'surface' as const,
+          sources: nextSources,
+          agents: nextAgents,
+          events: headEvents,
+          chains: nextChains,
+        };
       });
     } catch {
       // A mutation may have succeeded server-side but the re-read failed — tell
@@ -315,10 +461,9 @@ export const SettingsModelsPage: React.FC = () => {
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
-      // What the PATCH echo means is a rule, not an ad-hoc read of one field —
-      // see connectOutcome, which exists because `current: null` conflates four
-      // unrelated states and the copy behind it promised a Direct fallback the
-      // resolver does not perform.
+      // What the PATCH echo means is a rule, not an ad-hoc read of one field.
+      // `connectOutcome` combines mode and supply status so the copy never
+      // promises a Direct fallback the resolver does not perform.
       const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
       const outcome = connectOutcome(echoed, sources);
       await agentSaved(echoed);
@@ -337,24 +482,29 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
-  const retestSource = async (source: Source) => {
-    if (retestingSourceId !== null) return;
-    setRetestingSourceId(source.id);
+  const refreshSource = async (source: Source) => {
+    if (refreshingSourceId !== null) return;
+    setRefreshingSourceId(source.id);
     try {
-      const count = await modelsApi.testSource(source.id);
-      if (!aliveRef.current) return;
+      // The mutation must fail outside the read authority: that authority
+      // intentionally suppresses stale read errors, while a discovery failure
+      // writes the source's error state and must always reach the honest toast.
+      const refreshed = await modelsApi.refreshSource(source.id);
+      await refreshAuthority.run(() =>
+        Promise.resolve({ kind: 'source' as const, source: refreshed.source }),
+      );
       await refreshSourcesAgents();
       if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.rediscovered', { count }) as string, 'success');
+        showToast(t('settings.models.sourceActions.refreshed', { count: refreshed.discovered }) as string, 'success');
       }
     } catch {
       if (!aliveRef.current) return;
       await refreshSourcesAgents();
       if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.rediscoverFailed') as string, 'error');
+        showToast(t('settings.models.sourceActions.refreshFailed') as string, 'error');
       }
     } finally {
-      if (aliveRef.current) setRetestingSourceId(null);
+      if (aliveRef.current) setRefreshingSourceId(null);
     }
   };
 
@@ -380,6 +530,20 @@ export const SettingsModelsPage: React.FC = () => {
     requestAnimationFrame(() => agentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   };
 
+  const startRuntime = async () => {
+    setStartingRuntime(true);
+    setRuntimeRecoveryPending(false);
+    try {
+      const result = await startRuntimeWithStatusRefresh(modelsApi);
+      if (!aliveRef.current) return;
+      setRuntime(result.runtime);
+      setRuntimeRecoveryPending(result.runtime === null);
+      if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
+    } finally {
+      if (aliveRef.current) setStartingRuntime(false);
+    }
+  };
+
   return (
     <SettingsPageShell
       activeTab="models"
@@ -387,7 +551,15 @@ export const SettingsModelsPage: React.FC = () => {
       subtitle={t('settings.models.subtitle')}
       actions={
         !loading && !loadError ? (
-          <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={focusIssues} />
+          <ModelsPageActions
+            runtimeHealth={runtimeHealth}
+            runtimeRecoveryPending={runtimeRecoveryPending}
+            startingRuntime={startingRuntime}
+            issueCount={issueCount}
+            issuesOnly={issuesOnly}
+            onStartRuntime={() => void startRuntime()}
+            onFocusIssues={focusIssues}
+          />
         ) : undefined
       }
     >
@@ -417,8 +589,8 @@ export const SettingsModelsPage: React.FC = () => {
               onSetRoute={setModelRoute}
               onAddModel={(backend) => openCustomModel(undefined, backend)}
               onRepair={(source, kind) => setRepairTarget({ source, kind })}
-              onRetest={(source) => void retestSource(source)}
-              retestingSourceId={retestingSourceId}
+              onRetest={(source) => void refreshSource(source)}
+              retestingSourceId={refreshingSourceId}
               onProbeSettled={() => void refreshSourcesAgents()}
               connectingBackend={connecting}
             />
@@ -429,6 +601,8 @@ export const SettingsModelsPage: React.FC = () => {
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
             onSourceChanged={() => void refreshSourcesAgents()}
+            onRefreshSource={(source) => void refreshSource(source)}
+            refreshingSourceId={refreshingSourceId}
             onRepair={(source, kind) => setRepairTarget({ source, kind })}
             onAddModel={(source) => openCustomModel(source.id)}
           />

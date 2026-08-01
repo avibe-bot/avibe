@@ -1596,3 +1596,98 @@ class HarnessRunResultTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled["result_text"], "recovered background result")
         self.assertEqual(settled["status"], "succeeded")
         self.assertIsNone(store.get_run(f"activity:claude:{activity.id}"))
+
+
+class _AdapterShapedIMClient(_StubIMClient):
+    """An IM client shaped like a real adapter: transport, bookkeeping, return id.
+
+    ``swallow_bookkeeping_error`` selects the pre-fix vs post-fix adapter shape.
+    """
+
+    def __init__(self, *, swallow_bookkeeping_error: bool):
+        super().__init__()
+        self.swallow_bookkeeping_error = swallow_bookkeeping_error
+        self.delivered = []
+
+    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+        # Point of no return: the platform accepted the payload, the user HAS it.
+        message_id = f"bot-msg-{self._next_id}"
+        self._next_id += 1
+        self.delivered.append(message_id)
+        # Post-send local bookkeeping (sessions.mark_thread_active) blows up.
+        try:
+            raise RuntimeError("session store unavailable")
+        except RuntimeError:
+            if not self.swallow_bookkeeping_error:
+                raise
+        return message_id
+
+
+class PostSendBookkeepingDeliveryEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """The dispatcher cannot tell a bookkeeping raise from a failed send.
+
+    ``emit_agent_message`` only sees the adapter's return value or its exception,
+    so an adapter that lets post-send bookkeeping escape converts "delivered but
+    unbookkept" into "never delivered": the run is recorded with ``message_id
+    None`` even though the transport handed the message to the user, and whoever
+    owes a durable notice for it re-sends a duplicate.
+
+    That is why the fix has to live in the adapter (``modules/im/discord.py``
+    already guards it; Slack and Feishu now match) and cannot be papered over in
+    ``core/message_dispatcher.py``: the id is destroyed before it can escape.
+    Adapter-level coverage lives in ``tests/test_im_post_send_bookkeeping.py``;
+    these two cases pin the dispatcher-side consequence of each shape.
+
+    Subordinate context: ack/delivery lane, HFR-079's family. No new scenario id.
+    """
+
+    def _run(self, client):
+        controller = _StubController()
+        controller.im_client = client
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-bookkeeping",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def record_run_message(self, run_id, *, text, message_id=None, terminal_status=None):
+                calls.append(("record", run_id, text, message_id, terminal_status))
+
+            def close(self):
+                pass
+
+        return dispatcher, context, calls, _Store
+
+    async def test_escaping_bookkeeping_error_loses_evidence_for_a_delivered_message(self):
+        client = _AdapterShapedIMClient(swallow_bookkeeping_error=False)
+        dispatcher, context, calls, store_cls = self._run(client)
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=store_cls()):
+            message_id = await dispatcher.emit_agent_message(context, "result", "delivered body")
+
+        # The transport delivered on the very first call, but because the id never
+        # escaped the adapter the dispatcher read it as a failed send and walked its
+        # fallback ladder, pushing the SAME logical message to the user again. One
+        # bookkeeping failure, several user-visible copies, and no evidence at all.
+        self.assertEqual(client.delivered[0], "bot-msg-1")
+        self.assertGreater(len(client.delivered), 1)
+        self.assertIsNone(message_id)
+        self.assertEqual(calls, [("record", "run-bookkeeping", "delivered body", None, "succeeded")])
+
+    async def test_swallowed_bookkeeping_error_keeps_evidence_for_a_delivered_message(self):
+        client = _AdapterShapedIMClient(swallow_bookkeeping_error=True)
+        dispatcher, context, calls, store_cls = self._run(client)
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=store_cls()):
+            message_id = await dispatcher.emit_agent_message(context, "result", "delivered body")
+
+        self.assertEqual(client.delivered, ["bot-msg-1"])
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(calls, [("record", "run-bookkeeping", "delivered body", "bot-msg-1", "succeeded")])

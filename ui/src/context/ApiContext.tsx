@@ -552,6 +552,8 @@ export type ApiContextType = {
       display_name?: string;
       folder_path?: string;
       agent_backend?: string | null;
+      agent_id?: string | null;
+      expected_agent_id?: string | null;
       agent_name?: string | null;
       agent_variant?: string | null;
       model?: string | null;
@@ -628,12 +630,17 @@ export type ApiContextType = {
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
-  listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  listVibeAgents: (params?: {
+    backend?: string;
+    includeDisabled?: boolean;
+    includeArchived?: boolean;
+    cache?: boolean;
+  }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
-  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
+  removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
   listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -729,6 +736,7 @@ export type ApiContextType = {
 // absent field) means "no project default" → fall back to the global default.
 export type ProjectDefaultAgent = {
   agent_backend: string | null;
+  agent_id: string | null;
   agent_name: string | null;
   agent_variant: string | null;
   model: string | null;
@@ -771,6 +779,13 @@ export type WorkbenchSession = {
   model: string | null;
   reasoning_effort: string | null;
   status: string;
+  /** Storage projection, not a user preference: ``foreground`` = an ordinary chat,
+   *  ``background`` = hidden and undelivered, ``system`` = a row the RUNTIME owns
+   *  (kept out of session lists, still an Inbox destination — today the
+   *  workspace-notifications session, which accepts no turn, see
+   *  ``sessionReadOnlyReason``). Optional because payloads cached by an older client
+   *  predate the field; the server always sends it. */
+  visibility?: 'foreground' | 'background' | 'system';
   pinned: boolean;
   /** Live agent-runtime status driving the sidebar dot: idle (gray) /
    *  running (green) / failed (red). Distinct from the lifecycle ``status``. */
@@ -820,11 +835,14 @@ export type WorkbenchSessionUpdate = {
 export type VibeAgentBrief = {
   id: string;
   name: string;
+  display_name: string;
   description: string | null;
   backend: string;
   model: string | null;
   reasoning_effort: string | null;
   enabled: boolean;
+  archived: boolean;
+  archived_at: string | null;
   source: string;
   updated_at: string;
 };
@@ -933,6 +951,7 @@ export type SkillsCheckResult = {
 };
 
 export type VibeAgentUpdatePayload = {
+  name?: string;
   description?: string | null;
   model?: string | null;
   reasoning_effort?: string | null;
@@ -1199,6 +1218,7 @@ export type HarnessSessionSummary = {
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
 export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
 export type HarnessDefinitionState = {
@@ -1214,6 +1234,20 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  // Derived from this definition's own settled run outcomes, never from
+  // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
+  // success used to erase days of failure and a daily-failing cron rendered
+  // identically to a daily-succeeding one.
+  //
+  // ``failing`` = the newest verdict failed. ``degraded`` = the newest succeeded
+  // but a failure is still inside the window — a success downgrades, it does not
+  // clear. ``unknown`` = health could not be computed, which must not read as a
+  // clean bill of health.
+  health: HarnessDefinitionHealth | null;
+  // How many verdicts back the failure run reaches, and how many failures are in
+  // the window at all. Both age out on their own; neither is acknowledgment state.
+  consecutive_failures: number;
+  recent_failures: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
@@ -2882,8 +2916,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.backend) search.set('backend', params.backend);
       if (params?.includeDisabled) search.set('include_disabled', '1');
+      if (params?.includeArchived) search.set('include_archived', '1');
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
+      const path = qs ? `/api/agents?${qs}` : '/api/agents';
+      return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),

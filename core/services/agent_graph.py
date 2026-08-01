@@ -32,16 +32,17 @@ Scope is joined LEFT (``scope_id`` is nullable): a NULL scope renders as the
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
 from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
-from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
+from storage.models import agents, agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
 # History window → lookback seconds. ``24h`` is the default (contract §3).
 WINDOW_SECONDS: dict[str, int] = {
@@ -394,6 +395,9 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
         scopes.c.scope_type.label("scope_scope_type"),
         scopes.c.native_type.label("scope_native_type"),
         scope_settings.c.enabled.label("scope_enabled"),
+        agents.c.name.label("catalog_agent_name"),
+        agents.c.archived_at.label("catalog_agent_archived_at"),
+        agents.c.metadata_json.label("catalog_agent_metadata_json"),
     ]
     stmt = (
         select(*cols)
@@ -401,10 +405,36 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
             agent_sessions
             .outerjoin(scopes, agent_sessions.c.scope_id == scopes.c.id)
             .outerjoin(scope_settings, agent_sessions.c.scope_id == scope_settings.c.scope_id)
+            .outerjoin(
+                agents,
+                or_(
+                    agents.c.id == agent_sessions.c.agent_id,
+                    and_(
+                        agent_sessions.c.agent_id.is_(None),
+                        agents.c.name == agent_sessions.c.agent_name,
+                    ),
+                ),
+            )
         )
         .where(agent_sessions.c.id.in_(candidate_ids))
     )
     return [dict(row) for row in conn.execute(stmt).mappings()]
+
+
+def _session_agent_display_name(row: Mapping[str, Any]) -> Optional[str]:
+    internal_name = str(row.get("agent_name") or "").strip()
+    catalog_name = str(row.get("catalog_agent_name") or "").strip()
+    if row.get("catalog_agent_archived_at"):
+        try:
+            metadata = json.loads(row.get("catalog_agent_metadata_json") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        archive = metadata.get("_avibe_archive") if isinstance(metadata, dict) else None
+        if isinstance(archive, dict):
+            original_name = str(archive.get("original_name") or "").strip()
+            if original_name:
+                return original_name
+    return catalog_name or internal_name or None
 
 
 def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -630,6 +660,7 @@ def _build_nodes(
             "session_id": session_id,
             "title": row.get("title"),
             "agent_name": row.get("agent_name"),
+            "agent_display_name": _session_agent_display_name(row),
             "agent_backend": row.get("agent_backend"),
             "model": row.get("model"),
             "reasoning_effort": row.get("reasoning_effort"),
@@ -674,6 +705,18 @@ def _filter_nodes(
         else:
             target = f"avibe::project::{project}"
             result = [n for n in result if n["scope_id"] == target]
+    # A ``system`` session is the RUNTIME's own row (today: the workspace-notifications
+    # sink that harness failure notices fall back to — see
+    # ``storage.agent_session_rows.resolve_workspace_notice_session``). It is not agent
+    # work, has no backend and runs no turns, so it is not a node under EITHER toggle;
+    # ``include_background`` is a user preference about the user's own hidden sessions and
+    # does not mean "show me the runtime's". Excluded EXPLICITLY rather than left to the
+    # ``!= 'background'`` test below, which admits by default: today the row owns no runs
+    # so it never even becomes a candidate, but a single run pointing at it (a repaired
+    # ``session_id``, an imported row, a future self-heal run) would otherwise make it a
+    # History-view node counted as ``foreground``. Pinned by
+    # ``tests/test_workspace_system_session.py``.
+    result = [n for n in result if n.get("visibility") != "system"]
     if not include_background:
         result = [n for n in result if n.get("visibility") != "background"]
     return result
@@ -719,6 +762,9 @@ def _prefilter_candidate_rows(
         return r.get("status") == "archived" or archived_project
 
     result = [r for r in rows if not _hidden(r)]
+    # Mirror _filter_nodes' unconditional ``system`` exclusion here too, so a runtime row
+    # cannot consume the run-load cap on its way to being dropped.
+    result = [r for r in result if (r.get("visibility") or "foreground") != "system"]
     if not include_background:
         result = [r for r in result if (r.get("visibility") or "foreground") != "background"]
     if project and project != "all":

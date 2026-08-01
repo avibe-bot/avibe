@@ -49,9 +49,23 @@ _FORK_ANCHOR_TYPES = tuple(
     )
 )
 
+SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
+SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
+
 
 class SessionForkError(ValueError):
     """Raised when a Session cannot be forked."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session_fork_failed",
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -152,11 +166,12 @@ def reserve_forked_session(
     from sqlalchemy import select
 
     from core.vibe_agents import VibeAgentStore
-    from storage.agent_session_rows import create_agent_session_row, utc_now_iso
+    from storage.agent_session_rows import create_agent_session_row, reserve_write_lock, utc_now_iso
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
     from storage.session_reclaim import reconcile_explicit_overrides
+    from storage.workbench_sessions_service import require_enabled_agent_identity
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -165,6 +180,7 @@ def reserve_forked_session(
     agent_store = VibeAgentStore(path)
     try:
         with engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()
@@ -212,9 +228,37 @@ def reserve_forked_session(
                     "agent backend does not match the source session backend"
                 )
 
-            target_agent_id = override_agent.id if override_agent else row["agent_id"]
-            target_agent_name = override_agent.name if override_agent else row["agent_name"]
-            target_backend = override_agent.backend if override_agent else source_backend
+            inherited_agent = None
+            if override_agent is None and (row["agent_id"] or row["agent_name"]):
+                try:
+                    inherited_agent = require_enabled_agent_identity(
+                        conn,
+                        agent_id=row["agent_id"],
+                        agent_name=row["agent_name"],
+                    )
+                except LookupError as exc:
+                    raise SessionForkError(
+                        "source session Agent is unavailable; choose an enabled Agent override",
+                        code=SESSION_AGENT_UNAVAILABLE_CODE,
+                        details={"source_session_id": source_session_id},
+                    ) from exc
+                if inherited_agent["backend"] != source_backend:
+                    raise SessionForkError(
+                        "source session Agent backend does not match the session backend"
+                    )
+
+            if override_agent is not None:
+                target_agent_id = override_agent.id
+                target_agent_name = override_agent.name
+                target_backend = override_agent.backend
+            elif inherited_agent is not None:
+                target_agent_id = inherited_agent["id"]
+                target_agent_name = inherited_agent["name"]
+                target_backend = inherited_agent["backend"]
+            else:
+                target_agent_id = None
+                target_agent_name = None
+                target_backend = source_backend
             target_variant = target_backend if override_agent else str(row["agent_variant"] or target_backend)
             now = utc_now_iso()
             target_model = _clean_optional(model) if model is not None else row["model"]

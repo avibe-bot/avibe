@@ -62,6 +62,7 @@ import {
   DEFINITION_STATUS_FILTERS,
   definitionActiveCount,
   definitionChipLabel,
+  definitionHealth,
   definitionRowLine,
   definitionRowTitle,
   definitionStatusCount,
@@ -78,6 +79,7 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
+import { loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
@@ -187,6 +189,7 @@ export const HarnessPage: React.FC = () => {
   const [selectedRun, setSelectedRun] = useState<HarnessRun | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
   // Per-id pending state so the row's toggle / delete buttons can show a
   // spinner without disabling siblings.
   const [pendingMutation, setPendingMutation] = useState<Record<string, boolean>>({});
@@ -208,6 +211,7 @@ export const HarnessPage: React.FC = () => {
   const [runTypeFilter, setRunTypeFilter] = useState<RunTypeFilter>('default');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
+  const agentRefreshSeq = useRef(0);
   // URL scope from the background-work banner (spec req 4): ?tab / ?session /
   // ?run deep-link into a session-scoped tab (removable "只看本会话" chip) or a
   // specific run. One-way URL -> state, keyed per-param so a user's tab click
@@ -384,32 +388,32 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  const refreshAgents = useCallback(async () => {
+    const seq = agentRefreshSeq.current + 1;
+    agentRefreshSeq.current = seq;
+    try {
+      const agents = await loadHarnessAgentCatalog(api);
+      if (agentRefreshSeq.current === seq) setAgentsByName(agents);
+    } catch {
+      // Harness data remains usable when the optional Agent metadata lookup fails.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshAgents();
+    return () => {
+      agentRefreshSeq.current += 1;
+    };
+  }, [refreshAgents]);
+
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onRunsUpdated: () => {
         void refresh();
+        void refreshAgents();
       },
     });
-  }, [api, refresh]);
-
-  // Resolve agent_name → backend/model/effort for the detail panels: the
-  // task/watch payload stores only the name. Fetched once on mount.
-  const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: true })
-      .then((res) => {
-        if (cancelled) return;
-        const map: Record<string, VibeAgentBrief> = {};
-        for (const a of res.agents) map[a.name] = a;
-        setAgentsByName(map);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+  }, [api, refresh, refreshAgents]);
 
   const markPending = useCallback((id: string, value: boolean) => {
     setPendingMutation((prev) => {
@@ -815,6 +819,7 @@ export const HarnessPage: React.FC = () => {
           {tab === 'runs' && (
             <RunsList
               runs={runs}
+              agentsByName={agentsByName}
               loading={loading}
               hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
@@ -857,7 +862,7 @@ export const HarnessPage: React.FC = () => {
                 pending={!!pendingMutation[selectedWatch.id]}
               />
             ) : selectedRun ? (
-              <RunDetail run={selectedRun} />
+              <RunDetail run={selectedRun} agent={agentsByName[selectedRun.agent_name ?? '']} />
             ) : null}
           </div>
         )}
@@ -997,6 +1002,51 @@ const ALERT_CLASS: Record<HarnessRowAlert, string> = {
   // not an error the store recorded — it is the absence of one, which is
   // exactly why nothing used to show it.
   dead: 'text-pink',
+  // Recovered but not clean: the newest verdict succeeded while a failure is
+  // still in the window. Amber rather than pink — it is a "look at this", not a
+  // "this is broken right now".
+  degraded: 'text-amber',
+  // Health could not be read at all. Muted, because the fault is in the
+  // reporting path rather than in the definition — but present, because the
+  // alternative is a row that looks like it passed.
+  unknown: 'text-muted',
+};
+
+// Derived health, on the LIST row rather than only in the detail pane. A cron
+// task failing every night used to render identically to one succeeding every
+// night: the only failure signal was ``last_error``, which lives behind a click,
+// and the row's alert channel was driven by ``lifecycle_detail`` — null unless the
+// row is ``finished``, which a recurring definition never is.
+//
+// ``healthy`` renders nothing — a badge on every passing row is noise, and the
+// silence is what makes the other three worth looking at.
+//
+// ``unknown`` does render. The server emits it when the health read failed or
+// the stored metadata was malformed, so it is a rare fault state, not a noisy
+// one; rendering it as nothing produced a spotless Harness list at precisely the
+// moment the failure signal could not be computed, which is the opposite of what
+// the projection contract promises. Muted rather than pink or amber, because
+// what is broken is the reporting path, not necessarily the definition.
+export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
+  const { t } = useTranslation();
+  const health = definitionHealth(row);
+  if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
+  // No count on ``unknown``: both counters come from the same run history this
+  // row could not read, so printing one would put a number on nothing.
+  const count = health === 'unknown' ? 0 : health === 'failing' ? row.consecutive_failures : row.recent_failures;
+  return (
+    <Badge
+      variant="secondary"
+      className={clsx(
+        'shrink-0 font-mono text-[9px] uppercase',
+        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
+      )}
+      title={row.last_error || undefined}
+    >
+      {t(`harness.health.${health}`)}
+      {count > 1 ? ` ${count}` : ''}
+    </Badge>
+  );
 };
 
 interface DefinitionRowProps {
@@ -1048,6 +1098,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
                 {chip}
               </Badge>
             )}
+            <HealthBadge row={row} />
           </div>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
             {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
@@ -1186,11 +1237,17 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
       {task.last_run_at && (
         <DetailField label={t('harness.detail.lastRun')}>
           <span className="font-mono text-[11px] text-muted">{formatLocalDateTime(task.last_run_at)}</span>
-          {task.last_error && (
-            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
-              {task.last_error}
-            </div>
-          )}
+        </DetailField>
+      )}
+      {/* Its own field, and no longer nested inside ``last_run_at``: a task can
+          carry a ``last_error`` with no ``last_run_at`` (a fire that failed before
+          it ever ran), and that case rendered nothing at all. ``harness.detail.lastError``
+          already existed and was used only by the watch pane. */}
+      {task.last_error && (
+        <DetailField label={t('harness.detail.lastError')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive">
+            {task.last_error}
+          </pre>
         </DetailField>
       )}
       <DetailField label={t('harness.detail.id')}>
@@ -1361,6 +1418,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
 
 interface RunsListProps {
   runs: HarnessRun[];
+  agentsByName: Record<string, VibeAgentBrief>;
   loading: boolean;
   hasStoredRows: boolean;
   selectedId: string | null;
@@ -1373,6 +1431,7 @@ interface RunsListProps {
 
 const RunsList: React.FC<RunsListProps> = ({
   runs,
+  agentsByName,
   loading,
   hasStoredRows,
   selectedId,
@@ -1427,7 +1486,9 @@ const RunsList: React.FC<RunsListProps> = ({
                   {run.agent_name && (
                     <span className="inline-flex min-w-0 items-center gap-1">
                       <Bot className="size-3 shrink-0" />
-                      <span className="truncate">{run.agent_name}</span>
+                      <span className="truncate">
+                        {agentDisplayName(run.agent_name, agentsByName[run.agent_name])}
+                      </span>
                     </span>
                   )}
                   <RunSessionLabel run={run} />
@@ -1505,9 +1566,17 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 
 interface RunDetailProps {
   run: HarnessRun;
+  agent?: VibeAgentBrief;
 }
 
-export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+export function agentDisplayName(
+  agentName: string | null | undefined,
+  agent?: Pick<VibeAgentBrief, 'display_name'>,
+): string {
+  return agent?.display_name || agentName || '—';
+}
+
+export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
@@ -1541,7 +1610,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         <span className="text-[12px] text-foreground">{typeLabel}</span>
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
-        <span className="text-[12px] text-foreground">{run.agent_name || '—'}</span>
+        <span className="text-[12px] text-foreground">{agentDisplayName(run.agent_name, agent)}</span>
         {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>
@@ -1719,7 +1788,7 @@ function deliveryLabel(postTo: string | null | undefined, t: (k: string) => stri
 
 // Agent executor: name + resolved backend·model·effort, with a jump to the
 // Agents page. agent_name can be null (the definition inherits the scope /
-// global default); model/effort can be null (backend default).
+// global default); model/effort can be null in legacy or partial records.
 const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }> = ({ agentName, agent }) => {
   const { t } = useTranslation();
   if (!agentName) {
@@ -1737,15 +1806,17 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   return (
     <div className="flex min-w-0 items-center gap-2">
       <Bot className="size-3.5 shrink-0 text-violet" />
-      <span className="shrink-0 text-[12px] font-medium text-foreground">{agentName}</span>
+      <span className="shrink-0 text-[12px] font-medium text-foreground">{agent?.display_name || agentName}</span>
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
-      <Link
-        to="/agents"
-        className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
-      >
-        {t('harness.detail.openInAgents')}
-        <ArrowUpRight className="size-3" />
-      </Link>
+      {!agent?.archived && (
+        <Link
+          to="/agents"
+          className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
+        >
+          {t('harness.detail.openInAgents')}
+          <ArrowUpRight className="size-3" />
+        </Link>
+      )}
     </div>
   );
 };

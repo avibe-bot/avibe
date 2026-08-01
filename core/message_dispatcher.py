@@ -19,6 +19,7 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
+from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
@@ -1390,6 +1391,7 @@ class ConsolidatedMessageDispatcher:
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
+        delivery: DeliveryEvidence | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -1559,6 +1561,26 @@ class ConsolidatedMessageDispatcher:
 
         if native_output_id and agent_message_exists(target_context, native_output_id):
             logger.info("Skipping duplicate agent output %s", native_output_id)
+            # An existing row is the STRONGEST receipt available — stronger than a
+            # send that returned an id, because it proves the write committed. Report
+            # it here or a caller holding a durable notice cannot distinguish "already
+            # delivered" from "never delivered": this branch returns ~112 lines above
+            # the notify branch's evidence assignment, and the drain reads the
+            # evidence, not the return value.
+            #
+            # That gap was reachable exactly where it hurts most — a crash between
+            # persisting the message and acknowledging the notice, which is the case
+            # the idempotency key exists for. The retry would find the row, decline to
+            # re-send, report nothing, and then either walk on to another delivery
+            # rung (a duplicate by another route) or exhaust its backoff and
+            # dead-letter a notice the user already has.
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = native_output_id
+                delivery.persisted_row = {
+                    "native_message_id": native_output_id,
+                    "evidence": "duplicate_short_circuit",
+                }
             try:
                 if canonical_type == "result" and output_semantics.settles_run:
                     duplicate_result_text = self._fold_footer(
@@ -1612,15 +1634,12 @@ class ConsolidatedMessageDispatcher:
                             include_quick_replies=quick_replies_on,
                             keep_file_links=True,
                         )
-                        recorded_text = self._fold_footer(
-                            background_enhanced.text or persist_text,
-                            result_footer,
-                        )
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            recorded_text,
+                            background_enhanced.text or persist_text,
                             quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1629,6 +1648,7 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             recorded_text,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1683,24 +1703,54 @@ class ConsolidatedMessageDispatcher:
                     self._release_runtime_turn(context)
 
         if canonical_type == "notify":
+            # Three steps, three error scopes — deliberately NOT one blanket ``try``.
+            #
+            # Under a single ``try`` a persistence failure returned ``None`` and
+            # DISCARDED the message id assigned on the line above, turning
+            # "delivered but unpersisted" into "looks like never delivered" and
+            # re-sending a notice the user already had. A post-delivery
+            # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
+            # notice for this message has to be able to tell those apart from a send
+            # that genuinely failed, so each stage reports itself.
             try:
                 message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
-                # Record only once delivered (avibe always, via SSE) so a failed
-                # IM send isn't stored as if the user received it.
-                if persists_without_delivery or message_id is not None:
-                    persist_agent_message(
-                        target_context,
-                        "notify",
-                        text,
-                        metadata=output_metadata,
-                        native_message_id=native_output_id,
-                    )
-                # Live SSE turn stream for the web Chat page (no-op for IM/CLI).
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
-                return message_id
             except Exception as err:
-                logger.error("Failed to send notify message: %s", err)
-            return None
+                logger.error("Failed to send notify message: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_SEND
+                return None
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = message_id
+            # Record only once delivered (avibe always, via SSE) so a failed
+            # IM send isn't stored as if the user received it.
+            if persists_without_delivery or message_id is not None:
+                persist_errors: list[BaseException] = []
+                persisted_notify = persist_agent_message(
+                    target_context,
+                    "notify",
+                    text,
+                    metadata=output_metadata,
+                    native_message_id=native_output_id,
+                    error_sink=persist_errors,
+                )
+                if delivery is not None:
+                    delivery.persisted_row = persisted_notify
+                    if persisted_notify is None and persist_errors:
+                        delivery.error = persist_errors[0]
+                        delivery.error_stage = STAGE_PERSIST
+            # Live SSE turn stream for the web Chat page (no-op for IM/CLI). Past
+            # this point the message is delivered; a failure here is recorded for
+            # diagnosis and must not be read as a delivery failure.
+            try:
+                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+            except Exception as err:
+                logger.error("notify stream failed after delivery: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_STREAM
+            return message_id
 
         if canonical_type == "result":
             try:
@@ -1741,14 +1791,15 @@ class ConsolidatedMessageDispatcher:
                 #     grey subtext — and in concise mode it supersedes the bubble's
                 #     own ``✅ done · …`` line so the terminal footer stays
                 #     consistent (grey, one line, no head text);
-                #   * platforms WITHOUT subtext rendering (Telegram/WeChat/Avibe)
+                #   * IM platforms WITHOUT subtext rendering (Telegram/WeChat)
                 #     fold it onto the body as a trailing line, so the footnote
                 #     stays visible AND their senders (which don't accept the
                 #     ``subtext`` kwarg) are never handed it.
-                # ``folded_footer`` is the footnote to APPEND to the stored text so
-                # a reloaded transcript / inbox / agent-run record keeps the
-                # duration/token info (it used to live in the result body). It is
-                # set for BOTH platform kinds; only the DELIVERY form differs.
+                #   * Avibe carries it as structured message content; the Web
+                #     transcript renders it beside the timestamp.
+                # ``folded_footer`` is the canonical footnote carried to IM
+                # delivery, agent-run records, and structured Web message content.
+                # It is set for every platform; only the presentation differs.
                 folded_footer: Optional[str] = result_footer if mutates_turn_lifecycle else None
                 if folded_footer:
                     # Gate on the DELIVERY TARGET's capabilities, not the source
@@ -1759,7 +1810,7 @@ class ConsolidatedMessageDispatcher:
                         # Subtext-capable: deliver as the grey subtext footer (body
                         # stays clean); persistence still folds it in below.
                         done_footer = folded_footer
-                    else:
+                    elif target_context.platform != "avibe":
                         # No subtext rendering: fold onto the delivered body too.
                         display_text = self._fold_footer(display_text, folded_footer)
                 # Pass subtext to RAW send_message calls only when set, so an adapter
@@ -1927,15 +1978,21 @@ class ConsolidatedMessageDispatcher:
                     else:
                         await self._clear_consolidated_state(context)
 
-                # The stored text keeps the footnote for BOTH platform kinds:
-                # ``display_text`` already carries it on non-subtext platforms (folded
-                # above), while subtext platforms delivered it out-of-band — folding
-                # ``folded_footer`` onto the clean ``persist_text`` reconstructs the
-                # same body+footer without double-appending (persist_text is never
-                # mutated) and is a no-op when there is no footer.
+                # Agent-run records keep the complete body+footer text for every
+                # platform. The Web message row separately persists a clean body
+                # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                run_provenance = output_semantics.provenance(context)
+                workbench_run_waits_for_persistence = (
+                    target_context.platform == "avibe"
+                    and output_semantics.settles_run
+                    and bool(run_provenance.get("run_id") or run_provenance.get("run_ids"))
+                )
+                settlement_waits_for_persistence = (
+                    output_semantics.requires_delivery_for_run_settlement or workbench_run_waits_for_persistence
+                )
 
-                if not output_semantics.requires_delivery_for_run_settlement:
+                if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
                         persisted_result_text,
@@ -1966,12 +2023,12 @@ class ConsolidatedMessageDispatcher:
                         avibe_enhanced = process_reply(
                             raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
                         )
-                        avibe_text = self._fold_footer(avibe_enhanced.text or persist_text, folded_footer)
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            avibe_text,
+                            avibe_enhanced.text or persist_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1980,14 +2037,25 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             persisted_result_text,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
 
-                if output_semantics.requires_delivery_for_run_settlement:
-                    if persisted_output is None and not (
-                        native_output_id
-                        and agent_message_exists(target_context, native_output_id)
+                if settlement_waits_for_persistence:
+                    durable_output_exists = bool(
+                        persisted_output is not None
+                        or (
+                            native_output_id
+                            and agent_message_exists(target_context, native_output_id)
+                        )
+                    )
+                    if workbench_run_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError("Workbench run output was not durably persisted")
+                    if (
+                        output_semantics.requires_delivery_for_run_settlement
+                        and not workbench_run_waits_for_persistence
+                        and not durable_output_exists
                     ):
                         if primary_message_id is not None:
                             raise ActivityOutputNotDurablyPersistedAfterDeliveryError(

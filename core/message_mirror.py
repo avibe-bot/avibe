@@ -321,8 +321,10 @@ def persist_agent_message(
     text: str,
     *,
     quick_replies: Optional[list[str]] = None,
+    result_footer: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
+    error_sink: Optional[list] = None,
 ) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
 
@@ -431,6 +433,11 @@ def persist_agent_message(
                 # render their own native buttons from the same parse).
                 if quick_replies:
                     content = {**(content or {}), "quick_replies": list(quick_replies)}
+                # Keep the generated duration/token summary as structured content.
+                # IM delivery may still fold it into ``text``, while the Web
+                # transcript can render it beside the timestamp without guessing.
+                if result_footer:
+                    content = {**(content or {}), "result_footer": result_footer}
                 appended_row = _append_quietly(
                     conn,
                     scope_id=scope_id,
@@ -487,8 +494,16 @@ def persist_agent_message(
             except Exception:
                 logger.debug("web push notification scheduling failed", exc_info=True)
         return appended_row
-    except Exception:
+    except Exception as err:
         logger.exception("persist_agent_message: failure on platform=%s", context.platform)
+        # Surfaced, not raised. A caller that owes a durable receipt needs to know
+        # WHY the row is missing — propagating only ``None`` says a receipt is
+        # absent and nothing about whether the message was delivered. Raising
+        # instead would be caught by the notify branch and discard the message id
+        # already in hand, which is the bug this channel exists to avoid.
+        # Optional so the eleven callers that ignore it are unaffected.
+        if error_sink is not None:
+            error_sink.append(err)
         return None
 
 

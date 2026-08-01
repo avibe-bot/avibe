@@ -199,8 +199,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
             // Resolve the DISPLAYED route. An explicit agent with an empty
             // model/effort means "inherit that agent's", so fall back to the
             // selected agent's own model/effort — otherwise the effort column
-            // resolves options against the backend defaults instead of the
-            // inherited model (e.g. a Claude agent's xhigh/max would vanish).
+            // resolves options without the inherited Agent model (e.g. a Claude
+            // agent's xhigh/max would vanish).
             // agent_backend also falls back to the default agent so the columns
             // resolve while inheriting the global default.
             agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,

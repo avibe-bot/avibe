@@ -1044,33 +1044,36 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(im_client.sent, ["Background verification finished"])
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
-    async def test_completed_activity_flush_retry_cap_stops_rescheduling(self):
+    async def test_completed_activity_flush_retries_until_delivery_recovers(self):
         agent, _service = _build_agent()
         agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 1
-        agent.ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS = 3
         agent.ACTIVITY_OUTPUT_FLUSH_MAX_BACKOFF_SECONDS = 4
-        composite_key = "session-flush-retry-cap:/tmp/work"
+        composite_key = "session-flush-retry-recovery:/tmp/work"
         context = SimpleNamespace(platform_specific={})
-        exhausted = asyncio.Event()
+        recovered = asyncio.Event()
         attempts = 0
 
-        async def _fail_flush(*_args, **_kwargs):
+        async def _flush_until_recovered(*_args, **_kwargs):
             nonlocal attempts
             attempts += 1
-            if attempts == agent.ACTIVITY_OUTPUT_FLUSH_MAX_RETRY_ATTEMPTS:
-                exhausted.set()
-            raise RuntimeError("delivery unavailable")
+            if attempts < 4:
+                raise RuntimeError("delivery unavailable")
+            recovered.set()
+            return False
 
-        agent._flush_completed_activity_outputs = AsyncMock(side_effect=_fail_flush)
+        agent._flush_completed_activity_outputs = AsyncMock(
+            side_effect=_flush_until_recovered
+        )
         real_sleep = asyncio.sleep
         with patch("modules.agents.claude_agent.asyncio.sleep", new=AsyncMock()) as sleep:
             agent._schedule_completed_activity_flush(composite_key, context)
-            await asyncio.wait_for(exhausted.wait(), timeout=1)
+            await asyncio.wait_for(recovered.wait(), timeout=1)
             await real_sleep(0)
 
-        self.assertEqual(attempts, 3)
-        self.assertEqual(sleep.await_args_list, [call(1), call(2), call(4)])
+        self.assertEqual(attempts, 4)
+        self.assertEqual(sleep.await_args_list, [call(1), call(2), call(4), call(4)])
         self.assertNotIn(composite_key, agent._activity_flush_tasks)
+        self.assertNotIn(composite_key, agent._activity_flush_retry_attempts)
 
     async def test_successful_completed_activity_flush_resets_retry_attempts(self):
         agent, _service = _build_agent()
@@ -1084,7 +1087,11 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         task = agent._activity_flush_tasks[composite_key]
         await task
 
-        agent._flush_completed_activity_outputs.assert_awaited_once_with(composite_key, context)
+        agent._flush_completed_activity_outputs.assert_awaited_once_with(
+            composite_key,
+            context,
+            expected_steering_generation=agent._steering_generation(composite_key),
+        )
         self.assertNotIn(composite_key, agent._activity_flush_retry_attempts)
 
     async def test_foreground_tool_activity_waits_for_result_and_uses_assistant_text(self):
