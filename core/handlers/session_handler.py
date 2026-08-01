@@ -1065,6 +1065,14 @@ class SessionHandler(BaseHandler):
         fork_session: bool = False,
     ) -> ClaudeSDKClient:
 
+        # The workdir half of this runtime's IDENTITY, kept before the fallback below
+        # can rewrite where the process actually runs. ``composite_key`` was built
+        # from this string and ``agent_sessions.workdir`` stores this string, so
+        # binding the fallback cwd instead would leave the client naming a session
+        # that neither the cache nor the row knows by that name — and teardown, which
+        # reads the pair back off the client, would then settle nothing.
+        requested_workdir = working_path
+
         # Ensure working directory exists
         if not os.path.exists(working_path):
             try:
@@ -1294,7 +1302,7 @@ class SessionHandler(BaseHandler):
             base_session_id,
             composite_key,
             None if fork_session else stored_claude_session_id,
-            working_path=working_path,
+            working_path=requested_workdir,
         )
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")

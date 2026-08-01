@@ -82,17 +82,23 @@ class RuntimeAnchor:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_anchor", str(self.session_anchor or "").strip())
-        object.__setattr__(self, "workdir", str(self.workdir or "").strip())
+        # NOT stripped: a workdir may legally begin or end with whitespace, and
+        # :attr:`key` has to reproduce the cache key byte-for-byte.
+        object.__setattr__(self, "workdir", str(self.workdir or ""))
 
     def __bool__(self) -> bool:
         return bool(self.session_anchor)
 
     @property
     def key(self) -> str:
-        """The composite cache key, byte-identical to what the producers build."""
+        """The composite cache key, byte-identical to what the producers build.
 
-        if not self.workdir:
-            return self.session_anchor
+        The join is UNCONDITIONAL because the producers' is: every one of them
+        writes ``f"{base_session_id}:{working_path}"`` without testing the workdir,
+        so an empty workdir is spelled ``"anchor:"`` in the live caches. Collapsing
+        that to ``"anchor"`` here would return a key no cache holds.
+        """
+
         return f"{self.session_anchor}:{self.workdir}"
 
     @property

@@ -3789,3 +3789,47 @@ def test_end_fallback_prefers_the_rows_own_base_session_id_for_the_anchor_half()
 
     assert resolved == "sess-review"
     assert probes == [(anchor, "/repo", "claude")]
+
+
+def test_end_never_pairs_a_rows_anchor_with_a_guessed_workdir():
+    """HFR-335: two halves from two reads are not a pair, so the guess is dropped.
+
+    When the client is already gone from the cache — a stale Running-tab row, an End
+    that races cleanup — the pair cannot be read back and ``RuntimeAnchor.parse``
+    guesses a boundary. For ``slack_T1:/review:/repo`` it guesses
+    ``("slack_T1", "/review:/repo")``.
+
+    The row still carries the TRUE anchor, so the anchor half is not in doubt. The
+    danger is combining it with the guessed remainder: ``("slack_T1:/review",
+    "/review:/repo")`` is a workdir that anchor never had, it matches no row, and End
+    reports nothing to settle while tearing the runtime down. Dropping the guess and
+    probing the anchor alone is a SUPERSET lookup, so the real row is still found and
+    genuine ambiguity is left to the resolver to refuse (HFR-323).
+    """
+    from core.handlers.session_handler import SessionHandler
+
+    anchor = "slack_T1:/review"
+    probes = []
+
+    def _find(probe_anchor, *, workdir=None, agent_backend=None):
+        probes.append((probe_anchor, workdir, agent_backend))
+        return ["sess-review"] if (probe_anchor, workdir) == (anchor, None) else []
+
+    controller = _make_controller()
+    controller.sessions = types.SimpleNamespace(find_session_ids_for_anchor=_find)
+    # The cache is EMPTY: this key's client has already been popped.
+    handler = types.SimpleNamespace(claude_sessions={})
+    handler.runtime_anchor_for = SessionHandler.runtime_anchor_for.__get__(handler)
+    controller.session_handler = handler
+
+    resolved = running_agents._teardown_session_id(
+        controller,
+        session_id=None,
+        composite_key=f"{anchor}:/repo",
+        base_session_id=anchor,
+        backend="claude",
+    )
+
+    assert resolved == "sess-review"
+    # The guessed ``/review:/repo`` is never carried into the probe.
+    assert probes == [(anchor, None, "claude")]

@@ -79,7 +79,12 @@ def _safe_items(mapping: Any) -> list:
     return _safe_call(lambda: list(mapping.items()), [])
 
 
-def _runtime_anchor(controller: "Controller", composite_key: Optional[str]) -> RuntimeAnchor:
+def _runtime_anchor(
+    controller: "Controller",
+    composite_key: Optional[str],
+    *,
+    anchor_hint: Optional[str] = None,
+) -> RuntimeAnchor:
     """The (anchor, workdir) pair behind a Claude composite key.
 
     Composite keys are ``f"{base_session_id}:{working_path}"`` and BOTH halves may
@@ -90,15 +95,30 @@ def _runtime_anchor(controller: "Controller", composite_key: Optional[str]) -> R
     hands them back. This is the ONE place the snapshot and the End teardown both
     read the pair from, so a Running-tab row and the settlement it triggers can never
     disagree about which session they mean.
+
+    ``anchor_hint`` is the anchor the caller already holds (a row's own
+    ``base_session_id``). It WINS over the resolved anchor, and when the two disagree
+    the workdir is dropped rather than carried across: the halves then came from two
+    different reads, so pairing them would reintroduce exactly the crossed identity
+    this module stopped deriving. That happens when the client is already gone from
+    the cache and :meth:`RuntimeAnchor.parse` guessed a boundary — for
+    ``base:/review:/repo`` it guesses ``("base", "/review:/repo")``, and pinning the
+    real anchor to that remainder would match no row at all. Anchor-only is a
+    superset lookup, so the resolver still sees the right candidates and its own
+    ambiguity refusal decides (HFR-323).
     """
+    hint = str(anchor_hint or "").strip()
     handler = getattr(controller, "session_handler", None)
     resolver = getattr(handler, "runtime_anchor_for", None)
+    resolved = RuntimeAnchor.parse(composite_key)
     if composite_key and callable(resolver):
         try:
-            return resolver(composite_key)
+            resolved = resolver(composite_key)
         except Exception:  # noqa: BLE001
             logger.debug("end: runtime anchor lookup failed for %s", composite_key, exc_info=True)
-    return RuntimeAnchor.parse(composite_key)
+    if hint and resolved.session_anchor != hint:
+        return RuntimeAnchor(hint, "")
+    return resolved
 
 
 def _split_scope_id(scope_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -904,9 +924,8 @@ def _teardown_session_id(
     """
 
     supplied_session_id = str(session_id or "").strip()
-    anchor_hint = str(base_session_id or "").strip()
-    runtime_anchor = _runtime_anchor(controller, composite_key)
-    anchor = anchor_hint or runtime_anchor.session_anchor
+    runtime_anchor = _runtime_anchor(controller, composite_key, anchor_hint=base_session_id)
+    anchor = runtime_anchor.session_anchor
     if not anchor:
         # Some callers genuinely have only a persisted session id and no runtime
         # anchor.  There is no identity set to re-resolve in that shape, so preserve
@@ -914,7 +933,7 @@ def _teardown_session_id(
         return supplied_session_id
     candidates = resolve_teardown_session_ids(
         controller,
-        RuntimeAnchor(anchor, runtime_anchor.workdir),
+        runtime_anchor,
         agent_backend=str(backend or "").strip() or None,
         admission_holds=admission_holds,
         # Running-tab End owns the ordinary unique hold below. The shared
@@ -1035,7 +1054,7 @@ def _live_workdir_for_backend(
     base_session_id: Optional[str],
     composite_key: Optional[str],
 ) -> Optional[str]:
-    workdir = _runtime_anchor(controller, composite_key).workdir or None
+    workdir = _runtime_anchor(controller, composite_key, anchor_hint=base_session_id).workdir or None
     if workdir or not base_session_id:
         return workdir
     if backend == "codex":

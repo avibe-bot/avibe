@@ -160,6 +160,60 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert controller.claude_sessions[f"slack_C123:{tmp_path}"] is client
     assert getattr(client, "_vibe_runtime_base_session_id") == "slack_C123"
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
+    assert getattr(client, "_vibe_runtime_workdir") == str(tmp_path)
+
+
+def test_unusable_workdir_does_not_rewrite_the_runtimes_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A cwd fallback moves where the process RUNS, not what the session is CALLED.
+
+    When the working directory cannot be created the SDK is started in
+    ``os.getcwd()`` instead. That is a runtime concession and nothing more: the cache
+    is still keyed by the requested path, and ``agent_sessions.workdir`` still stores
+    the requested path.
+
+    Recording the fallback as the client's workdir would put a third spelling in play.
+    Teardown reads the pair back off this client, so it would then probe the
+    fallback cwd, match no row, and report nothing to settle while cancelling the
+    runtime — the runs stay ``running`` forever. The identity has to be the string the
+    cache and the row already agree on.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    unusable = tmp_path / "unwritable"
+
+    def _refuse(path, *args, **kwargs):
+        raise PermissionError(f"cannot create {path}")
+
+    monkeypatch.setattr(session_handler_module.os, "makedirs", _refuse)
+    monkeypatch.setattr(session_handler_module.os, "getcwd", lambda: str(tmp_path / "elsewhere"))
+
+    controller = _Controller(unusable)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    client = _run_session(handler, context)
+
+    composite_key = f"slack_C123:{unusable}"
+    # The process really did fall back...
+    assert captured["options"].cwd == str(tmp_path / "elsewhere")
+    # ...but all three spellings of the identity still agree.
+    assert controller.claude_sessions[composite_key] is client
+    assert getattr(client, "_vibe_runtime_session_key") == composite_key
+    assert getattr(client, "_vibe_runtime_workdir") == str(unusable)
+    assert handler.runtime_anchor_for(composite_key).key == composite_key
 
 
 def test_session_handler_injects_vendored_git_into_gitless_child_env(

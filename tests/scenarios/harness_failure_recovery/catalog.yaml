@@ -3503,13 +3503,27 @@ scenarios:
     # in-process cache keys that need one hashable value, and
     # SessionHandler.runtime_anchor_for reads the pair BACK off the client rather than
     # re-deriving it. See HFR-345 for the full closure and what it deleted.
-    # RESIDUAL: a key whose client is already gone (a repeat cleanup, a restart-recovery
-    # row) falls back to RuntimeAnchor.parse, which applies HFR-129's rule and does not
-    # disambiguate. Safe for settlement in the same way as before: an anchor that
-    # resolves nowhere has no runs to settle, so a wrong reading is a wrong ANSWER and
-    # never a wrong ACTION. The DISPLAY residual is gone -- the Running-tab snapshot
-    # reads the same pair off the same client, so a path-shaped anchor no longer renders
-    # a truncated base/workdir.
+    # A key whose client is already gone (a repeat cleanup, a stale Running-tab row, an
+    # End racing cleanup) still falls back to RuntimeAnchor.parse, which applies
+    # HFR-129's rule and does not disambiguate. The first write-up called that harmless
+    # because "an anchor that resolves nowhere has no runs to settle". THAT WAS TOO
+    # WEAK, and gpt-5.6-sol's review of the refactor caught it: End does not take the
+    # anchor from the parse when the ROW already carries base_session_id -- it takes the
+    # anchor from the row and the WORKDIR from the parse. Those two halves came from two
+    # different reads, so a right anchor was being pinned to a guessed workdir
+    # ("slack_T1:/review" + "/review:/repo"), a combination that never existed and
+    # matches no row. The wrong ANSWER did become a wrong ACTION.
+    # CLOSED by the same rule that closed the rest: halves that did not come from one
+    # read are not a pair. running_agents._runtime_anchor takes an anchor_hint, and when
+    # the hint disagrees with the resolved anchor it drops the workdir rather than
+    # crossing them, leaving an anchor-only probe -- a SUPERSET of the right lookup, so
+    # the row is still found and real ambiguity is refused by HFR-323 rather than
+    # guessed at.
+    # The DISPLAY residual is gone too -- the Running-tab snapshot reads the same pair
+    # off the same client, so a path-shaped anchor no longer renders a truncated
+    # base/workdir.
+    # A second test carries this same id, pinning the crossed-halves refusal:
+    # tests/test_running_agents_service.py::test_end_never_pairs_a_rows_anchor_with_a_guessed_workdir
     test: tests/test_running_agents_service.py::test_end_fallback_reads_a_path_shaped_agent_anchor_off_the_live_runtime
   - id: HFR-336
     name: >-
@@ -5661,6 +5675,53 @@ scenarios:
     # A refused Stop leaves both owners intact, and an idle backlog starts directly
     # without a post-submit call racing and interrupting the newly started head.
     test: tests/test_internal_server.py::test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head
+  - id: HFR-431
+    name: >-
+      an unusable working directory moves where the runtime runs, not what the
+      session is called
+    status: covered
+    kind: safety
+    layer: contract
+    backend: claude
+    # Found by gpt-5.6-sol reviewing the HFR-335/345 refactor, and it exists ONLY
+    # because that refactor gave the client a workdir to be wrong about.
+    # _create_claude_session rebinds its local working_path to os.getcwd() when
+    # os.makedirs fails, and the new identity binding sat AFTER that rebind -- so the
+    # client recorded the fallback cwd while the cache key and agent_sessions.workdir
+    # both still held the requested path.
+    # THE DAMAGE is teardown, not the launch: runtime_anchor_for reads the pair back
+    # off this client, so the resolve would probe a workdir no row carries, match
+    # nothing, and report "no runs to settle" while cancelling the runtime anyway --
+    # the exact silent-skip shape HFR-129/335 were written to remove, reintroduced
+    # through a third spelling of the same session.
+    # THE RULE: a cwd fallback is a RUNTIME concession (where the process starts) and
+    # never an IDENTITY change (what the cache and the row agree the session is
+    # called). The requested workdir is captured before the fallback can rewrite it and
+    # that is what is bound.
+    test: tests/test_claude_cli_path.py::test_unusable_workdir_does_not_rewrite_the_runtimes_identity
+  - id: HFR-432
+    name: the composite key a RuntimeAnchor renders is the one the producers wrote
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Found by gpt-5.6-sol reviewing the HFR-335/345 refactor. RuntimeAnchor.key is the
+    # ONLY sanctioned way back to a composite string, so it has to be byte-identical to
+    # what the caches are keyed by -- and it was not, in two spellings.
+    # 1. Every producer writes f"{base_session_id}:{working_path}" with no test on the
+    #    workdir (message_handler.py:460/464, session_handler.py:775/880,
+    #    claude_agent.py:372), so an empty workdir is spelled "anchor:" in
+    #    claude_sessions. key collapsed that to "anchor" -- a string no cache holds.
+    # 2. __post_init__ stripped the workdir, so a path created with leading or trailing
+    #    whitespace rendered a different key than the one it was stored under.
+    # Latent when found: no production caller looks a cache up by key today. Pinned
+    # anyway because "key is the round-trip" is the whole contract that lets the rest of
+    # the refactor stop splitting strings -- a contract that is only true when tested is
+    # a comment.
+    # Normalization is not lost, only relocated: storage_workdir is the spelling
+    # agent_sessions.workdir is compared with, and that separation is what HFR-345
+    # deleted the workdir_match tiers in favour of.
+    test: tests/test_session_teardown.py::test_anchor_key_reproduces_the_composite_key_producers_write
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -447,6 +447,33 @@ def test_legacy_key_parse_preserves_windows_drive_paths() -> None:
     )
 
 
+def test_anchor_key_reproduces_the_composite_key_producers_write() -> None:
+    """``key`` has to be the cache key byte-for-byte, including its edge spellings.
+
+    Every producer writes ``f"{base_session_id}:{working_path}"`` with no test on the
+    workdir, so an empty workdir is spelled ``"anchor:"`` in ``claude_sessions`` and a
+    workdir keeps whatever whitespace it was created with. If ``key`` normalized
+    either of those it would return a string no cache holds — a silent miss on a
+    runtime that is very much still live.
+
+    Normalization is not lost, it is just somewhere else: ``storage_workdir`` is the
+    spelling ``agent_sessions.workdir`` is compared with, which is the only place the
+    two spellings have to agree.
+    """
+
+    anchor = "slack_T1:reviewer"
+
+    # The ordinary case, and the one the caches are overwhelmingly keyed by.
+    assert RuntimeAnchor(anchor, "/repo").key == f"{anchor}:/repo"
+    # An empty workdir still joins, because the producers join unconditionally.
+    assert RuntimeAnchor(anchor, "").key == f"{anchor}:"
+    assert RuntimeAnchor(anchor).key == f"{anchor}:"
+    # Whitespace in a workdir is data, not formatting.
+    assert RuntimeAnchor(anchor, " /repo ").key == f"{anchor}: /repo "
+    # ...and it is normalized only where a stored row is compared.
+    assert RuntimeAnchor(anchor, " /repo ").storage_workdir == "/repo"
+
+
 def test_teardown_settles_a_session_whose_workdir_contains_a_colon(
     tmp_path: Path,
 ) -> None:
