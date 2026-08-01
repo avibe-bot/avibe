@@ -4060,6 +4060,33 @@ scenarios:
     # test_find_session_ids_for_anchor_can_report_the_exact_workdir_tier (the tier
     # contract at the service and at both wrapper layers).
     test: tests/test_session_teardown.py::test_exact_workdir_split_outranks_a_legacy_null_workdir_reading
+  - id: HFR-347
+    name: >-
+      global admission closes before the first async cleanup step, not after the
+      scheduler has stopped
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 21 (the review of head d191eb0e). PURE ORDERING BUG in
+    # cleanup_sync: the HFR-339 process-exit flag was set inside
+    # _settle_inflight_turns_for_shutdown -- the THIRD loop-side stop -- while
+    # scheduled_task_service.stop() ran ahead of it and can spend its whole bounded
+    # wait unwinding a slow execution. For that entire window the IM runtime kept
+    # dispatching fresh Web/IM messages onto backends the shutdown was about to
+    # dismantle: a prompt could be SENT and then cancelled as restarted, risking
+    # interrupted or repeated effects instead of a durable queue-for-restart.
+    # THE FIX: a tiny loop-side coroutine sets close_admission_for_shutdown() as the
+    # FIRST _stop_loop_coroutine call, ahead of every async cleanup step, in both
+    # loop states. The flag is loop-state, so the mutation stays on the loop
+    # (HFR-339's single-threaded invariant). The settlement helper's own set stays
+    # -- idempotent belt-and-suspenders that keeps the helper correct for any caller
+    # reaching it without passing through cleanup_sync.
+    # THE PIN IS THE ORDERING, observed from inside the scheduler stop itself
+    # (red pre-fix: the flag read False there). The consequence -- closed admission
+    # makes submit take the durable queue -- is already pinned by HFR-330's and
+    # HFR-339's tests; this supplies the missing half by composition.
+    test: tests/test_running_agents_service.py::test_admission_closes_before_the_scheduler_stop
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

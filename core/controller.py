@@ -2051,6 +2051,27 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _close_admission_for_shutdown() -> None:
+            # ADMISSION CLOSES BEFORE THE FIRST ASYNC CLEANUP STEP (HFR-347). The
+            # HFR-339 flag used to be set inside ``_settle_inflight_turns_for_shutdown``
+            # — two stops later. ``scheduled_task_service.stop()`` below can spend its
+            # whole bounded wait unwinding a slow execution, and for that entire window
+            # the IM runtime kept dispatching fresh Web/IM messages onto backends this
+            # method is about to dismantle: a prompt could be SENT and then cancelled
+            # as ``restarted``, risking interrupted or repeated effects. Closing first
+            # makes every arrival in the whole shutdown take the durable queue instead.
+            # A tiny coroutine because the flag is loop-state: HFR-339's
+            # single-threaded-mutation invariant says it is only ever written on the
+            # loop, and ``_stop_loop_coroutine`` runs this on the loop in both loop
+            # states. The settlement helper's own set stays (idempotent) — belt and
+            # suspenders, and it keeps that helper correct for any caller that reaches
+            # it without passing through here.
+            manager = getattr(self, "session_turns", None)
+            close = getattr(manager, "close_admission_for_shutdown", None)
+            if callable(close):
+                close()
+
+        _stop_loop_coroutine(_close_admission_for_shutdown(), "Shutdown admission close")
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         # THE ONE STOP THAT MAY NOT BE ABANDONED (HFR-340). The debt is read BEFORE the

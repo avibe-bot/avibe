@@ -2025,6 +2025,91 @@ def test_stopped_loop_shutdown_converges_a_slow_settlement(tmp_path, monkeypatch
     assert manager.is_admission_closed_for_shutdown() is True
 
 
+def test_admission_closes_before_the_scheduler_stop(tmp_path, monkeypatch):
+    """HFR-347: global admission closes before the FIRST async cleanup step.
+
+    HFR-339's flag was set inside ``_settle_inflight_turns_for_shutdown`` — the THIRD
+    loop-side stop in ``cleanup_sync``'s sequence. ``scheduled_task_service.stop()``
+    runs before it and can spend its whole bounded wait unwinding a slow execution;
+    for that entire window the IM runtime kept dispatching fresh Web/IM messages onto
+    backends the shutdown was about to dismantle — a prompt could be SENT and then
+    cancelled ``restarted``, risking interrupted or repeated effects.
+
+    THE PIN IS THE ORDERING, observed from inside the scheduler stop itself. The
+    consequence — a closed admission makes ``submit`` take the durable queue — is
+    already pinned by HFR-330's and HFR-339's own tests
+    (``test_submit_during_teardown_queues_instead_of_dispatching_onto_the_dying_runtime``,
+    ``test_shutdown_admission_stays_closed_after_settlement_returns``); this test
+    supplies the missing half: by the time the scheduler stop runs, the flag those
+    tests rely on is ALREADY set. The settlement helper's own set stays (idempotent,
+    belt and suspenders) — pinned unchanged by the assertions above and by HFR-339's
+    test, which this file deliberately does not move.
+    """
+
+    import threading
+
+    from core import session_turns
+    from core.controller import Controller
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+
+    observed: dict = {}
+
+    async def _instrumented_scheduler_stop():
+        # THE WINDOW: this coroutine stands in for a stop() mid-unwind of a slow
+        # execution. Whatever the flag reads here is what every Web/IM arrival
+        # during that unwind is admitted against.
+        manager = controller.session_turns
+        observed["closed_during_scheduler_stop"] = manager.is_admission_closed_for_shutdown()
+
+    async def _noop():
+        return None
+
+    controller = types.SimpleNamespace()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.session_turns = manager
+    controller._loop = loop
+    controller.cleanup_task = None
+    controller.update_checker = types.SimpleNamespace(stop=lambda: None)
+    controller.scheduled_task_service = types.SimpleNamespace(
+        stop=_instrumented_scheduler_stop
+    )
+    controller.watch_service = types.SimpleNamespace(stop=_noop)
+    controller.runtime_command_watcher = types.SimpleNamespace(stop=_noop)
+    controller.model_hub_turn_gateway = None
+    controller.show_git_checkpoint_service = None
+    controller.agent_service = types.SimpleNamespace(agents={})
+    controller.receiver_tasks = {}
+    controller.im_client = types.SimpleNamespace()
+    controller._im_thread = None
+    controller.set_agent_status = lambda *_args, **_kwargs: None
+    for name in (
+        "_settle_inflight_turns_for_shutdown",
+        "_shutdown_settlement_debt",
+        "_converge_abandoned_shutdown_settlement",
+    ):
+        setattr(controller, name, types.MethodType(getattr(Controller, name), controller))
+
+    assert manager.is_admission_closed_for_shutdown() is False
+    try:
+        Controller.cleanup_sync(controller)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=5)
+        loop.close()
+
+    # THE FINDING: pre-fix this read False — the scheduler stop ran two steps ahead
+    # of the flag, and the whole slow-unwind window admitted fresh dispatches.
+    assert observed.get("closed_during_scheduler_stop") is True
+    # The flag is never cleared (HFR-339), and the settlement helper's own
+    # belt-and-suspenders set did not need to be reached for it to hold.
+    assert manager.is_admission_closed_for_shutdown() is True
+
+
 def test_stopped_loop_shutdown_bounds_a_cancellation_suppressing_unwind(
     tmp_path, monkeypatch
 ):
