@@ -619,6 +619,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         session_id = None
         logical_turn_id = ""
         start_attempt_id = ""
+        native_start_phase = "before_write"
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
@@ -865,6 +866,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 session_key=request.session_key,
             )
+            native_start_phase = "may_have_written"
             await server.prompt_async(
                 session_id=session_id,
                 directory=request.working_path,
@@ -905,6 +907,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             self._steering_states[request.base_session_id] = steer_state
             self.mark_runtime_turn_started(request.context)
+            native_start_phase = "accepted"
 
             logger.info(
                 "Starting OpenCode poll loop for %s (thread=%s, cwd=%s)",
@@ -1013,8 +1016,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 logger.warning(f"Failed to abort OpenCode session after error: {abort_err}")
 
             await self._remove_ack_reaction(request)
-            if session_id:
+            if session_id and native_start_phase != "may_have_written":
                 self.sessions.remove_active_poll(session_id)
+            elif session_id:
+                logger.warning(
+                    "Preserving OpenCode active poll after ambiguous native start "
+                    "failure for Turn=%s attempt=%s",
+                    logical_turn_id,
+                    start_attempt_id,
+                )
 
             message = f"OpenCode request failed: {error_text}"
             await emit_backend_failure(

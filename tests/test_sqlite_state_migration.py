@@ -203,11 +203,11 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             "select state, dispatch_text, snapshot_json from message_deliveries where id = 'msg_fsm'"
         ).fetchone()
         migrated_dedupe = conn.execute(
-            "select state, dedupe_key from message_deliveries "
+            "select state, dedupe_key, snapshot_json from message_deliveries "
             "where id = 'msg_fsm_dedupe'"
         ).fetchone()
         migrated_agent_run = conn.execute(
-            "select state, dedupe_key from message_deliveries "
+            "select state, dedupe_key, snapshot_json from message_deliveries "
             "where id = 'msg_fsm_agent_run'"
         ).fetchone()
         hold_state = conn.execute(
@@ -245,8 +245,10 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert existing is None
     assert delivery[0:2] == ("queued", "hello")
     assert json.loads(delivery[2])["content_text"] == "hello"
-    assert migrated_dedupe == ("retired", "avibe:watch:legacy:run-1")
-    assert migrated_agent_run == ("queued", "avibe:agent_run:run-legacy")
+    assert migrated_dedupe[0:2] == ("retired", "avibe:watch:legacy:run-1")
+    assert json.loads(migrated_dedupe[2])["type"] == "harness"
+    assert migrated_agent_run[0:2] == ("queued", "avibe:agent_run:run-legacy")
+    assert json.loads(migrated_agent_run[2])["type"] == "harness"
     assert hold_state == ("held",)
     assert draft_state == ("unfinished thought", now)
     assert message_session_fk[6] == "NO ACTION"
@@ -612,6 +614,16 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
                     now,
                     now,
                 ),
+                (
+                    "msg_pending_annotation",
+                    "harness",
+                    "show_annotation",
+                    "harness",
+                    "annotation",
+                    "annotation",
+                    now,
+                    now,
+                ),
             ),
         )
         conn.commit()
@@ -620,19 +632,24 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
 
     with sqlite3.connect(db_path) as conn:
         remaining_messages = conn.execute(
-            "select id from messages where id in ('msg_pending_human', 'msg_pending_harness')"
+            "select id from messages where id in "
+            "('msg_pending_human', 'msg_pending_harness', 'msg_pending_annotation')"
         ).fetchall()
         deliveries = conn.execute(
             "select id, state, current_attempt_kind, current_receipt_outcome, "
             "snapshot_json from message_deliveries where id in "
-            "('msg_pending_human', 'msg_pending_harness') order by id"
+            "('msg_pending_human', 'msg_pending_harness', 'msg_pending_annotation') "
+            "order by id"
         ).fetchall()
     assert remaining_messages == []
     assert [(row[0], row[1], row[2], row[3]) for row in deliveries] == [
+        ("msg_pending_annotation", "retired", None, None),
         ("msg_pending_harness", "retired", None, None),
         ("msg_pending_human", "retired", None, None),
     ]
     snapshots = {row[0]: json.loads(row[4]) for row in deliveries}
+    assert snapshots["msg_pending_annotation"]["type"] == "annotation"
+    assert snapshots["msg_pending_annotation"]["author"] == "harness"
     assert snapshots["msg_pending_harness"]["type"] == "harness"
     assert snapshots["msg_pending_harness"]["author"] == "harness"
     assert snapshots["msg_pending_harness"]["author_name"] == "watch"
@@ -654,9 +671,11 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     with sqlite3.connect(db_path) as conn:
         restored = conn.execute(
             "select id, type, author from messages where id in "
-            "('msg_pending_human', 'msg_pending_harness') order by id"
+            "('msg_pending_human', 'msg_pending_harness', 'msg_pending_annotation') "
+            "order by id"
         ).fetchall()
     assert restored == [
+        ("msg_pending_annotation", "pending", "harness"),
         ("msg_pending_harness", "pending", "harness"),
         ("msg_pending_human", "pending", "user"),
     ]

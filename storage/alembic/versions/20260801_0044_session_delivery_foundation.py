@@ -65,19 +65,35 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _legacy_inbound_type(row: sa.RowMapping) -> str:
+    if (
+        row["author"] == "harness"
+        and row["source"] == "harness"
+        and row["author_name"] == "show_annotation"
+    ):
+        return "annotation"
+    if "harness" in {row["author"], row["source"]}:
+        return "harness"
+    return "user"
+
+
 def _message_snapshot(row: sa.RowMapping) -> dict[str, object]:
+    legacy_type = str(row["type"])
+    inbound_type = (
+        _legacy_inbound_type(row)
+        if legacy_type in {"queued", "pending", "draft", "harness_dedupe"}
+        else None
+    )
     return {
         "scope_id": row["scope_id"],
         "session_id": row["session_id"],
         "platform": row["platform"],
-        "author": row["author"],
-        "type": (
-            "harness"
-            if row["type"] == "harness_dedupe"
-            else "user"
-            if row["type"] in {"queued", "pending", "draft"}
-            else row["type"]
-        ),
+        "author": (
+            "user" if inbound_type == "user" else "harness"
+        )
+        if inbound_type is not None
+        else row["author"],
+        "type": inbound_type or legacy_type,
         "author_id": row["author_id"],
         "author_name": row["author_name"],
         "source": row["source"],
@@ -88,18 +104,6 @@ def _message_snapshot(row: sa.RowMapping) -> dict[str, object]:
         "metadata_json": row["metadata_json"] or "{}",
         "read_at": row["read_at"],
     }
-
-
-def _pending_target_type(row: sa.RowMapping) -> str:
-    if (
-        row["author"] == "harness"
-        and row["source"] == "harness"
-        and row["author_name"] == "show_annotation"
-    ):
-        return "annotation"
-    if "harness" in {row["author"], row["source"]}:
-        return "harness"
-    return "user"
 
 
 def _metadata(value: object) -> dict[str, object]:
@@ -231,11 +235,7 @@ def _migrate_pseudo_messages(bind) -> None:
         if session_status is None:
             _migrate_legacy_trace(bind, {**dict(row), "type": "tool_call"})
             continue
-        pending_target = _pending_target_type(row) if kind == "pending" else None
         snapshot = _message_snapshot(row)
-        if pending_target is not None:
-            snapshot["type"] = pending_target
-            snapshot["author"] = "user" if pending_target == "user" else "harness"
         snapshot_json = _json(snapshot)
         metadata = _metadata(row["metadata_json"])
         provenance = metadata.get("scheduled_provenance")
