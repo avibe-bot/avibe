@@ -36,7 +36,6 @@ from core.system_prompt_injection import (
 from core.resource_governance import governor_from_controller
 from core.run_settlement import SETTLED_BY_EVICTED
 from core.session_teardown import (
-    hold_session_admission,
     resolve_teardown_session_ids,
     teardown_session_runs,
 )
@@ -755,21 +754,19 @@ class CodexAgent(BaseAgent):
                             # row on another backend is not this runtime's to cancel
                             # (HFR-128).
                             agent_backend="codex",
+                            # HFR-369: even an ambiguous result (no cancellable id)
+                            # registers every plausible session before this shared
+                            # cwd transport is stopped.
+                            admission_holds=admission_holds,
                         ):
                             if resolved_session_id in seen_session_ids:
                                 continue
                             seen_session_ids.add(resolved_session_id)
-                            # Registered where the runtime identity has just become a
-                            # session id, and released by the stack above once this
-                            # transport is truly gone (HFR-334). The DEFAULT
-                            # ``drain_on_release=True`` is deliberate and unchanged: an
-                            # evicted session keeps serving its conversation, so its
-                            # queue has a replacement transport to land on.
-                            hold_session_admission(
-                                getattr(self, "controller", None),
-                                resolved_session_id,
-                                admission_holds=admission_holds,
-                            )
+                            # The resolver registered admission for every candidate
+                            # (including ambiguous ones) and the stack releases it
+                            # only after this transport is truly gone. The DEFAULT
+                            # drain remains deliberate: an evicted conversation keeps
+                            # serving on a replacement transport.
                             torn_down_session_ids.append(resolved_session_id)
 
                     # PHASE 2 — settle each held session. ``teardown_session_runs`` is the

@@ -225,19 +225,9 @@ def test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten(
 def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
-    """Subordinate to HFR-060/061 — the same hole in the zombie-settlement writer.
+    """HFR-368: terminal settlement wins its reserved slot; later Stop is retained."""
 
-    ``settle_run_terminal`` scopes its UPDATE to ``queued|running``, which catches a
-    cancel of a QUEUED row because ``cancel_run`` flips that one straight to
-    ``canceled``. On a RUNNING row ``cancel_run`` sets only ``cancel_requested``, the
-    status predicate still matches, and the write lands ``failed`` over the Stop with
-    an owed notice attached. A running turn is precisely what a user presses Stop on,
-    so this is the reachable half of the same defect.
-
-    The refusal alone would not be a fix: a run left ``running`` with nothing to settle
-    it is the zombie this writer exists to prevent. So the write is re-decided ONCE
-    from the row as it then stands, and lands ``canceled``.
-    """
+    import threading
 
     sqlite, requests = _store(tmp_path)
     request = requests.enqueue_agent_run(
@@ -249,7 +239,36 @@ def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     assert claimed is not None
     assert sqlite.get_run(request.id)["status"] == "running"
 
-    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    fired: list[int] = []
+    cancel_started = threading.Event()
+    cancel_finished = threading.Event()
+    cancel_results: list[bool] = []
+    cancel_errors: list[BaseException] = []
+    cancel_thread: list[threading.Thread] = []
+
+    def _cancel() -> None:
+        other = SQLiteBackgroundTaskStore(sqlite.db_path)
+        cancel_started.set()
+        try:
+            cancel_results.append(other.cancel_run(request.id))
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            cancel_errors.append(exc)
+        finally:
+            other.close()
+            cancel_finished.set()
+
+    def listener(_conn, _cursor, statement, _parameters, _context, _many):
+        if fired or "UPDATE agent_runs" not in statement:
+            return
+        fired.append(1)
+        thread = threading.Thread(target=_cancel)
+        cancel_thread.append(thread)
+        thread.start()
+        assert cancel_started.wait(timeout=5)
+        assert not cancel_finished.wait(timeout=0.05), (
+            "Stop bypassed settle_run_terminal's writer reservation"
+        )
+
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
         written = sqlite.settle_run_terminal(
@@ -258,18 +277,17 @@ def test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten(
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
-    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    assert cancel_thread
+    cancel_thread[0].join(timeout=5)
 
+    assert fired, "the serialized cancel never started; the race was not exercised"
+    assert not cancel_thread[0].is_alive()
+    assert cancel_errors == []
+    assert cancel_results == [True]
     saved = sqlite.get_run(request.id)
-    assert saved["status"] == "canceled", (
-        f"the user's Stop was overwritten by a stale snapshot; row is {saved['status']!r}"
-    )
-    assert written == "canceled", (
-        f"the writer must report what it actually wrote, not what it first decided; got {written!r}"
-    )
-    assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None, (
-        "a cancelled run owes no failure notice"
-    )
+    assert written == "failed"
+    assert saved["status"] == "failed"
+    assert saved["cancel_requested"] is True
 
 
 def test_a_cancel_waits_for_record_run_output_without_losing_its_request(
@@ -1157,6 +1175,104 @@ def test_deferred_settlement_serializes_with_a_concurrent_stronger_park(
     assert settled is not None
     assert settled["status"] == "canceled"
     assert settled["metadata"].get("interrupt_reason") is None
+
+
+def test_terminal_settlement_serializes_with_concurrent_deferred_parking(
+    tmp_path: Path,
+) -> None:
+    """HFR-368: every terminal writer reserves ownership before its first read."""
+
+    import threading
+
+    settlement_store, requests = _store(tmp_path)
+    parking_store = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    run = requests.enqueue_agent_run(
+        session_key="slack::channel::C368",
+        message="settle without backend output",
+        agent_name=None,
+    )
+    assert requests.claim(run.id) is not None
+
+    settlement_read = threading.Event()
+    allow_settlement = threading.Event()
+    parking_done = threading.Event()
+    settlement_results: list[str | None] = []
+    parking_results: list[bool] = []
+    errors: list[BaseException] = []
+
+    def _pause_after_settlement_read(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ):
+        normalized = " ".join(str(statement).lower().split())
+        if " from agent_runs " not in normalized or " where agent_runs.id" not in normalized:
+            return
+        if settlement_read.is_set():
+            return
+        settlement_read.set()
+        if not allow_settlement.wait(timeout=5):
+            raise TimeoutError("terminal settlement read was never released")
+
+    event.listen(
+        settlement_store.engine, "after_cursor_execute", _pause_after_settlement_read
+    )
+
+    def _settle() -> None:
+        try:
+            settlement_results.append(
+                settlement_store.settle_run_terminal(
+                    run.id,
+                    terminal_status="succeeded",
+                    result_text="finished without terminal output",
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+
+    def _park() -> None:
+        try:
+            parking_results.append(
+                parking_store.defer_run_terminal(
+                    run.id,
+                    terminal_status="failed",
+                    error="the runtime was evicted",
+                    metadata={"interrupt_reason": "evicted"},
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - forwarded from the test thread
+            errors.append(exc)
+        finally:
+            parking_done.set()
+
+    settlement = threading.Thread(target=_settle)
+    parking = threading.Thread(target=_park)
+    parking_was_blocked = False
+    try:
+        settlement.start()
+        assert settlement_read.wait(timeout=5)
+        parking.start()
+        parking_was_blocked = not parking_done.wait(timeout=0.25)
+        allow_settlement.set()
+        settlement.join(timeout=5)
+        parking.join(timeout=5)
+    finally:
+        allow_settlement.set()
+        event.remove(
+            settlement_store.engine,
+            "after_cursor_execute",
+            _pause_after_settlement_read,
+        )
+
+    assert not settlement.is_alive() and not parking.is_alive()
+    assert errors == []
+    assert parking_was_blocked, (
+        "deferred parking bypassed terminal settlement's writer reservation"
+    )
+    assert settlement_results == ["succeeded"]
+    assert parking_results == [False]
+    saved = settlement_store.get_run(run.id)
+    assert saved is not None
+    assert saved["status"] == "succeeded"
+    assert "deferred_terminal_status" not in (saved.get("result_payload") or {})
 
 
 def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Path) -> None:

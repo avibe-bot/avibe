@@ -4119,6 +4119,11 @@ class SQLiteBackgroundTaskStore:
         row_to_publish = None
         written_status: Optional[str] = None
         with self.engine.begin() as conn:
+            # HFR-368. This writer arbitrates against the same deferred terminal
+            # payload as parking and deferred settlement. Reserve SQLite's writer
+            # before the first read so a parker cannot commit an intent inside the
+            # read/guarded-terminal-write window and strand it on a terminal row.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()

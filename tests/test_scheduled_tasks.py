@@ -5881,6 +5881,70 @@ def test_definition_claim_preserves_run_owned_skip_metadata(
     assert saved["metadata"]["last_skip_at"] == first_skip_at
 
 
+def test_teardown_admission_refusal_requeues_a_claimed_scheduled_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-370: a refused pre-dispatch claim is deferred, not failed or disabled."""
+
+    from modules.agents.service import TurnAdmissionClosedError
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_store = ScheduledTaskStore()
+    task = task_store.add_task(
+        session_key="",
+        deliver_key="slack::channel::C370",
+        session_policy="create_per_run",
+        prompt="deliver after teardown",
+        schedule_type="cron",
+        cron="0 2 * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    queued = request_store.enqueue_task_run(
+        task.id, source_kind="scheduler", task=task
+    )
+    claimed = request_store.claim(queued.id)
+    assert claimed is not None
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=task_store,
+        request_store=request_store,
+    )
+    released: list[tuple[str, str]] = []
+    service._reserve_runtime_session = (  # type: ignore[method-assign]
+        lambda **_kwargs: "ses-reserved-before-refusal"
+    )
+
+    def _release(session_id: str, *, reason: str) -> bool:
+        released.append((session_id, reason))
+        return True
+
+    service._release_reserved_session = _release  # type: ignore[method-assign]
+
+    async def _refuse_before_dispatch(**_kwargs):
+        raise TurnAdmissionClosedError("teardown owns admission")
+
+    service._execute_request = _refuse_before_dispatch  # type: ignore[method-assign]
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    saved = request_store.get_run(queued.id)
+    assert saved is not None
+    assert saved["status"] == "queued"
+    assert saved.get("error") is None
+    assert [request.id for request in request_store.list_pending()] == [queued.id]
+    current = task_store.get_task(task.id)
+    assert current is not None
+    assert current.enabled is True
+    assert current.last_error is None
+    assert current.last_run_at is None
+    assert released == [
+        (
+            "ses-reserved-before-refusal",
+            f"teardown refused harness definition {task.id} before dispatch",
+        )
+    ]
+
+
 def test_swept_run_notifies_the_session_that_launched_it(tmp_path: Path, monkeypatch) -> None:
     """An honest row nobody is told about is still a silent failure.
 

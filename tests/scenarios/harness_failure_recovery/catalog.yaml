@@ -450,12 +450,11 @@ scenarios:
     # is a separate transaction: pysqlite starts no transaction for the read, so the
     # snapshot is genuinely older than the write and a Stop landing in the gap is
     # overwritten by a ``failed`` the writer decided on BEFORE the user pressed it.
-    # ``settle_run_terminal`` has the reachable half of the same defect from the other
-    # side: it scopes its UPDATE to ``queued|running``, which catches a cancel of a QUEUED
-    # row because ``cancel_run`` flips that status directly -- but on a RUNNING row
-    # ``cancel_run`` sets only the flag, the status predicate still matches, and the write
-    # lands ``failed`` over the Stop. A running turn is what a user actually presses Stop
-    # on.
+    # ``settle_run_terminal`` originally had the reachable half of the same defect from
+    # the other side. Its cancel-aware CAS remains, but HFR-368 now serializes that
+    # writer's whole decision with Stop and deferred parking: a Stop that starts after
+    # settlement reserved SQLite's writer waits, then remains recorded on the terminal
+    # row instead of being mistaken for part of the earlier decision.
     # THE DAMAGE IS TWO-LAYERED, and the second layer is why this belongs to PR6 rather
     # than to the settlement lane alone: the run reads ``failed`` when the user cancelled
     # it, so the Stop silently did nothing; AND a ``failed`` transition stamps an owed
@@ -484,10 +483,10 @@ scenarios:
     # goes through the production ``cancel_run`` on a second store over the same file, not
     # a hand-written UPDATE, "so what the test races against is what the Stop button
     # does", and each asserts the race actually fired before judging the outcome.
-    # ``test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten`` and
-    # ``test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten`` require
-    # ``canceled`` AND no stamped notice; red on ``a2829d3b`` for both writers, where the
-    # row ends ``failed`` with a notice attached.
+    # ``test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten`` requires
+    # ``canceled`` AND no stamped notice for the still-unreserved batch writer. The
+    # settle-run companion now pins HFR-368's ordering: settlement wins its reserved
+    # slot and the later Stop remains visible as ``cancel_requested``.
     # ``test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled`` is the negative
     # control, and it is not optional: "a ``cancel_requested`` predicate is the kind of
     # guard that quietly refuses writes nobody raced -- and here that would mean a failed
@@ -4515,6 +4514,42 @@ scenarios:
     # definition values onto the existing run metadata, preserving skip age, queue
     # ownership, interruption and other run-owned evidence.
     test: tests/test_scheduled_tasks.py::test_definition_claim_preserves_run_owned_skip_metadata
+  - id: HFR-368
+    name: ordinary terminal settlement serializes with deferred parking
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 30 (F1). settle_run_terminal read a run before reserving
+    # SQLite's writer, so teardown could park a stronger interruption in that gap and
+    # the stale writer could terminalize the row around it. Every deferred-payload
+    # producer and consumer now reserves the same writer before its decision read.
+    test: tests/test_harness_failure_visibility.py::test_terminal_settlement_serializes_with_concurrent_deferred_parking
+  - id: HFR-369
+    name: ambiguous runtime candidates are held without being canceled
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # PR2 review round 30 (F2). Ambiguous anchor/backend/workdir resolution correctly
+    # refused to cancel either live conversation, but consequently held admission for
+    # neither while the shared runtime was removed. The candidate set is now retained
+    # separately: every plausible session is held for the removal window while the
+    # cancellation set remains empty.
+    test: tests/test_session_teardown.py::test_teardown_refuses_ambiguous_exact_anchor_candidates
+  - id: HFR-370
+    name: a scheduled claim refused before dispatch returns to the durable queue
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # PR2 review round 30 (F3). TurnAdmissionClosedError was flattened into an
+    # ordinary task failure even though no backend saw the prompt. Scheduled task
+    # execution now propagates that distinct refusal to the claim owner, which
+    # requeues the row with its pre-claim clock and leaves definition health intact.
+    # A create-per-run Session reserved before the refusal is released (or recorded
+    # for retry cleanup) so repeated teardown races cannot leak reservations.
+    test: tests/test_scheduled_tasks.py::test_teardown_admission_refusal_requeues_a_claimed_scheduled_turn
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

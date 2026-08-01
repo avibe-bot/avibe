@@ -52,6 +52,7 @@ from core.run_settlement import (
     SWEEP_I18N_KEYS,
 )
 from core.session_activities import activity_completion_output
+from modules.agents.service import TurnAdmissionClosedError
 from modules.im import MessageContext
 from storage.agent_session_rows import (
     INBOX_SESSION_VISIBILITIES,
@@ -6451,6 +6452,25 @@ class ScheduledTaskService:
             )
             should_complete = False
             raise
+        except TurnAdmissionClosedError as exc:
+            if request.request_type in {"task_run", "scheduled"}:
+                # HFR-370. Admission refusal happened before backend dispatch, so
+                # this claim remains retryable work. Preserve its pre-claim clock;
+                # repeated teardown deferrals must not keep a stale row young.
+                self.request_store.requeue(
+                    request.id, updated_at=request.claimed_from_updated_at
+                )
+                self._drain_dirty = True
+                should_complete = False
+                settled_out_of_band = False
+                logger.debug(
+                    "Scheduled request %s deferred because teardown owns admission",
+                    request.id,
+                )
+            else:
+                error = str(exc)
+                should_complete = True
+                settled_out_of_band = False
         except UnresolvableSessionTarget as exc:
             # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
             # than one more error string. #1060's field evidence is the case: a watch
@@ -6703,6 +6723,25 @@ class ScheduledTaskService:
         except asyncio.CancelledError:
             self.reconcile_jobs()
             raise
+        except TurnAdmissionClosedError:
+            # HFR-370. Nothing reached the backend. Let the claimed-request owner
+            # restore the durable queue row instead of stamping a definition/run
+            # failure for work explicitly refused during teardown or shutdown.
+            # A create-per-run reservation was made before dispatch, so give that
+            # unused row back; otherwise each refusal leaks another Session. A
+            # failed release is tracked on the definition for the next-fire cleanup.
+            if task.session_policy == "create_per_run" and session_id:
+                release_reason = (
+                    f"teardown refused harness definition {task.id} before dispatch"
+                )
+                if not self._release_reserved_session(
+                    session_id, reason=release_reason
+                ):
+                    self._track_orphaned_reservation(
+                        task.id, session_id, release_reason
+                    )
+            self.reconcile_jobs()
+            raise
         except UnresolvableSessionTarget as exc:
             # The pinned session no longer resolves. Left alone this definition
             # re-fires and re-fails on every schedule with nobody told, so classify
@@ -6739,6 +6778,8 @@ class ScheduledTaskService:
                     )
                 except asyncio.CancelledError:
                     self.reconcile_jobs()
+                    raise
+                except TurnAdmissionClosedError:
                     raise
                 except Exception as retry_exc:
                     error = str(retry_exc)

@@ -359,12 +359,63 @@ def _scheduled_task_service(controller: Any) -> Any:
     return service
 
 
+def _teardown_session_candidates(
+    controller: Any,
+    *,
+    session_anchor: str,
+    workdir: Optional[str] = None,
+    agent_backend: Optional[str] = None,
+) -> list[str]:
+    """Return every live session row this runtime identity could plausibly own."""
+
+    anchor = str(session_anchor or "").strip()
+    if not anchor:
+        return []
+    sessions = getattr(controller, "sessions", None)
+    finder = getattr(sessions, "find_session_ids_for_anchor", None)
+    if not callable(finder):
+        return []
+    try:
+        resolved = finder(
+            anchor,
+            workdir=workdir or None,
+            agent_backend=str(agent_backend or "").strip() or None,
+        )
+    except Exception:
+        logger.debug(
+            "Session teardown: could not resolve session ids for anchor %s",
+            anchor,
+            exc_info=True,
+        )
+        return []
+    return [str(session_id) for session_id in (resolved or []) if session_id]
+
+
+def _unambiguous_teardown_session_ids(
+    session_anchor: str, candidates: list[str]
+) -> list[str]:
+    """Keep cancellation safe while retaining candidates for admission holds."""
+
+    if len(candidates) > 1:
+        logger.warning(
+            "Session teardown: anchor %s still names %d live sessions after backend "
+            "and working-directory narrowing; refusing to cancel any of them because "
+            "none of them is provably the runtime being reclaimed. Their runs stay "
+            "open for restart recovery and the staleness sweep.",
+            session_anchor,
+            len(candidates),
+        )
+        return []
+    return candidates
+
+
 def resolve_teardown_session_ids(
     controller: Any,
     *,
     session_anchor: str,
     workdir: Optional[str] = None,
     agent_backend: Optional[str] = None,
+    admission_holds: Optional[ExitStack] = None,
 ) -> list[str]:
     """Resolve a RUNTIME identity to the Avibe session ids a teardown must settle.
 
@@ -414,37 +465,22 @@ def resolve_teardown_session_ids(
     """
 
     anchor = str(session_anchor or "").strip()
-    if not anchor:
-        return []
-    sessions = getattr(controller, "sessions", None)
-    finder = getattr(sessions, "find_session_ids_for_anchor", None)
-    if not callable(finder):
-        return []
-    try:
-        resolved = finder(
-            anchor,
-            workdir=workdir or None,
-            agent_backend=str(agent_backend or "").strip() or None,
+    candidates = _teardown_session_candidates(
+        controller,
+        session_anchor=anchor,
+        workdir=workdir,
+        agent_backend=agent_backend,
+    )
+    # HFR-369. Ambiguity refuses CANCELLATION because none of these rows is a
+    # provable owner, but the caller still dismantles the shared runtime. Retain
+    # every plausible row as an admission-only owner for that removal window. The
+    # optional stack lets Codex's two-phase multi-session eviction acquire every
+    # hold before settling any row, while ordinary read-only resolution is unchanged.
+    for session_id in candidates:
+        hold_session_admission(
+            controller, session_id, admission_holds=admission_holds
         )
-    except Exception:
-        logger.debug(
-            "Session teardown: could not resolve session ids for anchor %s",
-            anchor,
-            exc_info=True,
-        )
-        return []
-    session_ids = [str(session_id) for session_id in (resolved or []) if session_id]
-    if len(session_ids) > 1:
-        logger.warning(
-            "Session teardown: anchor %s still names %d live sessions after backend "
-            "and working-directory narrowing; refusing to cancel any of them because "
-            "none of them is provably the runtime being reclaimed. Their runs stay "
-            "open for restart recovery and the staleness sweep.",
-            anchor,
-            len(session_ids),
-        )
-        return []
-    return session_ids
+    return _unambiguous_teardown_session_ids(anchor, candidates)
 
 
 def hold_session_admission(
@@ -714,12 +750,10 @@ async def teardown_runtime_session_runs(
         session_anchor=session_anchor,
         workdir=workdir,
         agent_backend=agent_backend,
+        admission_holds=admission_holds,
     )
     touched = 0
     for session_id in session_ids:
-        # BEFORE the teardown, not after: the window opens inside the very first
-        # ``release_for_teardown`` this call reaches.
-        hold_session_admission(controller, session_id, admission_holds=admission_holds)
         touched += await teardown_session_runs(
             controller,
             session_id,

@@ -197,7 +197,7 @@ def test_teardown_refuses_ambiguous_exact_anchor_candidates(
     tmp_path: Path,
     caplog,
 ) -> None:
-    """HFR-323: same anchor, same backend, same workdir is not the same runtime.
+    """HFR-323/369: ambiguity refuses cancellation while closing admission.
 
     HFR-128 narrowed the resolve by backend and by exact workdir, which removes the
     candidates a runtime provably cannot own. It cannot remove the ones it MIGHT: the
@@ -263,28 +263,42 @@ def test_teardown_refuses_ambiguous_exact_anchor_candidates(
         assert ANCHOR in refusals[0]
         assert "2 live sessions" in refusals[0]
 
-        async def _exercise() -> tuple[bool, bool]:
+        async def _exercise() -> tuple[bool, bool, tuple[bool, bool], tuple[bool, bool]]:
             first_task = _live_turn(manager, first_id, "claude")
             second_task = _live_turn(manager, second_id, "claude")
             await asyncio.sleep(0)
             try:
-                await teardown_composite_session_runs(
-                    controller,
-                    composite_key,
-                    settled_by=SETTLED_BY_EVICTED,
-                    agent_backend="claude",
+                with ExitStack() as admission_holds:
+                    await teardown_composite_session_runs(
+                        controller,
+                        composite_key,
+                        settled_by=SETTLED_BY_EVICTED,
+                        agent_backend="claude",
+                        admission_holds=admission_holds,
+                    )
+                    held = (
+                        manager.is_teardown_admission_closed(first_id),
+                        manager.is_teardown_admission_closed(second_id),
+                    )
+                reopened = (
+                    manager.is_teardown_admission_closed(first_id),
+                    manager.is_teardown_admission_closed(second_id),
                 )
-                return first_task.done(), second_task.done()
+                return first_task.done(), second_task.done(), held, reopened
             finally:
                 for task in (first_task, second_task):
                     task.cancel()
                 await asyncio.gather(first_task, second_task, return_exceptions=True)
 
-        first_done, second_done = asyncio.run(_exercise())
+        first_done, second_done, held, reopened = asyncio.run(_exercise())
 
         # Neither live turn was interrupted, and neither carries a settlement cause.
         assert first_done is False
         assert second_done is False
+        assert held == (True, True), (
+            "every plausible owner must refuse new turns until the shared runtime is gone"
+        )
+        assert reopened == (False, False)
         assert manager.in_flight[first_id].cancel_settled_by is None
         assert manager.in_flight[second_id].cancel_settled_by is None
         assert manager.in_flight[first_id].stop_no_flush is False
