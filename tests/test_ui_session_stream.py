@@ -262,20 +262,21 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("error_kind", "expected_status", "expected_error"),
+    ("error_kind", "expected_status", "expected_error", "expected_delivery_state"),
     (
-        ("timeout", 504, "dispatch_failed"),
-        ("ambiguous", 502, "dispatch_failed"),
-        ("unavailable", 502, "internal_unavailable"),
+        ("timeout", 504, "dispatch_pending", "reserved"),
+        ("ambiguous", 502, "dispatch_pending", "reserved"),
+        ("unavailable", 502, "internal_unavailable", "retired"),
     ),
 )
-def test_route_dispatch_failure_retires_unclaimed_delivery_outside_transcript(
+def test_route_dispatch_failure_classifies_unclaimed_delivery_outside_transcript(
     isolated_state,
     tmp_path,
     monkeypatch,
     error_kind,
     expected_status,
     expected_error,
+    expected_delivery_state,
 ):
     from vibe import internal_client
     from vibe.ui_server import app
@@ -321,8 +322,37 @@ def test_route_dispatch_failure_retires_unclaimed_delivery_outside_transcript(
         delivery = message_deliveries.get_delivery(conn, body["id"])
     assert queued == []
     assert visible["messages"] == []
-    assert delivery is not None and delivery["state"] == "retired"
+    assert delivery is not None and delivery["state"] == expected_delivery_state
     assert "message.new" not in [event_type for event_type, _data in published]
+
+
+def test_route_definitive_dispatch_rejection_retires_reserved_delivery(
+    isolated_state,
+    tmp_path,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch_mock = AsyncMock(
+        return_value={
+            "status_code": 500,
+            "body": {"error": "backend resolution failed"},
+        }
+    )
+    with patch("vibe.internal_client.dispatch_async", dispatch_mock):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "definitively rejected"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["dispatch_error"] == "dispatch_failed"
+    with create_sqlite_engine().connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, body["id"])
+    assert delivery is not None and delivery["state"] == "retired"
 
 
 def test_route_timeout_observes_controller_queue_without_republishing(

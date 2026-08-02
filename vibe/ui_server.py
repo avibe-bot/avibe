@@ -8242,15 +8242,11 @@ async def sessions_messages_create(session_id: str):
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerTimeout as exc:
-        current = _retire_unclaimed_delivery("internal_dispatch_timeout")
+        current = _current_delivery_response()
         return jsonify(
             {
                 **current,
-                "dispatch_error": (
-                    "dispatch_failed"
-                    if current.get("state") == "retired"
-                    else "dispatch_pending"
-                ),
+                "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
         ), 504
@@ -8270,15 +8266,11 @@ async def sessions_messages_create(session_id: str):
             exc,
             exc_info=True,
         )
-        current = _retire_unclaimed_delivery("internal_dispatch_error")
+        current = _current_delivery_response()
         return jsonify(
             {
                 **current,
-                "dispatch_error": (
-                    "dispatch_failed"
-                    if current.get("state") == "retired"
-                    else "dispatch_pending"
-                ),
+                "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
         ), 502
@@ -8307,9 +8299,10 @@ async def sessions_messages_create(session_id: str):
                 ), 502
             return jsonify({**accepted, **body}), 201
         return jsonify({**current, **body}), 202
+    current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
     return jsonify(
         {
-            **message,
+            **current,
             "dispatch_error": "dispatch_failed",
             "detail": body,
         }

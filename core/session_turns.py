@@ -1622,7 +1622,7 @@ class SessionTurnManager:
             "reason": getattr(receipt, "reason", None),
             "details": dict(getattr(receipt, "details", {}) or {}),
         }
-        start_turn_id: str | None = None
+        should_drain = False
         materialized = False
         saved: dict[str, Any] | None = None
         accepted_run_ids: list[str] = []
@@ -1700,19 +1700,12 @@ class SessionTurnManager:
                         None if unknown_rows and all(unknown_rows) else "receipt_cas_lost",
                     )
                 if not materialized:
-                    current = delivery_store.active_turn(conn, str(delivery["session_id"]))
                     session_status = conn.execute(
                         select(agent_sessions.c.status).where(
                             agent_sessions.c.id == str(delivery["session_id"])
                         )
                     ).scalar_one_or_none()
-                    next_state = (
-                        "retired"
-                        if session_status != "active"
-                        else "reserved"
-                        if current is None
-                        else "queued"
-                    )
+                    next_state = "queued" if session_status == "active" else "retired"
                     fallback_rows = [
                         delivery_store.record_definitive_attempt(
                             conn,
@@ -1735,30 +1728,7 @@ class SessionTurnManager:
                             "fallback_cas_lost",
                         )
                     saved = fallback_rows[0]
-                if not materialized and saved is not None and saved["state"] == "reserved":
-                    start_turn_id = delivery_store.new_turn_id()
-                    fallback_deliveries = [
-                        row for row in fallback_rows if row is not None
-                    ]
-                    self._claim_start_batch(
-                        conn,
-                        turn_id=start_turn_id,
-                        session_id=str(delivery["session_id"]),
-                        backend=str(
-                            (delivery_store.get_turn(conn, target_turn_id) or {}).get(
-                                "backend"
-                            )
-                            or self._context_backend(context)
-                            or ""
-                        ),
-                        deliveries=fallback_deliveries,
-                        dispatch_text="\n".join(
-                            str(row.get("dispatch_text") or "")
-                            for row in fallback_deliveries
-                            if str(row.get("dispatch_text") or "")
-                        ),
-                    )
-                    saved = delivery_store.get_delivery(conn, delivery_id)
+                    should_drain = saved is not None and saved["state"] == "queued"
         except Exception:
             logger.exception("failed to persist steering receipt for delivery=%s", delivery_id)
             try:
@@ -1805,17 +1775,16 @@ class SessionTurnManager:
                 "accepted",
                 target_turn_id or None,
             )
-        if start_turn_id:
-            await self._start_persisted_turn(start_turn_id, context=context)
+        if should_drain:
+            await self.drain_delivery_queue(session_id)
             return self._committed_delivery_result(
                 delivery_id,
-                attempted_turn_id=start_turn_id,
             )
         return DeliveryResult(
             delivery_id,
             None,
             str((saved or {}).get("state") or "reconciling_steer"),
-            start_turn_id,
+            None,
         )
 
     async def _admit_p0(
@@ -1902,6 +1871,67 @@ class SessionTurnManager:
                         )
                 if control_in_progress:
                     joined = True
+                    if request.content is None and current.get("control_mode") == "replace":
+                        successor_turn_id = str(
+                            current.get("control_successor_turn_id") or ""
+                        )
+                        successor_delivery_id = str(
+                            current.get("control_successor_delivery_id") or ""
+                        )
+                        successor = delivery_store.get_turn(conn, successor_turn_id)
+                        successor_delivery = delivery_store.get_delivery(
+                            conn,
+                            successor_delivery_id,
+                        )
+                        if (
+                            successor is None
+                            or successor["state"] != "waiting"
+                            or successor_delivery is None
+                            or successor_delivery["state"] != "interrupt_waiting"
+                        ):
+                            return DeliveryResult(
+                                None,
+                                None,
+                                "refused",
+                                current_id,
+                                "replacement_supersede_lost",
+                            )
+                        terminalized = self._write_terminal_snapshot(
+                            conn,
+                            successor_turn_id,
+                            outcome="not_written",
+                            settled_by="explicit_stop",
+                            evidence_kind="replacement_superseded_by_stop",
+                        )
+                        retired = delivery_store.record_definitive_attempt(
+                            conn,
+                            successor_delivery_id,
+                            expected_version=int(successor_delivery["version"]),
+                            expected_states=("interrupt_waiting",),
+                            outcome="not_written",
+                            next_state="retired",
+                            receipt={"kind": "replacement_superseded_by_stop"},
+                        )
+                        if not terminalized.get("changed") or retired is None:
+                            raise RuntimeError("replacement supersession lost")
+                        delivery_store.set_queue_hold(
+                            conn,
+                            request.session_id,
+                            held=True,
+                        )
+                        superseded = delivery_store.cas_turn(
+                            conn,
+                            current_id,
+                            expected_version=int(current["version"]),
+                            expected_states=(str(current["state"]),),
+                            values={
+                                "control_mode": "stop_only",
+                                "control_successor_delivery_id": None,
+                                "control_successor_turn_id": None,
+                            },
+                        )
+                        if superseded is None:
+                            raise RuntimeError("replacement control supersession lost")
                     if delivery is not None:
                         # Only the control-slot winner may replace the active Turn.
                         # A content loser remains one FIFO submission and never calls Stop.
@@ -2208,7 +2238,11 @@ class SessionTurnManager:
                     if not terminalized.get("changed") or queued is None:
                         raise RuntimeError("definitive P0 refusal fallback lost")
                     fallback_state = "queued"
-            if definitive and not terminal_proven:
+            if (
+                definitive
+                and not terminal_proven
+                and durable_turn.get("control_mode") == "replace"
+            ):
                 try:
                     control_context = json.loads(
                         str(durable_turn.get("control_receipt_json") or "{}")

@@ -1099,6 +1099,50 @@ def test_definitive_refusal_racing_idle_drain_starts_same_delivery_once(managers
     assert matching_starts[0][0] == row["turn_id"]
 
 
+def test_definitive_p1_refusal_requeues_behind_existing_fifo_head(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    older = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="older backlog"),
+            context=_context(),
+        )
+    )
+    with engine.begin() as conn:
+        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def refused(_backend, _request):
+        entered.set()
+        await asyncio.to_thread(release.wait, 5)
+        return steer_result(SteerOutcome.REFUSED, reason="not_steerable")
+
+    manager._steer = refused
+
+    async def race():
+        pending = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p1", content="fallback"),
+                context=_context(),
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert await manager.terminalize_turn(turn_id)
+        with engine.begin() as conn:
+            assert delivery_store.set_queue_hold(conn, "ses_fsm", held=False)
+        release.set()
+        return await pending
+
+    fallback = asyncio.run(race())
+    older_row = _row(engine, str(older.delivery_id))
+    fallback_row = _row(engine, str(fallback.delivery_id))
+    assert older_row["state"] == "claimed"
+    assert fallback_row["state"] == "claimed"
+    assert fallback_row["turn_id"] == older_row["turn_id"]
+    assert [text for _turn, text in starts].count("older backlog\nfallback") == 1
+
+
 def test_p0_successor_persistence_failure_never_calls_stop(managers, monkeypatch) -> None:
     """MESSAGE-DELIVERY-013: successor Delivery and Turn commit before Stop."""
 
@@ -1232,6 +1276,64 @@ def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> N
     assert delivery["state"] == "claimed"
     with engine.connect() as conn:
         assert delivery_store.queue_is_held(conn, "ses_fsm") is False
+
+
+def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_stop(_stop_context):
+            entered.set()
+            await release.wait()
+            return True
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=delayed_stop)
+        replacement_task = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(session_id="ses_fsm", priority="p0", content="replacement"),
+                context=_context(),
+            )
+        )
+        await entered.wait()
+        with engine.connect() as conn:
+            replacement_control = delivery_store.get_turn(conn, turn_id)
+        assert replacement_control is not None
+        successor_turn_id = str(replacement_control["control_successor_turn_id"] or "")
+        replacement_delivery_id = str(
+            replacement_control["control_successor_delivery_id"] or ""
+        )
+        stopped = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content=None),
+            context=context,
+        )
+        release.set()
+        await replacement_task
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        assert stopped.reason == "joined_existing_interrupt"
+        return turn_id, successor_turn_id, replacement_delivery_id
+
+    turn_id, successor_turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        target = delivery_store.get_turn(conn, turn_id)
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
+    assert target is not None and target["control_mode"] == "stop_only"
+    assert target["control_successor_turn_id"] is None
+    assert target["control_successor_delivery_id"] is None
+    assert successor is not None and successor["terminal_outcome"] == "not_written"
+    assert _row(engine, replacement_delivery_id)["state"] == "retired"
+    assert manager.controller.command_handler.handle_stop.await_count == 1
 
 
 def test_recovery_consumes_persisted_not_active_stop_receipt(managers) -> None:
