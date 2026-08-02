@@ -150,9 +150,11 @@ export const liveActivityReducer = (
   }
 };
 
-// Process-log rows for the Activity panel — the catalog's ``activity`` render kind.
+// Process-log rows for the Activity panel. Assistant rows are real Messages and
+// therefore use the catalog. Tool calls are synthetic live envelopes backed by
+// ``agent_events``; they intentionally do not exist in the Message catalog.
 export const isActivityMessageType = (type: string): boolean =>
-  specFor(type).render === 'activity';
+  type === 'tool_call' || specFor(type).render === 'activity';
 
 // ``format_toolcall`` stores "🔧 `ToolName` `{json params}`" (one string, backend
 // formatter output). Parse the tool name (first backtick token, else first word
