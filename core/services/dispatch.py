@@ -36,6 +36,7 @@ from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
 )
+from core.native_dispatch_phase import backend_dispatch_attempted
 from modules.im import MessageContext
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
@@ -70,6 +71,7 @@ class TurnDispatchOutcome:
 
     error: Optional[str]
     settled_by: Optional[str]
+    backend_dispatch_attempted: Optional[bool] = None
 
 
 async def dispatch_turn(
@@ -133,7 +135,11 @@ async def dispatch_turn_with_outcome(
 
     if on_chunk is None:
         # IM / CLI: fire-and-forget; no live stream to hold open.
-        return TurnDispatchOutcome(error=await _run(), settled_by=None)
+        return TurnDispatchOutcome(
+            error=await _run(),
+            settled_by=None,
+            backend_dispatch_attempted=backend_dispatch_attempted(context),
+        )
 
     session_key = controller._get_session_key(context)
     if controller.get_turn_sink(session_key) is not None:
@@ -149,7 +155,11 @@ async def dispatch_turn_with_outcome(
         # settlement — report it directly. A caller holding a durable record (an
         # ``agent_runs`` row) must settle it: this turn never reached a backend, so
         # no terminal result will ever arrive for it.
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_REFUSED_CONCURRENT_TURN)
+        return TurnDispatchOutcome(
+            error=None,
+            settled_by=SETTLED_BY_REFUSED_CONCURRENT_TURN,
+            backend_dispatch_attempted=False,
+        )
     # Tag this turn with a unique token, stamped into the context the agent
     # receiver will carry. ``_stream_chunk`` only forwards an emit to the sink
     # when the emit's context token matches the registered sink's token, so a
@@ -191,7 +201,11 @@ async def dispatch_turn_with_outcome(
         settled_by = SETTLED_BY_NO_TERMINAL_RESULT
         if isinstance(sink, dict) and sink.get("done_event") is done:
             settled_by = str(sink.get("settled_by") or SETTLED_BY_NO_TERMINAL_RESULT)
-        return TurnDispatchOutcome(error=result, settled_by=settled_by)
+        return TurnDispatchOutcome(
+            error=result,
+            settled_by=settled_by,
+            backend_dispatch_attempted=backend_dispatch_attempted(context),
+        )
     finally:
         # Pass our own done event so a turn that was superseded by a newer
         # concurrent turn doesn't evict the newer turn's sink on cleanup.

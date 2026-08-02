@@ -2029,7 +2029,7 @@ def cancel_agent_runs_for_retired_deliveries_in_connection(
         )
     )
     if transition.rowcount != len(run_ids):
-        raise RuntimeError("archive lost an exact Delivery-owned Agent Run transition")
+        raise RuntimeError("Delivery retirement lost an exact Agent Run transition")
     return run_ids
 
 

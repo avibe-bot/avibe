@@ -36,6 +36,12 @@ from core.services.dispatch import (
     dispatch_turn,
     dispatch_turn_with_outcome,
 )
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_ATTEMPTING,
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from modules.im import MessageContext
 
 
@@ -173,6 +179,32 @@ def test_outcome_reports_release_without_terminal_result():
     controller = _streaming_controller(sink_settled_by=None)
     outcome = asyncio.run(dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=AsyncMock()))
     assert outcome.settled_by == SETTLED_BY_NO_TERMINAL_RESULT
+
+
+def test_outcome_reports_definite_prewrite_exit() -> None:
+    controller = _streaming_controller(sink_settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    async def no_backend_dispatch(context, _text):
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        return "agent is unavailable"
+
+    controller.message_handler.handle_user_message = AsyncMock(side_effect=no_backend_dispatch)
+    outcome = asyncio.run(
+        dispatch_turn_with_outcome(controller, _ctx(), "hi", on_chunk=AsyncMock())
+    )
+
+    assert outcome.backend_dispatch_attempted is False
+
+
+def test_dispatch_evidence_survives_prepared_context_replacement() -> None:
+    original = _ctx()
+    evidence = set_dispatch_phase(original, DISPATCH_PHASE_PREWRITE)
+    prepared = _ctx()
+    set_dispatch_phase(prepared, DISPATCH_PHASE_PREWRITE, evidence=evidence)
+
+    set_dispatch_phase(prepared, DISPATCH_PHASE_ATTEMPTING)
+
+    assert backend_dispatch_attempted(original) is True
 
 
 def test_outcome_reports_refused_concurrent_turn():

@@ -14,6 +14,10 @@ from core.audio_asr import (
 )
 from core.message_output import terminal_output_for, terminal_turn_output
 from core.message_context import resolve_context_thread_id
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    set_dispatch_phase,
+)
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -83,6 +87,7 @@ class MessageHandler(BaseHandler):
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
+        dispatch_evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
         # dispatched — early returns, missing/disabled backend, errors — no
@@ -148,6 +153,11 @@ class MessageHandler(BaseHandler):
                 raise RuntimeError("Session handler not initialized")
 
             context = await self._prepare_turn_context(context, source)
+            set_dispatch_phase(
+                context,
+                DISPATCH_PHASE_PREWRITE,
+                evidence=dispatch_evidence,
+            )
 
             # Durable Deliveries materialize their Message only after exact native
             # acceptance. Legacy direct turns still mirror at this boundary.

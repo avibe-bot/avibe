@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.message_output import terminal_turn_output
+from core.native_dispatch_phase import backend_dispatch_attempted
 from core.session_activities import SessionActivityRegistry
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -136,7 +137,8 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
         agent = _OrderRecordingAgent(log)
         service.register(agent)
 
-        await service.handle_message("claude", _request("hi"))
+        request = _request("hi")
+        await service.handle_message("claude", request)
 
         # on_running (gate confirmed) must precede the bubble hooks, which in turn
         # precede the agent run. This is what keeps a queued turn from claiming
@@ -147,6 +149,7 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
             "begin_status_bubble",
             "handle_message",
         ]
+        assert backend_dispatch_attempted(request.context) is True
 
     asyncio.run(_run())
 

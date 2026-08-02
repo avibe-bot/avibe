@@ -932,6 +932,62 @@ class SessionTurnManager:
             attempt_id=attempt_id,
         )
 
+    @staticmethod
+    def _cancel_runs_for_retired_delivery(
+        conn: Connection,
+        delivery: dict[str, Any] | None,
+    ) -> list[str]:
+        """Make Delivery retirement and exact Run cancellation one transaction."""
+
+        if delivery is None or delivery.get("state") != "retired":
+            return []
+        from storage.background import (
+            cancel_agent_runs_for_retired_deliveries_in_connection,
+        )
+
+        return cancel_agent_runs_for_retired_deliveries_in_connection(
+            conn,
+            session_id=str(delivery["session_id"]),
+            delivery_ids=[str(delivery["id"])],
+        )
+
+    @classmethod
+    def _record_definitive_delivery_attempt(
+        cls,
+        conn: Connection,
+        delivery_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any] | None:
+        delivery = delivery_store.record_definitive_attempt(
+            conn,
+            delivery_id,
+            **kwargs,
+        )
+        cls._cancel_runs_for_retired_delivery(conn, delivery)
+        return delivery
+
+    @classmethod
+    def _retire_delivery_not_written(
+        cls,
+        conn: Connection,
+        session_id: str,
+        delivery_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        retired = delivery_store.retire_not_written(
+            conn,
+            session_id,
+            delivery_id,
+            reason=reason,
+        )
+        if retired:
+            cls._cancel_runs_for_retired_delivery(
+                conn,
+                delivery_store.get_delivery(conn, delivery_id),
+            )
+        return retired
+
     def _claim_fifo_batch_in_transaction(
         self,
         conn: Connection,
@@ -1225,7 +1281,7 @@ class SessionTurnManager:
                     else None
                 )
                 if existing is not None and existing["state"] in {"reserved", "queued"}:
-                    delivery_store.retire_not_written(
+                    self._retire_delivery_not_written(
                         conn,
                         request.session_id,
                         str(existing["id"]),
@@ -1341,7 +1397,7 @@ class SessionTurnManager:
                     else None
                 )
                 if existing is not None and existing["state"] == "reserved":
-                    delivery_store.retire_not_written(
+                    self._retire_delivery_not_written(
                         conn,
                         request.session_id,
                         str(existing["id"]),
@@ -1707,7 +1763,7 @@ class SessionTurnManager:
                     ).scalar_one_or_none()
                     next_state = "queued" if session_status == "active" else "retired"
                     fallback_rows = [
-                        delivery_store.record_definitive_attempt(
+                        self._record_definitive_delivery_attempt(
                             conn,
                             str(row["id"]),
                             expected_version=int(row["version"]),
@@ -1813,7 +1869,7 @@ class SessionTurnManager:
                     else None
                 )
                 if existing is not None and existing["state"] == "reserved":
-                    delivery_store.retire_not_written(
+                    self._retire_delivery_not_written(
                         conn,
                         request.session_id,
                         str(existing["id"]),
@@ -1903,7 +1959,7 @@ class SessionTurnManager:
                             settled_by="explicit_stop",
                             evidence_kind="replacement_superseded_by_stop",
                         )
-                        retired = delivery_store.record_definitive_attempt(
+                        retired = self._record_definitive_delivery_attempt(
                             conn,
                             successor_delivery_id,
                             expected_version=int(successor_delivery["version"]),
@@ -2669,7 +2725,7 @@ class SessionTurnManager:
                             else "restart_retry_exhausted"
                         )
                         for initial in initial_batch:
-                            reconciled = delivery_store.record_definitive_attempt(
+                            reconciled = self._record_definitive_delivery_attempt(
                                 conn,
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
@@ -2712,7 +2768,7 @@ class SessionTurnManager:
                                 if session_status == "active" and not owned_run_terminal
                                 else "retired"
                             )
-                            definitive = delivery_store.record_definitive_attempt(
+                            definitive = self._record_definitive_delivery_attempt(
                                 conn,
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
@@ -2764,7 +2820,7 @@ class SessionTurnManager:
                         )
                     ).mappings()
                     for pending_row in pending_rows:
-                        fallback = delivery_store.record_definitive_attempt(
+                        fallback = self._record_definitive_delivery_attempt(
                             conn,
                             str(pending_row["id"]),
                             expected_version=int(pending_row["version"]),
@@ -2806,7 +2862,7 @@ class SessionTurnManager:
                                     settled_by="session_archive",
                                     evidence_kind="unstarted_successor_retired",
                                 )
-                                retired = delivery_store.record_definitive_attempt(
+                                retired = self._record_definitive_delivery_attempt(
                                     conn,
                                     successor_delivery_id,
                                     expected_version=int(successor_delivery["version"]),
@@ -2974,6 +3030,7 @@ class SessionTurnManager:
         cancelled: bool,
         failed: bool,
         prewrite_refused: bool,
+        definitive_prewrite_exit: bool,
         settled_by: str | None,
         terminal_is_error: bool,
     ) -> dict[str, Any]:
@@ -3005,6 +3062,11 @@ class SessionTurnManager:
                 return self._settle_durable_prewrite_failure(
                     turn_id,
                     outcome=SETTLED_BY_REFUSED_CONCURRENT_TURN,
+                )
+            if definitive_prewrite_exit:
+                return self._settle_durable_prewrite_failure(
+                    turn_id,
+                    outcome=SETTLED_BY_NO_TERMINAL_RESULT,
                 )
             if settled_by is not None:
                 return self._terminalize_durable_turn(
@@ -3858,6 +3920,7 @@ class SessionTurnManager:
             cancelled = False
             failed = False
             prewrite_refused = False
+            definitive_prewrite_exit = False
             # How this turn's waiter was released, in the ``core.run_settlement``
             # vocabulary. Anything other than a real terminal result means no result
             # is coming, so an ``agent_runs`` row this turn owns has to be settled
@@ -3894,6 +3957,7 @@ class SessionTurnManager:
                     on_chunk=self._noop_chunk,
                 )
                 settled_by = outcome.settled_by
+                definitive_prewrite_exit = outcome.backend_dispatch_attempted is False
             except asyncio.CancelledError:
                 cancelled = True
                 # Do NOT decide the reason here: the canceller knows it, and it is
@@ -3954,6 +4018,7 @@ class SessionTurnManager:
                             cancelled=cancelled,
                             failed=failed,
                             prewrite_refused=prewrite_refused,
+                            definitive_prewrite_exit=definitive_prewrite_exit,
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
                         )
@@ -3986,6 +4051,7 @@ class SessionTurnManager:
                         and not cancelled
                         and not failed
                         and not prewrite_refused
+                        and not definitive_prewrite_exit
                         and settled_by != SETTLED_BY_STOPPED
                     )
                     backend = self._context_backend(context)
@@ -4062,7 +4128,7 @@ class SessionTurnManager:
                 return {"changed": False, "state": None}
             state = str(delivery["state"])
             if delivery_store.policy_for(state).run_cancel == "retire":
-                retired = delivery_store.retire_not_written(
+                retired = self._retire_delivery_not_written(
                     conn,
                     session_id,
                     str(delivery["id"]),

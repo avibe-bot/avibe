@@ -263,6 +263,33 @@ def test_messages_type_is_never_delivery_authority() -> None:
     assert offenders == []
 
 
+def test_turn_manager_routes_retirement_through_run_settlement_boundary() -> None:
+    source_path = REPO_ROOT / "core" / "session_turns.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    allowed = {
+        "_record_definitive_delivery_attempt",
+        "_retire_delivery_not_written",
+    }
+    offenders: list[str] = []
+    for function in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ):
+        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+            target = call.func
+            if not (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "delivery_store"
+                and target.attr in {"record_definitive_attempt", "retire_not_written"}
+            ):
+                continue
+            if function.name not in allowed:
+                offenders.append(f"{function.name}:{call.lineno}")
+    assert offenders == []
+
+
 def test_session_turn_storage_mutations_have_one_module_owner() -> None:
     offenders: list[str] = []
     for root_name in ("core", "modules", "storage", "vibe"):

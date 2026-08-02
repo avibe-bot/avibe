@@ -12,6 +12,8 @@ import pytest
 from sqlalchemy import select, update
 
 from core.services.agent_steering import SteerOutcome, result as steer_result
+from core.services.dispatch import TurnDispatchOutcome
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
@@ -1281,7 +1283,7 @@ def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> N
 def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
-    async def run() -> tuple[str, str, str]:
+    async def run() -> tuple[str, str, str, str]:
         turn_id, context = await _activate(manager)
         holder = asyncio.create_task(asyncio.Event().wait())
         manager.in_flight["ses_fsm"] = Turn(
@@ -1312,6 +1314,23 @@ def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
         replacement_delivery_id = str(
             replacement_control["control_successor_delivery_id"] or ""
         )
+        run_id = "run-replacement-superseded-by-stop"
+        now = "2026-08-01T00:00:00Z"
+        with engine.begin() as conn:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    delivery_id=replacement_delivery_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
         stopped = await manager.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p0", content=None),
             context=context,
@@ -1321,18 +1340,24 @@ def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
         holder.cancel()
         await asyncio.gather(holder, return_exceptions=True)
         assert stopped.reason == "joined_existing_interrupt"
-        return turn_id, successor_turn_id, replacement_delivery_id
+        return turn_id, successor_turn_id, replacement_delivery_id, run_id
 
-    turn_id, successor_turn_id, replacement_delivery_id = asyncio.run(run())
+    turn_id, successor_turn_id, replacement_delivery_id, run_id = asyncio.run(run())
     with engine.connect() as conn:
         target = delivery_store.get_turn(conn, turn_id)
         successor = delivery_store.get_turn(conn, successor_turn_id)
+        run_row = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.cancel_requested).where(
+                agent_runs.c.id == run_id
+            )
+        ).one()
         assert delivery_store.queue_is_held(conn, "ses_fsm") is True
     assert target is not None and target["control_mode"] == "stop_only"
     assert target["control_successor_turn_id"] is None
     assert target["control_successor_delivery_id"] is None
     assert successor is not None and successor["terminal_outcome"] == "not_written"
     assert _row(engine, replacement_delivery_id)["state"] == "retired"
+    assert run_row == ("canceled", 1)
     assert manager.controller.command_handler.handle_stop.await_count == 1
 
 
@@ -1893,6 +1918,74 @@ def test_terminal_run_wins_after_turn_launch_before_runner_dispatch(
     assert turn is not None
     assert turn["terminal_outcome"] == "not_written"
     assert turn["settled_by"] == "terminal_run"
+
+
+def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="retry after backend is enabled",
+            ),
+            dispatch_text="retry after backend is enabled",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="opencode",
+            deliveries=[delivery],
+            dispatch_text="retry after backend is enabled",
+        )
+
+    async def definite_prewrite_exit(*_args, **_kwargs):
+        return TurnDispatchOutcome(
+            error="agent 'opencode' is not available",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            backend_dispatch_attempted=False,
+        )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        definite_prewrite_exit,
+    )
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            _context(),
+            "retry after backend is enabled",
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    assert _row(engine, delivery_id)["state"] == "queued"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["settled_by"] == "no_terminal_result"
 
 
 def test_materialized_message_preserves_submission_and_acceptance_times(managers) -> None:
@@ -2677,6 +2770,8 @@ def test_archive_keeps_unknown_and_materializes_late_positive_evidence(managers)
 
 def test_definitive_steer_refusal_after_archive_retires_without_start(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    run_id = "run-archived-steer-refused"
 
     async def run():
         turn_id, _ = await _activate(manager)
@@ -2691,12 +2786,32 @@ def test_definitive_steer_refusal_after_archive_retires_without_start(managers) 
         manager._steer = refused
         pending = asyncio.create_task(
             manager.deliver(
-                DeliveryRequest(session_id="ses_fsm", priority="p1", content="archived"),
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p1",
+                    content="archived",
+                    delivery_id=delivery_id,
+                ),
                 context=_context(),
             )
         )
         await entered.wait()
         with engine.begin() as conn:
+            now = "2026-08-01T00:00:00Z"
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    delivery_id=delivery_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
             workbench_sessions_service.archive_session(conn, "ses_fsm")
         release.set()
         return turn_id, await pending
@@ -2711,6 +2826,12 @@ def test_definitive_steer_refusal_after_archive_retires_without_start(managers) 
         assert conn.execute(
             select(messages.c.id).where(messages.c.id == result.delivery_id)
         ).first() is None
+        run_row = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.cancel_requested).where(
+                agent_runs.c.id == run_id
+            )
+        ).one()
+    assert run_row == ("canceled", 1)
 
 
 def test_archive_retires_unstarted_successor_without_creating_message(managers) -> None:
