@@ -386,37 +386,62 @@ ledger — while no longer gating anything. Measured: with `react-hooks/refs` an
 `no-unused-vars` demoted to `warn`, the presence-only form of these probes
 passed 10/10.
 
-A behavioural probe only defends the rule someone thought to write it for, so
-one further test closes the class at its chokepoint: the resolved severity of
-the *whole* config is pinned — every rule an error, apart from three named
-warnings and the 22 base rules `typescript-eslint` supersedes. Demoting
-`react-hooks/globals`, a rule this cleanup emptied and that has no behavioural
-probe, fails there. So does any rule that does not exist yet.
+### The contract pins whole subjects, not projections
 
-That pins *how loudly* each rule fires. A second chokepoint pins *which files
-are looked at*, the hole named above, in the same file and against the same real
-config:
+A behavioural probe only defends the rule someone thought to write it for, so the
+same file closes the class at its chokepoint. The first two attempts at that
+chokepoint pinned the policy with *filtered views* of it, and every view has a
+blind complement — which review then found one at a time:
 
-| Probe | Pinned |
+| Projection | What it could not see |
 | --- | --- |
-| global ignores | exactly `['dist']`, nothing else |
-| rule scope | every rule-bearing config confined to `**/*.{ts,tsx}` (plus the `.ts`/`.tsx`/`.mts`/`.cts` forms `typescript-eslint`'s preset expands to) |
-| unscoped config | no rule-bearing config without an explicit `files` |
-| an unwritten `src/**/*.ts` | `isPathIgnored` false, TypeScript rules resolve, and an `any` in it errors at severity 2 |
-| `dist/**` | ignored |
-| `scripts/*.mjs`, `eslint.config.js` | *parsed only* — not ignored, but no rule resolves |
+| the rule ids at severity 1 and at severity 0 | a severity-2 rule that leaves the config outright |
+| global `ignores` only | an `ignores` on a rule-bearing entry, which exempts a subtree while its `files` is unchanged |
+| the union of every entry's `files` | the same scoped ignore, from the other side |
+| "some rules resolve" as *linted* | a path resolving 1 rule out of 106 |
 
-The last row is recorded, not aspirational. `npm run lint` opens the gate script
-and the config itself, so a syntax or config error in either fails the build
-through the *Fatal* branch, but the TypeScript rule set does not apply to them.
-Broadening the lint scope to JS/MJS is a separate decision; the probe makes it a
-visible one, because widening `files` fails that row.
+A fifth predicate would only move the blind spot. So the contract is now two
+complete subjects, compared for equality:
 
-Red-first, all three defects applied to the real `eslint.config.js` and
-reverted: adding one ignore glob over unwritten source failed 4 cases (including
-the behavioural one — an `any` in an exempted file reports nothing at all);
-adding `**/*.mjs` to `files` failed 2; a rule-bearing config with no `files`
-failed 2.
+- **`EXPECTED_SEVERITY_MAP`** — every rule id the config resolves for a
+  TypeScript source, with its level. 106 entries: 81 error, 3 warn, 22 off. Both
+  the `.ts` and the `.tsx` probe must resolve exactly this map.
+- **`EXPECTED_SCOPE_CONTRACT`** — every entry of the flat config in cascade
+  order, each entry's `files` and `ignores` kept together, nested pattern shape
+  preserved rather than flattened. Listing *every* entry, not only the scoped
+  ones, is what makes a rule-bearing entry with no scope at all show up — as a
+  new `files: null` row.
+
+Path classification derives from the first of those, never from a rule count:
+
+| Path | Classified |
+| --- | --- |
+| an unwritten `src/**/*.ts` and `src/**/*.tsx` | *linted* — resolves exactly `EXPECTED_SEVERITY_MAP`, and an `any` in it errors at severity 2 |
+| `dist/**` | *ignored* |
+| `scripts/*.mjs`, `eslint.config.js` | *parsed only* — not ignored, resolves exactly the empty rule map |
+
+Anything else is reported as a fourth state naming both counts, so a reduced rule
+map cannot read as *linted*. The *parsed only* row is recorded, not aspirational:
+`npm run lint` opens the gate script and the config itself, so a syntax or config
+error in either fails the build through the *Fatal* branch, but no rule applies
+to them. Broadening the lint scope to JS/MJS is a separate decision, and widening
+`files` fails the scope contract — which makes it a visible one.
+
+A dependency upgrade is *meant* to fail these two assertions. The diff is the
+review prompt: the only place a change in enforcement policy surfaces before it
+silently changes what `eslint-baseline.json` is allowed to record.
+
+Red-first, each defect applied to the real `eslint.config.js` and reverted, with
+the config confirmed byte-identical afterwards:
+
+| Defect | Under the projections | Under the complete contract |
+| --- | --- | --- |
+| `ignores: ['src/context/**']` on the rule-bearing entry | 21/21 passed | 1 failure |
+| an upstream preset drops `react-hooks/globals`, an error rule with no violations | 21/21 passed, and `npm run lint` printed *no drift* | 4 failures |
+| a `.tsx` path re-covered by a single-rule config | 21/21 passed, classified *linted* on 1 of 106 rules | 2 failures |
+
+The middle row is the whole argument in one line: an enforcement rule left the
+gate, every test passed, and the ledger reported no drift.
 
 ## 4. Result
 
