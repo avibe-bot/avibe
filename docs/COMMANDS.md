@@ -873,13 +873,12 @@ with `run_id` / `session_id`, and uses the callback policy to deliver the final
 result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
 
-With an existing `--session-id`, `--send-now` first persists the Agent Run and
-then reuses Workbench's Session-level interrupt-and-flush transition. It stops
-the active turn through the shared Stop path and dispatches the existing FIFO
-queue head as a new turn. It does not provide same-turn steering or queue
-reordering; a refused interrupt leaves the Run queued. The command response
-includes `delivery_intent`, and `vibe runs show <run-id>` exposes the durable
-`metadata.delivery_outcome` after the controller consumes the request.
+With an existing `--session-id`, the default is P1: steer the new Run into an
+active native Turn, start it when idle, or move the same Delivery to P3 after a
+definitive refusal/not-active receipt. `--send-now` instead admits the new Run as
+content P0 and persists its replacement successor before stopping an active
+Turn. `vibe session send-now` adds no message; it promotes only the exact current
+P3 queue head, steering it when active or starting it when idle.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or

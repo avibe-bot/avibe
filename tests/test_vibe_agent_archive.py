@@ -22,10 +22,12 @@ from storage.background import (
     SQLiteBackgroundTaskStore,
     definition_state_unchanged,
 )
+from storage import message_deliveries as delivery_store
 from storage.models import (
     agent_runs,
     agent_sessions,
     agents,
+    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -189,32 +191,212 @@ def _seed_references(store: VibeAgentStore, agent_name: str) -> None:
                     metadata_json="{}",
                 )
             )
-        conn.execute(
-            messages.insert().values(
-                id="msg_queued_archive",
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id="msg_queued_archive",
+            session_id="ses_archive",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
                 scope_id=SCOPE_ID,
                 session_id="ses_archive",
                 platform="avibe",
                 author="harness",
-                type="queued",
                 source="harness",
-                content_text="continue",
-                content_json=json.dumps({"text": "continue"}),
-                metadata_json=json.dumps(
-                    {
-                        "scheduled_provenance": {
-                            "platform_specific": {
-                                "vibe_agent_name": agent_name,
-                                "scheduled_target_agent_name": agent_name,
-                                "agent_session_target": {"agent_name": agent_name},
-                            }
+                message_type="harness",
+                text="continue",
+                metadata={
+                    "scheduled_provenance": {
+                        "platform_specific": {
+                            "vibe_agent_name": agent_name,
+                            "scheduled_target_agent_name": agent_name,
+                            "agent_session_target": {"agent_name": agent_name},
                         }
                     }
-                ),
-                created_at=NOW,
-                updated_at=NOW,
-            )
+                },
+            ),
+            dispatch_text="continue",
+            now=NOW,
         )
+
+
+def _seed_dispatchable_delivery_states(store: VibeAgentStore, agent_name: str) -> dict[str, str]:
+    states = (
+        "reserved",
+        "queued",
+        "claimed",
+        "pending_steer",
+        "steering",
+        "interrupt_waiting",
+        "reconciling_steer",
+    )
+    seeded: dict[str, str] = {}
+
+    def snapshot(session_id: str) -> dict[str, object]:
+        return delivery_store.message_snapshot(
+            scope_id=SCOPE_ID,
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="continue",
+            metadata={
+                "scheduled_provenance": {
+                    "platform_specific": {
+                        "vibe_agent_name": agent_name,
+                        "scheduled_target_agent_name": agent_name,
+                        "agent_session_target": {"agent_name": agent_name},
+                    }
+                }
+            },
+        )
+
+    with store.engine.begin() as conn:
+        for state in states:
+            session_id = f"ses_archive_{state}"
+            delivery_id = f"del_archive_{state}"
+            seeded[state] = delivery_id
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=SCOPE_ID,
+                    agent_id=None,
+                    agent_name=None,
+                    agent_backend="claude",
+                    agent_variant="claude",
+                    model=None,
+                    reasoning_effort=None,
+                    session_anchor=session_id,
+                    workdir="/tmp/archive-test",
+                    native_session_id="",
+                    title=None,
+                    status="active",
+                    visibility="background",
+                    pinned=0,
+                    agent_status="idle",
+                    metadata_json="{}",
+                    created_at=NOW,
+                    updated_at=NOW,
+                    last_active_at=NOW,
+                )
+            )
+            target = delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=session_id,
+                priority="p1",
+                state="queued" if state == "queued" else "reserved",
+                snapshot=snapshot(session_id),
+                dispatch_text="continue",
+                now=NOW,
+            )
+
+            if state == "claimed":
+                delivery_store.claim_start_batch(
+                    conn,
+                    turn_id=f"turn_archive_{state}",
+                    session_id=session_id,
+                    backend="claude",
+                    deliveries=[target],
+                    dispatch_text="continue",
+                )
+            elif state in {"pending_steer", "steering", "reconciling_steer"}:
+                anchor_id = f"anchor_archive_{state}"
+                anchor = delivery_store.insert_delivery(
+                    conn,
+                    delivery_id=anchor_id,
+                    session_id=session_id,
+                    priority="p3",
+                    state="reserved",
+                    snapshot=delivery_store.message_snapshot(
+                        scope_id=SCOPE_ID,
+                        session_id=session_id,
+                        platform="avibe",
+                        author="user",
+                        source="user",
+                        message_type="user",
+                        text="anchor",
+                    ),
+                    dispatch_text="anchor",
+                    now=NOW,
+                )
+                turn_id = f"turn_archive_{state}"
+                claimed = delivery_store.claim_start_batch(
+                    conn,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    backend="claude",
+                    deliveries=[anchor],
+                    dispatch_text="anchor",
+                )
+                attempt_id = f"attempt_archive_{state}"
+                if state == "pending_steer":
+                    delivery_store.open_pending_steer_batch(
+                        conn,
+                        deliveries=[target],
+                        turn_id=turn_id,
+                        attempt_id=attempt_id,
+                    )
+                else:
+                    turn = delivery_store.bind_native_start(
+                        conn,
+                        turn_id,
+                        expected_version=int(claimed["turn"]["version"]),
+                        runtime_key=f"runtime-{state}",
+                        runtime_turn_id=f"runtime-turn-{state}",
+                        native_turn_id=f"native-{state}",
+                    )
+                    assert turn is not None
+                    steering = delivery_store.open_steer_attempt(
+                        conn,
+                        delivery_id,
+                        expected_version=int(target["version"]),
+                        turn_id=turn_id,
+                        attempt_id=attempt_id,
+                        expected_native_turn_id=f"native-{state}",
+                    )
+                    assert steering is not None
+                    if state == "reconciling_steer":
+                        assert delivery_store.mark_attempt_unknown(
+                            conn,
+                            delivery_id,
+                            expected_version=int(steering["version"]),
+                            receipt={"kind": "lost_receipt"},
+                        ) is not None
+            elif state == "interrupt_waiting":
+                turn_id = f"turn_archive_{state}"
+                delivery_store.insert_turn(
+                    conn,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    initial_delivery_id=delivery_id,
+                    state="waiting",
+                    backend="claude",
+                    now=NOW,
+                )
+                assert delivery_store.cas_delivery(
+                    conn,
+                    delivery_id,
+                    expected_version=int(target["version"]),
+                    expected_states=("reserved",),
+                    values={
+                        "state": "interrupt_waiting",
+                        "turn_id": turn_id,
+                        "turn_role": "initial",
+                        "turn_position": 0,
+                    },
+                ) is not None
+
+        observed = set(
+            conn.execute(
+                select(message_deliveries.c.state).where(
+                    message_deliveries.c.id.in_(tuple(seeded.values()))
+                )
+            ).scalars()
+        )
+        assert observed == set(states)
+    return seeded
 
 
 def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> None:
@@ -265,9 +447,11 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             session = conn.execute(select(agent_sessions)).mappings().one()
             definitions = conn.execute(select(run_definitions).order_by(run_definitions.c.id)).mappings().all()
             runs = conn.execute(select(agent_runs.c.status, agent_runs.c.agent_name)).mappings().all()
-            queued_metadata = json.loads(
+            queued_snapshot = json.loads(
                 conn.execute(
-                    select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+                    select(message_deliveries.c.snapshot_json).where(
+                        message_deliveries.c.id == "msg_queued_archive"
+                    )
                 ).scalar_one()
             )
         assert scope["agent_name"] == result.archived_name
@@ -295,13 +479,55 @@ def test_archive_atomically_moves_live_references_and_hides_agent(tmp_path) -> N
             for row in runs
             if row["status"] in {"succeeded", "failed", "canceled"}
         } == {"pm"}
-        queued_spec = queued_metadata["scheduled_provenance"]["platform_specific"]
-        assert queued_spec["vibe_agent_name"] == result.archived_name
-        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
-        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
+        queued_spec = json.loads(queued_snapshot["metadata_json"])["scheduled_provenance"][
+            "platform_specific"
+        ]
+        assert queued_spec["vibe_agent_name"] == "pm"
+        assert queued_spec["scheduled_target_agent_name"] == "pm"
+        assert queued_spec["agent_session_target"]["agent_name"] == "pm"
 
         replacement = store.create(name="pm", backend="claude")
         assert replacement.id != original.id
+    finally:
+        store.close()
+
+
+def test_archive_never_rewrites_immutable_delivery_snapshots(tmp_path) -> None:
+    store = VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    try:
+        store.create(name="claude-fallback", backend="claude")
+        store.create(name="pm", backend="claude")
+        _seed_references(store, "pm")
+        seeded = _seed_dispatchable_delivery_states(store, "pm")
+
+        with store.engine.connect() as conn:
+            before = {
+                str(row["id"]): str(row["snapshot_json"])
+                for row in conn.execute(
+                    select(
+                        message_deliveries.c.id,
+                        message_deliveries.c.snapshot_json,
+                    ).where(message_deliveries.c.id.in_(tuple(seeded.values())))
+                ).mappings()
+            }
+
+        result = store.archive("pm")
+
+        assert result is not None
+        with store.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    message_deliveries.c.id,
+                    message_deliveries.c.state,
+                    message_deliveries.c.snapshot_json,
+                ).where(message_deliveries.c.id.in_(tuple(seeded.values())))
+            ).mappings()
+            after = {
+                str(row["id"]): str(row["snapshot_json"])
+                for row in rows
+            }
+        assert result is not None
+        assert after == before
     finally:
         store.close()
 
@@ -1120,8 +1346,10 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
                     agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
                 )
             ).scalars().all()
-            queued_metadata = conn.execute(
-                select(messages.c.metadata_json).where(messages.c.id == "msg_queued_archive")
+            queued_snapshot = conn.execute(
+                select(message_deliveries.c.snapshot_json).where(
+                    message_deliveries.c.id == "msg_queued_archive"
+                )
             ).scalar_one()
         assert scope["agent_name"] == result.archived_name
         assert json.loads(scope["settings_json"])["routing"] == {
@@ -1139,10 +1367,12 @@ def test_archive_moves_normalized_equivalent_references(tmp_path, stored_name: s
             "session_settings_snapshot"
         ]["agent_name"] == stored_name
         assert set(live_runs) == {result.archived_name}
-        queued_spec = json.loads(queued_metadata)["scheduled_provenance"]["platform_specific"]
-        assert queued_spec["vibe_agent_name"] == result.archived_name
-        assert queued_spec["scheduled_target_agent_name"] == result.archived_name
-        assert queued_spec["agent_session_target"]["agent_name"] == result.archived_name
+        queued_spec = json.loads(json.loads(queued_snapshot)["metadata_json"])[
+            "scheduled_provenance"
+        ]["platform_specific"]
+        assert queued_spec["vibe_agent_name"] == stored_name
+        assert queued_spec["scheduled_target_agent_name"] == stored_name
+        assert queued_spec["agent_session_target"]["agent_name"] == stored_name
     finally:
         store.close()
 

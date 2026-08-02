@@ -35,7 +35,7 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
-    AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_STEER,
     AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
@@ -1179,8 +1179,9 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
-          If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
+          Add --send-now to admit this new Run as content P0 and replace the active Turn.
+          To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
@@ -4857,7 +4858,7 @@ def cmd_agent_run(args):
         delivery_intent = (
             AGENT_RUN_DELIVERY_SEND_NOW
             if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            else AGENT_RUN_DELIVERY_STEER
         )
         if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
             raise TaskCliError(
@@ -5082,10 +5083,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_QUEUE:
-            # Keep the long-standing default-queue envelope byte-compatible.
-            # The explicit control intent is surfaced only when the caller opted
-            # into the new behavior.
+        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -5663,7 +5661,7 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
 
 def cmd_session_queue_list(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
     try:
@@ -5684,7 +5682,7 @@ def cmd_session_queue_list(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            result = messages_service.list_queued_page(
+            result = message_deliveries.list_queued_page(
                 conn,
                 session_id,
                 page_request=page_request,
@@ -5723,7 +5721,7 @@ def cmd_session_queue_list(args):
 
 def cmd_session_queue_remove(args):
     from core.services import sessions as sessions_service
-    from storage import messages_service
+    from storage import message_deliveries
     from storage.background import run_update_event_transaction
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
@@ -5731,6 +5729,9 @@ def cmd_session_queue_remove(args):
     try:
         engine = _open_session_engine()
         with run_update_event_transaction(engine) as conn:
+            from storage.agent_session_rows import reserve_write_lock
+
+            reserve_write_lock(conn)
             sessions_service.get_active_session(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
@@ -5742,7 +5743,7 @@ def cmd_session_queue_remove(args):
                         "platform": target.session_key.platform,
                     },
                 )
-            removed = messages_service.remove_queued(
+            removed = message_deliveries.retire_queued_with_run(
                 conn,
                 session_id,
                 message_id,
@@ -11695,8 +11696,7 @@ def _resolve_show_event_after_ambiguous_live_timeout(
 ) -> dict | None:
     """Wait for acceptance, then let the caller replay the same reservation."""
     from core.show_session_events import ShowSessionEventStore
-    from storage import messages_service
-
+    from storage.delivery_states import ADMITTED_DELIVERY_STATES
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -11707,12 +11707,13 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             event = store.get_event(session_id, event_id)
             if event is None:
                 return None
-            message = event.get("message")
-            if (
-                isinstance(message, dict)
-                and message.get("type") != messages_service.PENDING_TYPE
-            ):
-                return event
+            delivery = event.get("delivery")
+            if isinstance(delivery, dict):
+                state = delivery.get("state")
+                if state in ADMITTED_DELIVERY_STATES:
+                    return event
+                if state == "retired":
+                    return None
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.05)
@@ -13125,7 +13126,7 @@ def build_parser():
     agent_run_parser.add_argument(
         "--send-now",
         action="store_true",
-        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+        help="Replace the active Turn with this new Run; start it immediately when idle",
     )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
@@ -13215,7 +13216,7 @@ def build_parser():
         help="Inspect, control, and update Agent sessions",
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
-            "'send-now' applies Workbench's queued-head interrupt transition; "
+            "'send-now' promotes the exact queued head, steering it when active; "
             "'update' changes title, visibility, or scope. Archived sessions are "
             "soft-deleted and never surfaced."
         ),
@@ -13255,12 +13256,12 @@ def build_parser():
     _add_json_noop(session_get_parser)
     session_send_now_parser = session_subparsers.add_parser(
         "send-now",
-        help="Interrupt a busy Session and dispatch its existing FIFO queue head",
+        help="Promote the exact existing FIFO queue head",
         description=(
-            "Apply the same Session-level Send now transition as Workbench without "
-            "adding another message. If the Session is busy, Avibe interrupts the "
-            "active turn and starts the durable FIFO queue head as a new turn. If "
-            "the Session is idle, Avibe starts the queue head directly."
+            "Promote the exact current P3 queue head without adding a message. "
+            "If a native Turn is active, Avibe steers that head into it; if the "
+            "Session is idle, Avibe starts that head as a new Turn. A stale head "
+            "is refused rather than replaced by the next queued item."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session send-now --help",

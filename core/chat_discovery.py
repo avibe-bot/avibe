@@ -11,12 +11,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, and_, select
+from sqlalchemy import Connection, and_, func, select
 
 from config import paths
 from storage.db import create_sqlite_engine
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
-from storage.models import agent_events, media_objects, messages, scope_settings, scopes, state_meta
+from storage.models import (
+    agent_events,
+    media_objects,
+    message_deliveries,
+    messages,
+    scope_settings,
+    scopes,
+    state_meta,
+)
 from storage.settings_service import make_scope_id, upsert_scope
 from config.v2_settings import make_thread_native_id, split_thread_native_id
 
@@ -946,11 +954,11 @@ def _mark_not_returned(
 
 
 def _scope_has_history(conn: Connection, scope_id: str) -> bool:
-    """True if the scope owns rows whose FK to scopes is ON DELETE CASCADE.
+    """True if deleting the scope would destroy or invalidate retained history.
 
     ``messages``, ``agent_events`` and ``media_objects`` cascade-delete with the
-    scope row, so deleting a scope that owns any of them would destroy stored
-    chat history/traces/media — not just the discovery entry.
+    scope row. Nonterminal Deliveries retain the prospective Message scope inside
+    their immutable snapshot and need that Scope to survive materialization.
     """
     for table in (messages, agent_events, media_objects):
         exists = conn.execute(
@@ -958,7 +966,16 @@ def _scope_has_history(conn: Connection, scope_id: str) -> bool:
         ).first()
         if exists is not None:
             return True
-    return False
+    delivery_exists = conn.execute(
+        select(message_deliveries.c.id)
+        .where(
+            func.json_extract(message_deliveries.c.snapshot_json, "$.scope_id")
+            == scope_id
+        )
+        .where(message_deliveries.c.state != "retired")
+        .limit(1)
+    ).first()
+    return delivery_exists is not None
 
 
 def _descendant_scope_rows(conn: Connection, scope_id: str) -> list[dict[str, Any]]:

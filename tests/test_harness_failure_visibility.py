@@ -112,10 +112,10 @@ def test_complete_does_not_clobber_an_already_terminal_run(tmp_path: Path) -> No
     assert saved["result_text"] == "the report"
 
 
-def test_complete_coalesced_does_not_clobber_an_already_succeeded_run(tmp_path: Path) -> None:
-    """HFR-061 — the coalesced completer must skip already-terminal rows.
+def test_turn_participant_settlement_does_not_clobber_an_already_succeeded_run(tmp_path: Path) -> None:
+    """HFR-061 — Turn settlement must skip already-terminal rows.
 
-    ``complete_coalesced_agent_runs_for_workbench_in_connection`` honors
+    ``settle_agent_runs_for_turn_in_connection`` honors
     ``cancel_requested`` but has no ``queued|running`` predicate and no
     already-terminal skip, so it rewrites a settled row wholesale.
     """
@@ -135,7 +135,7 @@ def test_complete_coalesced_does_not_clobber_an_already_succeeded_run(tmp_path: 
         terminal_status="succeeded",
     )
 
-    requests.complete_coalesced(claimed, [request.id], ok=False, error="turn died")
+    requests.settle_turn_participants(claimed, [request.id], ok=False, error="turn died")
 
     saved = sqlite.get_run(request.id)
     assert saved["status"] == "succeeded", "a settled success must not be rewritten to failed"
@@ -206,7 +206,7 @@ def test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten(
     listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
-        requests.complete_coalesced(claimed, [request.id], ok=False, error="turn died")
+        requests.settle_turn_participants(claimed, [request.id], ok=False, error="turn died")
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
@@ -357,7 +357,7 @@ def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Pa
     )
     claimed = requests.claim(coalesced.id)
     assert claimed is not None
-    requests.complete_coalesced(claimed, [coalesced.id], ok=False, error="turn died")
+    requests.settle_turn_participants(claimed, [coalesced.id], ok=False, error="turn died")
     saved = sqlite.get_run(coalesced.id)
     assert saved["status"] == "failed"
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is not None
@@ -379,7 +379,12 @@ def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Pa
     claimed = requests.claim(requested.id)
     assert claimed is not None
     sqlite.cancel_run(requested.id)
-    requests.complete_coalesced(claimed, [requested.id], ok=False, error="turn died")
+    requests.settle_turn_participants(
+        claimed,
+        [requested.id],
+        ok=False,
+        error="turn died",
+    )
     saved = sqlite.get_run(requested.id)
     assert saved["status"] == "canceled"
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
@@ -1214,7 +1219,12 @@ def test_every_terminal_failure_transition_stamps_an_owed_notice(tmp_path: Path)
     # 4. the coalesced completer
     fourth = requests.enqueue_agent_run(session_key="slack::channel::C1", message="d", agent_name=None)
     claimed_fourth = requests.claim(fourth.id)
-    requests.complete_coalesced(claimed_fourth, [fourth.id], ok=False, error="coalesced boom")
+    requests.settle_turn_participants(
+        claimed_fourth,
+        [fourth.id],
+        ok=False,
+        error="turn participant boom",
+    )
 
     for run_id in (first.id, second.id, third.id, fourth.id):
         notice = sqlite.owed_failure_notice(run_id)
@@ -1309,7 +1319,12 @@ def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -
             elif writer == "settle_deferred_run":
                 sqlite.settle_deferred_run(run.id)
             else:
-                requests.complete_coalesced(claimed, [run.id], ok=False, error="boom")
+                requests.settle_turn_participants(
+                    claimed,
+                    [run.id],
+                    ok=False,
+                    error="boom",
+                )
 
             saved = sqlite.get_run(run.id)
             assert _raw_metadata_json(sqlite, run.id) == blob, (
@@ -4265,34 +4280,9 @@ def test_workspace_notification_session_is_created_once_and_reused(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The second owed test at plan ``docs/plans/harness-run-reliability.md:3222``.
-
-    Subordinate coverage under §D5's rung-(5) requirement (plan :3193, :3215-3222);
-    no new scenario id this round — the §10.7 HFR-280…319 assignment is offered to
-    the maintainer as a follow-up.
-
-    Rung (5) resolves-or-CREATES, so the identity has to do the deduplication. Two
-    caller-less definitions fail and are drained in two separate passes; exactly ONE
-    ``agent_sessions`` row may exist afterwards and BOTH notices must land in it.
-
-    Idempotence rests on the PRIMARY KEY, not on a marker search: the reserved id is
-    spelled outside ``SESSION_ID_ALPHABET`` (which has no ``-``), so
-    ``new_session_id`` can never mint it and the reserved row cannot collide with an
-    ordinary session. The create re-decides under SQLite's write lock
-    (``reserve_write_lock``), which is the same answer ``get_or_create_agent_session_row``
-    already gives the first-turn INSERT — so two drain owners racing the creation
-    produce one row, not an ``IntegrityError``.
-
-    DURABILITY BY RECREATION, deliberately, rather than by exempting the row from
-    ``/new`` clears and eviction: nothing here asks the session-clear or reclaim
-    machinery for a special case. The third phase deletes the row outright and drains
-    a third failure — the next notice simply recreates it, which is why an exemption
-    is not needed at all.
-    """
+    """Repeated workspace notices reuse one retained Session history owner."""
 
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
-    from storage.db import get_cached_sqlite_engine
-    from storage.models import agent_sessions
 
     _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -4330,21 +4320,15 @@ def test_workspace_notification_session_is_created_once_and_reused(
     for run_id in (first, second):
         assert sqlite.owed_failure_notice(run_id)["state"] == NOTICE_SENT
 
-    # --- durability by recreation, not by exemption -------------------------
-    with get_cached_sqlite_engine().begin() as conn:
-        conn.execute(
-            agent_sessions.delete().where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
-        )
-    assert _workspace_notice_session_rows() == []
-
     third = _fail("task-cli-c")
     asyncio.run(service._drain_failure_notices())
 
     assert len(_workspace_notice_session_rows()) == 1, (
-        "a cleared workspace session is recreated by the next notice"
+        "later notices must keep using the retained workspace Session"
     )
+    assert len(_persisted_messages()) == 3
     assert sqlite.owed_failure_notice(third)["state"] == NOTICE_SENT, (
-        "so a clear cannot make a later notice unsendable"
+        "retaining accepted history cannot make a later notice unsendable"
     )
 
 

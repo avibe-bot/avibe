@@ -800,8 +800,8 @@ def test_messages_post_into_the_reserved_system_session_dispatches_nothing(monke
     # Refused BEFORE the reservation and BEFORE the controller: no row, no turn.
     assert _message_count(WORKSPACE_NOTICE_SESSION_ID) == 0
     assert dispatch.await_count == 1
-    assert accepted.status_code == 201
-    assert _message_count(ordinary) == 1
+    assert accepted.status_code == 202
+    assert _message_count(ordinary) == 0
 
 
 def test_messages_post_reserved_refusal_follows_configured_language(monkeypatch, tmp_path):

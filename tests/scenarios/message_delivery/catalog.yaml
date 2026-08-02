@@ -4,6 +4,7 @@ capability:
   name: full-duplex message delivery
   canonical_tests:
     - tests/scenarios/message_delivery/test_message_delivery_scenarios.py
+    - tests/test_session_delivery_fsm.py
   shared_harness:
     - tests/scenario_harness/core.py
     - tests/scenario_harness/message_delivery.py
@@ -61,8 +62,72 @@ scenarios:
     kind: concurrency
     layer: contract
     test: tests/test_scheduled_tasks.py::test_directed_run_and_callback_remain_distinct_while_target_busy
+  - id: MESSAGE-DELIVERY-009
+    name: P1 terminal race produces one accepted attachment or one P3 fallback owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_terminal_between_p1_observation_and_claim_starts_same_submission_once
+  - id: MESSAGE-DELIVERY-010
+    name: Concurrent empty P1 requests can claim only the observed FIFO head
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_two_empty_p1_requests_claim_exact_same_head_only
+  - id: MESSAGE-DELIVERY-011
+    name: Lost accepted steering receipt enters reconciliation without a second adapter call
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_lost_accepted_receipt_restarts_unknown_without_resteer
+  - id: MESSAGE-DELIVERY-012
+    name: Definitive P1 refusal and idle drain start one fallback Turn
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_definitive_refusal_racing_idle_drain_starts_same_delivery_once
+  - id: MESSAGE-DELIVERY-013
+    name: P0 never interrupts before its successor is durable
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_p0_successor_persistence_failure_never_calls_stop
+  - id: MESSAGE-DELIVERY-014
+    name: P0 terminal and restart race claims its successor once after terminal proof
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_p0_terminal_restart_claims_successor_once_after_old_terminal
+  - id: MESSAGE-DELIVERY-015
+    name: Concurrent idle P3 admissions choose one Turn owner and retain one FIFO loser
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_two_idle_p3_admissions_leave_one_fifo_loser
+  - id: MESSAGE-DELIVERY-016
+    name: A late T1 terminal event cannot clear or overwrite active T2
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_late_t1_terminal_cannot_clear_active_t2
+  - id: MESSAGE-DELIVERY-017
+    name: Ambiguous native start replays once, then fails open without blocking FIFO
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_start_write_ambiguity_replays_once_after_restart
+  - id: MESSAGE-DELIVERY-101
+    name: Unresolved fallback-capable delivery fences only later FIFO submissions
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_unresolved_p1_fence_blocks_later_but_not_older_fifo
+  - id: MESSAGE-DELIVERY-102
+    name: Queue hold blocks autonomous backlog but not a new idle admission
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_held_old_backlog_does_not_block_new_idle_p3
 next_priority:
-  - MESSAGE-DELIVERY-101
-  - MESSAGE-DELIVERY-102
   - MESSAGE-DELIVERY-201
   - MESSAGE-DELIVERY-202

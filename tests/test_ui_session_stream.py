@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 
 from storage.importer import ensure_sqlite_state
 from storage.db import create_sqlite_engine
-from storage import messages_service
+from storage import message_deliveries, messages_service
 from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
@@ -122,6 +122,56 @@ def _seed_opencode_messages(xdg_home: Path, native_session_id: str, roles: list[
             )
 
 
+def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
+    with create_sqlite_engine().begin() as conn:
+        delivery = message_deliveries.get_delivery(conn, payload["user_message_id"])
+        assert delivery is not None and delivery["state"] == "reserved"
+        if state == "queued":
+            settled = message_deliveries.cas_delivery(
+                conn,
+                delivery["id"],
+                expected_version=delivery["version"],
+                expected_states=("reserved",),
+                values={"state": "queued"},
+            )
+        else:
+            turn_id = message_deliveries.new_turn_id()
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=turn_id,
+                session_id=delivery["session_id"],
+                initial_delivery_id=delivery["id"],
+                state="starting",
+                backend="claude",
+            )
+            attempt_id = message_deliveries.new_attempt_id()
+            message_deliveries.open_start_attempt(
+                conn,
+                delivery["id"],
+                expected_version=delivery["version"],
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+            )
+            turn = message_deliveries.get_turn(conn, turn_id)
+            assert turn is not None
+            assert message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(turn["version"]),
+                runtime_key=f"runtime:{turn_id}",
+                runtime_turn_id=f"runtime-turn:{turn_id}",
+                native_turn_id=f"native:{turn_id}",
+            ) is not None
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            settled = accepted[0] if accepted else None
+        assert settled is not None
+        return settled
+
+
 def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     """The web Chat POST persists the user row AND fire-and-forgets the turn via
     ``/internal/dispatch_async``. The reply arrives over the persistent
@@ -133,9 +183,18 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    dispatch_mock = AsyncMock(
-        return_value={"status_code": 202, "body": {"ok": True, "session_id": session_id}}
-    )
+    async def dispatch(payload):
+        settled = _settle_reserved_delivery(payload, state="accepted")
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "delivery_state": settled["state"],
+            },
+        }
+
+    dispatch_mock = AsyncMock(side_effect=dispatch)
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
@@ -160,6 +219,95 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert sent["text"] == "no stream"
 
 
+def test_route_reads_the_materialized_message_id_for_a_merged_batch(
+    isolated_state,
+    tmp_path,
+) -> None:
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    older_delivery_id = "msg_merged_segment_head"
+
+    async def dispatch(payload):
+        with create_sqlite_engine().begin() as conn:
+            current = message_deliveries.get_delivery(conn, payload["user_message_id"])
+            assert current is not None and current["state"] == "reserved"
+            older = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=older_delivery_id,
+                session_id=session_id,
+                priority="p3",
+                state="queued",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    text="older queued input",
+                    metadata={"_web_push_user_key": "remote:user-a"},
+                    author_id="remote:user-a",
+                ),
+                dispatch_text="older queued input",
+                now="2026-01-01T00:00:00Z",
+            )
+            turn_id = message_deliveries.new_turn_id()
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=session_id,
+                backend="claude",
+                deliveries=[older, current],
+                dispatch_text="older queued input\nnew input",
+            )
+            turn = claimed["turn"]
+            assert message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(turn["version"]),
+                runtime_key=f"runtime:{turn_id}",
+                runtime_turn_id=f"runtime-turn:{turn_id}",
+                native_turn_id=f"native:{turn_id}",
+            ) is not None
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            current_after = message_deliveries.get_delivery(
+                conn,
+                payload["user_message_id"],
+            )
+        assert accepted and current_after is not None
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "delivery_id": payload["user_message_id"],
+                "message_id": accepted[0]["message_id"],
+                "delivery_state": current_after["state"],
+            },
+        }
+
+    with (
+        patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)),
+        patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+    ):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "new input"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    body = response.get_json()
+    assert body["id"] == older_delivery_id
+    assert body["message_id"] == older_delivery_id
+    assert body["delivery_id"] != older_delivery_id
+
+
 def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     """When the controller reports a turn already running (202 {queued}), the
     route persists the user row, hands its id to the controller to re-type as
@@ -171,16 +319,15 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     _, session_id = _make_session(tmp_path)
 
     async def dispatch(payload):
-        from core.session_turns import queue_pending_user_message
-        from storage.db import create_sqlite_engine
-
-        with create_sqlite_engine().begin() as conn:
-            assert queue_pending_user_message(
-                conn,
-                payload["user_message_id"],
-                payload["text"],
-            )
-        return {"status_code": 202, "body": {"ok": True, "queued": True}}
+        settled = _settle_reserved_delivery(payload, state="queued")
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "queued": True,
+                "delivery_state": settled["state"],
+            },
+        }
 
     dispatch_mock = AsyncMock(side_effect=dispatch)
     with patch("vibe.internal_client.dispatch_async", dispatch_mock):
@@ -204,15 +351,21 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("error_kind", "expected_status"),
-    (("timeout", 504), ("ambiguous", 502)),
+    ("error_kind", "expected_status", "expected_error", "expected_delivery_state"),
+    (
+        ("timeout", 504, "dispatch_pending", "reserved"),
+        ("ambiguous", 502, "dispatch_pending", "reserved"),
+        ("unavailable", 502, "internal_unavailable", "retired"),
+    ),
 )
-def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queueing(
+def test_route_dispatch_failure_classifies_unclaimed_delivery_outside_transcript(
     isolated_state,
     tmp_path,
     monkeypatch,
     error_kind,
     expected_status,
+    expected_error,
+    expected_delivery_state,
 ):
     from vibe import internal_client
     from vibe.ui_server import app
@@ -223,6 +376,8 @@ def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queuein
     async def fail_after_connect(_payload):
         if error_kind == "timeout":
             raise internal_client.InternalServerTimeout("acceptance unknown")
+        if error_kind == "unavailable":
+            raise internal_client.InternalServerUnavailable("socket missing")
         raise RuntimeError("ambiguous response")
 
     monkeypatch.setattr(
@@ -240,12 +395,12 @@ def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queuein
 
     assert response.status_code == expected_status
     body = response.get_json()
-    assert body["dispatch_error"] == "dispatch_pending"
+    assert body["dispatch_error"] == expected_error
     assert body["type"] == "user"
     dispatch_mock.assert_awaited_once()
 
     with create_sqlite_engine().connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
         visible = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -253,9 +408,40 @@ def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queuein
             limit=1,
             types=messages_service.TRANSCRIPT_TYPES,
         )
+        delivery = message_deliveries.get_delivery(conn, body["id"])
     assert queued == []
-    assert [row["id"] for row in visible["messages"]] == [body["id"]]
-    assert [event_type for event_type, _data in published].count("message.new") == 1
+    assert visible["messages"] == []
+    assert delivery is not None and delivery["state"] == expected_delivery_state
+    assert "message.new" not in [event_type for event_type, _data in published]
+
+
+def test_route_definitive_dispatch_rejection_retires_reserved_delivery(
+    isolated_state,
+    tmp_path,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch_mock = AsyncMock(
+        return_value={
+            "status_code": 500,
+            "body": {"error": "backend resolution failed"},
+        }
+    )
+    with patch("vibe.internal_client.dispatch_async", dispatch_mock):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "definitively rejected"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["dispatch_error"] == "dispatch_failed"
+    with create_sqlite_engine().connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, body["id"])
+    assert delivery is not None and delivery["state"] == "retired"
 
 
 def test_route_timeout_observes_controller_queue_without_republishing(
@@ -263,7 +449,6 @@ def test_route_timeout_observes_controller_queue_without_republishing(
     tmp_path,
     monkeypatch,
 ):
-    from core.session_turns import queue_pending_user_message
     from vibe import internal_client
     from vibe.ui_server import app
 
@@ -271,12 +456,8 @@ def test_route_timeout_observes_controller_queue_without_republishing(
     published = []
 
     async def timeout_after_controller_queues(payload):
-        with create_sqlite_engine().begin() as conn:
-            assert queue_pending_user_message(
-                conn,
-                payload["user_message_id"],
-                payload["text"],
-            )
+        _settle_reserved_delivery(payload, state="queued")
+        published.append(("queue.updated", {"session_id": session_id}))
         raise internal_client.InternalServerTimeout("response lost after enqueue")
 
     monkeypatch.setattr(
@@ -295,185 +476,47 @@ def test_route_timeout_observes_controller_queue_without_republishing(
     assert response.status_code == 504
     body = response.get_json()
     assert body["dispatch_error"] == "dispatch_pending"
-    assert body["type"] == messages_service.QUEUED_TYPE
+    assert body["type"] == "queued"
     dispatch_mock.assert_awaited_once()
 
     with create_sqlite_engine().connect() as conn:
-        queued = messages_service.list_queued(conn, session_id)
+        queued = message_deliveries.list_queued(conn, session_id)
     assert [row["id"] for row in queued] == [body["id"]]
     assert "message.new" not in [event_type for event_type, _data in published]
     assert [event_type for event_type, _data in published].count("queue.updated") == 1
 
 
-def test_recover_stale_pending_promotes_visible_user(isolated_state, tmp_path):
+def test_startup_has_no_type_owned_pending_recovery(isolated_state, tmp_path):
     from vibe import ui_server
 
     scope_id, session_id = _make_session(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        pending = messages_service.append(
+        pending = message_deliveries.insert_delivery(
             conn,
-            scope_id=scope_id,
+            delivery_id="msg_reserved_startup",
             session_id=session_id,
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="stuck pending",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="stuck reserved",
+            ),
+            dispatch_text="stuck reserved",
         )
 
-    with patch("vibe.sse_broker.broker.publish") as publish:
-        summary = ui_server._recover_stale_pending_messages()
-
-    assert summary == {"promoted": 1, "deleted": 0, "skipped": 0}
+    assert not hasattr(ui_server, "_recover_stale_pending_messages")
     with engine.connect() as conn:
-        stored = conn.execute(
-            select(messages.c.type, messages.c.content_text).where(messages.c.id == pending["id"])
-        ).first()
-    assert stored == ("user", "stuck pending")
-    published_events = [call.args[0] for call in publish.call_args_list]
-    assert "message.new" in published_events
-    assert "session.activity" in published_events
-
-
-def test_recover_stale_pending_deletes_archived_session_rows(isolated_state, tmp_path):
-    from vibe import ui_server
-
-    scope_id, session_id = _make_session(tmp_path)
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        pending = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="archived pending",
-        )
-        conn.execute(
-            update(agent_sessions)
-            .where(agent_sessions.c.id == session_id)
-            .values(status="archived", session_anchor=f"archived:{session_id}")
-        )
-
-    with patch("vibe.sse_broker.broker.publish") as publish:
-        summary = ui_server._recover_stale_pending_messages()
-
-    assert summary == {"promoted": 0, "deleted": 1, "skipped": 0}
-    with engine.connect() as conn:
-        stored = conn.execute(select(messages.c.id).where(messages.c.id == pending["id"])).scalar_one_or_none()
-    assert stored is None
-    publish.assert_not_called()
-
-
-def test_recover_stale_pending_deletes_rows_without_session(isolated_state, tmp_path):
-    from vibe import ui_server
-
-    scope_id, _ = _make_session(tmp_path)
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        pending = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=None,
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="orphaned pending",
-        )
-
-    with patch("vibe.sse_broker.broker.publish") as publish:
-        summary = ui_server._recover_stale_pending_messages()
-
-    assert summary == {"promoted": 0, "deleted": 1, "skipped": 0}
-    with engine.connect() as conn:
-        stored = conn.execute(
+        stored = message_deliveries.get_delivery(conn, pending["id"])
+        materialized = conn.execute(
             select(messages.c.id).where(messages.c.id == pending["id"])
         ).scalar_one_or_none()
-    assert stored is None
-    publish.assert_not_called()
-
-
-def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_path):
-    from vibe import ui_server
-
-    scope_id, session_id = _make_session(tmp_path)
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        pending = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="user",
-            source="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="already queued",
-        )
-        conn.execute(
-            update(messages)
-            .where(messages.c.id == pending["id"])
-            .values(type=messages_service.QUEUED_TYPE)
-        )
-
-    with patch("vibe.sse_broker.broker.publish") as publish:
-        summary = ui_server._recover_stale_pending_messages()
-
-    assert summary == {"promoted": 0, "deleted": 0, "skipped": 0}
-    with engine.connect() as conn:
-        stored = conn.execute(
-            select(messages.c.type).where(messages.c.id == pending["id"])
-        ).scalar_one()
-    assert stored == messages_service.QUEUED_TYPE
-    publish.assert_not_called()
-
-
-def test_recover_stale_pending_keeps_show_owned_rows_retryable(
-    isolated_state,
-    tmp_path,
-):
-    """Startup must not claim an unaccepted Show reservation was queued."""
-
-    from core.show_session_events import ShowSessionEventStore
-    from vibe import ui_server
-
-    _, session_id = _make_session(tmp_path)
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            session_id,
-            {
-                "id": "show_evt_pending_recovery_owner",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Keep this reservation under Show ownership.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-    assert event["message"]["type"] == messages_service.PENDING_TYPE
-
-    with patch("vibe.sse_broker.broker.publish") as publish:
-        summary = ui_server._recover_stale_pending_messages()
-
-    assert summary == {"promoted": 0, "deleted": 0, "skipped": 1}
-    store = ShowSessionEventStore()
-    try:
-        recovered = store.get_event(session_id, event["id"])
-    finally:
-        store.close()
-    assert recovered is not None
-    assert recovered["message"]["type"] == messages_service.PENDING_TYPE
-    assert recovered["message"]["metadata"][
-        messages_service.QUEUED_DISPATCH_TEXT_KEY
-    ].startswith("[show-annotation] comment")
-    publish.assert_not_called()
+    assert stored is not None and stored["state"] == "reserved"
+    assert materialized is None
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):
@@ -930,30 +973,16 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
             session_id=session_id,
             platform="avibe",
             author="agent",
-            message_type="tool_call",
-            text="ran tool",
-        )
-        messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            platform="avibe",
-            author="agent",
             message_type="result",
             text="answer",
         )
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=session_id,
             text="follow-up",
         )
-        messages_service.set_draft(
-            conn,
-            scope_id=scope_id,
-            session_id=session_id,
-            text="draft text",
-        )
+        message_deliveries.set_draft(conn, session_id, "draft text")
 
     async def in_flight(session_id_inner):
         assert session_id_inner == session_id
@@ -1005,6 +1034,31 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["pending_input_count"] == 1
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
     assert body["turn_state"]["connection"] == "connected"
+
+
+def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    send_now = AsyncMock(
+        return_value={
+            "status_code": 409,
+            "body": {"ok": False, "code": "stale_head"},
+        }
+    )
+    with patch("vibe.internal_client.send_now", send_now):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/queue/del_requested/send-now",
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "stale_head"
+    send_now.assert_awaited_once_with(
+        session_id,
+        expected_delivery_id="del_requested",
+    )
 
 
 def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_path):
@@ -1065,7 +1119,7 @@ def test_cancel_route_returns_503_when_socket_unavailable(isolated_state, tmp_pa
     assert body["code"] == "internal_unavailable"
 
 
-def test_cancel_route_recovers_stale_running_status_on_not_in_flight(isolated_state, tmp_path):
+def test_cancel_route_forwards_controller_status_recovery(isolated_state, tmp_path):
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from vibe.ui_server import app
@@ -1076,7 +1130,14 @@ def test_cancel_route_recovers_stale_running_status_on_not_in_flight(isolated_st
         assert sessions_service.set_agent_status(conn, session_id, "running") is True
 
     cancel_mock = AsyncMock(
-        return_value={"status_code": 404, "body": {"ok": False, "code": "not_in_flight"}}
+        return_value={
+            "status_code": 404,
+            "body": {
+                "ok": False,
+                "code": "not_in_flight",
+                "recovered_agent_status": True,
+            },
+        }
     )
     with patch("vibe.internal_client.cancel_dispatch", cancel_mock):
         client = app.test_client()
@@ -1088,7 +1149,7 @@ def test_cancel_route_recovers_stale_running_status_on_not_in_flight(isolated_st
     assert body["code"] == "not_in_flight"
     assert body["recovered_agent_status"] is True
     with engine.connect() as conn:
-        assert sessions_service.get_session(conn, session_id)["agent_status"] == "idle"
+        assert sessions_service.get_session(conn, session_id)["agent_status"] == "running"
 
 
 def test_cancel_route_does_not_recover_failed_status_on_not_in_flight(isolated_state, tmp_path):
@@ -1151,7 +1212,7 @@ def test_turn_state_route_returns_504_on_probe_timeout(isolated_state, tmp_path)
     assert response.get_json()["error"]["code"] == "turn_state_timeout"
 
 
-def test_turn_state_idle_recovers_stale_running_status(isolated_state, tmp_path):
+def test_turn_state_forwards_controller_status_recovery(isolated_state, tmp_path):
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from vibe.ui_server import app
@@ -1163,7 +1224,10 @@ def test_turn_state_idle_recovers_stale_running_status(isolated_state, tmp_path)
 
     async def idle(session_id_inner):
         assert session_id_inner == session_id
-        return {"status_code": 200, "body": {"in_flight": False}}
+        return {
+            "status_code": 200,
+            "body": {"in_flight": False, "recovered_agent_status": True},
+        }
 
     with patch("vibe.internal_client.turn_state", idle):
         client = app.test_client()
@@ -1174,7 +1238,7 @@ def test_turn_state_idle_recovers_stale_running_status(isolated_state, tmp_path)
     assert body["in_flight"] is False
     assert body["recovered_agent_status"] is True
     with engine.connect() as conn:
-        assert sessions_service.get_session(conn, session_id)["agent_status"] == "idle"
+        assert sessions_service.get_session(conn, session_id)["agent_status"] == "running"
 
 
 def test_turn_state_route_preserves_orthogonal_runtime_axes(isolated_state, tmp_path):

@@ -9,6 +9,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.message_output import terminal_turn_output
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from core.session_activities import SessionActivityRegistry
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -136,7 +141,9 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
         agent = _OrderRecordingAgent(log)
         service.register(agent)
 
-        await service.handle_message("claude", _request("hi"))
+        request = _request("hi")
+        set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
+        await service.handle_message("claude", request)
 
         # on_running (gate confirmed) must precede the bubble hooks, which in turn
         # precede the agent run. This is what keeps a queued turn from claiming
@@ -147,6 +154,7 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
             "begin_status_bubble",
             "handle_message",
         ]
+        assert backend_dispatch_attempted(request.context) is False
 
     asyncio.run(_run())
 
@@ -942,6 +950,37 @@ def test_agent_service_marks_runtime_started_from_matching_context_only() -> Non
     assert gate.runtime_started is False
 
 
+def test_agent_service_contains_terminal_owner_failure_after_releasing_gate() -> None:
+    async def _run():
+        controller = _Controller()
+
+        class _TurnOwner:
+            @staticmethod
+            def on_native_terminal(_context, *, outcome):
+                assert outcome == "terminal"
+                raise RuntimeError("terminal owner write failed")
+
+        controller.session_turns = _TurnOwner()
+        service = AgentService(controller=controller)
+        runtime_key = "session:/repo"
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "runtime-token"
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_runtime_turn_key": runtime_key,
+                "agent_runtime_turn_token": "runtime-token",
+            }
+        )
+
+        service.release_runtime_turn(context)
+
+        assert not gate.lock.locked()
+        assert gate.token == ""
+
+    asyncio.run(_run())
+
+
 def test_agent_service_clear_backend_sessions_does_not_release_other_backend_gate() -> None:
     async def _run():
         service = AgentService(controller=_Controller())
@@ -986,10 +1025,16 @@ def test_agent_service_refresh_runtime_config_releases_backend_gates() -> None:
     asyncio.run(_run())
 
 
-def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
+@pytest.mark.parametrize("reason", ["not_active", "runtime_unavailable"])
+def test_agent_service_releases_runtime_gate_for_stale_stop_without_terminal_evidence(
+    reason: str,
+) -> None:
     async def _run():
-        service = AgentService(controller=_Controller())
-        agent = _StopRuntimeAgent("not_active")
+        controller = _Controller()
+        terminal_owner = Mock()
+        controller.session_turns = SimpleNamespace(on_native_terminal=terminal_owner)
+        service = AgentService(controller=controller)
+        agent = _StopRuntimeAgent(reason)
         service.register(agent)
         request = _request("stop")
         gate = service._get_turn_gate("session:/repo")
@@ -1003,6 +1048,7 @@ def test_agent_service_releases_runtime_gate_for_stale_stop() -> None:
         assert handled is False
         assert not gate.lock.locked()
         assert request.context.platform_specific["agent_runtime_turn_token"] == "stop-token"
+        terminal_owner.assert_not_called()
 
     asyncio.run(_run())
 

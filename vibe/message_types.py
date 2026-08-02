@@ -15,7 +15,6 @@ _BOOL_PROPERTIES = {
     "inboxSettlesReply",
     "unread",
     "webPush",
-    "acceptedReservation",
 }
 _LIST_PROPERTIES = {
     "inputAuthors",
@@ -112,18 +111,6 @@ def types_with(property_name: str) -> tuple[str, ...]:
     )
 
 
-def types_without(property_name: str) -> tuple[str, ...]:
-    """Return catalog types for which *property_name* is disabled, in catalog order."""
-
-    if property_name not in _PROPERTY_NAMES:
-        raise KeyError(property_name)
-    return tuple(
-        message_type
-        for message_type, spec in _TYPE_SPECS.items()
-        if not _property_enabled(property_name, spec[property_name])
-    )
-
-
 def input_author_type_pairs() -> tuple[tuple[str, str], ...]:
     """Return accepted ``(author, message_type)`` input-turn pairs in catalog order.
 
@@ -161,8 +148,8 @@ def build_partial_index_predicate(index_name: str) -> str:
 
     if index_name == "ix_messages_inbox_activity":
         return (
-            "session_id is not null and type not in "
-            f"({_sql_values(types_without('inboxActivity'))})"
+            "session_id is not null and type in "
+            f"({_sql_values(types_with('inboxActivity'))})"
         )
     if index_name == "ix_messages_inbox_agent_reply":
         return (
@@ -186,5 +173,4 @@ __all__ = [
     "input_author_type_pairs",
     "spec_for",
     "types_with",
-    "types_without",
 ]

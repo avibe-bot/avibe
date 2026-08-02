@@ -258,7 +258,21 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             [item[1] for item in controller.im_client.sent_messages],
             ["first output", "final output"],
         )
-        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        controller.session_turns.on_terminal_result.assert_called_once_with(
+            context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "final output",
+                "terminal_error": None,
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_id": "turn-1",
+                    "sequence": 2,
+                    "output_id": "output-2",
+                    "detached": False,
+                },
+            },
+        )
         controller.agent_service.release_runtime_turn.assert_called_once_with(context)
 
     async def test_duplicate_terminal_output_still_settles_lifecycle(self):
@@ -313,7 +327,20 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             "agent-output:unknown:runtime-1:terminal-output",
         )
         self.assertEqual(controller.im_client.sent_messages, [])
-        controller.session_turns.on_terminal_result.assert_called_once_with(context, is_error=False)
+        controller.session_turns.on_terminal_result.assert_called_once_with(
+            context,
+            is_error=False,
+            terminal_evidence={
+                "result_text": "already delivered",
+                "terminal_error": None,
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_id": "turn-1",
+                    "output_id": "terminal-output",
+                    "detached": False,
+                },
+            },
+        )
         dispatcher._record_agent_run_terminal_result.assert_called_once_with(
             context,
             "already delivered",
@@ -408,6 +435,17 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         dispatcher._record_agent_run_terminal_result.assert_called_once()
 
+    async def test_silent_im_terminal_records_non_message_turn_evidence(self):
+        controller = self._terminal_lifecycle_controller()
+
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            _dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+            )
+
+        persist.assert_called_once_with(context, is_error=False)
+
     async def test_stop_output_release_names_the_stop_and_records_no_run_terminal(self):
         """HFR-036: the synthetic result a user stop emits must NOT record the run.
 
@@ -422,11 +460,12 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         """
         controller = self._terminal_lifecycle_controller()
 
-        dispatcher, context = await self._emit_silent_terminal(
-            controller,
-            completes_run=False,
-            output=stop_output_for(None),
-        )
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+                output=stop_output_for(None),
+            )
 
         controller.mark_turn_complete.assert_called_once_with(
             context,
@@ -436,6 +475,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(SETTLED_BY_STOPPED, SETTLEMENTS_WITHOUT_RESULT)
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")
         dispatcher._record_agent_run_terminal_result.assert_not_called()
+        persist.assert_not_called()
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
@@ -627,6 +667,30 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         # The block is still stripped from the persisted text itself.
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
+
+    async def test_visible_workbench_terminal_result_requires_durable_message(self):
+        controller = _StubController(platform="avibe")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "ses-1",
+                "turn_token": "turn-1",
+            },
+        )
+        dispatcher._is_current_runtime_turn = mock.Mock(return_value=True)
+
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Workbench terminal output was not durably persisted",
+            ):
+                await dispatcher.emit_agent_message(context, "result", "done")
 
     async def test_workbench_run_settles_only_after_result_persistence(self):
         """A callback child stays pending until its Workbench receipt exists."""
@@ -1004,65 +1068,20 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_result_settles_dot_idle(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = _avibe_ctx()
         with mock.patch("core.message_dispatcher.persist_agent_message"):
-            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "")
+            await dispatcher.emit_agent_message(context, "result", "")
+        controller.session_turns.on_terminal_delivery_complete(context)
         self.assertEqual(controller.status_calls, [("ses-1", "idle")])
 
     async def test_terminal_error_result_settles_dot_failed(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = _avibe_ctx()
         with mock.patch("core.message_dispatcher.persist_agent_message"):
-            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
+            await dispatcher.emit_agent_message(context, "result", "", is_error=True)
+        controller.session_turns.on_terminal_delivery_complete(context)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
-
-    async def test_clean_silent_completion_writes_marker(self):
-        # The fix: a clean (non-error) terminal result with no visible body — a
-        # ``<silent>``-stripped / empty final reply — persists the invisible ``silent``
-        # marker so the activity grouping closes the turn as DONE, not interrupted.
-        controller = _AvibeStatusController()
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        ctx = _avibe_ctx()
-        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
-            "core.message_dispatcher.persist_silent_completion_marker"
-        ) as marker:
-            await dispatcher.emit_agent_message(ctx, "result", "")
-        marker.assert_called_once_with(ctx)
-
-    async def test_user_stop_writes_no_marker(self):
-        # The REAL stop paths (codex/claude/opencode) emit a terminal result with
-        # ``level='silent'`` and ``is_error=False`` — a stop legitimately stays
-        # interrupted, so NO silent marker. (``not is_error`` alone would wrongly mark
-        # it — the gate keys on ``level != 'silent'`` too. P1.)
-        controller = _AvibeStatusController()
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
-            "core.message_dispatcher.persist_silent_completion_marker"
-        ) as marker:
-            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", level="silent")
-        marker.assert_not_called()
-
-    async def test_error_completion_writes_no_marker(self):
-        # An ``is_error`` terminal is a FAILURE, never a done marker.
-        controller = _AvibeStatusController()
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
-            "core.message_dispatcher.persist_silent_completion_marker"
-        ) as marker:
-            await dispatcher.emit_agent_message(_avibe_ctx(), "result", "", is_error=True)
-        marker.assert_not_called()
-
-    async def test_suppress_delivery_writes_local_marker(self):
-        controller = _AvibeStatusController()
-        dispatcher = ConsolidatedMessageDispatcher(controller)
-        ctx = MessageContext(
-            user_id="U1", channel_id="ses-1", platform="avibe",
-            platform_specific={"agent_session_id": "ses-1", "suppress_delivery": True},
-        )
-        with mock.patch("core.message_dispatcher.persist_agent_message"), mock.patch(
-            "core.message_dispatcher.persist_silent_completion_marker"
-        ) as marker:
-            await dispatcher.emit_agent_message(ctx, "result", "")
-        marker.assert_called_once_with(ctx)
 
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()
@@ -1120,6 +1139,7 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await dispatcher.emit_agent_message(ctx, "result", "")
+        controller.session_turns.on_terminal_delivery_complete(ctx)
         self.assertEqual(controller.status_calls, [("ses-1", "idle")])
 
     async def test_tokenless_result_does_not_settle_dot_when_live_turn_exists(self):
@@ -1148,10 +1168,12 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         # replacing the old "fake invisibility via empty text" trick.
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = _avibe_ctx()
         with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
             message_id = await dispatcher.emit_agent_message(
-                _avibe_ctx(), "result", "🛑 stopped", level="silent"
+                context, "result", "🛑 stopped", level="silent"
             )
+        controller.session_turns.on_terminal_delivery_complete(context)
         self.assertIsNone(message_id)
         self.assertEqual(controller.status_calls, [("ses-1", "idle")])  # dot still settles
         persist.assert_not_called()  # never recorded in history

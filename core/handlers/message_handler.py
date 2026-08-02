@@ -14,6 +14,10 @@ from core.audio_asr import (
 )
 from core.message_output import terminal_output_for, terminal_turn_output
 from core.message_context import resolve_context_thread_id
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    set_dispatch_phase,
+)
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -83,6 +87,7 @@ class MessageHandler(BaseHandler):
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
+        dispatch_evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
         # dispatched — early returns, missing/disabled backend, errors — no
@@ -148,23 +153,26 @@ class MessageHandler(BaseHandler):
                 raise RuntimeError("Session handler not initialized")
 
             context = await self._prepare_turn_context(context, source)
+            set_dispatch_phase(
+                context,
+                DISPATCH_PHASE_PREWRITE,
+                evidence=dispatch_evidence,
+            )
 
-            # Mirror the originating prompt into the workbench messages table
-            # before we kick off the agent, so the transcript shows the turn
-            # that produced the reply. Human turns are source='user'; harness
-            # turns (scheduled task / watch / webhook) use a first-class harness
-            # author/type so they cannot be mistaken for human input. Wrapped in
-            # try/except inside the helper so a mirror failure can't break the turn.
-            if source == self.TURN_SOURCE_HUMAN:
-                from core.message_mirror import mirror_inbound
+            # Durable Deliveries materialize their Message only after exact native
+            # acceptance. Legacy direct turns still mirror at this boundary.
+            durable_delivery_owned = bool(
+                (context.platform_specific or {}).get("delivery_ids")
+            )
+            if not durable_delivery_owned:
+                if source == self.TURN_SOURCE_HUMAN:
+                    from core.message_mirror import mirror_inbound
 
-                mirror_inbound(context, control_message)
-            else:
-                # Harness turns retain a complete local transcript even when their
-                # session is background-only; visibility gates outward delivery.
-                from core.message_mirror import mirror_harness_inbound
+                    mirror_inbound(context, control_message)
+                else:
+                    from core.message_mirror import mirror_harness_inbound
 
-                mirror_harness_inbound(context, message)
+                    mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             payload = dict(context.platform_specific or {})

@@ -19,6 +19,7 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -1724,6 +1725,7 @@ class CodexAgent(BaseAgent):
         )
         if callable(snapshot_generated_images):
             snapshot_generated_images(thread_id, request.base_session_id)
+        mark_backend_dispatch_attempted(request.context)
         resp = await transport.send_request("turn/start", turn_params)
 
         turn_id = resp.get("id", "")

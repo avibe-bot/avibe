@@ -13,6 +13,7 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
+from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.reply_enhancer import strip_silent_blocks
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -164,6 +165,7 @@ class ClaudeAgent(BaseAgent):
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
 
+            mark_backend_dispatch_attempted(request.context)
             await client.query(message, session_id=runtime_session_key)
             if (
                 runtime_session_key not in self.receiver_tasks
@@ -1951,7 +1953,11 @@ class ClaudeAgent(BaseAgent):
         token = src_payload.get(AGENT_TURN_TOKEN)
         runtime_key = src_payload.get(AGENT_RUNTIME_TURN_KEY)
         runtime_token = src_payload.get(AGENT_RUNTIME_TURN_TOKEN)
-        attribution_keys = ("task_trigger_kind", "task_execution_id", "coalesced_queue")
+        attribution_keys = (
+            "task_trigger_kind",
+            "task_execution_id",
+            "accepted_agent_run_ids",
+        )
         current_payload = getattr(context, "platform_specific", None) or {}
         updates_attribution = any(
             key in src_payload or key in current_payload for key in attribution_keys
@@ -1971,6 +1977,8 @@ class ClaudeAgent(BaseAgent):
                 context.platform_specific.pop(key, None)
                 continue
             value = src_payload[key]
+            if isinstance(value, list):
+                value = list(value)
             if isinstance(value, dict):
                 value = dict(value)
                 execution_ids = value.get("execution_ids")
@@ -2262,8 +2270,7 @@ class ClaudeAgent(BaseAgent):
         primary = str(spec.get("task_execution_id") or "").strip()
         if primary:
             run_ids.append(primary)
-        coalesced = spec.get("coalesced_queue")
-        values = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        values = spec.get("accepted_agent_run_ids")
         if isinstance(values, list):
             for value in values:
                 run_id = str(value or "").strip()

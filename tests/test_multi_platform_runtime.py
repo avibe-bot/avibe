@@ -14,6 +14,11 @@ from modules.im.multi import IMClientRemovalError, MultiIMClient
 from modules.settings_manager import MultiSettingsManager
 from config.v2_sessions import ActivePollInfo
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import launch_for_context
@@ -678,6 +683,7 @@ def test_opencode_restored_ack_preserves_wechat_typing_context():
 def test_opencode_prompt_disables_question_tool_for_all_platforms():
     calls = []
     active_polls = []
+    recovery_order = []
 
     class _Server:
         async def ensure_running(self):
@@ -701,6 +707,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
             }
 
         async def prompt_async(self, **kwargs):
+            recovery_order.append("prompt")
             calls.append(kwargs)
 
         async def mark_run_active(self, session_id):
@@ -733,6 +740,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            recovery_order.append("poll")
             active_polls.append(kwargs)
             return None
 
@@ -802,6 +810,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 platform_specific={
                     "agent_session_id": "ses_test",
                     "turn_token": "logical-turn",
+                    "delivery_start_attempt_id": "atm_initial_start",
                 },
             ),
             message="hello",
@@ -819,6 +828,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+    assert calls[0]["message_id"] == "atm_initial_start"
+    assert recovery_order[:2] == ["poll", "prompt"]
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]
     assert steering_snapshot["system"] == calls[0]["system"]
 
@@ -1240,6 +1251,14 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     removed = []
     ack_removed = []
 
+    request_context = MessageContext(
+        user_id="u",
+        channel_id="c",
+        platform="slack",
+        platform_specific={"agent_session_id": "ses_test"},
+    )
+    set_dispatch_phase(request_context, DISPATCH_PHASE_PREWRITE)
+
     class _Server:
         async def ensure_running(self):
             return None
@@ -1248,6 +1267,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
             return []
 
         async def prompt_async(self, **kwargs):
+            assert backend_dispatch_attempted(request_context) is True
             return None
 
         async def mark_run_active(self, session_id):
@@ -1334,12 +1354,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     agent._remove_ack_reaction = _remove_ack
 
     request = AgentRequest(
-        context=MessageContext(
-            user_id="u",
-            channel_id="c",
-            platform="slack",
-            platform_specific={"agent_session_id": "ses_test"},
-        ),
+        context=request_context,
         message="hello",
         user_message="hello",
         working_path="/tmp/work",

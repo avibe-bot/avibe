@@ -3293,7 +3293,7 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
 
     class FakeStore:
         def __init__(self):
-            self.message_types = iter(("pending", "harness"))
+            self.delivery_states = iter(("reserved", "accepted"))
             self.closed = False
             instances.append(self)
 
@@ -3301,10 +3301,10 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
             return {
                 "id": event_id,
                 "session_id": session_id,
-                "message": {
+                "delivery": {
                     "id": "msg_poll_once",
                     "session_id": session_id,
-                    "type": next(self.message_types),
+                    "state": next(self.delivery_states),
                 },
             }
 
@@ -3323,10 +3323,10 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
     assert resolved == {
         "id": "show_evt_poll_once",
         "session_id": "ses123",
-        "message": {
+        "delivery": {
             "id": "msg_poll_once",
             "session_id": "ses123",
-            "type": "harness",
+            "state": "accepted",
         },
     }
     assert len(instances) == 1
@@ -3387,7 +3387,7 @@ def test_show_event_cli_pending_timeout_allows_same_reservation_retry(monkeypatc
             return {
                 "id": event_id,
                 "session_id": session_id,
-                "message": {"id": "msg_pending", "type": "pending"},
+                "delivery": {"id": "msg_pending", "state": "reserved"},
             }
 
         def close(self):
@@ -3399,6 +3399,29 @@ def test_show_event_cli_pending_timeout_allows_same_reservation_retry(monkeypatc
     resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
         "ses123",
         {"id": "show_evt_pending_retry"},
+        wait_seconds=1,
+    )
+
+    assert resolved is None
+
+
+def test_show_event_cli_retired_delivery_is_not_reported_as_accepted(monkeypatch):
+    class FakeStore:
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "delivery": {"id": "msg_retired", "state": "retired"},
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_retired"},
         wait_seconds=1,
     )
 

@@ -38,15 +38,19 @@ from core.scheduled_tasks import (
     ScheduledTaskService,
     ScheduledTaskStore,
     SessionBindingChange,
+    TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
+    _TASK_RESULT_NOT_RECORDED_ERROR,
     _agent_run_message_for_request,
     build_session_key_for_context,
+    normalize_agent_run_delivery_intent,
     parse_session_key,
     resolve_session_id_target,
     session_anchor_for_target,
 )
 from modules.im import MessageContext
+from storage import message_deliveries
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import (
@@ -1767,18 +1771,18 @@ def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatc
     assert restarted_store.get_run(second.id)["status"] == "succeeded"
 
 
-def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settles(
+def test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """HFR-004: durable queue ownership resumes once an older Run is terminal."""
+    """Only the Delivery FIFO can block recovery; an unlinked Run cannot."""
 
     from core.session_turns import (
         SCHEDULED_PROVENANCE_KEY,
         SessionTurnManager,
         capture_scheduled_provenance,
     )
-    from storage import messages_service
+    from storage.background import attach_agent_run_delivery_in_connection
     from storage.models import agent_sessions
 
     session_id = _make_avibe_session(monkeypatch, tmp_path)
@@ -1792,7 +1796,6 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
         session_id=session_id,
         message="persisted successor",
         agent_name="codex",
-        metadata={"workbench_queue_holds_run": True},
     )
     sqlite_store = request_store._sqlite
     assert sqlite_store is not None
@@ -1814,14 +1817,13 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.append(
+        delivery = message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             text="persisted successor",
             metadata={
                 SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
@@ -1829,6 +1831,12 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
                 )
             },
             native_message_id=f"agent_run:{successor.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            successor.id,
+            session_id=session_id,
+            delivery_id=str(delivery["id"]),
         )
 
     class _Controller:
@@ -1874,13 +1882,6 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
     monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise() -> None:
-        # The older scheduler-owned Run keeps its original FIFO position.
-        assert await controller.session_turns.recover_persisted_agent_run_queue() == []
-        assert started == []
-        with engine.connect() as conn:
-            assert len(messages_service.list_queued(conn, session_id)) == 1
-
-        request_store.complete(older, ok=True)
         assert await controller.session_turns.recover_persisted_agent_run_queue(
             session_id
         ) == [session_id]
@@ -1890,9 +1891,10 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
             await asyncio.sleep(0.005)
 
         assert started == [successor.id]
+        assert request_store.get_run(older.id)["status"] == "queued"
         assert request_store.get_run(successor.id)["status"] == "succeeded"
         with engine.connect() as conn:
-            assert messages_service.list_queued(conn, session_id) == []
+            assert message_deliveries.list_queued(conn, session_id) == []
 
         assert await controller.session_turns.recover_persisted_agent_run_queue(
             session_id
@@ -1916,7 +1918,7 @@ def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> No
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
@@ -1936,7 +1938,7 @@ def test_restart_does_not_auto_send_pure_user_queue(monkeypatch, tmp_path) -> No
 
     assert asyncio.run(manager.recover_persisted_agent_run_queue()) == []
     with engine.connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
             "kept after explicit stop"
         ]
     engine.dispose()
@@ -1981,20 +1983,19 @@ def test_restart_does_not_flush_user_queue_ahead_of_held_agent_run(
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.enqueue_queued(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
             text="kept after explicit stop",
         )
-        messages_service.append(
+        message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
+            message_type="harness",
             text="held successor",
             metadata={
                 SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
@@ -2021,7 +2022,7 @@ def test_restart_does_not_flush_user_queue_ahead_of_held_agent_run(
     with engine.connect() as conn:
         assert [
             row["text"]
-            for row in messages_service.list_queued(conn, session_id)
+            for row in message_deliveries.list_queued(conn, session_id)
         ] == ["kept after explicit stop", "held successor"]
     engine.dispose()
 
@@ -2978,9 +2979,7 @@ def test_sweep_skips_running_run_owned_by_workbench_turn(tmp_path: Path, monkeyp
         platform="slack",
         platform_specific={
             "task_execution_id": run_id,
-            # A coalesced turn settles several runs; it owns every one of them, not
-            # just the primary, or the sweep fails the siblings out from under it.
-            "coalesced_queue": {"execution_ids": [sibling_id]},
+            "accepted_agent_run_ids": [run_id, sibling_id],
         },
     )
     session_turns.register_turn_sink(
@@ -3311,15 +3310,10 @@ def test_sweep_ignores_queued_run_skipped_only_for_capacity(tmp_path: Path, monk
     assert request_store.get_run(run_id)["status"] == "queued"
 
 
-def test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl(
+def test_legacy_queue_hold_metadata_has_no_sweep_authority(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The hold TTL is the longest one: a recovering queue must be allowed to recover.
-
-    A run holding a workbench queue slot is waiting on the session's turn queue, which
-    legitimately drains slowly. Only a hold nothing has touched for the full TTL is
-    treated as a gate that never reopened.
-    """
+    """Old metadata cannot recreate the removed Run-owned queue lifecycle."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -3334,23 +3328,13 @@ def test_sweep_expires_a_workbench_queue_hold_only_after_its_ttl(
     service._sweep_stale_runs()
 
     assert request_store.get_run(recovering)["status"] == "queued"
-    expired = request_store.get_run(abandoned)
-    assert expired["status"] == "failed"
-    assert expired["metadata"]["interrupt_reason"] == "queue_hold_expired"
+    assert request_store.get_run(abandoned)["status"] == "queued"
 
 
-def test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns(
+def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """HFR-026: ownership outranks the queue TTLs too, not just the orphan grace.
-
-    A coalesced workbench turn deliberately leaves its secondary runs ``queued`` with
-    ``workbench_queue_holds_run`` while the primary settles them, and reports every one
-    of them from ``owned_agent_run_ids``. A hold TTL that ignored ownership would fail
-    those live siblings the moment the turn outran it — a turn-duration timeout by the
-    back door, which this design explicitly does not have. The control row proves the
-    class still works: same age, same flag, no owner.
-    """
+    """Only explicit Turn attribution owns running work; legacy flags own nothing."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
@@ -3376,7 +3360,7 @@ def test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns(
             platform="slack",
             platform_specific={
                 "task_execution_id": primary,
-                "coalesced_queue": {"execution_ids": [held]},
+                "accepted_agent_run_ids": [primary],
             },
         ),
     )
@@ -3384,7 +3368,7 @@ def test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns(
     service._sweep_stale_runs()
 
     assert request_store.get_run(held)["status"] == "queued"
-    assert request_store.get_run(unowned)["status"] == "failed"
+    assert request_store.get_run(unowned)["status"] == "queued"
 
 
 def test_workbench_turn_settles_its_agent_run_when_no_result_arrives(
@@ -3432,7 +3416,7 @@ def test_workbench_turn_settles_its_agent_run_when_no_result_arrives(
         platform_specific={
             "task_execution_id": primary,
             "task_trigger_kind": "agent_run",
-            "coalesced_queue": {"execution_ids": [sibling]},
+            "accepted_agent_run_ids": [primary, sibling],
         },
     )
 
@@ -3529,6 +3513,106 @@ def test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop(
     assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_BACKEND_REFRESH
     assert settled["error"]
     assert "stop" not in settled["error"].lower()
+
+
+def test_backend_refresh_settles_restored_durable_agent_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="restored before backend refresh",
+        agent_name="codex",
+    ).id
+    _force_run_columns(request_store, run_id, status="running", started_at=_ago(30))
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = conn.execute(
+            select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+        ).scalar_one()
+        delivery_id = message_deliveries.new_delivery_id()
+        turn_id = message_deliveries.new_turn_id()
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="restored before backend refresh",
+                native_message_id=f"agent_run:{run_id}",
+                metadata={
+                    "scheduled_provenance": {
+                        "task_execution_id": run_id,
+                        "platform_specific": {
+                            "task_trigger_kind": "agent_run",
+                            "task_execution_id": run_id,
+                        },
+                    }
+                },
+            ),
+            dispatch_text="restored before backend refresh",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run_id,
+            session_id=session_id,
+            delivery_id=delivery_id,
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="restored before backend refresh",
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key="restored-runtime",
+            runtime_turn_id="restored-turn",
+            native_turn_id="restored-native",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "restored_native_acceptance"},
+        )
+
+    manager = SessionTurnManager(controller=None)
+    manager._engine = engine
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        set_agent_status=lambda *_args, **_kwargs: None,
+    )
+    assert run_id in manager.owned_agent_run_ids()
+
+    released = asyncio.run(
+        manager.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={session_id},
+        )
+    )
+
+    assert released == 1
+    settled = request_store.get_run(run_id)
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_BACKEND_REFRESH
 
 
 def test_turn_only_result_leaves_an_activity_owned_run_alone(
@@ -3700,7 +3784,7 @@ def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
 
         assert request_store.get_run(held)["status"] == "queued", "the gate will flush it"
         assert request_store.get_run(live)["status"] == "running", "owned, so never swept"
-        assert request_store.get_run(abandoned)["status"] == "failed", "no live turn => abandoned"
+        assert request_store.get_run(abandoned)["status"] == "queued"
 
         turn = manager.in_flight.get(session_id)
         assert turn is not None
@@ -3711,54 +3795,50 @@ def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
     asyncio.run(_exercise())
 
 
-def test_sweep_retires_the_queue_segment_of_the_run_it_expired(
+def test_canceling_a_delivery_owned_run_retires_its_exact_queue_row(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """HFR-028: terminalizing the row is not enough — the queued segment must go too.
+    """Run cancellation and exact Delivery retirement share one transaction."""
 
-    ``recover_persisted_agent_run_queue`` ignores references whose run is no longer
-    ``queued``, so a swept run's persisted ``messages`` row is nobody's to reclaim: the
-    Session keeps showing stale pending input until an unrelated user send happens to
-    force ``flush_queue`` to retire it. The sweep already knows the session, so it
-    reconciles immediately.
-    """
-
-    from storage import messages_service
+    from storage.background import attach_agent_run_delivery_in_connection
     from storage.models import agent_sessions
 
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
-    held = request_store.enqueue_agent_run(
+    run = request_store.enqueue_agent_run(
         session_id=session_id,
-        message="held behind a gate that never reopened",
+        message="cancel this queued input",
         agent_name="codex",
-        metadata={"workbench_queue_holds_run": True},
-    ).id
-    _force_run_columns(request_store, held, updated_at=_ago(7200))
+    )
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         session = conn.execute(
             select(agent_sessions).where(agent_sessions.c.id == session_id)
         ).mappings().one()
-        messages_service.append(
+        delivery = message_deliveries.enqueue_queued(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            platform="avibe",
             author="harness",
             source="harness",
-            message_type=messages_service.QUEUED_TYPE,
-            text="held behind a gate that never reopened",
-            native_message_id=f"agent_run:{held}",
+            message_type="harness",
+            text="cancel this queued input",
+            native_message_id=f"agent_run:{run.id}",
         )
-        assert len(messages_service.list_queued(conn, session_id)) == 1
-    service = _sweep_service(tmp_path, request_store)
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session_id,
+            delivery_id=str(delivery["id"]),
+        )
+        assert len(message_deliveries.list_queued(conn, session_id)) == 1
 
-    service._sweep_stale_runs()
-
-    assert request_store.get_run(held)["metadata"]["interrupt_reason"] == "queue_hold_expired"
+    assert request_store.cancel_run(run.id) is True
+    assert request_store.get_run(run.id)["status"] == "canceled"
     with create_sqlite_engine().connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
+        assert message_deliveries.list_queued(conn, session_id) == []
+        retired = message_deliveries.get_delivery(conn, str(delivery["id"]))
+    assert retired is not None and retired["state"] == "retired"
 
 
 def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monkeypatch) -> None:
@@ -4016,7 +4096,7 @@ def test_agent_run_with_blank_message_fails_instead_of_hanging(tmp_path: Path, m
     assert settled["completed_at"] is not None
 
 
-def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path: Path, monkeypatch) -> None:
+def test_duplicate_result_settles_only_the_exact_agent_run(tmp_path: Path, monkeypatch) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     run_ids: list[str] = []
@@ -4025,14 +4105,8 @@ def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path:
             session_id=session_id,
             message=f"coalesced prompt {index + 1}",
             agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
         )
         run_ids.append(request.id)
-
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
-    request_store.recover_processing()
 
     async def _submit_scheduled(_sid, _ctx, _text):
         return "duplicate"
@@ -4042,27 +4116,24 @@ def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path:
 
     gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
     controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
-    recover_queue = AsyncMock(return_value=[])
-    controller.session_turns = SimpleNamespace(
-        recover_persisted_agent_run_queue=recover_queue,
-    )
     service = ScheduledTaskService(
         controller=controller,
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=request_store,
     )
 
-    asyncio.run(service._drain_requests())
+    claimed = request_store.claim(run_ids[0])
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
     stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
 
     assert stored[run_ids[0]]["status"] == "succeeded"
-    assert stored[run_ids[1]]["status"] == "succeeded"
+    assert stored[run_ids[1]]["status"] == "queued"
     assert stored[run_ids[0]]["completed_at"] is not None
-    assert stored[run_ids[1]]["completed_at"] is not None
-    recover_queue.assert_awaited_once_with(session_id)
+    assert stored[run_ids[1]]["completed_at"] is None
 
 
-def test_recover_processing_rebuilds_coalesced_metadata_without_queue_rows(
+def test_recover_processing_preserves_independent_agent_runs(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -4074,47 +4145,43 @@ def test_recover_processing_rebuilds_coalesced_metadata_without_queue_rows(
             session_id=session_id,
             message=f"coalesced prompt {index + 1}",
             agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
         )
         run_ids.append(request.id)
 
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    for run_id in run_ids:
+        assert request_store.claim(run_id) is not None
 
     request_store.recover_processing()
     pending = request_store.list_pending()
 
-    assert [request.id for request in pending] == [run_ids[0]]
-    assert pending[0].metadata["coalesced_queue"]["execution_ids"] == run_ids
-    assert _agent_run_message_for_request(pending[0]) == (
-        "coalesced prompt 1\n\n---\n\ncoalesced prompt 2\n\n---\n\ncoalesced prompt 3"
-    )
+    assert [request.id for request in pending] == run_ids
+    assert [_agent_run_message_for_request(request) for request in pending] == [
+        "coalesced prompt 1",
+        "coalesced prompt 2",
+        "coalesced prompt 3",
+    ]
+    assert all("coalesced_queue" not in request.metadata for request in pending)
 
 
-def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
+def test_recovery_preserves_delivery_owned_agent_run_batch(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        claim_agent_runs_for_turn_in_connection,
+    )
+
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     run_ids: list[str] = []
     for index in range(2):
         request = request_store.enqueue_agent_run(
             session_id=session_id,
-            message=f"coalesced prompt {index + 1}",
+            message=f"batched prompt {index + 1}",
             agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
         )
         run_ids.append(request.id)
-
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
-    request_store.recover_processing()
-
-    from storage import messages_service
-    from storage.models import agent_sessions, messages
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -4122,85 +4189,176 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
             select(agent_sessions).where(agent_sessions.c.id == session_id).limit(1)
         ).mappings().first()
         assert session is not None
-        scope_id = session["scope_id"]
+        deliveries = []
         for run_id in run_ids:
-            messages_service.append(
+            delivery = message_deliveries.enqueue_queued(
                 conn,
-                scope_id=scope_id,
+                scope_id=session["scope_id"],
                 session_id=session_id,
-                platform="avibe",
                 author="harness",
                 source="harness",
-                message_type=messages_service.QUEUED_TYPE,
-                text=f"stale queued row for {run_id}",
+                message_type="harness",
+                text=f"batched prompt {len(deliveries) + 1}",
                 native_message_id=f"agent_run:{run_id}",
             )
-
-    submitted: list[str] = []
-
-    async def _submit_scheduled(_sid, ctx, text):
-        with engine.connect() as conn:
-            if messages_service.native_message_exists(
+            assert attach_agent_run_delivery_in_connection(
                 conn,
-                platform="avibe",
-                native_message_id=ctx.message_id,
-            ):
-                return "duplicate"
-        submitted.append(text)
-        return "ran"
+                run_id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+            deliveries.append(delivery)
+        assert claim_agent_runs_for_turn_in_connection(conn, run_ids) == run_ids
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=message_deliveries.new_turn_id(),
+            session_id=session_id,
+            backend="codex",
+            deliveries=deliveries,
+            dispatch_text="batched prompt 1\n\nbatched prompt 2",
+        )
 
-    async def _handle_scheduled_message(context, message, parsed_session_key=None):
-        return None
+    request_store.recover_processing()
 
-    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
-    controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
+    assert request_store.list_pending() == []
+    stored = [request_store.get_run(run_id) for run_id in run_ids]
+    assert [row["status"] for row in stored] == ["running", "running"]
+    assert [row["delivery_id"] for row in stored] == [
+        delivery["id"] for delivery in deliveries
+    ]
+    with engine.connect() as conn:
+        retained = [
+            message_deliveries.get_delivery(conn, delivery["id"])
+            for delivery in deliveries
+        ]
+    assert all(row is not None and row["state"] == "claimed" for row in retained)
+    assert len({row["turn_id"] for row in retained}) == 1
+    assert retained[0]["turn_id"] == claimed["turn"]["id"]
+
+
+def test_recovered_agent_run_resubmits_through_real_session_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from core import internal_server, session_turns
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recover through the durable gate",
+        agent_name="codex",
+    )
+    engine = create_sqlite_engine()
+
+    sinks: dict[str, dict] = {}
+
+    def _session_key(context):
+        return f"avibe::{(context.platform_specific or {}).get('agent_session_id')}"
+
+    def _register_sink(
+        key,
+        *,
+        on_chunk,
+        done_event,
+        turn_token=None,
+        context=None,
+    ):
+        sinks[key] = {
+            "on_chunk": on_chunk,
+            "done_event": done_event,
+            "turn_token": turn_token,
+            "context": context,
+        }
+
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+        message_handler=SimpleNamespace(handle_scheduled_message=AsyncMock()),
+        command_handler=SimpleNamespace(handle_stop=AsyncMock(return_value=True)),
+        agent_service=SimpleNamespace(default_agent="codex", agents={}, _turn_gates={}),
+        config=SimpleNamespace(language="en"),
+        _get_lang=lambda: "en",
+        _get_session_key=_session_key,
+        register_turn_sink=_register_sink,
+        get_turn_sink=lambda key: sinks.get(key),
+        pop_turn_sink=lambda key, done_event=None: sinks.pop(key, None),
+        _session_id_from_context=lambda context: (
+            context.platform_specific or {}
+        ).get("agent_session_id"),
+        resolve_agent_for_context=lambda _context: "codex",
+        set_agent_status=lambda *_args: None,
+        emit_agent_message=AsyncMock(),
+    )
+    internal_server.create_app(controller)
+    dispatched: list[str] = []
+
+    async def _dispatch(_controller, _context, text, **_kwargs):
+        dispatched.append(text)
+        logical_turn_id = str(
+            (_context.platform_specific or {}).get("turn_token") or ""
+        )
+        assert logical_turn_id
+        _controller.session_turns.on_native_start(
+            _context,
+            backend="codex",
+            runtime_key=f"runtime:{logical_turn_id}",
+            runtime_turn_id=f"runtime-turn:{logical_turn_id}",
+        )
+        return TurnDispatchOutcome(
+            error=None,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+        )
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _dispatch)
     service = ScheduledTaskService(
         controller=controller,
         store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
         request_store=request_store,
     )
+    controller.scheduled_task_service = service
 
     async def _exercise() -> None:
         await service._drain_requests()
-        execution = service._inflight_executions.get(run_ids[0])
-        if execution is not None:
-            await execution
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+        for _ in range(100):
+            if not controller.session_turns.in_flight:
+                break
+            await asyncio.sleep(0)
 
     asyncio.run(_exercise())
 
-    assert len(submitted) == 1
-    assert "coalesced prompt 1" in submitted[0]
-    assert "coalesced prompt 2" in submitted[0]
+    assert dispatched == ["recover through the durable gate"]
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session_id) == []
-        dedupe_rows = conn.execute(
-            select(messages.c.native_message_id, messages.c.type)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
-        ).all()
-    assert {row.native_message_id for row in dedupe_rows} == {f"agent_run:{run_ids[1]}"}
-    stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
-    assert stored[run_ids[0]]["status"] == "running"
-    assert stored[run_ids[1]]["status"] == "queued"
+        stored_run = conn.execute(
+            select(agent_runs).where(agent_runs.c.id == request.id)
+        ).mappings().one()
+        owner = message_deliveries.get_delivery(conn, stored_run["delivery_id"])
+        accepted_message = conn.execute(
+            select(messages).where(messages.c.id == stored_run["delivery_id"])
+        ).mappings().one()
+    assert owner is not None
+    assert owner["state"] == "accepted"
+    assert owner["id"] == accepted_message["id"] == stored_run["delivery_id"]
 
 
-def test_recovered_coalesced_agent_run_early_failure_settles_children(tmp_path: Path, monkeypatch) -> None:
+def test_agent_run_early_failure_settles_only_the_exact_run(tmp_path: Path, monkeypatch) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     run_ids: list[str] = []
     for index in range(2):
         request = request_store.enqueue_agent_run(
             session_id=session_id,
-            message=f"coalesced prompt {index + 1}",
+            message=f"independent prompt {index + 1}",
             agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
         )
         run_ids.append(request.id)
-
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
-    request_store.recover_processing()
     claimed = request_store.claim(run_ids[0])
     assert claimed is not None
 
@@ -4227,11 +4385,10 @@ def test_recovered_coalesced_agent_run_early_failure_settles_children(tmp_path: 
     stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
 
     assert stored[run_ids[0]]["status"] == "failed"
-    assert stored[run_ids[1]]["status"] == "failed"
+    assert stored[run_ids[1]]["status"] == "queued"
     assert stored[run_ids[0]]["completed_at"] is not None
-    assert stored[run_ids[1]]["completed_at"] is not None
+    assert stored[run_ids[1]]["completed_at"] is None
     assert stored[run_ids[0]]["error"] == "target session vanished"
-    assert stored[run_ids[1]]["error"] == "target session vanished"
 
 
 def _harness_turn_context(
@@ -4279,7 +4436,7 @@ def _harness_dispatcher() -> ConsolidatedMessageDispatcher:
             release_runtime_turn=lambda _context: None,
         ),
         session_turns=SimpleNamespace(
-            on_terminal_result=lambda _context, is_error=False: None,
+            on_terminal_result=lambda _context, is_error=False, **_kwargs: None,
         ),
         mark_turn_complete=lambda _context, **_kwargs: None,
     )
@@ -4659,30 +4816,22 @@ def test_silent_terminal_skips_callback_and_keeps_directed_run(
                 agent_events.c.content_text,
             ).where(agent_events.c.session_id == target_session_id)
         ).mappings().all()
-    assert [row["author"] for row in target_messages] == [
-        "harness",
-        "agent",
-        "agent",
-    ]
+    assert [row["author"] for row in target_messages] == ["harness", "agent"]
     assert [row["type"] for row in target_messages] == [
         "harness",
         "assistant",
-        "silent",
     ]
     assert [row["source"] for row in target_messages] == [
         "harness",
-        "agent",
         "agent",
     ]
     assert [row["native_message_id"] for row in target_messages] == [
         f"agent_run:{request.id}",
         preamble_output.native_message_id(context),
-        None,
     ]
     assert [row["content_text"] for row in target_messages] == [
         "escalation prompt",
         "裁决如下：",
-        "",
     ]
     assert all(row["author"] != "user" and row["type"] != "user" for row in target_messages)
     assert tool_events == [
@@ -6210,6 +6359,20 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
         message="run in workbench session",
         agent_name="codex",
     )
+    sqlite_backend = request_store.sqlite_backend
+    assert sqlite_backend is not None
+    with sqlite_backend.engine.begin() as conn:
+        metadata = json.loads(
+            conn.execute(
+                select(agent_runs.c.metadata_json).where(agent_runs.c.id == request.id)
+            ).scalar_one()
+        )
+        metadata["delivery_intent"] = "queue"
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == request.id)
+            .values(metadata_json=json.dumps(metadata))
+        )
     submitted: list[tuple] = []
     handler_calls: list = []
 
@@ -6245,7 +6408,11 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert handler_calls == []
 
 
-def test_busy_avibe_agent_run_send_now_records_the_turn_owner_outcome(monkeypatch, tmp_path) -> None:
+def test_legacy_queue_delivery_intent_normalizes_to_current_steer() -> None:
+    assert normalize_agent_run_delivery_intent("queue") == "steer"
+
+
+def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypatch, tmp_path) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -6273,6 +6440,7 @@ def test_busy_avibe_agent_run_send_now_records_the_turn_owner_outcome(monkeypatc
             queue_persisted=True,
             target_was_busy=True,
             delivery_status="interrupted",
+            delivery_owner_transferred=True,
         )
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
@@ -6298,16 +6466,11 @@ def test_busy_avibe_agent_run_send_now_records_the_turn_owner_outcome(monkeypatc
 
     run = request_store.get_run(request.id)
     assert run is not None
-    assert run["status"] == "queued"
-    assert run.get("started_at") is None
+    assert run["status"] == "running"
+    assert run.get("started_at") is not None
     assert run.get("completed_at") is None
-    assert (run.get("metadata") or {}).get("workbench_queue_holds_run") is True
+    assert "workbench_queue_holds_run" not in (run.get("metadata") or {})
     assert run["metadata"]["delivery_intent"] == "send_now"
-    assert run["metadata"]["delivery_outcome"] == {
-        "intent": "send_now",
-        "status": "interrupted",
-        "target_was_busy": True,
-    }
     assert submitted == [
         (session_id, "run behind active workbench turn", request.id, "send_now")
     ]
@@ -6344,7 +6507,7 @@ def test_idle_send_now_flush_failure_invokes_queue_recovery(monkeypatch, tmp_pat
             queue_persisted=True,
             target_was_busy=False,
             delivery_status="flush_failed",
-            queue_owner_transferred=True,
+            delivery_owner_transferred=True,
         )
 
     async def _recover_queue(sid):
@@ -6509,11 +6672,13 @@ def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatc
     run = request_store.get_run(request.id)
     assert run is not None
     assert run["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
-    assert run["metadata"]["workbench_queue_holds_run"] is True
+    assert "workbench_queue_holds_run" not in run["metadata"]
     assert submitted[0][2]["source_native_session_id"] == "thread-source"
 
 
-def test_workbench_queue_flush_recovery_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+def test_delivery_claim_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+    from storage.background import attach_agent_run_delivery_in_connection
+
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -6526,99 +6691,47 @@ def test_workbench_queue_flush_recovery_preserves_session_fork_metadata(monkeypa
                 "source_native_session_id": "thread-source",
                 "source_backend": "codex",
             },
-            "workbench_queue_holds_run": True,
         },
     )
 
     sqlite_store = request_store._sqlite
     assert sqlite_store is not None
-    assert sqlite_store.claim_queued_run_for_workbench(request.id) is True
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        delivery = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="recover fork after queue flush",
+            native_message_id=f"agent_run:{request.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id=session_id,
+            delivery_id=str(delivery["id"]),
+        )
+    assert sqlite_store.claim_agent_run_for_turn(request.id) is True
 
     flushed = request_store.get_run(request.id)
     assert flushed is not None
     assert flushed["status"] == "running"
-    assert flushed["metadata"]["workbench_queue_holds_run"] is False
+    assert flushed["delivery_id"] == delivery["id"]
+    assert "workbench_queue_holds_run" not in flushed["metadata"]
     assert flushed["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
 
     request_store.recover_processing()
-    claimed = request_store.claim(request.id)
-
-    assert claimed is not None
-    assert claimed.metadata["workbench_queue_holds_run"] is False
-    assert claimed.metadata["session_fork"]["source_native_session_id"] == "thread-source"
-
-
-def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch, tmp_path) -> None:
-    session_id = _make_avibe_session(monkeypatch, tmp_path)
-    request_store = TaskExecutionStore()
-    run_ids: list[str] = []
-    for index in range(3):
-        request = request_store.enqueue_agent_run(
-            session_id=session_id,
-            message=f"coalesced prompt {index + 1}",
-            agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
-        )
-        run_ids.append(request.id)
-
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
-
-    request_store.recover_processing()
-    pending = request_store.list_pending()
-
-    assert [request.id for request in pending] == [run_ids[0]]
-    primary = request_store.get_run(run_ids[0])
-    child = request_store.get_run(run_ids[1])
-    assert primary is not None
-    assert child is not None
-    assert primary["status"] == "queued"
-    assert child["status"] == "queued"
-    assert primary["metadata"]["workbench_queue_holds_run"] is False
-    assert primary["metadata"]["coalesced_queue"]["execution_ids"] == run_ids
-    assert primary["metadata"]["coalesced_queue"]["messages"] == [
-        {"execution_id": run_ids[0], "message": "coalesced prompt 1"},
-        {"execution_id": run_ids[1], "message": "coalesced prompt 2"},
-        {"execution_id": run_ids[2], "message": "coalesced prompt 3"},
-    ]
-    assert child["metadata"]["workbench_queue_holds_run"] is True
-    assert child["metadata"]["coalesced_into_run_id"] == run_ids[0]
-
-    claimed = request_store.claim(run_ids[0])
-    assert claimed is not None
-    recovered_message = _agent_run_message_for_request(claimed)
-    assert "coalesced prompt 1" in recovered_message
-    assert "coalesced prompt 2" in recovered_message
-    assert "coalesced prompt 3" in recovered_message
-
-
-def test_recovered_coalesced_agent_run_message_filters_cancelled_child(monkeypatch, tmp_path) -> None:
-    session_id = _make_avibe_session(monkeypatch, tmp_path)
-    request_store = TaskExecutionStore()
-    run_ids: list[str] = []
-    for index in range(3):
-        request = request_store.enqueue_agent_run(
-            session_id=session_id,
-            message=f"coalesced prompt {index + 1}",
-            agent_name="codex",
-            metadata={"workbench_queue_holds_run": True},
-        )
-        run_ids.append(request.id)
-
-    sqlite_store = request_store._sqlite
-    assert sqlite_store is not None
-    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
-    request_store.recover_processing()
-    assert sqlite_store.cancel_run(run_ids[1]) is True
-
-    claimed = request_store.claim(run_ids[0])
-    assert claimed is not None
-    recovered_message = _agent_run_message_for_request(claimed)
-
-    assert "coalesced prompt 1" in recovered_message
-    assert "coalesced prompt 2" not in recovered_message
-    assert "coalesced prompt 3" in recovered_message
+    recovered = request_store.get_run(request.id)
+    assert recovered is not None
+    assert recovered["status"] == "running"
+    assert recovered["delivery_id"] == delivery["id"]
+    assert recovered["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
 
 
 def test_inspect_queued_runs_finalizes_cancel_requested_queued_agent_run(monkeypatch, tmp_path) -> None:
@@ -6640,7 +6753,7 @@ def test_inspect_queued_runs_finalizes_cancel_requested_queued_agent_run(monkeyp
         cancel_requested_at="2026-06-22T00:00:01Z",
     )
 
-    queued_run_ids, stale_run_ids = bg.inspect_queued_runs_for_workbench([request.id])
+    queued_run_ids, stale_run_ids = bg.inspect_agent_runs_for_turn([request.id])
 
     assert queued_run_ids == []
     assert stale_run_ids == [request.id]
@@ -6652,17 +6765,37 @@ def test_inspect_queued_runs_finalizes_cancel_requested_queued_agent_run(monkeyp
 
 def test_claim_queued_runs_publishes_after_commit(monkeypatch, tmp_path) -> None:
     import storage.background as background_module
+    from storage.background import attach_agent_run_delivery_in_connection
 
-    _make_avibe_session(monkeypatch, tmp_path)
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
-        session_id="placeholder",
+        session_id=session_id,
         message="queued run",
         agent_name="codex",
-        metadata={"workbench_queue_holds_run": True},
     )
     bg = request_store._sqlite
     assert bg is not None
+    with create_sqlite_engine().begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        delivery = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="queued run",
+            native_message_id=f"agent_run:{request.id}",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id=session_id,
+            delivery_id=str(delivery["id"]),
+        )
 
     observed_statuses: list[str | None] = []
 
@@ -6672,7 +6805,7 @@ def test_claim_queued_runs_publishes_after_commit(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(background_module, "_publish_run_rows_updated", capture_publish)
 
-    assert bg.claim_queued_runs_for_workbench([request.id]) == [request.id]
+    assert bg.claim_agent_runs_for_turn([request.id]) == [request.id]
     assert observed_statuses == ["running"]
 
 
@@ -6727,12 +6860,69 @@ def test_drain_requests_reserves_watch_create_per_run_before_session_validation(
             "task_id": "watch-1",
             "trigger_kind": "watch",
             "agent_name": "release-reviewer",
+            "_capture_dispatch_result": True,
         }
     ]
     payload = json.loads((request_store.completed_dir / f"{request.id}.json").read_text(encoding="utf-8"))
     assert payload["ok"] is True
     assert payload["session_id"] == "ses-created"
     assert payload["session_key"] == ""
+
+
+def test_claimed_watch_stays_nonterminal_after_delivery_ownership_transfer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="watch result",
+        agent_name="release-reviewer",
+        run_type="watch",
+    )
+    submitted: list[tuple[str, str, str]] = []
+
+    async def _submit_scheduled(sid, ctx, text):
+        from core.session_turns import TurnSubmissionResult
+
+        submitted.append(
+            (sid, text, str(ctx.platform_specific.get("task_execution_id") or ""))
+        )
+        return TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=True,
+            target_was_busy=True,
+            delivery_owner_transferred=True,
+        )
+
+    async def _handle_scheduled_message(*_args, **_kwargs):
+        raise AssertionError("Workbench Watch input must use the Delivery gate")
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
+    service = ScheduledTaskService(
+        controller=_avibe_controller_double(
+            gate=gate,
+            handle_scheduled_message=_handle_scheduled_message,
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+
+    asyncio.run(_exercise())
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored.get("completed_at") is None
+    assert submitted == [(session_id, "watch result", request.id)]
 
 
 def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_path: Path) -> None:
@@ -6783,6 +6973,7 @@ def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_pa
             "task_id": task.id,
             "trigger_kind": "scheduled",
             "agent_name": "release-reviewer",
+            "_capture_dispatch_result": True,
         }
     ]
     payload = json.loads((request_store.completed_dir / f"{request.id}.json").read_text(encoding="utf-8"))
@@ -6887,6 +7078,7 @@ def test_claimed_request_keeps_agent_identity_when_archive_lands_after_refresh(
                 "task_id": None,
                 "trigger_kind": "hook",
                 "agent_name": "pm",
+                "_capture_dispatch_result": True,
                 "agent_id": agent.id,
             }
         ]
@@ -7774,6 +7966,12 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
     )
     sqlite_store = request_store._sqlite
     assert sqlite_store is not None
+    engine = create_sqlite_engine()
+
+    def _delivery_state(delivery_id: str) -> str | None:
+        with engine.connect() as conn:
+            delivery = message_deliveries.get_delivery(conn, delivery_id)
+        return str(delivery["state"]) if delivery is not None else None
 
     class _Controller:
         primary_platform = "avibe"
@@ -7927,16 +8125,17 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
 
         await scheduled._drain_requests()
         await _wait_for(
-            lambda: request_store.get_run(second.id)["metadata"].get(
-                "workbench_queue_holds_run"
-            )
-            is True
+            lambda: request_store.get_run(second.id).get("delivery_id") is not None
+        )
+        second_delivery_id = request_store.get_run(second.id)["delivery_id"]
+        await _wait_for(
+            lambda: _delivery_state(second_delivery_id) == "pending_steer"
         )
         state = controller.session_turns.turn_state(session_id)
         assert state["owner"]["run_id"] == first.id
-        assert state["pending_input_count"] == 1
+        assert state["pending_input_count"] == 0
         assert request_store.get_run(first.id)["status"] == "running"
-        assert request_store.get_run(second.id)["status"] == "queued"
+        assert request_store.get_run(second.id)["status"] == "running"
 
         backend.first_alive = False
         await _wait_for(lambda: request_store.get_run(second.id)["status"] == "succeeded")
@@ -9862,6 +10061,55 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
     assert row["last_run_at"] is None and row["last_error"] is None, (
         "the refused write partially landed — a lost compare-and-set must change NOTHING"
     )
+
+
+def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_refusal")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        metadata={"origin": "test"},
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    reconciled: list[tuple[str, str]] = []
+
+    async def _execute_request(**_kwargs):
+        return TaskDispatchResult(error=None, complete_on_return=False)
+
+    async def _reconcile(run_id: str, *, session_id: str):
+        reconciled.append((run_id, session_id))
+        return {"changed": True, "state": "retired"}
+
+    service._execute_request = _execute_request
+    service.controller.session_turns = SimpleNamespace(
+        reconcile_terminal_run_delivery=_reconcile
+    )
+    monkeypatch.setattr(store, "mark_task_result", lambda *_args, **_kwargs: False)
+    queued = service.request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+    )
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR
+    assert reconciled == [(queued.id, session_id)]
 
 
 def test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup(

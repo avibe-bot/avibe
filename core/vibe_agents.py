@@ -242,14 +242,14 @@ def _rewrite_definition_agent_name(
     return _json_dumps(payload), True
 
 
-def _rewrite_queued_agent_provenance(
+def _rewrite_scheduled_agent_provenance(
     raw: str | None,
     reference_names: frozenset[str],
     new_name: str,
     *,
     agent_id: str,
 ) -> tuple[str, bool]:
-    """Move routing names captured on a queued Workbench harness message."""
+    """Move routing names captured in scheduled submission metadata."""
 
     try:
         payload = json.loads(raw or "{}")
@@ -904,7 +904,7 @@ class VibeAgentStore:
             conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id.in_(session_ids))
-                .values(agent_name=new_name)
+                .values(agent_id=agent_id, agent_name=new_name)
             )
 
         run_ids = [
@@ -924,25 +924,8 @@ class VibeAgentStore:
             conn.execute(
                 agent_runs.update()
                 .where(agent_runs.c.id.in_(run_ids))
-                .values(agent_name=new_name)
+                .values(agent_id=agent_id, agent_name=new_name)
             )
-
-        queued_rows = conn.execute(
-            select(messages.c.id, messages.c.metadata_json).where(messages.c.type == "queued")
-        ).mappings().all()
-        for row in queued_rows:
-            metadata, changed = _rewrite_queued_agent_provenance(
-                row["metadata_json"],
-                reference_names,
-                new_name,
-                agent_id=agent_id,
-            )
-            if changed:
-                conn.execute(
-                    messages.update()
-                    .where(messages.c.id == row["id"])
-                    .values(metadata_json=metadata)
-                )
 
         scope_rows = conn.execute(
             select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)

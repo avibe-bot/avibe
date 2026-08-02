@@ -341,7 +341,7 @@ def test_turn_state_composes_foreground_inbox_activity_and_connection_axes():
     manager._engine = SimpleNamespace(begin=lambda: nullcontext(object()))
 
     with mock.patch(
-        "core.session_turns.messages_service.list_queued",
+        "core.session_turns.delivery_store.list_queued",
         return_value=[{"id": "queued-1"}],
     ):
         state = manager.turn_state("ses-1")
@@ -379,7 +379,7 @@ def test_turn_state_reports_authoritative_live_owner_diagnostics():
         started_at="2026-07-18T04:31:26+00:00",
     )
 
-    with mock.patch("core.session_turns.messages_service.list_queued", return_value=[{"id": "queued-1"}]):
+    with mock.patch("core.session_turns.delivery_store.list_queued", return_value=[{"id": "queued-1"}]):
         state = manager.turn_state("ses-1")
 
     assert state["in_flight"] is True

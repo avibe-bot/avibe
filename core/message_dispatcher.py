@@ -23,7 +23,7 @@ from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, Deli
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
-    persist_silent_completion_marker,
+    persist_silent_terminal,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -44,18 +44,18 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 
-def _coalesced_task_execution_ids(payload: dict[str, Any]) -> list[str]:
+def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
     run_ids: list[str] = []
-    primary = str(payload.get("task_execution_id") or "").strip()
-    if primary:
-        run_ids.append(primary)
-    coalesced = payload.get("coalesced_queue")
-    execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-    if isinstance(execution_ids, list):
-        for value in execution_ids:
+    accepted = payload.get("accepted_agent_run_ids")
+    if isinstance(accepted, list):
+        for value in accepted:
             run_id = str(value or "").strip()
             if run_id and run_id not in run_ids:
                 run_ids.append(run_id)
+    if payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
+        primary = str(payload.get("task_execution_id") or "").strip()
+        if primary and primary not in run_ids:
+            run_ids.append(primary)
     return run_ids
 
 
@@ -1030,7 +1030,10 @@ class ConsolidatedMessageDispatcher:
         terminal_status: Optional[str] = None,
     ) -> None:
         payload = context.platform_specific or {}
-        run_ids = _coalesced_task_execution_ids(payload)
+        run_ids = _owned_agent_run_ids(payload)
+        for run_id in self._durable_accepted_agent_run_ids(context):
+            if run_id not in run_ids:
+                run_ids.append(run_id)
         if not run_ids:
             return
         store = None
@@ -1152,8 +1155,11 @@ class ConsolidatedMessageDispatcher:
                 run_id = str(value or "").strip()
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-        if not run_ids and payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
-            run_ids = _coalesced_task_execution_ids(payload)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(payload)
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
         if not run_ids:
             return
         terminal_status = None
@@ -1179,6 +1185,25 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
+
+    def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        if not turn_id:
+            return []
+        manager = getattr(self.controller, "session_turns", None)
+        read = getattr(manager, "accepted_agent_run_ids_for_turn", None)
+        if not callable(read):
+            return []
+        try:
+            return list(read(turn_id))
+        except Exception:
+            logger.warning(
+                "Failed to read durable Agent Run attribution for Turn %s",
+                turn_id,
+                exc_info=True,
+            )
+            return []
+
     def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -1454,24 +1479,10 @@ class ConsolidatedMessageDispatcher:
         else:
             terminal_reason = "failed"
 
-        # OUTBOUND status chokepoint (one of exactly two — the other is the
-        # inbound AgentService.handle_message). A terminal ``result`` ends the
-        # turn, so settle the avibe sidebar dot here regardless of delivery
-        # outcome. Non-avibe contexts resolve to no session id and are skipped;
-        # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
-        # ``_signal_turn_complete``).
         if canonical_type == "result":
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
                 return None
-            # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
-            # failed on is_error) via the turn owner, which applies the active-turn
-            # guard + skips non-avibe contexts. Runtime gate release happens after
-            # the result path clears/persists/streams its own state.
-            if mutates_turn_lifecycle:
-                manager = getattr(self.controller, "session_turns", None)
-                if manager is not None:
-                    manager.on_terminal_result(context, is_error=is_error)
         raw_text = text
         enhanced = None
         if canonical_type == "result" and level != "silent":
@@ -1480,6 +1491,23 @@ class ConsolidatedMessageDispatcher:
             text = enhanced.visible_text
         else:
             text = strip_silent_blocks(raw_text)
+        # Persist the exact terminal body in the Turn snapshot before delivery.
+        # A steer accepted after this Turn settles can then complete its Agent Run
+        # without guessing from transcript order or requiring a live sink.
+        if mutates_turn_lifecycle:
+            terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            manager = getattr(self.controller, "session_turns", None)
+            if manager is not None:
+                manager.on_terminal_result(
+                    context,
+                    is_error=is_error,
+                    terminal_evidence={
+                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        "terminal_error": terminal_error,
+                        "settles_run": output_semantics.settles_run,
+                        "output_provenance": output_semantics.provenance(context),
+                    },
+                )
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
         # we release the SSE waiter and return BEFORE any delivery / persistence /
@@ -1487,6 +1515,13 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if (
+                    mutates_turn_lifecycle
+                    and context.platform != "avibe"
+                    and self._turn_release_settlement(output_semantics)
+                    != SETTLED_BY_STOPPED
+                ):
+                    persist_silent_terminal(context, is_error=is_error)
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
@@ -1511,26 +1546,6 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
-                    if level != "silent" and not is_error:
-                        # A CLEAN silent completion — ``level='normal'`` with an
-                        # empty/``<silent>``-stripped body (we're already inside the
-                        # ``level=='silent' or not text.strip()`` branch, so here the
-                        # body is empty). Persist an INVISIBLE ``silent`` terminal
-                        # marker; without it the activity grouping sees "activity rows +
-                        # no terminal" and misreads a legal completion as interrupted.
-                        #
-                        # This must NOT fire for ``level='silent'``: the user-stop paths
-                        # (codex/claude/opencode) emit a terminal ``result`` with
-                        # ``level='silent'`` and ``is_error=False`` — a stop legitimately
-                        # stays ``interrupted``, so ``not is_error`` is the wrong gate.
-                        # Backend failures also arrive ``level='silent'`` (after a
-                        # visible notify), and are excluded here too. Background
-                        # sessions still keep this local terminal marker; visibility
-                        # suppresses outward delivery, not durable history.
-                        try:
-                            persist_silent_completion_marker(context)
-                        except Exception:
-                            logger.exception("emit_agent_message: silent completion marker failed")
                 return None
             finally:
                 if mutates_turn_lifecycle:
@@ -1984,8 +1999,13 @@ class ConsolidatedMessageDispatcher:
                     and output_semantics.settles_run
                     and bool(run_provenance.get("run_id") or run_provenance.get("run_ids"))
                 )
+                workbench_terminal_waits_for_persistence = (
+                    target_context.platform == "avibe" and mutates_turn_lifecycle
+                )
                 settlement_waits_for_persistence = (
-                    output_semantics.requires_delivery_for_run_settlement or workbench_run_waits_for_persistence
+                    output_semantics.requires_delivery_for_run_settlement
+                    or workbench_run_waits_for_persistence
+                    or workbench_terminal_waits_for_persistence
                 )
 
                 if not settlement_waits_for_persistence:
@@ -2046,6 +2066,10 @@ class ConsolidatedMessageDispatcher:
                             and agent_message_exists(target_context, native_output_id)
                         )
                     )
+                    if workbench_terminal_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError(
+                            "Workbench terminal output was not durably persisted"
+                        )
                     if workbench_run_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError("Workbench run output was not durably persisted")
                     if (

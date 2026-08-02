@@ -8,6 +8,11 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
@@ -864,8 +869,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController()
         controller.emit_agent_message = AsyncMock()
         runtime_key = "wechat_o9:reviewer:/tmp/work"
+        request_context = SimpleNamespace(platform_specific={})
+        set_dispatch_phase(request_context, DISPATCH_PHASE_PREWRITE)
+
+        async def _query_at_native_boundary(*_args, **_kwargs):
+            self.assertIs(backend_dispatch_attempted(request_context), True)
+
         client = SimpleNamespace(
-            query=AsyncMock(),
+            query=AsyncMock(side_effect=_query_at_native_boundary),
             _vibe_runtime_base_session_id="wechat_o9:reviewer",
             _vibe_runtime_session_key=runtime_key,
         )
@@ -884,7 +895,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._receive_messages = AsyncMock()
 
         request = SimpleNamespace(
-            context=SimpleNamespace(),
+            context=request_context,
             message="hello",
             working_path="/tmp/work",
             base_session_id="wechat_o9",
@@ -2820,13 +2831,13 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
                 "task_execution_id": "run-old",
             }
         )
-        coalesced = {"execution_ids": ["run-new", "run-child"]}
+        accepted = ["run-new", "run-child"]
         pending = SimpleNamespace(
             context=SimpleNamespace(
                 platform_specific={
                     "task_trigger_kind": "agent_run",
                     "task_execution_id": "run-new",
-                    "coalesced_queue": coalesced,
+                    "accepted_agent_run_ids": accepted,
                 }
             )
         )
@@ -2834,12 +2845,8 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         ClaudeAgent._adopt_pending_turn_token(ctx, pending)
 
         self.assertEqual(ctx.platform_specific["task_execution_id"], "run-new")
-        self.assertEqual(ctx.platform_specific["coalesced_queue"], coalesced)
-        self.assertIsNot(ctx.platform_specific["coalesced_queue"], coalesced)
-        self.assertIsNot(
-            ctx.platform_specific["coalesced_queue"]["execution_ids"],
-            coalesced["execution_ids"],
-        )
+        self.assertEqual(ctx.platform_specific["accepted_agent_run_ids"], accepted)
+        self.assertIsNot(ctx.platform_specific["accepted_agent_run_ids"], accepted)
 
     def test_clears_stale_agent_run_attribution_for_plain_turn(self):
         ctx = SimpleNamespace(
@@ -2847,7 +2854,7 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
                 "turn_token": "T1",
                 "task_trigger_kind": "agent_run",
                 "task_execution_id": "run-old",
-                "coalesced_queue": {"execution_ids": ["run-old"]},
+                "accepted_agent_run_ids": ["run-old"],
             }
         )
         pending = SimpleNamespace(
@@ -2859,7 +2866,7 @@ class AdoptPendingTurnTokenTests(unittest.TestCase):
         self.assertEqual(ctx.platform_specific["turn_token"], "T2")
         self.assertNotIn("task_trigger_kind", ctx.platform_specific)
         self.assertNotIn("task_execution_id", ctx.platform_specific)
-        self.assertNotIn("coalesced_queue", ctx.platform_specific)
+        self.assertNotIn("accepted_agent_run_ids", ctx.platform_specific)
 
 
 class _FakeBaseAgent(BaseAgent):

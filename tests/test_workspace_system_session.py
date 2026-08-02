@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -668,28 +669,22 @@ def test_a_scoped_clear_cannot_reach_the_reserved_row(monkeypatch, tmp_path: Pat
         assert messages_service.get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None
 
 
-def test_a_deleted_reserved_row_heals_back_to_system(monkeypatch, tmp_path: Path) -> None:
-    """Round-12 doctrine: DURABILITY BY LAZY RECREATION, not by a delete exemption.
-
-    No new guard is added for raw deletes. If any machinery removes the row, the next
-    notice recreates it — under its reserved primary key, its reserved anchor, and now
-    ``system``, so the recreated row is projected exactly like the original.
-    """
+def test_an_accepted_notice_prevents_raw_session_deletion(monkeypatch, tmp_path: Path) -> None:
+    """Accepted communication keeps its Session graph intact."""
     db_path = _migrated_db(monkeypatch, tmp_path)
     engine = _reserved_with_one_notice(db_path)
-    with engine.begin() as conn:
-        conn.execute(
-            text("DELETE FROM agent_sessions WHERE id = :sid"), {"sid": WORKSPACE_NOTICE_SESSION_ID}
-        )
-    with engine.begin() as conn:
-        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
-            WORKSPACE_NOTICE_SESSION_ID
-        )
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM agent_sessions WHERE id = :sid"),
+                {"sid": WORKSPACE_NOTICE_SESSION_ID},
+            )
     with engine.connect() as conn:
         row = conn.execute(
             select(agent_sessions.c.visibility, agent_sessions.c.session_anchor, agent_sessions.c.status)
             .where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
         ).mappings().one()
+        assert messages_service.get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None
     assert row["visibility"] == "system"
     assert row["session_anchor"] == WORKSPACE_NOTICE_SESSION_ANCHOR
     assert row["status"] == "active"

@@ -37,6 +37,7 @@ from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _sav
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
+from storage import message_deliveries
 
 
 class _FakeShowRuntimeManager:
@@ -178,17 +179,53 @@ def _create_agent_session(session_id: str, *, status: str = "active") -> None:
 
 
 def _accept_dispatch(payload: dict, message_type: str = "harness") -> None:
-    from core.session_turns import queue_pending_user_message
-    from storage import messages_service
+    from storage import message_deliveries
     from storage.db import create_sqlite_engine
 
-    if message_type == messages_service.QUEUED_TYPE:
-        with create_sqlite_engine().begin() as conn:
-            assert queue_pending_user_message(
+    with create_sqlite_engine().begin() as conn:
+        delivery = message_deliveries.get_delivery(conn, payload["user_message_id"])
+        assert delivery is not None
+        if message_type == "queued":
+            assert message_deliveries.cas_delivery(
                 conn,
-                payload["user_message_id"],
-                payload["text"],
+                delivery["id"],
+                expected_version=delivery["version"],
+                expected_states=("reserved",),
+                values={"state": "queued"},
             )
+            return
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=delivery["session_id"],
+            initial_delivery_id=delivery["id"],
+            state="starting",
+            backend="codex",
+        )
+        attempt_id = message_deliveries.new_attempt_id()
+        assert message_deliveries.open_start_attempt(
+            conn,
+            delivery["id"],
+            expected_version=delivery["version"],
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key=f"runtime:{turn_id}",
+            runtime_turn_id=f"runtime-turn:{turn_id}",
+            native_turn_id=f"native:{turn_id}",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        )
 
 
 def _write_runtime_archive(tmp_path: Path, *, text: str = "#!/usr/bin/env node\n") -> Path:
@@ -2100,13 +2137,7 @@ def test_private_show_page_idle_dispatch_promotes_visible_harness_row(monkeypatc
     assert dispatches[0]["user_message_id"] == response.get_json()["event"]["message_id"]
     assert dispatches[0]["files"] == []
     assert "dispatch_owner" not in dispatches[0]
-    assert [event_type for event_type, _data in published] == [
-        "show.event",
-        "message.new",
-        "session.activity",
-    ]
-    assert published[1][1]["type"] == "harness"
-    assert published[1][1]["author_name"] == "show_intent"
+    assert [event_type for event_type, _data in published] == ["show.event"]
 
     from storage import messages_service
     from storage.db import create_sqlite_engine
@@ -2177,12 +2208,10 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert dispatch_kwargs == {"timeout": None}
 
 
-def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_502(
+def test_private_show_page_definitive_dispatch_rejection_retires_and_returns_502(
     monkeypatch,
     tmp_path,
 ):
-    from vibe import internal_client
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -2196,7 +2225,7 @@ def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_50
     )
 
     async def fake_dispatch_async(payload, **kwargs):
-        raise internal_client.InternalServerUnavailable("controller unavailable")
+        return {"status_code": 500, "body": {"ok": False}}
 
     with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
         response = app.test_client().post(
@@ -2221,18 +2250,18 @@ def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_50
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    # No turn started, so the reservation remains outside the transcript.
-    assert body["event"]["message"]["type"] == "pending"
-    assert body["event"]["message"]["author_name"] == "show_annotation"
+    # No turn started, so the retired submission remains outside the transcript.
+    assert body["event"]["message"] is None
+    assert body["event"]["message_id"] is None
+    assert body["event"]["delivery"]["state"] == "retired"
+    assert body["event"]["delivery"]["author_name"] == "show_annotation"
     assert [event_type for event_type, _data in published] == ["show.event"]
 
 
-def test_private_show_page_concurrent_dispatch_replay_returns_pending(
+def test_private_show_page_concurrent_dispatch_replay_returns_reserved_delivery(
     monkeypatch,
     tmp_path,
 ):
-    from storage import messages_service
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -2269,82 +2298,11 @@ def test_private_show_page_concurrent_dispatch_replay_returns_pending(
     body = response.get_json()
     assert body["ok"] is True
     assert body["dispatch_pending"] is True
-    assert body["event"]["message"]["type"] == messages_service.PENDING_TYPE
+    assert body["event"]["message"] is None
+    assert body["event"]["delivery"]["state"] == "reserved"
 
 
-def test_legacy_settled_show_dispatch_replay_does_not_require_reserved_prompt(
-    monkeypatch,
-):
-    from storage import messages_service
-
-    async def unexpected_dispatch(*_args, **_kwargs):
-        pytest.fail("a settled legacy Show input must not dispatch again")
-
-    monkeypatch.setattr("vibe.internal_client.dispatch_async", unexpected_dispatch)
-    outcome = asyncio.run(
-        ui_server._run_show_event_dispatch(
-            {
-                "id": "show_evt_legacy_settled",
-                "session_id": "ses123",
-                "message": {
-                    "id": "msg_legacy_settled",
-                    "type": messages_service.HARNESS_TYPE,
-                    "metadata": {},
-                },
-            }
-        )
-    )
-
-    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
-
-
-def test_legacy_pending_show_dispatch_replays_stored_prompt(monkeypatch):
-    from storage import messages_service
-
-    dispatched = {}
-
-    async def accept_dispatch(payload, **_kwargs):
-        dispatched.update(payload)
-        return {"status_code": 202, "body": {"ok": True}}
-
-    monkeypatch.setattr("vibe.internal_client.dispatch_async", accept_dispatch)
-    monkeypatch.setattr(
-        ui_server,
-        "_settle_show_event_message",
-        lambda _event: {"type": messages_service.HARNESS_TYPE},
-    )
-    outcome = asyncio.run(
-        ui_server._run_show_event_dispatch(
-            {
-                "id": "show_evt_legacy_pending",
-                "session_id": "ses123",
-                "type": "human.annotation.created",
-                "transcript_text": "[show-annotation] comment\n\nLegacy prompt",
-                "payload": {"intent": "comment"},
-                "message": {
-                    "id": "msg_legacy_pending",
-                    "type": messages_service.PENDING_TYPE,
-                    "content": {
-                        "text": "[show-annotation] comment\n\nLegacy prompt",
-                    },
-                    "metadata": {},
-                },
-            }
-        )
-    )
-
-    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
-    assert dispatched["text"] == (
-        "[show-annotation] comment\n\nLegacy prompt\n\n"
-        "Show event id: show_evt_legacy_pending\n\n"
-        "如需在页面上原位回应，可执行：\n"
-        "  vibe show reply show_evt_legacy_pending --message '<你的回答>'\n"
-        "（也可以直接修改页面内容来响应，按场景选择。）"
-    )
-
-
-def test_current_pending_annotation_never_dispatches_display_body(monkeypatch):
-    from storage import messages_service
+def test_dispatching_show_event_requires_delivery_authority(monkeypatch):
 
     async def unexpected_dispatch(*_args, **_kwargs):
         pytest.fail("a current annotation without its reserved prompt must not dispatch")
@@ -2359,7 +2317,7 @@ def test_current_pending_annotation_never_dispatches_display_body(monkeypatch):
                 "transcript_text": "Visible words only",
                 "message": {
                     "id": "msg_missing_prompt",
-                    "type": messages_service.PENDING_TYPE,
+                    "type": "annotation",
                     "content": {
                         "text": "Visible words only",
                         "annotation": {
@@ -2376,9 +2334,7 @@ def test_current_pending_annotation_never_dispatches_display_body(monkeypatch):
     assert outcome is ui_server._ShowEventDispatchOutcome.FAILED
 
 
-def test_pending_show_dispatch_rejects_whitespace_only_reserved_prompt(monkeypatch):
-    from storage import messages_service
-
+def test_reserved_show_dispatch_rejects_whitespace_only_dispatch_text(monkeypatch):
     async def unexpected_dispatch(*_args, **_kwargs):
         pytest.fail("a blank Show prompt must not start a turn")
 
@@ -2388,12 +2344,10 @@ def test_pending_show_dispatch_rejects_whitespace_only_reserved_prompt(monkeypat
             {
                 "id": "show_evt_blank_prompt",
                 "session_id": "ses123",
-                "message": {
+                "delivery": {
                     "id": "msg_blank_prompt",
-                    "type": messages_service.PENDING_TYPE,
-                    "metadata": {
-                        messages_service.QUEUED_DISPATCH_TEXT_KEY: " \n\t ",
-                    },
+                    "state": "reserved",
+                    "dispatch_text": " \n\t ",
                 },
             }
         )
@@ -2402,7 +2356,40 @@ def test_pending_show_dispatch_rejects_whitespace_only_reserved_prompt(monkeypat
     assert outcome is ui_server._ShowEventDispatchOutcome.FAILED
 
 
-def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
+@pytest.mark.parametrize(
+    "delivery_state",
+    [
+        "queued",
+        "claimed",
+        "pending_steer",
+        "steering",
+        "reconciling_steer",
+        "interrupt_waiting",
+    ],
+)
+def test_show_dispatch_replay_accepts_existing_admission(monkeypatch, delivery_state):
+    async def unexpected_dispatch(*_args, **_kwargs):
+        pytest.fail("an admitted Show Delivery must not be dispatched twice")
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", unexpected_dispatch)
+    outcome = asyncio.run(
+        ui_server._run_show_event_dispatch(
+            {
+                "id": "show_evt_admitted",
+                "session_id": "ses123",
+                "delivery": {
+                    "id": "msg_admitted",
+                    "state": delivery_state,
+                    "dispatch_text": "already admitted",
+                },
+            }
+        )
+    )
+
+    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
+
+
+def test_private_show_page_materializes_same_submission_after_synchronous_acceptance(
     monkeypatch,
     tmp_path,
 ):
@@ -2420,29 +2407,8 @@ def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
     settled = {}
 
     async def fake_dispatch_async(payload, **kwargs):
-        from core import session_turns
-        from storage import messages_service
-        from storage.db import create_sqlite_engine
-
-        with create_sqlite_engine().begin() as conn:
-            assert session_turns.queue_pending_user_message(
-                conn,
-                payload["user_message_id"],
-                payload["text"],
-            )
-            segment = messages_service.list_queued(conn, "ses123")
-            metadata = dict(segment[0]["metadata"])
-            metadata.pop(session_turns.QUEUED_DISPATCH_TEXT_KEY)
-            visible = session_turns._promote_merged_user_segment(
-                conn,
-                segment,
-                text=segment[0]["text"],
-                attachments=[],
-                metadata=metadata,
-                author_id=None,
-            )
         _accept_dispatch(payload)
-        settled.update(original_id=payload["user_message_id"], visible=visible)
+        settled["submission_id"] = payload["user_message_id"]
         return {"status_code": 202, "body": {"ok": True, "drained": True}}
 
     with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
@@ -2466,9 +2432,8 @@ def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
 
     assert response.status_code == 201
     event = response.get_json()["event"]
-    assert settled["visible"]["id"] != settled["original_id"]
-    assert event["message_id"] == settled["visible"]["id"]
-    assert event["message"]["id"] == settled["visible"]["id"]
+    assert event["message_id"] == settled["submission_id"]
+    assert event["message"]["id"] == settled["submission_id"]
     assert event["message"]["type"] == "annotation"
     assert event["message"]["author_name"] == "show_annotation"
     # The real manager already publishes the promoted row. The route only
@@ -2489,9 +2454,7 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
     dispatch_done = asyncio.Event()
 
     async def fake_dispatch_async(payload, **kwargs):
-        from storage import messages_service
-
-        _accept_dispatch(payload, messages_service.QUEUED_TYPE)
+        _accept_dispatch(payload, "queued")
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True, "queued": True}}
 
@@ -2516,13 +2479,13 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
 
     assert response.status_code == 201
     asyncio.run(asyncio.wait_for(dispatch_done.wait(), timeout=1))
-    message_id = response.get_json()["event"]["message_id"]
+    delivery_id = response.get_json()["event"]["delivery"]["id"]
 
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
     with create_sqlite_engine().connect() as conn:
-        queued = messages_service.list_queued(conn, "ses123")
+        queued = message_deliveries.list_queued(conn, "ses123")
         transcript = messages_service.list_session_messages(
             conn,
             session_id="ses123",
@@ -2531,7 +2494,7 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
             tail=True,
         )
     assert [(message["id"], message["text"]) for message in queued] == [
-        (message_id, response.get_json()["event"]["transcript_text"])
+        (delivery_id, response.get_json()["event"]["transcript_text"])
     ]
     assert transcript["messages"] == []
     assert [event_type for event_type, _data in published] == ["show.event", "queue.updated"]
@@ -3047,12 +3010,13 @@ def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
         event = store.append(
             "ses123",
             {
-                "type": "assistant.mark.created",
-                "mark": {
-                    "target": "summary",
-                    "body": "body",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "body",
+                    "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -3062,12 +3026,14 @@ def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
     assert response.status_code == 200
     public_event = response.get_json()["events"][0]
     assert public_event["id"] == event["id"]
-    assert public_event["type"] == "assistant.mark.created"
-    assert public_event["payload"]["body"] == "body"
+    assert public_event["type"] == "human.annotation.created"
+    assert public_event["payload"]["comment"] == "body"
     assert "session_id" not in public_event
     assert "scope_id" not in public_event
     assert "message_id" not in public_event
     assert "message" not in public_event
+    assert "delivery_id" not in public_event
+    assert "delivery" not in public_event
 
 
 def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
@@ -3084,12 +3050,13 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
             "ses123",
             {
                 "id": "show_evt_public",
-                "type": "assistant.mark.created",
-                "mark": {
-                    "target": "summary",
-                    "body": "body",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "body",
+                    "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -3113,6 +3080,8 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
     assert '"scope_id"' not in body
     assert '"message_id"' not in body
     assert '"message"' not in body
+    assert '"delivery_id"' not in body
+    assert '"delivery"' not in body
 
 
 def test_public_show_events_stream_redacts_screenshot_path(monkeypatch, tmp_path):

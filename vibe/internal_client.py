@@ -379,7 +379,12 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def send_now(
+    session_id: str,
+    *,
+    expected_delivery_id: str | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Ask the controller to run a session's send-while-busy queue immediately
     ("立即发送"): interrupt any running turn + flush the queue. Returns
     ``{status_code, body}``; raises ``InternalServerUnavailable`` on socket
@@ -399,7 +404,14 @@ async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> di
             # slow-but-successful interrupt isn't read-timed-out.
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
-            resp = await client.post(f"/internal/send-now/{session_id}")
+            resp = await client.post(
+                f"/internal/send-now/{session_id}",
+                params=(
+                    {"expected_delivery_id": expected_delivery_id}
+                    if expected_delivery_id
+                    else None
+                ),
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}

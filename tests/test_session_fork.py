@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -24,8 +25,8 @@ from core.vibe_agents import VibeAgentStore
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
-from storage import messages_service
-from storage.models import agent_runs, agent_sessions, scope_settings
+from storage import message_deliveries, messages_service
+from storage.models import agent_events, agent_runs, agent_sessions, messages, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -82,6 +83,52 @@ def _seed_source_session(db_path: Path, tmp_path: Path, *, backend: str = "codex
             )
     finally:
         engine.dispose()
+
+
+def _seed_started_delivery(conn, *, scope_id: str, session_id: str, text: str) -> str:
+    delivery_id = message_deliveries.new_delivery_id()
+    turn_id = message_deliveries.new_turn_id()
+    attempt_id = message_deliveries.new_attempt_id()
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=delivery_id,
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type="user",
+            text=text,
+        ),
+        dispatch_text=text,
+    )
+    claimed = message_deliveries.claim_start_batch(
+        conn,
+        turn_id=turn_id,
+        session_id=session_id,
+        backend="codex",
+        deliveries=[delivery],
+        dispatch_text=text,
+        attempt_id=attempt_id,
+    )
+    assert message_deliveries.bind_native_start(
+        conn,
+        turn_id,
+        expected_version=int(claimed["turn"]["version"]),
+        runtime_key=f"runtime:{turn_id}",
+        runtime_turn_id=f"runtime-turn:{turn_id}",
+        native_turn_id=f"native:{turn_id}",
+    ) is not None
+    assert message_deliveries.materialize_start_acceptance(
+        conn,
+        turn_id=turn_id,
+        evidence={"kind": "test_native_acceptance"},
+    )
+    return turn_id
 
 
 def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path) -> None:
@@ -1329,16 +1376,22 @@ def test_fork_source_state_ignores_operational_rows_after_anchor(
                 message_type="user",
                 text="do the long task",
             )
-            for message_type in ("queued", "pending", "draft", "notify"):
-                messages_service.append(
-                    conn,
-                    scope_id=row["scope_id"],
-                    session_id=source_id,
-                    platform="avibe",
-                    author="agent",
-                    message_type=message_type,
-                    text=message_type,
-                )
+            message_deliveries.enqueue_queued(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                text="queued",
+            )
+            message_deliveries.set_draft(conn, source_id, "draft")
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="notify",
+            )
 
         state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
 
@@ -1511,9 +1564,7 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
 
 
 def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: Path) -> None:
-    """A codex/opencode source whose latest turn completed SILENTLY (the invisible
-    ``silent`` marker follows its input + activity) is TERMINAL — the fork must not
-    trim/roll back the completed turn as if it were still running."""
+    """A reply-less durable terminal snapshot prevents running-Turn trimming."""
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)  # agent_backend='codex'
     engine = create_sqlite_engine(db_path)
@@ -1522,17 +1573,22 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).mappings().one()["scope_id"]
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="user", message_type="user", text="do the thing",
+            turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="do the thing",
             )
             messages_service.append(
                 conn, scope_id=scope_id, session_id=source_id, platform="avibe",
                 author="agent", message_type="assistant", text="working",
             )
-            messages_service.append(
-                conn, scope_id=scope_id, session_id=source_id, platform="avibe",
-                author="agent", message_type=messages_service.SILENT_TYPE, text="",
+            message_deliveries.terminalize_turn(
+                conn,
+                turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="test_replyless_completion",
             )
     finally:
         engine.dispose()
@@ -1540,6 +1596,366 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
     result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
     # A terminal exists after the input anchor → not a running turn → no trim.
     assert result.fork.trim_latest_running_turn is False
+
+
+def test_not_written_successor_does_not_mask_accepted_source_turn(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            turn_id = _seed_started_delivery(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                text="keep working",
+            )
+            successor_id = message_deliveries.new_delivery_id()
+            successor_turn_id = message_deliveries.new_turn_id()
+            successor = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=successor_id,
+                session_id=source_id,
+                priority="p0",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="replacement",
+                ),
+                dispatch_text="replacement",
+            )
+            message_deliveries.insert_turn(
+                conn,
+                turn_id=successor_turn_id,
+                session_id=source_id,
+                initial_delivery_id=successor_id,
+                state="waiting",
+                backend="codex",
+            )
+            assert message_deliveries.cas_delivery(
+                conn,
+                successor_id,
+                expected_version=int(successor["version"]),
+                expected_states=("reserved",),
+                values={
+                    "state": "interrupt_waiting",
+                    "turn_id": successor_turn_id,
+                    "turn_role": "initial",
+                    "turn_position": 0,
+                },
+            ) is not None
+            message_deliveries.terminalize_turn(
+                conn,
+                successor_turn_id,
+                outcome="not_written",
+                settled_by="definitive_stop_receipt",
+                evidence_kind="stop_refused",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            message_deliveries.terminalize_turn(
+                conn,
+                turn_id,
+                outcome="completed",
+                settled_by="terminal_result",
+                evidence_kind="replyless_completion",
+            )
+    finally:
+        engine.dispose()
+
+    completed = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert completed.fork.trim_latest_running_turn is False
+
+
+def test_fork_anchor_uses_active_turn_initial_delivery_before_transcript_order(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous result persisted after the queued submission",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == previous_result["id"])
+                .values(
+                    created_at="2026-08-01T00:02:00Z",
+                    updated_at="2026-08-01T00:02:00Z",
+                )
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            delivery = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="queued before the previous result",
+                ),
+                dispatch_text="queued before the previous result",
+                now="2026-08-01T00:01:00Z",
+            )
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                backend="codex",
+                deliveries=[delivery],
+                dispatch_text="queued before the previous result",
+                attempt_id=attempt_id,
+            )
+            assert message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(claimed["turn"]["version"]),
+                runtime_key="runtime",
+                runtime_turn_id="runtime-turn",
+                native_turn_id="native-turn",
+            ) is not None
+            assert message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "delayed_start_acceptance"},
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == delivery_id
+    assert result.fork.trim_latest_running_turn is True
+
+
+@pytest.mark.parametrize("start_receipt", ["unwritten", "unknown"])
+def test_fork_anchor_treats_pre_materialization_start_as_running(
+    tmp_path: Path,
+    start_receipt: str,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            previous_result = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="previous terminal boundary",
+            )
+            delivery_id = message_deliveries.new_delivery_id()
+            turn_id = message_deliveries.new_turn_id()
+            attempt_id = message_deliveries.new_attempt_id()
+            delivery = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id=source_id,
+                priority="p3",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="possibly written native input",
+                ),
+                dispatch_text="possibly written native input",
+            )
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=source_id,
+                backend="codex",
+                deliveries=[delivery],
+                dispatch_text="possibly written native input",
+                attempt_id=attempt_id,
+            )
+            if start_receipt == "unknown":
+                assert message_deliveries.mark_start_unknown(
+                    conn,
+                    turn_id,
+                    expected_version=int(claimed["turn"]["version"]),
+                    receipt={"reason": "restart_without_native_evidence"},
+                ) is not None
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == previous_result["id"]
+    assert result.fork.trim_latest_running_turn is True
+
+
+def test_reserve_forked_session_migrated_silent_completion_is_terminal_no_trim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A migrated legacy silent event remains a terminal fork boundary."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            message_micros = int(
+                datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1_000_000
+            )
+            monkeypatch.setattr(
+                messages_service,
+                "_new_message_id",
+                lambda: f"msg_{message_micros:015x}{'0' * 8}",
+            )
+            message = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="latest completed input",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == message["id"])
+                .values(
+                    created_at="2026-08-01T00:00:00Z",
+                    updated_at="2026-08-01T00:00:00Z",
+                )
+            )
+            conn.execute(
+                agent_events.insert().values(
+                    id="evt_legacy_silent_fork_boundary",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    turn_id=None,
+                    run_id=None,
+                    platform="avibe",
+                    agent_name="worker",
+                    backend="codex",
+                    event_type="silent_terminal",
+                    visibility="trace",
+                    sequence=None,
+                    content_text=None,
+                    content_json="{}",
+                    metadata_json=json.dumps(
+                        {
+                            "legacy_message_id": "msg_legacy_silent",
+                            "migration_revision": "20260731_0043",
+                        }
+                    ),
+                    source="agent",
+                    created_at="2026-08-01T00:00:01Z",
+                    updated_at="2026-08-01T00:00:01Z",
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is False
+
+
+def test_earlier_same_second_silent_terminal_does_not_close_latest_input(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    base = 1_800_000_000_000_000
+    timestamp = "2026-08-01T00:00:00Z"
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(
+                    agent_sessions.c.id == source_id
+                )
+            ).scalar_one()
+            conn.execute(
+                agent_events.insert().values(
+                    id=f"evt_{base + 1_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    event_type="silent_terminal",
+                    visibility="trace",
+                    content_json="{}",
+                    metadata_json="{}",
+                    source="agent",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            conn.execute(
+                messages.insert().values(
+                    id=f"msg_{base + 2_000:015x}{'0' * 8}",
+                    scope_id=scope_id,
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    type="user",
+                    source="user",
+                    content_text="new still-running input",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
 
 
 def test_forking_an_inherited_null_session_keeps_its_explicit_pins(

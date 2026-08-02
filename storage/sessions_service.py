@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import Connection, and_, case, func, or_, select
+from sqlalchemy import Connection, and_, case, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -30,7 +30,10 @@ from storage.agent_session_rows import (
 )
 from storage.models import (
     agents,
+    agent_runs,
     agent_sessions,
+    message_deliveries,
+    messages,
     metadata,
     run_definitions,
     runtime_records,
@@ -45,8 +48,10 @@ from storage.session_reclaim import (
     reclaim_bound_definitions,
     reclaim_ledger_transaction,
     reconcile_explicit_overrides,
+    retire_session_delivery_owners,
 )
 from storage.settings_service import make_scope_id, upsert_scope
+from storage import message_deliveries as delivery_store
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -2151,14 +2156,11 @@ def _delete_agent_session_rows(
     reclaim_mode: ReclaimMode,
     reclaim_reason: str | None,
 ) -> int:
-    """Hard-delete session rows, reclaiming what was bound to them first.
+    """Remove Session rows from active routing, preserving retained history.
 
-    Every hard delete of a session row runs through here so no teardown path can
-    leave a ``run_definitions.session_id`` pointing at a row that no longer exists
-    — the root cause of a pinned task that fires and fails forever. The reclaim
-    must run BEFORE the delete: it is the last moment both rows are visible, and
-    the settings snapshot it takes is what lets a later rebind preserve the
-    session's model / agent instead of silently resetting to scope defaults.
+    Empty rows are deleted. A row with Message or Delivery history is archived
+    and re-anchored instead, so ``/new`` frees the original anchor without
+    orphaning immutable communication or execution audit.
 
     ``id_query`` is re-asserted BY THE DELETE, so a row that stopped matching after
     the id read is kept, and the returned count names only the rows actually removed.
@@ -2193,20 +2195,87 @@ def _delete_agent_session_rows(
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
         # a superseded one the thread has already moved off.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
-        removed = bool(
+        claimed = bool(
             conn.execute(
-                agent_sessions.delete()
+                agent_sessions.update()
                 .where(agent_sessions.c.id == session_id)
                 .where(agent_sessions.c.id.in_(id_query))
+                .values(updated_at=agent_sessions.c.updated_at)
             ).rowcount
         )
-        if not removed:
+        if not claimed:
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",
                 session_id,
             )
             continue
+        has_retained_history = bool(
+            conn.execute(
+                select(messages.c.id)
+                .where(messages.c.session_id == session_id)
+                .limit(1)
+            ).first()
+            or conn.execute(
+                select(message_deliveries.c.id)
+                .where(message_deliveries.c.session_id == session_id)
+                .limit(1)
+            ).first()
+        )
+        if has_retained_history:
+            row = conn.execute(
+                select(agent_sessions.c.session_anchor).where(
+                    agent_sessions.c.id == session_id
+                )
+            ).first()
+            current_anchor = str((row or ("",))[0] or "")
+            superseded_anchor = (
+                current_anchor
+                if SUPERSEDED_ANCHOR_INFIX in current_anchor
+                else (
+                    f"{current_anchor}{SUPERSEDED_ANCHOR_INFIX}{session_id}"
+                    if current_anchor
+                    else f"superseded:{session_id}"
+                )
+            )
+            now = _utc_now_iso()
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
+                .values(cancel_requested=1, cancel_requested_at=now, updated_at=now)
+            )
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.session_id == session_id)
+                .where(agent_runs.c.status.in_(("pending", "queued")))
+                .values(status="canceled", completed_at=now, updated_at=now)
+            )
+            retire_session_delivery_owners(conn, session_id)
+            delivery_store.set_draft(conn, session_id, None)
+            retained = conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == session_id)
+                .values(
+                    status="archived",
+                    agent_status="idle",
+                    session_anchor=superseded_anchor,
+                    updated_at=now,
+                )
+            )
+            if retained.rowcount != 1:
+                raise RuntimeError(
+                    f"claimed Session {session_id} disappeared during archival"
+                )
+            deleted += 1
+            continue
+        removed = bool(
+            conn.execute(
+                agent_sessions.delete().where(agent_sessions.c.id == session_id)
+            ).rowcount
+        )
+        if not removed:
+            raise RuntimeError(f"claimed Session {session_id} disappeared during teardown")
         deleted += 1
     return deleted
 

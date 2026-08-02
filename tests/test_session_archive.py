@@ -18,12 +18,20 @@ from config import paths
 from core.scheduled_tasks import resolve_session_id_target
 from core.show_pages import ShowPageError, ShowPageStore
 from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
-from storage import messages_service
+from storage import message_deliveries, messages_service
 from storage import vault_service as vs
 from storage import workbench_sessions_service as wss
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, agent_sessions, messages, run_definitions, show_pages, vault_grants, vault_requests
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    message_deliveries as delivery_rows,
+    run_definitions,
+    show_pages,
+    vault_grants,
+    vault_requests,
+)
 from storage.vault_crypto import Sealed
 from storage.session_reclaim import session_teardown_context
 from storage.sessions_service import SQLiteSessionsService
@@ -57,13 +65,21 @@ def _insert_def(conn, *, def_id: str, session_id: str, definition_type: str, del
     )
 
 
-def _insert_run(conn, *, run_id: str, session_id: str, status: str) -> None:
+def _insert_run(
+    conn,
+    *,
+    run_id: str,
+    session_id: str,
+    status: str,
+    delivery_id: str | None = None,
+) -> None:
     conn.execute(
         agent_runs.insert().values(
             id=run_id,
             run_type="agent",
             status=status,
             session_id=session_id,
+            delivery_id=delivery_id,
             cancel_requested=0,
             created_at=NOW,
             updated_at=NOW,
@@ -318,9 +334,9 @@ def test_resolve_session_id_target_rejects_archived(tmp_path: Path) -> None:
 def _pending_ids(conn, session_id: str) -> list[str]:
     return list(
         conn.execute(
-            select(messages.c.id)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == messages_service.PENDING_TYPE)
+            select(delivery_rows.c.id)
+            .where(delivery_rows.c.session_id == session_id)
+            .where(delivery_rows.c.state == "reserved")
         ).scalars()
     )
 
@@ -338,33 +354,58 @@ def test_archive_clears_queued_and_pending_messages(tmp_path: Path) -> None:
 
     engine = create_sqlite_engine(db_path)
     with engine.begin() as conn:
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q1")
-        messages_service.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q2")
-        # A send mid-dispatch reserved its row as ``pending``; the user also has a
-        # saved composer draft.
-        messages_service.append(
+        queued_run_delivery = message_deliveries.enqueue_queued(
             conn,
             scope_id=scope_id,
             session_id=sid,
-            platform="avibe",
-            author="user",
-            message_type=messages_service.PENDING_TYPE,
-            text="reserved",
+            text="q1",
         )
-        messages_service.set_draft(conn, scope_id=scope_id, session_id=sid, text="half-typed")
+        message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q2")
+        _insert_run(
+            conn,
+            run_id="run_delivery_archive",
+            session_id=sid,
+            status="running",
+            delivery_id=str(queued_run_delivery["id"]),
+        )
+        # A send mid-dispatch reserved its row as ``pending``; the user also has a
+        # saved composer draft.
+        message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_reserved_archive",
+            session_id=sid,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=sid,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="reserved",
+            ),
+            dispatch_text="reserved",
+        )
+        message_deliveries.set_draft(conn, sid, "half-typed")
     with engine.connect() as conn:
-        assert len(messages_service.list_queued(conn, sid)) == 2
+        assert len(message_deliveries.list_queued(conn, sid)) == 2
         assert len(_pending_ids(conn, sid)) == 1
-        assert messages_service.get_draft(conn, sid)
+        assert message_deliveries.get_draft(conn, sid)
         # Queued prompts are surfaced in the reclaim preview (not silently dropped).
         assert wss.count_bound_resources(conn, sid)["queued"] == 2
 
     with engine.begin() as conn:
         wss.archive_session(conn, sid)
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, sid) == []
+        assert message_deliveries.list_queued(conn, sid) == []
         assert _pending_ids(conn, sid) == []
-        assert not messages_service.get_draft(conn, sid)
+        assert not message_deliveries.get_draft(conn, sid)
+        archived_run = conn.execute(
+            select(agent_runs).where(agent_runs.c.id == "run_delivery_archive")
+        ).mappings().one()
+        assert archived_run["status"] == "canceled"
+        assert archived_run["cancel_requested"] == 1
+        assert archived_run["completed_at"] is not None
 
 
 def test_archived_show_page_cannot_be_republished(monkeypatch, tmp_path: Path) -> None:

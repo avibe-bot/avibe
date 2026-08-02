@@ -11,8 +11,10 @@ from aiohttp.client_reqrep import ConnectionKey
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
+    SteerReconcileRequest,
     SteerRequest,
     active_steer_identity,
+    reconcile_steer_attempt,
     steer_active_turn,
 )
 from modules.agents.base import AgentRequest
@@ -148,7 +150,10 @@ class _OpenCodeServer:
             raise self.error
         self.messages.append(
             {
-                "info": {"id": f"steer-user-{len(self.prompt_calls)}", "role": "user"},
+                "info": {
+                    "id": kwargs.get("message_id") or f"steer-user-{len(self.prompt_calls)}",
+                    "role": "user",
+                },
                 "parts": [{"type": "text", "text": kwargs["text"]}],
             }
         )
@@ -165,6 +170,13 @@ class _OpenCodeServer:
         if self.status_responses:
             return self.status_responses.pop(0)
         return self.status
+
+    async def get_message(self, session_id: str, message_id: str, directory: str) -> dict:
+        return next(
+            message
+            for message in self.messages
+            if message.get("info", {}).get("id") == message_id
+        )
 
     async def abort_session(self, *args) -> bool:
         self.abort_calls.append(args)
@@ -605,6 +617,49 @@ async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> No
 
 
 @pytest.mark.anyio
+async def test_opencode_reconciles_exact_native_attempt_without_resteering() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer()
+    agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    attempt_id = "atm_exact_restart_evidence"
+    try:
+        identity = active_steer_identity(controller, "opencode", "avibe-session")
+        assert identity is not None
+        receipt = await steer_active_turn(
+            controller,
+            "opencode",
+            SteerRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                text=STEER_TEXT,
+                attempt_id=attempt_id,
+            ),
+        )
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert server.prompt_calls[0]["message_id"] == attempt_id
+
+        reconciled = await reconcile_steer_attempt(
+            controller,
+            "opencode",
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id=identity[0],
+                expected_native_turn_id=identity[1],
+                attempt_id=attempt_id,
+            ),
+        )
+
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.details["native_message_id"] == attempt_id
+        assert len(server.prompt_calls) == 1
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
@@ -853,6 +908,243 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
+    backend_failure.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reconciliation_fails", [False, True])
+async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanup(
+    monkeypatch,
+    reconciliation_fails: bool,
+) -> None:
+    primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["delivery_start_attempt_id"] = "atm-start"
+    events: list[str] = []
+
+    class _Server:
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return []
+
+        async def prompt_async(self, **kwargs):
+            events.append("prompt")
+            raise OpenCodePromptRejectedError(409, "prompt refused")
+
+        async def abort_session(self, session_id, directory):
+            events.append("abort")
+            return True
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, agent):
+            return None
+
+    class _SessionManager:
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "opencode-session"
+
+        def set_request_session(self, base_session_id, session_id, directory, session_key):
+            return None
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            events.append("persist_poll")
+
+        def remove_active_poll(self, session_id):
+            events.append("remove_poll")
+
+    def reconcile_start_attempt_not_written(turn_id, attempt_id, *, backend):
+        events.append(f"reconcile:{turn_id}:{attempt_id}:{backend}")
+        if reconciliation_fails:
+            raise RuntimeError("storage unavailable")
+        return True
+
+    server = _Server()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            platform="avibe",
+            reply_enhancements=False,
+            show_pages_prompt=False,
+            remote_access=None,
+            language="en",
+            opencode=SimpleNamespace(
+                default_model=None,
+                default_provider=None,
+                default_reasoning_effort=None,
+            ),
+        ),
+        model_hub_runtime=None,
+        processing_indicator=SimpleNamespace(snapshot_request=lambda request: {}),
+        get_opencode_overrides=lambda context: (None, None, None),
+        session_turns=SimpleNamespace(
+            reconcile_start_attempt_not_written=reconcile_start_attempt_not_written,
+        ),
+    )
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent.sessions = _Sessions()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = SimpleNamespace()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._get_server = AsyncMock(return_value=server)
+    agent._delete_ack = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent._prepare_message_with_files = lambda request: request.message
+    agent.record_model_hub_native_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        lambda **kwargs: "system prompt",
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        lambda *args, **kwargs: None,
+    )
+    backend_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        backend_failure,
+    )
+
+    await agent._process_message(primary)
+
+    assert events[:3] == [
+        "persist_poll",
+        "prompt",
+        "reconcile:logical-turn:atm-start:opencode",
+    ]
+    assert "abort" not in events
+    assert ("remove_poll" in events) is not reconciliation_fails
+    backend_failure.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
+    monkeypatch,
+) -> None:
+    primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["delivery_start_attempt_id"] = "atm-start"
+    events: list[str] = []
+
+    class _Server:
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return []
+
+        async def prompt_async(self, **kwargs):
+            events.append("prompt")
+            raise OSError("connection lost after prompt write")
+
+        async def abort_session(self, session_id, directory):
+            events.append("abort")
+            return True
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, agent):
+            return None
+
+    class _SessionManager:
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "opencode-session"
+
+        def set_request_session(self, base_session_id, session_id, directory, session_key):
+            return None
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            events.append("persist_poll")
+
+        def remove_active_poll(self, session_id):
+            events.append("remove_poll")
+
+    server = _Server()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            platform="avibe",
+            reply_enhancements=False,
+            show_pages_prompt=False,
+            remote_access=None,
+            language="en",
+            opencode=SimpleNamespace(
+                default_model=None,
+                default_provider=None,
+                default_reasoning_effort=None,
+            ),
+        ),
+        model_hub_runtime=None,
+        processing_indicator=SimpleNamespace(snapshot_request=lambda request: {}),
+        get_opencode_overrides=lambda context: (None, None, None),
+    )
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent.sessions = _Sessions()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = SimpleNamespace()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._get_server = AsyncMock(return_value=server)
+    agent._delete_ack = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent._prepare_message_with_files = lambda request: request.message
+    agent.record_model_hub_native_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        lambda **kwargs: "system prompt",
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        lambda *args, **kwargs: None,
+    )
+    backend_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        backend_failure,
+    )
+
+    await agent._process_message(primary)
+
+    assert events == ["persist_poll", "prompt", "abort"]
     backend_failure.assert_awaited_once()
 
 

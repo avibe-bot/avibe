@@ -1642,24 +1642,6 @@ def _like_contains_pattern(value: str) -> str:
     return "%" + "%".join(escape(part) for part in parts) + "%"
 
 
-def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> dict[str, Any]:
-    messages: list[dict[str, str]] = []
-    prompt_parts: list[str] = []
-    for run_id in run_ids:
-        row = rows[run_id]
-        message = str(row["message"] or row["prompt"] or "")
-        messages.append({"execution_id": run_id, "message": message})
-        if message:
-            prompt_parts.append(message)
-    metadata: dict[str, Any] = {
-        "execution_ids": run_ids,
-        "messages": messages,
-    }
-    if prompt_parts:
-        metadata["prompt"] = "\n\n---\n\n".join(prompt_parts)
-    return metadata
-
-
 def cancel_not_requested() -> Any:
     """SQL for "still nobody has asked to cancel this run", evaluated by SQLite.
 
@@ -1706,10 +1688,10 @@ def _cancel_aware_terminal_status(
     return status, guards
 
 
-def _coalesced_terminal_write(
+def _turn_participant_terminal_write(
     conn: Any, row: Any, *, run_id: str, ok: bool, error: Optional[str], now: str
 ) -> Optional[tuple[dict[str, Any], list[Any]]]:
-    """The values and the CAS predicates one coalesced run's settlement needs.
+    """Build one Turn participant's guarded terminal write.
 
     ``None`` means "write nothing": the row was already settled by another actor.
     Without that skip the UPDATE rewrites a row wholesale — a ``record_run_output``
@@ -1758,7 +1740,7 @@ def _coalesced_terminal_write(
     return values, predicates
 
 
-def complete_coalesced_agent_runs_for_workbench_in_connection(
+def settle_agent_runs_for_turn_in_connection(
     conn: Any,
     run_ids: list[str],
     *,
@@ -1795,7 +1777,7 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
         for final_attempt in (False, True):
             if row is None:
                 break
-            plan = _coalesced_terminal_write(
+            plan = _turn_participant_terminal_write(
                 conn, row, run_id=run_id, ok=ok, error=error, now=now
             )
             if plan is None:
@@ -1818,7 +1800,7 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
     return completed_ids
 
 
-def claim_queued_runs_for_workbench_in_connection(
+def claim_agent_runs_for_turn_in_connection(
     conn: Any,
     run_ids: list[str],
     *,
@@ -1832,72 +1814,55 @@ def claim_queued_runs_for_workbench_in_connection(
             continue
         seen.add(run_id)
         normalized_run_ids.append(run_id)
-    queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, normalized_run_ids)
-    if stale_run_ids or queued_run_ids != normalized_run_ids:
+    eligible_run_ids, stale_run_ids = inspect_agent_runs_for_turn_in_connection(
+        conn, normalized_run_ids
+    )
+    if stale_run_ids or eligible_run_ids != normalized_run_ids:
         return []
-    primary_run_id = normalized_run_ids[0] if normalized_run_ids else ""
-    if not primary_run_id:
+    if not normalized_run_ids:
         return []
     now = started_at or _utc_now_iso()
-    rows = {
-        row["id"]: row
-        for row in conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))).mappings()
-    }
+    changed_run_ids: list[str] = []
     for run_id in normalized_run_ids:
-        row = rows[run_id]
-        metadata = _json_loads(row["metadata_json"], {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        metadata["workbench_queue_holds_run"] = run_id != primary_run_id
-        metadata["effective_run_id"] = primary_run_id
-        if run_id == primary_run_id and len(normalized_run_ids) > 1:
-            metadata["coalesced_queue"] = _coalesced_agent_run_metadata(rows, normalized_run_ids)
-        if run_id != primary_run_id:
-            metadata["coalesced_into_run_id"] = primary_run_id
-            result = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(agent_runs.c.status.in_(_status_query_values("queued")))
-                .values(
-                    updated_at=now,
-                    metadata_json=_json_dumps(metadata),
-                )
-            )
-            if not result.rowcount:
-                raise RuntimeError(f"failed to claim queued agent run {run_id}")
+        row = conn.execute(
+            select(agent_runs.c.status)
+            .where(agent_runs.c.id == run_id)
+            .limit(1)
+        ).mappings().one()
+        if normalize_run_status(row["status"]) == "running":
             continue
         result = conn.execute(
             update(agent_runs)
             .where(agent_runs.c.id == run_id)
             .where(agent_runs.c.status.in_(_status_query_values("queued")))
+            .where(agent_runs.c.delivery_id.is_not(None))
             .values(
                 status="running",
                 started_at=now,
                 updated_at=now,
-                metadata_json=_json_dumps(metadata),
             )
         )
         if not result.rowcount:
-            raise RuntimeError(f"failed to claim queued agent run {run_id}")
-    _defer_run_ids_updated_from_connection(conn, normalized_run_ids)
+            raise RuntimeError(f"failed to claim Delivery-owned agent run {run_id}")
+        changed_run_ids.append(run_id)
+    _defer_run_ids_updated_from_connection(conn, changed_run_ids)
     return normalized_run_ids
 
 
-def hold_running_agent_run_for_workbench_in_connection(
+def attach_agent_run_delivery_in_connection(
     conn: Any,
     run_id: str,
     *,
+    session_id: str,
+    delivery_id: str,
     delivery_outcome: Optional[dict[str, Any]] = None,
 ) -> bool:
-    """Transfer a claimed Agent Run to the durable Workbench queue.
-
-    The caller persists the matching queued message in the same write
-    transaction. The queue row therefore cannot become flushable while the
-    scheduler still owns the Run as ``running``.
-    """
+    """Bind one Agent Run to its one durable input Delivery."""
 
     normalized_run_id = str(run_id or "").strip()
-    if not normalized_run_id:
+    normalized_session_id = str(session_id or "").strip()
+    normalized_delivery_id = str(delivery_id or "").strip()
+    if not normalized_run_id or not normalized_session_id or not normalized_delivery_id:
         return False
     row = conn.execute(
         select(agent_runs)
@@ -1909,18 +1874,31 @@ def hold_running_agent_run_for_workbench_in_connection(
     metadata = _json_loads(row["metadata_json"], {})
     if not isinstance(metadata, dict):
         metadata = {}
-    metadata["workbench_queue_holds_run"] = True
+    if bool(row["cancel_requested"]):
+        return False
+    if str(row["session_id"] or "").strip() != normalized_session_id:
+        return False
+    existing_delivery_id = str(row["delivery_id"] or "").strip()
+    if existing_delivery_id == normalized_delivery_id:
+        return True
+    if existing_delivery_id:
+        return False
     if delivery_outcome is not None:
         metadata["delivery_outcome"] = dict(delivery_outcome)
     now = _utc_now_iso()
     result = conn.execute(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)
-        .where(agent_runs.c.status.in_(_status_query_values("running")))
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("running") + _status_query_values("queued")
+            )
+        )
         .where(agent_runs.c.cancel_requested == 0)
+        .where(agent_runs.c.delivery_id.is_(None))
         .values(
-            status="queued",
-            started_at=None,
+            delivery_id=normalized_delivery_id,
             updated_at=now,
             metadata_json=_json_dumps(metadata),
         )
@@ -1949,23 +1927,19 @@ def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
     ) == "canceled"
 
 
-def cancel_workbench_queued_agent_run_in_connection(
+def cancel_queued_agent_run_delivery_in_connection(
     conn: Any,
     run_id: str,
     *,
     session_id: str,
+    delivery_id: str,
 ) -> bool:
-    """Cancel a Run only while the named Workbench queue still owns it.
-
-    Queue-row deletion and this transition share the caller's transaction. A
-    concurrent claim/settlement therefore either wins before this guard (and the
-    row is not removed) or loses after both cancellation and deletion commit.
-    Missing Run rows are stale queue input and may be removed.
-    """
+    """Cancel a nonterminal Run only while it owns the exact queued Delivery."""
 
     normalized_run_id = str(run_id or "").strip()
     normalized_session_id = str(session_id or "").strip()
-    if not normalized_run_id or not normalized_session_id:
+    normalized_delivery_id = str(delivery_id or "").strip()
+    if not normalized_run_id or not normalized_session_id or not normalized_delivery_id:
         return False
     row = conn.execute(
         select(agent_runs)
@@ -1974,12 +1948,10 @@ def cancel_workbench_queued_agent_run_in_connection(
     ).mappings().first()
     if row is None:
         return True
-    metadata = _json_loads(row["metadata_json"], {})
     if (
-        normalize_run_status(row["status"]) != "queued"
+        normalize_run_status(row["status"]) not in {"queued", "running"}
         or str(row["session_id"] or "").strip() != normalized_session_id
-        or not isinstance(metadata, dict)
-        or metadata.get("workbench_queue_holds_run") is not True
+        or str(row["delivery_id"] or "").strip() != normalized_delivery_id
     ):
         return False
     now = _utc_now_iso()
@@ -1987,8 +1959,12 @@ def cancel_workbench_queued_agent_run_in_connection(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)
         .where(agent_runs.c.session_id == normalized_session_id)
-        .where(agent_runs.c.status.in_(_status_query_values("queued")))
-        .where(agent_runs.c.metadata_json == row["metadata_json"])
+        .where(agent_runs.c.delivery_id == normalized_delivery_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
         .values(
             status="canceled",
             cancel_requested=1,
@@ -2006,6 +1982,56 @@ def cancel_workbench_queued_agent_run_in_connection(
     ).mappings().one()
     _defer_run_rows_updated_from_connection(conn, [updated])
     return True
+
+
+def cancel_agent_runs_for_retired_deliveries_in_connection(
+    conn: Any,
+    *,
+    session_id: str,
+    delivery_ids: list[str],
+) -> list[str]:
+    """Terminal-cancel every nonterminal Run whose exact Delivery was retired."""
+
+    normalized_session_id = str(session_id or "").strip()
+    normalized_delivery_ids = list(
+        dict.fromkeys(
+            str(delivery_id or "").strip()
+            for delivery_id in delivery_ids
+            if str(delivery_id or "").strip()
+        )
+    )
+    if not normalized_session_id or not normalized_delivery_ids:
+        return []
+    active_statuses = _status_query_values("queued") + _status_query_values("running")
+    run_ids = list(
+        conn.execute(
+            select(agent_runs.c.id)
+            .where(agent_runs.c.session_id == normalized_session_id)
+            .where(agent_runs.c.delivery_id.in_(normalized_delivery_ids))
+            .where(agent_runs.c.status.in_(active_statuses))
+        ).scalars()
+    )
+    if not run_ids:
+        return []
+    now = _utc_now_iso()
+    transition = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id.in_(run_ids))
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(agent_runs.c.delivery_id.in_(normalized_delivery_ids))
+        .where(agent_runs.c.status.in_(active_statuses))
+        .values(
+            status="canceled",
+            cancel_requested=1,
+            cancel_requested_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    if transition.rowcount != len(run_ids):
+        raise RuntimeError("Delivery retirement lost an exact Agent Run transition")
+    _defer_run_ids_updated_from_connection(conn, run_ids)
+    return run_ids
 
 
 def record_agent_run_delivery_outcome_in_connection(
@@ -2037,78 +2063,9 @@ def record_agent_run_delivery_outcome_in_connection(
     return True
 
 
-def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now: str) -> None:
-    rows = list(
-        conn.execute(
-            select(agent_runs)
-            .where(agent_runs.c.run_type == "agent_run")
-            .where(agent_runs.c.status.in_(_status_query_values("queued")))
-        ).mappings()
-    )
-    rows_by_id = {row["id"]: row for row in rows}
-    processed: set[str] = set()
-    for row in rows:
-        run_id = str(row["id"] or "")
-        if run_id in processed:
-            continue
-        metadata = _json_loads(row["metadata_json"], {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        coalesced = metadata.get("coalesced_queue") if isinstance(metadata, dict) else None
-        raw_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-        if not isinstance(raw_ids, list):
-            continue
-        run_ids: list[str] = []
-        for value in raw_ids:
-            coalesced_id = str(value or "").strip()
-            if coalesced_id and coalesced_id not in run_ids:
-                run_ids.append(coalesced_id)
-        if run_id not in run_ids:
-            run_ids.insert(0, run_id)
-        live_ids = [
-            candidate
-            for candidate in run_ids
-            if candidate in rows_by_id
-            and not bool(rows_by_id[candidate]["cancel_requested"])
-            and normalize_run_status(rows_by_id[candidate]["status"]) == "queued"
-        ]
-        if not live_ids:
-            processed.update(run_ids)
-            continue
-        primary_id = live_ids[0]
-        live_rows = {candidate: rows_by_id[candidate] for candidate in live_ids}
-        primary_metadata = _json_loads(rows_by_id[primary_id]["metadata_json"], {})
-        if not isinstance(primary_metadata, dict):
-            primary_metadata = {}
-        primary_metadata["workbench_queue_holds_run"] = False
-        primary_metadata["effective_run_id"] = primary_id
-        primary_metadata.pop("coalesced_into_run_id", None)
-        if len(live_ids) > 1:
-            primary_metadata["coalesced_queue"] = _coalesced_agent_run_metadata(live_rows, live_ids)
-        else:
-            primary_metadata.pop("coalesced_queue", None)
-        conn.execute(
-            update(agent_runs)
-            .where(agent_runs.c.id == primary_id)
-            .values(metadata_json=_json_dumps(primary_metadata), updated_at=now)
-        )
-        for child_id in live_ids[1:]:
-            child_metadata = _json_loads(rows_by_id[child_id]["metadata_json"], {})
-            if not isinstance(child_metadata, dict):
-                child_metadata = {}
-            child_metadata["workbench_queue_holds_run"] = True
-            child_metadata["effective_run_id"] = primary_id
-            child_metadata["coalesced_into_run_id"] = primary_id
-            child_metadata.pop("coalesced_queue", None)
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == child_id)
-                .values(metadata_json=_json_dumps(child_metadata), updated_at=now)
-            )
-        processed.update(run_ids)
-
-
-def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str]) -> tuple[list[str], list[str]]:
+def inspect_agent_runs_for_turn_in_connection(
+    conn: Any, run_ids: list[str]
+) -> tuple[list[str], list[str]]:
     normalized_run_ids: list[str] = []
     seen: set[str] = set()
     for raw_run_id in run_ids:
@@ -2123,7 +2080,7 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
         row["id"]: row
         for row in conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))).mappings()
     }
-    queued_run_ids: list[str] = []
+    eligible_run_ids: list[str] = []
     stale_run_ids: list[str] = []
     cancel_requested_run_ids: list[str] = []
     for run_id in normalized_run_ids:
@@ -2136,10 +2093,13 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
                 cancel_requested_run_ids.append(run_id)
             stale_run_ids.append(run_id)
             continue
-        if normalize_run_status(row["status"]) != "queued":
+        status = normalize_run_status(row["status"])
+        if status not in {"queued", "running"} or not str(
+            row["delivery_id"] or ""
+        ).strip():
             stale_run_ids.append(run_id)
             continue
-        queued_run_ids.append(run_id)
+        eligible_run_ids.append(run_id)
     if cancel_requested_run_ids:
         now = _utc_now_iso()
         conn.execute(
@@ -2149,41 +2109,7 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
             .values(status="canceled", completed_at=now, updated_at=now)
         )
         _defer_run_ids_updated_from_connection(conn, cancel_requested_run_ids)
-    return queued_run_ids, stale_run_ids
-
-
-def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) -> None:
-    now = _utc_now_iso()
-    seen: set[str] = set()
-    changed_ids: list[str] = []
-    for raw_run_id in run_ids:
-        run_id = str(raw_run_id or "").strip()
-        if not run_id or run_id in seen:
-            continue
-        seen.add(run_id)
-        row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-        if not row:
-            continue
-        metadata = _json_loads(row["metadata_json"], {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        metadata["workbench_queue_holds_run"] = True
-        metadata.pop("effective_run_id", None)
-        metadata.pop("coalesced_into_run_id", None)
-        values = {
-            "updated_at": now,
-            "metadata_json": _json_dumps(metadata),
-        }
-        if normalize_run_status(row["status"]) == "running":
-            values["status"] = "queued"
-            values["started_at"] = None
-        conn.execute(
-            update(agent_runs)
-            .where(agent_runs.c.id == run_id)
-            .values(**values)
-        )
-        changed_ids.append(run_id)
-    _defer_run_ids_updated_from_connection(conn, changed_ids)
+    return eligible_run_ids, stale_run_ids
 
 
 def upsert_definition_in_connection(
@@ -3148,6 +3074,7 @@ class SQLiteBackgroundTaskStore:
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
+        rows_to_publish: list[dict[str, Any]] = []
         queue_session_id = ""
         with self.engine.begin() as conn:
             # Cancellation and Workbench queue retirement are one ownership
@@ -3162,13 +3089,25 @@ class SQLiteBackgroundTaskStore:
             if not row:
                 return False
             status = normalize_run_status(row["status"])
-            metadata = _json_loads(row["metadata_json"], {})
             values: dict[str, Any] = {
                 "cancel_requested": 1,
                 "cancel_requested_at": now,
                 "updated_at": now,
             }
-            if status == "queued":
+            delivery_id = str(row["delivery_id"] or "").strip()
+            retired_delivery = False
+            if delivery_id:
+                from storage import message_deliveries
+
+                retired_delivery = message_deliveries.retire_for_run_cancellation(
+                    conn,
+                    str(row["session_id"] or ""),
+                    delivery_id,
+                )
+            # Once a Delivery exists its matrix policy outranks a stale Run
+            # projection. A Turn-owned Delivery may have written natively and
+            # must settle through that Turn even if the Run still says queued.
+            if retired_delivery or (status == "queued" and not delivery_id):
                 values["status"] = "canceled"
                 values["completed_at"] = now
             result = conn.execute(
@@ -3180,21 +3119,9 @@ class SQLiteBackgroundTaskStore:
                 row_to_publish = dict(
                     conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
                 )
-                if (
-                    status == "queued"
-                    and isinstance(metadata, dict)
-                    and metadata.get("workbench_queue_holds_run") is True
-                ):
-                    from storage import messages_service
-
-                    session_id = str(row["session_id"] or "").strip()
-                    if messages_service.delete_queued_agent_run(
-                        conn,
-                        session_id=session_id,
-                        run_id=run_id,
-                    ):
-                        queue_session_id = session_id
-        _publish_run_rows_updated([row_to_publish])
+                if retired_delivery:
+                    queue_session_id = str(row["session_id"] or "").strip()
+        _publish_run_rows_updated(rows_to_publish or [row_to_publish])
         _publish_queue_updated(queue_session_id)
         return row_to_publish is not None
 
@@ -3509,26 +3436,28 @@ class SQLiteBackgroundTaskStore:
         _publish_run_rows_updated([row_to_publish])
         return row_to_publish is not None
 
-    def claim_queued_run_for_workbench(
+    def claim_agent_run_for_turn(
         self,
         run_id: str,
         *,
         started_at: Optional[str] = None,
     ) -> bool:
-        return self.claim_queued_runs_for_workbench([run_id], started_at=started_at) == [run_id]
+        return self.claim_agent_runs_for_turn([run_id], started_at=started_at) == [run_id]
 
-    def claim_queued_runs_for_workbench(
+    def claim_agent_runs_for_turn(
         self,
         run_ids: list[str],
         *,
         started_at: Optional[str] = None,
     ) -> list[str]:
         with run_update_event_transaction(self.engine) as conn:
-            return claim_queued_runs_for_workbench_in_connection(conn, run_ids, started_at=started_at)
+            return claim_agent_runs_for_turn_in_connection(
+                conn, run_ids, started_at=started_at
+            )
 
-    def inspect_queued_runs_for_workbench(self, run_ids: list[str]) -> tuple[list[str], list[str]]:
+    def inspect_agent_runs_for_turn(self, run_ids: list[str]) -> tuple[list[str], list[str]]:
         with run_update_event_transaction(self.engine) as conn:
-            return inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
+            return inspect_agent_runs_for_turn_in_connection(conn, run_ids)
 
     def record_run_message(
         self,
@@ -4094,6 +4023,7 @@ class SQLiteBackgroundTaskStore:
                     select(agent_runs.c.id, agent_runs.c.result_payload_json)
                     .where(agent_runs.c.status.in_(_status_query_values("running")))
                     .where(agent_runs.c.run_type != "watch_runtime")
+                    .where(agent_runs.c.delivery_id.is_(None))
                 ).mappings()
             )
             recovered_ids = []
@@ -4110,7 +4040,6 @@ class SQLiteBackgroundTaskStore:
                     .where(agent_runs.c.id.in_(recovered_ids))
                     .values(status="queued", started_at=None, pid=None, updated_at=now)
                 )
-            _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
             _defer_run_ids_updated_from_connection(conn, recovered_ids)
 
     def record_run_skip_reason(self, run_id: str, *, reason: str, at: Optional[str] = None) -> bool:
@@ -4219,16 +4148,14 @@ class SQLiteBackgroundTaskStore:
         owned_run_ids: set[str],
         error_texts: dict[str, str],
         deliverable_run_ids: Optional[set[str]] = None,
-        busy_session_ids: Optional[set[str]] = None,
         now: Optional[str] = None,
         orphan_grace_seconds: int = 0,
         queued_ttl_seconds: int = 0,
-        hold_ttl_seconds: int = 0,
     ) -> list[SweptRun]:
         """Terminalize runs that provably have nothing left to settle them.
 
-        Three evidence-based classes (``docs/plans/agent-run-zombie-settlement.md``
-        §4.2). Each is disabled by passing ``0`` for its window:
+        Two evidence-based classes remain. Each is disabled by passing ``0``
+        for its window:
 
         - ``orphaned``: a ``running`` agent run with no live owner, older than
           ``orphan_grace_seconds``. The grace period is what keeps a run that is
@@ -4239,18 +4166,8 @@ class SQLiteBackgroundTaskStore:
           caller still cannot deliver. The reason is read off the row, never
           re-derived, so a run deferred for capacity or a session lock — both of which
           are progress — is never swept.
-        - ``queue_hold_expired``: a ``queued`` run holding a workbench queue slot that
-          has not been touched in ``hold_ttl_seconds``, in a session with no live turn.
-
-        ``owned_run_ids`` exempts a row from **every** class, not just ``orphaned``. A
-        coalesced workbench turn claims its secondary runs and deliberately leaves them
-        ``queued`` while the primary settles them, so a live owner has to outrank the
-        queue TTLs too — otherwise a turn that outlives ``hold_ttl_seconds`` would have
-        its own siblings failed underneath it, reintroducing the turn-duration timeout
-        this design does not have. It must be the union of every ownership source; the
-        caller is responsible for failing closed (passing "everything is owned", or not calling
-        at all) when it cannot enumerate owners. This method cannot tell an empty set
-        meaning "nothing is running" from one meaning "I could not look".
+        ``owned_run_ids`` exempts a row from every class. It includes both live
+        process work and Runs linked to unresolved durable Deliveries.
 
         ``deliverable_run_ids`` is the same contract for the transport class, and it is
         why the recorded reason alone is not enough. The drain stops at its concurrency
@@ -4262,16 +4179,6 @@ class SQLiteBackgroundTaskStore:
         own start: capacity keeps the drain from re-stamping a row below its cut, so
         without the clear a recovered-then-failed-again transport would be read as one
         continuous outage and skip the whole configured reconnect window (Codex P2).
-
-        ``busy_session_ids`` is the same contract again, for the hold class: a run the
-        gate parked behind a live turn is NOT reported by ``owned_agent_run_ids`` (the
-        live turn only owns the ids of the run it is itself executing), so a legitimate
-        Workbench turn outliving ``hold_ttl_seconds`` would have its own queued follower
-        failed even though the gate would flush it on completion (Codex P2). The set is
-        session ids, not run ids, because that is the granularity the gate occupies.
-        ``None`` means "no exemptions", so a caller that cannot enumerate live turns
-        must fail closed by disabling the class (``hold_ttl_seconds=0``), exactly as it
-        does for deliverability.
 
         Candidate selection is read-only; each row is then terminalized through
         :meth:`settle_run_terminal`, so every write inherits the same guards — scoped
@@ -4318,12 +4225,7 @@ class SQLiteBackgroundTaskStore:
             run_id = str(row["id"])
             if run_id in owned_run_ids:
                 # A live owner outranks every TTL, whatever the row's status. This is
-                # NOT only about ``running`` rows: a coalesced workbench turn claims its
-                # secondary runs and deliberately leaves them ``queued`` with
-                # ``workbench_queue_holds_run`` while the primary settles them, and
-                # ``owned_agent_run_ids`` reports all of them as owned. Aging those out
-                # would fail live siblings mid-turn — a turn-duration timeout by the back
-                # door, which this design explicitly does not have.
+                # A durable Delivery or Turn owns this run across process loss.
                 continue
             reason: Optional[str] = None
             if status == "running":
@@ -4344,19 +4246,7 @@ class SQLiteBackgroundTaskStore:
                     # stale ``last_skip_at`` would make the NEXT outage look like a
                     # continuation of this one and skip its whole TTL (Codex P2).
                     recovered_ids.add(run_id)
-                # Hold before transport: it is the more specific piece of evidence, and
-                # its TTL is deliberately the longest so an actively recovering queue
-                # survives.
                 if (
-                    metadata.get("workbench_queue_holds_run")
-                    # A live turn in this row's session is why it is parked. The gate
-                    # will flush it when that turn ends, and the turn does NOT report
-                    # this run as owned — it owns only the ids it is executing itself.
-                    and str(row["session_id"] or "") not in (busy_session_ids or set())
-                    and _older_than(row["updated_at"], hold_ttl_seconds)
-                ):
-                    reason = SWEEP_REASON_QUEUE_HOLD_EXPIRED
-                elif (
                     metadata.get("last_skip_reason") == SKIP_REASON_TRANSPORT_UNAVAILABLE
                     # Two independent facts, both required: the drain recorded that this
                     # row's platform was down, AND the caller still cannot deliver it.
@@ -5713,6 +5603,7 @@ class SQLiteBackgroundTaskStore:
             "result_text": payload.get("result_text"),
             "result_payload_json": self._payload_json(payload, "result_payload", "result_payload_json"),
             "message_ids_json": self._payload_json(payload, "message_ids", "message_ids_json"),
+            "delivery_id": payload.get("delivery_id"),
             "callback_session_id": payload.get("callback_session_id"),
             "callback_status": payload.get("callback_status"),
             "callback_error": payload.get("callback_error"),
@@ -5833,6 +5724,7 @@ class SQLiteBackgroundTaskStore:
             "result_text": row["result_text"],
             "result_payload": _json_loads(row["result_payload_json"], None),
             "message_ids": _json_loads(row["message_ids_json"], []),
+            "delivery_id": row["delivery_id"],
             "callback_session_id": row["callback_session_id"],
             "callback_status": row["callback_status"],
             "callback_error": row["callback_error"],
