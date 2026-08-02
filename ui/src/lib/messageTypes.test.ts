@@ -101,9 +101,9 @@ describe('catalog-derived predicates match the communication-record boundary', (
     }
   });
 
-  it('activity-step identity (isActivityMessageType)', () => {
+  it('activity-step identity includes synthetic tool events', () => {
     for (const type of PROBE_TYPES) {
-      expect(isActivityMessageType(type), type).toBe(wasActivity(type));
+      expect(isActivityMessageType(type), type).toBe(type === 'tool_call' || wasActivity(type));
     }
   });
 
