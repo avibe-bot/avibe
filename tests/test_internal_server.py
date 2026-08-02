@@ -3664,7 +3664,11 @@ def test_agent_run_send_now_idle_start_failure_is_reconciled_without_replay(
     with engine.connect() as conn:
         delivery = message_deliveries.get_delivery_by_dedupe(
             conn,
-            f"avibe:agent_run:{request.id}",
+            message_deliveries.native_dedupe_key(
+                "avibe",
+                f"agent_run:{request.id}",
+                scope_id=scope_id,
+            ),
         )
         assert delivery is not None
         assert delivery["state"] == "claimed"
@@ -4129,7 +4133,11 @@ def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tm
         with engine.connect() as conn:
             reserved = message_deliveries.get_delivery_by_dedupe(
                 conn,
-                "avibe:watch:def-watch:reserved-retry",
+                message_deliveries.native_dedupe_key(
+                    "avibe",
+                    "watch:def-watch:reserved-retry",
+                    scope_id=session["scope_id"],
+                ),
             )
             assert reserved is not None
             assert reserved["state"] == "reserved"

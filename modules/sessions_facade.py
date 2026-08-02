@@ -395,6 +395,13 @@ class SessionsFacade:
     def is_message_already_processed(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
         return self.sessions_store.is_message_in_processed_set(channel_id, thread_ts, message_ts)
 
+    def has_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
+        return self.sessions_store.has_processed_message(
+            channel_id,
+            thread_ts,
+            message_ts,
+        )
+
     def record_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> None:
         self.sessions_store.add_to_processed_set(channel_id, thread_ts, message_ts)
         logger.debug("Recorded processed message: channel=%s, thread=%s, message=%s", channel_id, thread_ts, message_ts)

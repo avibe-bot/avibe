@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -66,7 +66,7 @@ class _StubSessions:
         self._claimed = set()
 
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
-        return False
+        return (channel_id, thread_ts, message_ts) in self._claimed
 
     def record_processed_message(self, channel_id, thread_ts, message_ts):
         self.recorded.append((channel_id, thread_ts, message_ts))
@@ -173,18 +173,29 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController()
         controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
         consumed = []
+        flow_active = True
 
         async def consume_once(context, message, *, claim_native_event):
+            nonlocal flow_active
+            if not flow_active:
+                return False
             if not claim_native_event():
                 return True
             consumed.append(message)
+            flow_active = False
             return True
 
         controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(
             side_effect=consume_once
         )
         handler = MessageHandler(controller)
-        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._is_duplicate_human_delivery = Mock(
+            side_effect=lambda context: controller.settings_manager.sessions.is_message_already_processed(
+                context.channel_id,
+                context.thread_id or context.message_id,
+                context.message_id,
+            )
+        )
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -200,7 +211,28 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
             controller.settings_manager.sessions.recorded,
             [("C1", "m-setup", "m-setup")],
         )
+        self.assertEqual(
+            controller.agent_auth_service.maybe_consume_setup_reply.await_count,
+            1,
+        )
         controller.session_turns.deliver.assert_not_awaited()
+
+    async def test_consumed_control_fence_precedes_delivery_lookup(self):
+        controller = _StubController()
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="telegram",
+            message_id="1",
+        )
+        assert handler._claim_native_human_event(context)
+
+        with patch(
+            "storage.db.get_cached_sqlite_engine",
+            side_effect=AssertionError("Delivery lookup must not run"),
+        ):
+            assert handler._is_duplicate_human_delivery(context)
 
 
 if __name__ == "__main__":

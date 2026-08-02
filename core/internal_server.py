@@ -162,9 +162,7 @@ def create_app(controller: "Controller") -> FastAPI:
 
         submission_platform = str(getattr(context, "platform", None) or "avibe").strip()
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
-        dedupe_key = message_deliveries.native_dedupe_key(
-            submission_platform, native_message_id
-        )
+        dedupe_key: str | None = None
         delivery_id: str | None = None
         delivery_request: DeliveryRequest | None = None
         scope_id: str | None = None
@@ -180,16 +178,26 @@ def create_app(controller: "Controller") -> FastAPI:
             from storage.models import agent_runs, agent_sessions
 
             reserve_write_lock(conn)
-            existing = (
-                message_deliveries.get_delivery_by_dedupe(conn, dedupe_key)
-                if dedupe_key
-                else None
+            scope_id = _scope_id_for_session(conn, session_id)
+            dedupe_key = message_deliveries.native_dedupe_key(
+                submission_platform,
+                native_message_id,
+                scope_id=scope_id,
+            )
+            existing = message_deliveries.get_delivery_by_native_identity(
+                conn,
+                platform=submission_platform,
+                native_message_id=native_message_id,
+                scope_id=scope_id,
+                session_id=session_id,
+                normalize_legacy=True,
             )
             legacy_accepted = bool(
                 native_message_id
                 and messages_service.native_message_exists(
                     conn,
                     platform=submission_platform,
+                    scope_id=scope_id,
                     native_message_id=native_message_id,
                 )
             )
@@ -277,7 +285,6 @@ def create_app(controller: "Controller") -> FastAPI:
             else:
                 from core.message_priority import priority_for_delivery_intent
 
-                scope_id = _scope_id_for_session(conn, session_id)
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
                 priority = priority_for_delivery_intent(delivery_intent)

@@ -771,15 +771,16 @@ class MessageHandler(BaseHandler):
         attachment_refs: list[dict[str, Any]] = []
         scope_id = None
         with get_cached_sqlite_engine().begin() as conn:
-            if context.message_id and messages_service.native_message_exists(
-                conn,
-                platform=str(context.platform or ""),
-                native_message_id=str(context.message_id),
-            ):
-                return True
             from core.message_mirror import _scope_id_for_session
 
             scope_id = _scope_id_for_session(conn, session_id)
+            if context.message_id and messages_service.native_message_exists(
+                conn,
+                platform=str(context.platform or ""),
+                scope_id=scope_id,
+                native_message_id=str(context.message_id),
+            ):
+                return True
             for attachment in processed_files:
                 if not attachment.local_path:
                     continue
@@ -852,10 +853,11 @@ class MessageHandler(BaseHandler):
             bus.publish("queue.updated", {"session_id": session_id})
         return True
 
-    @staticmethod
-    def _is_duplicate_human_delivery(context: MessageContext) -> bool:
+    def _is_duplicate_human_delivery(self, context: MessageContext) -> bool:
         """Reject a retried native event before pre-admission side effects."""
 
+        if self._native_human_event_processed(context):
+            return True
         platform = str(context.platform or "").strip()
         native_message_id = str(context.message_id or "").strip()
         if not platform or not native_message_id:
@@ -863,23 +865,24 @@ class MessageHandler(BaseHandler):
         try:
             from storage import message_deliveries, messages_service
             from storage.db import get_cached_sqlite_engine
+            from core.message_mirror import scope_id_for_context
+
+            scope_id = scope_id_for_context(context)
 
             with get_cached_sqlite_engine().connect() as conn:
                 if messages_service.native_message_exists(
                     conn,
                     platform=platform,
+                    scope_id=scope_id,
                     native_message_id=native_message_id,
                 ):
                     return True
-                dedupe_key = message_deliveries.native_dedupe_key(
-                    platform,
-                    native_message_id,
-                )
                 return bool(
-                    dedupe_key
-                    and message_deliveries.get_delivery_by_dedupe(
+                    message_deliveries.get_delivery_by_native_identity(
                         conn,
-                        dedupe_key,
+                        platform=platform,
+                        native_message_id=native_message_id,
+                        scope_id=scope_id,
                     )
                     is not None
                 )
@@ -890,6 +893,20 @@ class MessageHandler(BaseHandler):
                 native_message_id,
             )
             return False
+
+    def _native_human_event_processed(self, context: MessageContext) -> bool:
+        message_ts = context.message_id
+        thread_ts = context.thread_id or context.message_id
+        if not message_ts or not thread_ts:
+            return False
+        checker = getattr(self.sessions, "has_processed_message", None)
+        if callable(checker):
+            return bool(checker(context.channel_id, thread_ts, message_ts))
+        checker = getattr(self.sessions, "is_message_already_processed", None)
+        return bool(
+            callable(checker)
+            and checker(context.channel_id, thread_ts, message_ts)
+        )
 
     def _claim_native_human_event(self, context: MessageContext) -> bool:
         """Fence a native control input that intentionally creates no Delivery."""

@@ -53,6 +53,116 @@ def _seed_session(conn, scope_id: str, session_id: str) -> None:
     )
 
 
+def test_native_message_identity_is_scoped_to_conversation(isolated_state):
+    engine = create_sqlite_engine(isolated_state / "state" / "vibe.sqlite")
+    with engine.begin() as conn:
+        now = messages_service._utc_now_iso()
+        first_scope = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="chat-1",
+            now=now,
+        )
+        second_scope = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="chat-2",
+            now=now,
+        )
+        _seed_session(conn, first_scope, "ses_chat_1")
+        _seed_session(conn, second_scope, "ses_chat_2")
+        messages_service.append(
+            conn,
+            scope_id=first_scope,
+            session_id="ses_chat_1",
+            platform="telegram",
+            author="user",
+            text="first chat",
+            native_message_id="1",
+        )
+
+        assert messages_service.native_message_exists(
+            conn,
+            platform="telegram",
+            scope_id=first_scope,
+            native_message_id="1",
+        )
+        assert not messages_service.native_message_exists(
+            conn,
+            platform="telegram",
+            scope_id=second_scope,
+            native_message_id="1",
+        )
+        messages_service.append(
+            conn,
+            scope_id=second_scope,
+            session_id="ses_chat_2",
+            platform="telegram",
+            author="user",
+            text="second chat",
+            native_message_id="1",
+        )
+        first_delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_delivery_chat_1",
+            session_id="ses_chat_1",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=first_scope,
+                session_id="ses_chat_1",
+                platform="telegram",
+                author="user",
+                source="user",
+                message_type="user",
+                text="queued first chat",
+                native_message_id="2",
+            ),
+            dispatch_text="queued first chat",
+            dedupe_key=message_deliveries.native_dedupe_key(
+                "telegram",
+                "2",
+                scope_id=first_scope,
+            ),
+        )
+        second_delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_delivery_chat_2",
+            session_id="ses_chat_2",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=second_scope,
+                session_id="ses_chat_2",
+                platform="telegram",
+                author="user",
+                source="user",
+                message_type="user",
+                text="queued second chat",
+                native_message_id="2",
+            ),
+            dispatch_text="queued second chat",
+            dedupe_key=message_deliveries.native_dedupe_key(
+                "telegram",
+                "2",
+                scope_id=second_scope,
+            ),
+        )
+        assert first_delivery["id"] != second_delivery["id"]
+
+    assert message_deliveries.native_dedupe_key(
+        "telegram",
+        "1",
+        scope_id=first_scope,
+    ) != message_deliveries.native_dedupe_key(
+        "telegram",
+        "1",
+        scope_id=second_scope,
+    )
+
+
 def _list_production_transcript(conn, session_id: str):
     return messages_service.list_session_messages(
         conn,

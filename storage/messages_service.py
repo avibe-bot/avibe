@@ -480,15 +480,27 @@ def get_message(
     return _row_to_payload(dict(row)) if row else None
 
 
-def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
-    """True when a platform/native message id has already been recorded."""
+def native_message_exists(
+    conn: Connection,
+    *,
+    platform: str,
+    scope_id: str | None,
+    native_message_id: str,
+) -> bool:
+    """True when a conversation-scoped native message has been recorded."""
     platform = str(platform or "").strip()
     native_message_id = str(native_message_id or "").strip()
     if not platform or not native_message_id:
         return False
+    scope_predicate = (
+        messages.c.scope_id == scope_id
+        if scope_id is not None
+        else messages.c.scope_id.is_(None)
+    )
     row_id = conn.execute(
         select(messages.c.id)
         .where(messages.c.platform == platform)
+        .where(scope_predicate)
         .where(messages.c.native_message_id == native_message_id)
         .limit(1)
     ).scalar_one_or_none()

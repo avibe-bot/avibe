@@ -1262,9 +1262,17 @@ class SessionTurnManager:
         dedupe_key = delivery_store.native_dedupe_key(
             request.platform,
             request.native_message_id,
+            scope_id=request.scope_id,
         )
         if dedupe_key:
-            existing = delivery_store.get_delivery_by_dedupe(conn, dedupe_key)
+            existing = delivery_store.get_delivery_by_native_identity(
+                conn,
+                platform=request.platform,
+                native_message_id=str(request.native_message_id or ""),
+                scope_id=request.scope_id,
+                session_id=request.session_id,
+                normalize_legacy=True,
+            )
             if existing is not None:
                 if existing["session_id"] != request.session_id:
                     raise ValueError("Delivery dedupe identity belongs to another Session")

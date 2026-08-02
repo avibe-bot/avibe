@@ -1211,6 +1211,26 @@ class SQLiteSessionsService:
                 last_activity=self._load_last_activity(conn),
             )
 
+    def processed_message_exists(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        message_ts: str,
+    ) -> bool:
+        record_key = _processed_message_record_key(
+            str(channel_id),
+            str(thread_ts),
+            str(message_ts),
+        )
+        with self.engine.connect() as conn:
+            row_id = conn.execute(
+                select(runtime_records.c.id)
+                .where(runtime_records.c.record_type == "processed_message")
+                .where(runtime_records.c.record_key == record_key)
+                .limit(1)
+            ).scalar_one_or_none()
+        return row_id is not None
+
     def try_record_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
         """Atomically claim a message for processing.
 

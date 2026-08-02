@@ -61,11 +61,21 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def native_dedupe_key(platform: str, native_message_id: str | None) -> str | None:
+def native_dedupe_key(
+    platform: str,
+    native_message_id: str | None,
+    *,
+    scope_id: str | None = None,
+) -> str | None:
     """Return the canonical live dedupe identity for a native submission."""
 
     native_id = str(native_message_id or "").strip()
-    return f"{platform}:{native_id}" if native_id else None
+    if not native_id:
+        return None
+    native_scope = str(scope_id or "").strip()
+    if not native_scope:
+        return f"{platform}:{native_id}"
+    return f"{platform}:scope:{len(native_scope)}:{native_scope}:{native_id}"
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -157,6 +167,61 @@ def get_delivery_by_dedupe(conn: Connection, dedupe_key: str) -> dict[str, Any] 
         conn,
         select(message_deliveries).where(message_deliveries.c.dedupe_key == dedupe_key),
     )
+
+
+def get_delivery_by_native_identity(
+    conn: Connection,
+    *,
+    platform: str,
+    native_message_id: str,
+    scope_id: str | None,
+    session_id: str | None = None,
+    normalize_legacy: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve one native event, including the pre-0045 unscoped key."""
+
+    canonical_key = native_dedupe_key(
+        platform,
+        native_message_id,
+        scope_id=scope_id,
+    )
+    if canonical_key is None:
+        return None
+    delivery = get_delivery_by_dedupe(conn, canonical_key)
+    if delivery is not None or scope_id is None:
+        return delivery
+
+    legacy_key = native_dedupe_key(platform, native_message_id)
+    if legacy_key is None or legacy_key == canonical_key:
+        return None
+    delivery = get_delivery_by_dedupe(conn, legacy_key)
+    if delivery is None:
+        return None
+    if session_id is not None and delivery["session_id"] != session_id:
+        return None
+
+    delivery_scope = _json_object(delivery.get("snapshot_json")).get("scope_id")
+    if delivery_scope is None and delivery.get("message_id"):
+        delivery_scope = conn.execute(
+            select(messages.c.scope_id)
+            .where(messages.c.id == delivery["message_id"])
+            .limit(1)
+        ).scalar_one_or_none()
+    if delivery_scope != scope_id:
+        return None
+    if not normalize_legacy:
+        return delivery
+
+    result = conn.execute(
+        update(message_deliveries)
+        .where(message_deliveries.c.id == delivery["id"])
+        .where(message_deliveries.c.dedupe_key == legacy_key)
+        .values(dedupe_key=canonical_key)
+    )
+    if result.rowcount != 1:
+        return get_delivery_by_dedupe(conn, canonical_key)
+    delivery["dedupe_key"] = canonical_key
+    return delivery
 
 
 def delivery_admission_context(delivery: dict[str, Any]) -> dict[str, Any]:
@@ -503,7 +568,11 @@ def enqueue_queued(
             native_message_id=native_message_id,
         ),
         dispatch_text=text if dispatch_text is None else dispatch_text,
-        dedupe_key=native_dedupe_key(platform, native_message_id),
+        dedupe_key=native_dedupe_key(
+            platform,
+            native_message_id,
+            scope_id=scope_id,
+        ),
         history_event={"kind": "submitted", "priority": "p3"},
         now=now,
     )
