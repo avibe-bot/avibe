@@ -18,7 +18,7 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
@@ -1570,6 +1570,321 @@ def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> N
     assert delivery["state"] == "claimed"
     with engine.connect() as conn:
         assert delivery_store.queue_is_held(conn, "ses_fsm") is False
+
+
+def test_stopped_runner_starts_successor_already_activated_by_terminal_result(
+    managers, monkeypatch
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str]]:
+        turn_id, context = await _activate(manager)
+        dispatch_started = asyncio.Event()
+        dispatch_blocked = asyncio.Event()
+
+        async def blocked_dispatch(*_args, **_kwargs):
+            dispatch_started.set()
+            await dispatch_blocked.wait()
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=SETTLED_BY_STOPPED,
+                backend_dispatch_attempted=True,
+            )
+
+        monkeypatch.setattr(
+            "core.session_turns.dispatch_turn_with_outcome",
+            blocked_dispatch,
+        )
+        await SessionTurnManager._run(
+            manager,
+            "ses_fsm",
+            context,
+            "primary",
+            logical_turn_id=turn_id,
+            durable_preallocated=True,
+        )
+        await dispatch_started.wait()
+
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        assert admitted.state == "waiting_terminal"
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_id = str(old["control_successor_turn_id"])
+
+        manager._finish_durable_terminal_result(
+            "ses_fsm",
+            turn_id,
+            is_error=False,
+            settled_by=SETTLED_BY_STOPPED,
+        )
+        with engine.connect() as conn:
+            successor = delivery_store.get_turn(conn, successor_id)
+        assert successor is not None and successor["state"] == "starting"
+
+        started: list[str] = []
+
+        async def record_start(candidate: str, **_kwargs) -> bool:
+            started.append(candidate)
+            return True
+
+        monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
+        current = manager.in_flight["ses_fsm"]
+        dispatch_blocked.set()
+        await current.task
+        return successor_id, started
+
+    successor_id, started = asyncio.run(run())
+    assert started == [successor_id]
+
+
+@pytest.mark.parametrize("cancel_holder", [False, True])
+def test_stopped_agent_initiated_holder_starts_already_activated_successor(
+    managers, monkeypatch, cancel_holder
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str]]:
+        context = _context()
+        assert manager.register_agent_initiated_turn(context) is True
+        await asyncio.sleep(0)
+        turn_id = str(context.platform_specific["turn_token"])
+
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        assert admitted.state == "waiting_terminal"
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_id = str(old["control_successor_turn_id"])
+
+        manager._finish_durable_terminal_result(
+            "ses_fsm",
+            turn_id,
+            is_error=False,
+            settled_by=SETTLED_BY_STOPPED,
+        )
+        with engine.connect() as conn:
+            successor = delivery_store.get_turn(conn, successor_id)
+        assert successor is not None and successor["state"] == "starting"
+
+        started: list[str] = []
+
+        async def record_start(candidate: str, **_kwargs) -> bool:
+            started.append(candidate)
+            return True
+
+        monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
+        holder = manager.in_flight["ses_fsm"].task
+        sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+        assert sink is not None
+        if cancel_holder:
+            holder.cancel()
+        else:
+            sink["settled_by"] = SETTLED_BY_STOPPED
+            sink["done_event"].set()
+        await asyncio.gather(holder, return_exceptions=True)
+        return successor_id, started
+
+    successor_id, started = asyncio.run(run())
+    assert started == [successor_id]
+
+
+def test_unrelated_runner_cancellation_does_not_drain_queued_work(
+    managers, monkeypatch
+) -> None:
+    manager, _restarted, engine, _engine_b, starts = managers
+
+    async def run() -> str:
+        turn_id, context = await _activate(manager)
+        dispatch_started = asyncio.Event()
+
+        async def blocked_dispatch(*_args, **_kwargs):
+            dispatch_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "core.session_turns.dispatch_turn_with_outcome",
+            blocked_dispatch,
+        )
+        await SessionTurnManager._run(
+            manager,
+            "ses_fsm",
+            context,
+            "primary",
+            logical_turn_id=turn_id,
+            durable_preallocated=True,
+        )
+        await dispatch_started.wait()
+
+        queued = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="backlog"),
+            context=_context(),
+        )
+        current = manager.in_flight["ses_fsm"]
+        current.task.cancel()
+        await asyncio.gather(current.task, return_exceptions=True)
+        return str(queued.delivery_id)
+
+    delivery_id = asyncio.run(run())
+    assert _row(engine, delivery_id)["state"] == "queued"
+    assert [text for _turn, text in starts].count("backlog") == 0
+
+
+def test_adapter_not_active_race_resumes_exact_linked_successor(
+    managers, monkeypatch
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str], str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def not_active(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "not_active"
+            return False
+
+        manager.controller.command_handler.handle_stop = not_active
+        original_terminalize = manager._terminalize_durable_turn
+        competing_terminal_written = False
+
+        def terminalize_with_competing_result(candidate, outcome, **kwargs):
+            nonlocal competing_terminal_written
+            if kwargs.get("settled_by") == "adapter_not_active":
+                assert competing_terminal_written is False
+                competing_terminal_written = True
+                won = original_terminalize(
+                    candidate,
+                    "canceled",
+                    settled_by=SETTLED_BY_STOPPED,
+                    evidence_kind="competing_terminal_result",
+                )
+                assert won["successor_turn_id"]
+            return original_terminalize(candidate, outcome, **kwargs)
+
+        monkeypatch.setattr(
+            manager,
+            "_terminalize_durable_turn",
+            terminalize_with_competing_result,
+        )
+        started: list[str] = []
+
+        async def record_start(candidate: str, **_kwargs) -> bool:
+            started.append(candidate)
+            return True
+
+        monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        return str(old["control_successor_turn_id"]), started, admitted.state
+
+    successor_id, started, state = asyncio.run(run())
+    assert state == "claimed"
+    assert started == [successor_id]
+
+
+def test_adapter_not_active_runner_cleanup_starts_linked_successor_once(
+    managers, monkeypatch
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str]]:
+        turn_id, context = await _activate(manager)
+        dispatch_started = asyncio.Event()
+
+        async def blocked_dispatch(*_args, **_kwargs):
+            dispatch_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "core.session_turns.dispatch_turn_with_outcome",
+            blocked_dispatch,
+        )
+        await SessionTurnManager._run(
+            manager,
+            "ses_fsm",
+            context,
+            "primary",
+            logical_turn_id=turn_id,
+            durable_preallocated=True,
+        )
+        await dispatch_started.wait()
+
+        async def not_active(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "not_active"
+            return False
+
+        manager.controller.command_handler.handle_stop = not_active
+        original_terminalize = manager._terminalize_durable_turn
+        competing_terminal_written = False
+
+        def terminalize_with_competing_result(candidate, outcome, **kwargs):
+            nonlocal competing_terminal_written
+            if kwargs.get("settled_by") == "adapter_not_active":
+                assert competing_terminal_written is False
+                competing_terminal_written = True
+                won = original_terminalize(
+                    candidate,
+                    "canceled",
+                    settled_by=SETTLED_BY_STOPPED,
+                    evidence_kind="competing_terminal_result",
+                )
+                assert won["successor_turn_id"]
+            return original_terminalize(candidate, outcome, **kwargs)
+
+        monkeypatch.setattr(
+            manager,
+            "_terminalize_durable_turn",
+            terminalize_with_competing_result,
+        )
+        started: list[str] = []
+        successor_holder: asyncio.Task | None = None
+
+        async def record_successor_start(
+            session_id, start_context, _text, *, logical_turn_id=None, **_kwargs
+        ):
+            nonlocal successor_holder
+            assert logical_turn_id is not None
+            started.append(logical_turn_id)
+            successor_holder = asyncio.create_task(asyncio.Event().wait())
+            manager.in_flight[session_id] = Turn(
+                task=successor_holder,
+                context=start_context,
+                logical_turn_id=logical_turn_id,
+            )
+
+        manager._run = record_successor_start
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_id = str(old["control_successor_turn_id"])
+        assert admitted.state == "claimed"
+        if successor_holder is not None:
+            successor_holder.cancel()
+            await asyncio.gather(successor_holder, return_exceptions=True)
+        return successor_id, started
+
+    successor_id, started = asyncio.run(run())
+    assert started == [successor_id]
 
 
 def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
