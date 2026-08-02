@@ -280,8 +280,9 @@ would grow unobserved.
 
 ### Invariant
 
-The build fails when any of these is true. The first three apply to each
-tally independently; the last two are ledger-wide:
+Once the run is known to be complete, the build fails on recorded-debt drift
+when any of these is true. The first three apply to each tally independently;
+the last is ledger-wide:
 
 1. **Unclassified** — a `(file, rule)` pair with no ledger entry. The lookup is
    per pair, so a file already listed for one rule buys no tolerance for
@@ -293,12 +294,9 @@ tally independently; the last two are ledger-wide:
 4. **Unexplained** — a rule appears in the ledger with no entry in its
    `rationale` map. A rule nobody had to explain is exactly how an unrelated
    error class slips in and stops being visible.
-5. **Fatal** — ESLint reported a problem with no rule id: a parse failure, an
-   unresolvable config, a plugin that threw. This one is unconditional, and it
-   has to be: such a problem has no `(file, rule)` key to be recorded under,
-   and a file that does not parse reports *no violations at all*, which a pure
-   tally comparison reads as clean. Without this, breaking a file's syntax
-   would be a way to make its debt disappear and still pass.
+
+Whether the run *is* complete is a separate, unconditional question, answered
+first — see "The gate measures its own completeness" below.
 
 The ledger therefore never grows on its own — raising a number is an edit to a
 reviewed file, not a side effect of a push — and nothing it tolerates is
@@ -320,12 +318,12 @@ a reader to discover:
   sides: the pair must already carry recorded debt, the count cannot grow, and
   once that debt is genuinely paid down the *stale* check forces the allowance
   down with it, permanently. Raising it again needs a reviewer.
-- **The ledger records what was found, never what was looked at.** Widening
-  `globalIgnores` would exempt arbitrary source with no signal in the ledger at
-  all — the exempted pairs would simply read as *stale* and the next
+- **The ledger records what was found, never what was looked at.** Narrowing the
+  lint scope would exempt arbitrary source with no signal in the ledger at all —
+  the exempted pairs would simply read as *stale* and the next
   `npm run lint:baseline` would book the exemption as if the debt had been paid.
-  That hole is closed at its owner instead, by pinning the config: see the scope
-  probes in Evidence below.
+  That hole is closed outside the ledger, by the integrity checks below, which
+  run before both the verdict and `--update`.
 
 Closing the first one properly means keying the ledger on a site fingerprint,
 which pushes ledger churn into every unrelated PR that touches a line carrying
@@ -343,13 +341,26 @@ match it.
 
 ### Evidence
 
-`compareToBaseline`, `missingRationales`, `fatalProblems` and `reportLines` are
-pure functions with red-first unit tests (`ui/scripts/lintBaseline.test.mjs`,
-25 cases): exact match, new rule in a new file, new rule in an already-listed
-file, expanded count, reduced count, vanished pair, deleted file, empty-run
-vacuity, each rationale branch, each `fatalProblems` discrimination, and — the
-load-bearing one — that `reportLines` still fails when a fatal error is the
-*only* problem and every tally matches.
+`compareToBaseline`, `missingRationales`, `fatalProblems`, `reportLines` and
+`integrityLines` are pure functions with red-first unit tests
+(`ui/scripts/lintBaseline.test.mjs`, 33 cases): exact match, new rule in a new
+file, new rule in an already-listed file, expanded count, reduced count,
+vanished pair, deleted file, empty-run vacuity, each rationale branch, each
+`fatalProblems` discrimination, each integrity failure in isolation and all of
+them together, and — the load-bearing one — a subprocess regression proving
+`lint:baseline --update` cannot write a baseline while an integrity check is
+failing. That last case runs the real command rather than an injected fake,
+because a fake would only pin the ordering its author already imagined.
+
+The measurement itself is pinned in `ui/scripts/lintPolicy.test.mjs` (35 cases):
+the walk against a synthetic tree and against the real one, its symlink
+semantics asserted equal to ESLint's own enumerator, the positive invariant that
+every intended file resolves the pinned policy, and one case per drift —
+`basePath`, scoped `ignores`, a dropped rule, a demoted rule, loosened options
+at unchanged severity, an unpinned rule appearing, each language and plugin
+boundary, each globals direction, grouping, both coverage directions, the
+vacuous-empty case, every inline directive family, and `eslint-disable-next-line`
+still reaching `suppressedMessages`.
 
 Two of those cases pin the residual above as an *intended* property rather than
 an oversight: that a one-for-one swap inside a recorded pair passes, and that
@@ -386,62 +397,93 @@ ledger — while no longer gating anything. Measured: with `react-hooks/refs` an
 `no-unused-vars` demoted to `warn`, the presence-only form of these probes
 passed 10/10.
 
-### The contract pins whole subjects, not projections
+### The gate measures its own completeness
 
 A behavioural probe only defends the rule someone thought to write it for, so the
-same file closes the class at its chokepoint. The first two attempts at that
-chokepoint pinned the policy with *filtered views* of it, and every view has a
-blind complement — which review then found one at a time:
+class needs closing at a chokepoint. Three successive attempts at that chokepoint
+described the policy with *hand-written* statements about it, and each one had a
+blind complement that review then found, one at a time:
 
-| Projection | What it could not see |
+| Description | What it could not see |
 | --- | --- |
 | the rule ids at severity 1 and at severity 0 | a severity-2 rule that leaves the config outright |
 | global `ignores` only | an `ignores` on a rule-bearing entry, which exempts a subtree while its `files` is unchanged |
 | the union of every entry's `files` | the same scoped ignore, from the other side |
-| "some rules resolve" as *linted* | a path resolving 1 rule out of 106 |
+| "some rules resolve" counts as *linted* | a path resolving 1 rule out of 106 |
+| every rule's *severity* | a rule kept at error with its options loosened |
+| every entry's `{name, files, ignores}` | `basePath`, which narrows an entry's reach without touching any of the three |
+| a fixed list of representative paths | any file not on the list |
 
-A fifth predicate would only move the blind spot. So the contract is now two
-complete subjects, compared for equality:
+Enumerating the domain is the generator: whatever the list says, the complement
+is invisible, and a fourth list would only move the blind spot. So the domain is
+no longer written down. `npm run lint` **measures** it, and refuses to report
+anything at all until four questions come out clean — before the drift verdict,
+and before `--update` may write a baseline:
 
-- **`EXPECTED_SEVERITY_MAP`** — every rule id the config resolves for a
-  TypeScript source, with its level. 106 entries: 81 error, 3 warn, 22 off. Both
-  the `.ts` and the `.tsx` probe must resolve exactly this map.
-- **`EXPECTED_SCOPE_CONTRACT`** — every entry of the flat config in cascade
-  order, each entry's `files` and `ignores` kept together, nested pattern shape
-  preserved rather than flattened. Listing *every* entry, not only the scoped
-  ones, is what makes a rule-bearing entry with no scope at all show up — as a
-  new `files: null` row.
+1. **Domain** — walk `ui/` with `fs.readdir`/Dirent and collect every `.ts` and
+   `.tsx` file, at any depth, excluding only `node_modules` and `dist` (the two
+   roots the declared policy already places outside it). An empty walk is itself
+   a failure, so the check cannot pass vacuously. Symlink handling mirrors
+   ESLint's own enumerator exactly, so the two lists are comparable.
+2. **Coverage** — every walked file must appear in the ESLint run, and every
+   TypeScript file the run opened must appear in the walk. Both directions, so
+   neither a narrowed scope nor a blind walk can hide behind the other.
+3. **Policy** — every walked file must resolve `EXPECTED_POLICY` in full: all
+   106 rules *with their options*, plus the boundaries that can stop a rule
+   running even when the rule map is intact — parser identity, `ecmaVersion`,
+   `sourceType`, parser options, processor, plugin ids, linter options, and
+   browser globals. Identical failures are grouped, so a config-wide drift
+   prints once rather than 514 times.
+4. **Inline overrides** — no source may reconfigure a rule in a comment. Each
+   file is parsed a second time with the shared config's rules stripped and
+   `allowInlineConfig: false`, and every node from `getInlineConfigNodes()` that
+   is not in `getDisableDirectives()` is a failure. Structural, by node
+   identity: no regex, no new dependency.
 
-Path classification derives from the first of those, never from a rule count:
+Point 4 exists because `/* eslint some-rule: "off" */` is invisible to *both*
+tallies — it produces no error to count and no suppressed message either. The
+48 existing `eslint-disable` suppressions are unaffected: they stay in the
+normal ESLint pass, keep populating `suppressedMessages`, and remain frozen by
+the ledger. Turning them all off with `linterOptions.noInlineConfig` was
+considered and rejected for exactly that reason.
 
-| Path | Classified |
-| --- | --- |
-| an unwritten `src/**/*.ts` and `src/**/*.tsx` | *linted* — resolves exactly `EXPECTED_SEVERITY_MAP`, and an `any` in it errors at severity 2 |
-| `dist/**` | *ignored* |
-| `scripts/*.mjs`, `eslint.config.js` | *parsed only* — not ignored, resolves exactly the empty rule map |
+`vite.config.ts` is the concrete file this recovers: a root-level source that
+every path-list and every `{name, files, ignores}` contract missed, and that a
+one-word `basePath: 'src'` silently dropped from the lint run.
 
-Anything else is reported as a fourth state naming both counts, so a reduced rule
-map cannot read as *linted*. The *parsed only* row is recorded, not aspirational:
-`npm run lint` opens the gate script and the config itself, so a syntax or config
-error in either fails the build through the *Fatal* branch, but no rule applies
-to them. Broadening the lint scope to JS/MJS is a separate decision, and widening
-`files` fails the scope contract — which makes it a visible one.
+`EXPECTED_POLICY` lives in `ui/scripts/lintPolicy.mjs`, imported by the gate and
+by its tests, so there is one copy. A dependency upgrade is *meant* to fail
+against it; the diff is the review prompt, and it is the only place a change in
+enforcement policy surfaces before it silently changes what
+`eslint-baseline.json` is allowed to record. There is deliberately no
+auto-generator and no snapshot-update path — a contract that rewrites itself
+records drift instead of gating it.
 
-A dependency upgrade is *meant* to fail these two assertions. The diff is the
-review prompt: the only place a change in enforcement policy surfaces before it
-silently changes what `eslint-baseline.json` is allowed to record.
+What remains hand-written is the *boundary* of the TypeScript policy, kept small
+and behavioural: `scripts/*.mjs` and `eslint.config.js` are opened by the run but
+resolve the empty rule map, so only a fatal parse or config error can be reported
+for them. Broadening the lint scope to JS/MJS is a separate decision; that
+assertion is where it would become visible.
 
-Red-first, each defect applied to the real `eslint.config.js` and reverted, with
-the config confirmed byte-identical afterwards:
+Red-first, each defect driven through the real command and then reverted, with
+the config and the baseline confirmed byte-identical afterwards:
 
-| Defect | Under the projections | Under the complete contract |
+| Defect | Under the earlier contracts | Under the measurement |
 | --- | --- | --- |
-| `ignores: ['src/context/**']` on the rule-bearing entry | 21/21 passed | 1 failure |
-| an upstream preset drops `react-hooks/globals`, an error rule with no violations | 21/21 passed, and `npm run lint` printed *no drift* | 4 failures |
-| a `.tsx` path re-covered by a single-rule config | 21/21 passed, classified *linted* on 1 of 106 rules | 2 failures |
+| `basePath: 'src'` on the rule-bearing entry | all green, `vite.config.ts` silently unlinted | `UNLINTED vite.config.ts`, plus a `POLICY` group, exit 1 |
+| `ignores: ['src/lib/**']` on the same entry | caught only if a listed path happened to live there | every file in the subtree fails coverage |
+| an upstream preset drops `react-hooks/globals` | *no drift*, if severity alone was pinned | `POLICY` on all 514 files, grouped into one entry |
+| a rule kept at error with its options loosened | severity map unchanged, all green | `rule config changed`, exit 1 |
+| `/* eslint …: "off" */` in a source file | invisible to both tallies | `INLINE`, exit 1 |
+| `/* eslint …: "warn" */` in a source file | invisible to both tallies | `INLINE`, exit 1 |
+| the same file, under `lint:baseline --update` | a fresh green baseline written | exit 1, `eslint-baseline.json` unchanged |
+| `// eslint-disable-next-line` alone | — | not an `INLINE` failure; still lands in the suppression tally |
 
-The middle row is the whole argument in one line: an enforcement rule left the
+The third row is the whole argument in one line: an enforcement rule left the
 gate, every test passed, and the ledger reported no drift.
+
+The cost is one extra parse of the 514 sources: `npm run lint` goes from 9.1 s
+to 10.9 s. The `calculateConfigForFile` sweep across all of them is 12.6 ms.
 
 ## 4. Result
 

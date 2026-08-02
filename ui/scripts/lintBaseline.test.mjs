@@ -1,9 +1,18 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { compareToBaseline, fatalProblems, missingRationales, pairKey, reportLines } from './lint-baseline.mjs';
+import {
+  compareToBaseline,
+  fatalProblems,
+  integrityLines,
+  missingRationales,
+  pairKey,
+  reportLines,
+} from './lint-baseline.mjs';
 
 // The ratchet's whole value is in this comparison: it decides what counts as new
 // debt. Every branch is pinned here so the gate can't be widened by accident —
@@ -159,22 +168,37 @@ describe('fatalProblems catches what the ledger structurally cannot', () => {
   });
 });
 
-describe('reportLines fails on a fatal error even when every tally matches', () => {
-  // The unconditional property. If this ever reduces to "only report drift",
-  // a file that stops parsing ships as a green build.
+describe('reportLines turns recorded-debt drift into a verdict', () => {
   const clean = { unclassified: [], expanded: [], stale: [] };
 
   it('reports nothing when the run is genuinely clean', () => {
-    expect(
-      reportLines({ violationDrift: clean, suppressionDrift: clean, unexplained: [], fatals: [] }),
-    ).toEqual([]);
+    expect(reportLines({ violationDrift: clean, suppressionDrift: clean, unexplained: [] })).toEqual([]);
   });
 
-  it('still fails when the only problem is a fatal error', () => {
+  it('reports drift and unexplained rules together', () => {
     const lines = reportLines({
-      violationDrift: clean,
+      violationDrift: { unclassified: [{ file: 'src/a.ts', rule: 'no-explicit-any', count: 1 }], expanded: [], stale: [] },
       suppressionDrift: clean,
-      unexplained: [],
+      unexplained: ['mystery-rule'],
+    });
+    expect(lines.filter((line) => line.includes('NEW'))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('UNEXPLAINED'))).toHaveLength(1);
+  });
+});
+
+describe('integrityLines fails on an incomplete measurement even when every tally matches', () => {
+  // The unconditional half. `reportLines` can only speak about what was found;
+  // everything here is a way the run looked at less than it claims to, which no
+  // tally comparison can detect because the tally comes out clean.
+  const sound = { fatals: [], coverage: { empty: false, missing: [], unwalked: [] }, policyGroups: [], inlineViolations: [] };
+
+  it('reports nothing when the measurement is complete', () => {
+    expect(integrityLines(sound)).toEqual([]);
+  });
+
+  it('fails when a file stopped parsing, which yields no violations to count', () => {
+    const lines = integrityLines({
+      ...sound,
       fatals: [{ filePath: 'src/broken.ts', line: 4, message: 'Parsing error: ;' }],
     });
     expect(lines).toHaveLength(1);
@@ -183,17 +207,96 @@ describe('reportLines fails on a fatal error even when every tally matches', () 
     expect(lines[0]).toContain('Parsing error: ;');
   });
 
-  it('keeps reporting drift and unexplained rules alongside', () => {
-    const lines = reportLines({
-      violationDrift: { unclassified: [{ file: 'src/a.ts', rule: 'no-explicit-any', count: 1 }], expanded: [], stale: [] },
-      suppressionDrift: clean,
-      unexplained: ['mystery-rule'],
-      fatals: [{ filePath: 'src/broken.ts', line: 4, message: 'Parsing error: ;' }],
-    });
-    expect(lines.filter((line) => line.includes('FATAL'))).toHaveLength(1);
-    expect(lines.filter((line) => line.includes('NEW'))).toHaveLength(1);
-    expect(lines.filter((line) => line.includes('UNEXPLAINED'))).toHaveLength(1);
+  it('fails when repo-owned TypeScript was never opened', () => {
+    const lines = integrityLines({ ...sound, coverage: { empty: false, missing: ['vite.config.ts'], unwalked: [] } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('UNLINTED');
+    expect(lines[0]).toContain('vite.config.ts');
   });
+
+  it('fails when the domain walk missed a file the run did open', () => {
+    const lines = integrityLines({ ...sound, coverage: { empty: false, missing: [], unwalked: ['src/hidden.tsx'] } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('UNWALKED');
+  });
+
+  it('fails when the walk found nothing, instead of passing vacuously', () => {
+    const lines = integrityLines({ ...sound, coverage: { empty: true, missing: [], unwalked: [] } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('DOMAIN');
+  });
+
+  it('fails when the effective policy drifted, printing one entry per distinct drift', () => {
+    const lines = integrityLines({
+      ...sound,
+      policyGroups: [
+        {
+          differences: ['rule config changed — @typescript-eslint/no-explicit-any: expected [2], resolved [1]'],
+          files: Array.from({ length: 514 }, (_, index) => `src/f${index}.ts`),
+        },
+      ],
+    });
+    // Grouped: a config-wide drift is one finding, not 514 copies of it.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('POLICY    514 file(s)');
+    expect(lines[0]).toContain('+511 more');
+    expect(lines[1]).toContain('no-explicit-any');
+  });
+
+  it('fails when a source rewrote policy inline', () => {
+    const lines = integrityLines({
+      ...sound,
+      inlineViolations: [{ file: 'src/a.ts', line: 1, column: 1, text: '/* eslint no-var: "off" */' }],
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('INLINE');
+    expect(lines[0]).toContain('src/a.ts:1:1');
+  });
+
+  it('reports every kind at once rather than stopping at the first', () => {
+    const lines = integrityLines({
+      fatals: [{ filePath: 'src/broken.ts', line: 4, message: 'Parsing error: ;' }],
+      coverage: { empty: true, missing: ['vite.config.ts'], unwalked: ['src/hidden.tsx'] },
+      policyGroups: [{ differences: ['parser: expected "x", resolved "y"'], files: ['src/a.ts'] }],
+      inlineViolations: [{ file: 'src/a.ts', line: 1, column: 1, text: '/* eslint no-var: "off" */' }],
+    });
+    for (const label of ['FATAL', 'DOMAIN', 'UNLINTED', 'UNWALKED', 'POLICY', 'INLINE']) {
+      expect(lines.some((line) => line.includes(label)), label).toBe(true);
+    }
+  });
+});
+
+describe('an incomplete measurement blocks --update too, not just the verdict', () => {
+  // The ordering has to hold in the real script: `lint:baseline` exists to
+  // rewrite the ledger, so if it ran before the integrity checks, any of the
+  // failures above could be laundered into a freshly written green baseline.
+  // Asserted against the actual command rather than an injected fake, because a
+  // fake would only pin the ordering a test author already imagined.
+  const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
+  const BASELINE = path.join(UI_ROOT, 'eslint-baseline.json');
+  const PROBE = path.join(UI_ROOT, 'update-integrity-probe.ts');
+
+  const runGate = (args) =>
+    spawnSync(process.execPath, ['scripts/lint-baseline.mjs', ...args], {
+      cwd: UI_ROOT,
+      encoding: 'utf8',
+      timeout: 300_000,
+    });
+
+  it('refuses to write a baseline while an integrity check is failing', () => {
+    const before = fs.readFileSync(BASELINE);
+    try {
+      fs.writeFileSync(PROBE, '/* eslint @typescript-eslint/no-explicit-any: "off" */\nexport const f = (v: any) => v;\n');
+      const result = runGate(['--update']);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('INLINE');
+      expect(result.stderr).toContain('update-integrity-probe.ts');
+      expect(fs.readFileSync(BASELINE).equals(before)).toBe(true);
+    } finally {
+      fs.rmSync(PROBE, { force: true });
+      fs.writeFileSync(BASELINE, before);
+    }
+  }, 300_000);
 });
 
 describe('the gate script stays reviewable text', () => {

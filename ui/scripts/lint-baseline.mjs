@@ -10,7 +10,18 @@
 //     and a suppressed rule also stops the React Compiler analysing that
 //     component, so the unmeasured area would grow silently.
 //
-// What this gate rejects, exactly:
+// Counting both still only measures what ESLint was *asked* to look at, so the
+// run's own completeness is checked first, before any tally is trusted and
+// before ``--update`` may write anything (see ``scripts/lintPolicy.mjs``):
+//   - every repo-owned ``.ts``/``.tsx`` file under ``ui/`` appears in the run and
+//     resolves the pinned effective policy, rules and options and all;
+//   - the walk that produced that list sees everything the run did, so the
+//     invariant cannot pass by measuring less;
+//   - no source carries inline configuration outside the ``eslint-disable``
+//     family, which is the one way to change policy that neither tally records;
+//   - nothing was reported that has no rule id to be ledgered under.
+//
+// What the gate rejects on top of that, exactly:
 //   - a ``(file, rule)`` pair the ledger never recorded;
 //   - a recorded pair violated more often than the ledger allows;
 //   - a recorded pair violated less often than the ledger allows, until the
@@ -31,10 +42,6 @@
 // grow, and once the real debt is paid down the stale check forces the allowance
 // down with it.
 //
-// This file also cannot tell that ESLint was asked to look at less. Configured
-// lint scope and rule severity are pinned separately, at their owner, by
-// ``scripts/eslintConventions.test.mjs``.
-//
 // Why a ledger instead of ``eslint-disable`` comments or a relaxed config: both
 // of those hide the debt at the site, so nobody can see how much there is or
 // whether it is shrinking. One sorted JSON file can be read, diffed, and
@@ -44,7 +51,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ESLint } from 'eslint';
+import { ESLint, Linter } from 'eslint';
+
+import sharedConfig from '../eslint.config.js';
+import {
+  coverageGaps,
+  effectivePolicyOf,
+  forbiddenInlineConfig,
+  groupByDifferences,
+  intendedFiles,
+  policyDifferences,
+  withoutRules,
+} from './lintPolicy.mjs';
 
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const BASELINE_FILE = path.join(UI_ROOT, 'eslint-baseline.json');
@@ -175,15 +193,48 @@ function describe({ unclassified, expanded, stale }, label) {
 }
 
 /**
- * Every reason this run should fail, as printable lines. Empty means pass.
+ * Every reason the measurement itself cannot be trusted, as printable lines.
+ * Empty means the run looked at everything it claims to.
  *
- * The gate's verdict lives here, in one pure function, so "a fatal error fails
- * even when every baselined tally matches" is a property a test can hold onto
- * rather than a branch buried in the IO path. Pure.
+ * These are the checks a tally comparison structurally cannot make, so they are
+ * kept out of the drift verdict and run ahead of it — including ahead of
+ * ``--update``, because a baseline written from an incomplete run records the
+ * wrong thing and then blesses it. The whole verdict lives in one pure function
+ * so "an incomplete measurement fails even when every tally matches" is a
+ * property a test can hold onto rather than a branch buried in the IO path. Pure.
  */
-export function reportLines({ violationDrift, suppressionDrift, unexplained, fatals }) {
+export function integrityLines({ fatals, coverage, policyGroups, inlineViolations }) {
+  const lines = fatals.map(({ filePath, line, message }) => `  FATAL     ${filePath}:${line}  ${message}`);
+
+  if (coverage.empty) {
+    lines.push('  DOMAIN    the walk found no TypeScript sources at all, so nothing was measured');
+  }
+  for (const file of coverage.missing) {
+    lines.push(`  UNLINTED  ${file}  is repo-owned TypeScript the lint run never opened`);
+  }
+  for (const file of coverage.unwalked) {
+    lines.push(`  UNWALKED  ${file}  was linted but the domain walk missed it, so the walk is blind`);
+  }
+  for (const { differences, files } of policyGroups) {
+    lines.push(`  POLICY    ${files.length} file(s) resolve a different policy (${preview(files)}):`);
+    for (const difference of differences) lines.push(`              ${difference}`);
+  }
+  for (const { file, line, column, text } of inlineViolations) {
+    lines.push(`  INLINE    ${file}:${line}:${column}  inline configuration outside the eslint-disable family: ${text}`);
+  }
+
+  return lines;
+}
+
+const preview = (files, limit = 3) =>
+  files.length <= limit ? files.join(', ') : `${files.slice(0, limit).join(', ')}, +${files.length - limit} more`;
+
+/**
+ * Every reason this run should fail on recorded debt, as printable lines. Empty
+ * means pass. Pure.
+ */
+export function reportLines({ violationDrift, suppressionDrift, unexplained }) {
   return [
-    ...fatals.map(({ filePath, line, message }) => `  FATAL     ${filePath}:${line}  ${message}`),
     ...describe(violationDrift, 'errors'),
     ...describe(suppressionDrift, 'suppressed messages'),
     ...unexplained.map((rule) => `  UNEXPLAINED  ${rule} is in the baseline with no "rationale" entry`),
@@ -193,10 +244,55 @@ export function reportLines({ violationDrift, suppressionDrift, unexplained, fat
 const total = (byFile) =>
   Object.values(byFile).reduce((sum, rules) => sum + Object.values(rules).reduce((a, b) => a + b, 0), 0);
 
+const relative = (filePath) => path.relative(UI_ROOT, filePath).split(path.sep).join('/');
+
+/**
+ * Measure the run's completeness: what the domain contains, whether ESLint
+ * opened all of it under the pinned policy, and whether any source rewrote that
+ * policy inline.
+ */
+async function measureIntegrity(eslint, results) {
+  const intended = intendedFiles(UI_ROOT);
+
+  const perFile = [];
+  for (const file of intended) {
+    const config = await eslint.calculateConfigForFile(path.join(UI_ROOT, file));
+    perFile.push({ file, differences: policyDifferences(effectivePolicyOf(config)) });
+  }
+
+  return {
+    intended,
+    fatals: fatalProblems(results).map((problem) => ({ ...problem, filePath: relative(problem.filePath) })),
+    coverage: coverageGaps({ intended, lintedFiles: results.map((result) => relative(result.filePath)) }),
+    policyGroups: groupByDifferences(perFile),
+    inlineViolations: forbiddenInlineConfig({
+      root: UI_ROOT,
+      files: intended,
+      config: withoutRules(sharedConfig),
+      linter: new Linter(),
+    }),
+  };
+}
+
 async function main() {
   const update = process.argv.includes('--update');
   const eslint = new ESLint();
   const results = await eslint.lintFiles(['.']);
+
+  // Unconditional, and first: an incomplete or bypassed measurement can neither
+  // pass nor be written to the baseline.
+  const measurement = await measureIntegrity(eslint, results);
+  const integrity = integrityLines(measurement);
+  if (integrity.length > 0) {
+    console.error('Lint gate integrity check failed:');
+    console.error(integrity.join('\n'));
+    console.error(
+      '\nThe lint run did not measure what it claims to, so neither its verdict nor\n' +
+        '"npm run lint:baseline" means anything until this is fixed.',
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   const violations = tally(results, errorsOf);
   const suppressions = tally(results, suppressedOf);
@@ -221,10 +317,6 @@ async function main() {
     violationDrift,
     suppressionDrift: compareToBaseline(baseline.suppressions ?? {}, suppressions),
     unexplained: missingRationales([baseline.violations ?? {}, baseline.suppressions ?? {}], baseline.rationale),
-    fatals: fatalProblems(results).map((problem) => ({
-      ...problem,
-      filePath: path.relative(UI_ROOT, problem.filePath).split(path.sep).join('/'),
-    })),
   });
 
   if (lines.length > 0) {
@@ -235,7 +327,7 @@ async function main() {
     );
     const focused = results
       .map((result) => {
-        const file = path.relative(UI_ROOT, result.filePath).split(path.sep).join('/');
+        const file = relative(result.filePath);
         const messages = errorsOf(result).filter((message) => offenders.has(pairKey(file, message.ruleId)));
         return { ...result, messages, warningCount: 0, suppressedMessages: [] };
       })
@@ -257,9 +349,10 @@ async function main() {
   }
 
   console.log(
-    `Lint baseline check passed: ${total(violations)} baselined violations, ` +
+    `Lint baseline check passed: ${measurement.intended.length} TypeScript sources all measured ` +
+      `under the pinned policy, ${total(violations)} baselined violations, ` +
       `${total(suppressions)} baselined suppressions, no fatal problems, ` +
-      'and no drift in any (file, rule) pair.',
+      'no inline policy overrides, and no drift in any (file, rule) pair.',
   );
 }
 
