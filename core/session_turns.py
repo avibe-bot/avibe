@@ -1298,6 +1298,24 @@ class SessionTurnManager:
             },
         )
 
+    @staticmethod
+    def reserve_delivery(
+        conn: Connection,
+        request: DeliveryRequest,
+    ) -> dict[str, Any]:
+        """Persist a producer-owned content reservation in the caller's transaction."""
+
+        if request.content is None:
+            raise ValueError("content Delivery requires a Message snapshot")
+        if request.priority not in {"p1", "p3"}:
+            raise ValueError("content reservation requires P1 or P3 priority")
+        return SessionTurnManager._insert_delivery(
+            conn,
+            request,
+            priority=request.priority,
+            state="reserved",
+        )
+
     def _active_identity(
         self,
         backend: str,

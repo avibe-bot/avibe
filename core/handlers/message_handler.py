@@ -518,33 +518,65 @@ class MessageHandler(BaseHandler):
                     spec["routing_subagent"] = routing_agent
                     context.platform_specific = spec
 
+            from core.message_priority import delivery_intent_for_trigger
+
+            delivery_intent = delivery_intent_for_trigger("im")
+            if (
+                restored_route is None
+                and agent_name == "opencode"
+                and subagent_name
+                and subagent_message is not None
+            ):
+                # OpenCode subagents share the main Session anchor. They need a
+                # fresh Turn so the persisted route can select the requested
+                # native subagent instead of text-steering the active main Turn.
+                delivery_intent = "queue"
+
             if agent_name in {"claude", "codex"} and subagent_name:
                 spec = dict(context.platform_specific or {})
                 spec["backend_base_session_id"] = base_session_id
                 spec["backend_composite_session_id"] = composite_key
                 context.platform_specific = spec
 
-            # Resolve remote attachments before admission so a queued Delivery
-            # owns stable local media references and can survive a restart.
-            processed_files = None
-            attachment_errors: List[str] = []
-            if context.files:
-                processed_files, attachment_errors = await self._process_file_attachments(
-                    context,
-                    working_path,
-                )
-                if processed_files:
-                    logger.info(
-                        "Processed %s file attachments for message",
-                        len(processed_files),
-                    )
-
+            durable_dispatch_text = None
             if durable_ingress_enabled and not durable_delivery_owned:
                 durable_dispatch_text = await self._prepend_message_metadata(
                     context,
                     message,
                     include_user_info=True,
                 )
+
+            # Resolve remote attachments before admission so a queued Delivery
+            # owns stable local media references and can survive a restart.
+            processed_files = None
+            attachment_errors: List[str] = []
+            downloaded_attachment_paths: list[str] = []
+            if context.files:
+                existing_local_paths = {
+                    str(attachment.local_path)
+                    for attachment in context.files
+                    if isinstance(attachment, FileAttachment)
+                    and attachment.local_path
+                }
+                processed_files, attachment_errors = await self._process_file_attachments(
+                    context,
+                    working_path,
+                )
+                if processed_files:
+                    downloaded_attachment_paths = [
+                        str(attachment.local_path)
+                        for attachment in processed_files
+                        if isinstance(attachment, FileAttachment)
+                        and attachment.local_path
+                        and str(attachment.local_path) not in existing_local_paths
+                    ]
+                    logger.info(
+                        "Processed %s file attachments for message",
+                        len(processed_files),
+                    )
+
+            if durable_ingress_enabled and not durable_delivery_owned:
+                assert durable_dispatch_text is not None
                 admitted = await self._admit_human_delivery(
                     manager=delivery_manager,
                     context=context,
@@ -559,6 +591,8 @@ class MessageHandler(BaseHandler):
                     session_anchor=base_session_id,
                     working_path=working_path,
                     vibe_agent=vibe_agent,
+                    delivery_intent=delivery_intent,
+                    downloaded_attachment_paths=downloaded_attachment_paths,
                     admission_context={
                         "message_handler_route": {
                             "base_session_id": base_session_id,
@@ -748,9 +782,11 @@ class MessageHandler(BaseHandler):
         session_anchor: str,
         working_path: str,
         vibe_agent: Any,
+        delivery_intent: str,
+        downloaded_attachment_paths: List[str],
         admission_context: dict[str, Any],
     ) -> bool:
-        """Transfer one IM input to the durable P1 owner before native work."""
+        """Transfer one IM input to its durable owner before native work."""
 
         session_id = self.session_handler.ensure_agent_session_id(
             context,
@@ -764,85 +800,122 @@ class MessageHandler(BaseHandler):
         if not session_id:
             raise RuntimeError("Could not reserve the Agent Session before delivery")
 
-        from core.message_priority import (
-            delivery_intent_for_trigger,
-            priority_for_delivery_intent,
-        )
+        from core.message_priority import priority_for_delivery_intent
         from core.session_turns import DeliveryRequest
         from storage import message_deliveries, media_service, messages_service
+        from storage.agent_session_rows import reserve_write_lock
         from storage.db import get_cached_sqlite_engine
 
-        attachment_refs: list[dict[str, Any]] = []
+        priority = priority_for_delivery_intent(delivery_intent)
         scope_id = None
-        with get_cached_sqlite_engine().begin() as conn:
-            from core.message_mirror import _scope_id_for_session
+        request = None
+        duplicate_delivery_id = None
+        try:
+            with get_cached_sqlite_engine().begin() as conn:
+                from core.message_mirror import _scope_id_for_session
 
-            scope_id = _scope_id_for_session(conn, session_id)
-            if context.message_id and messages_service.native_message_exists(
-                conn,
-                platform=str(context.platform or ""),
-                scope_id=scope_id,
-                native_message_id=str(context.message_id),
-            ):
-                return True
-            for attachment in processed_files:
-                if not attachment.local_path:
-                    continue
-                token = media_service.register(
+                reserve_write_lock(conn)
+                scope_id = _scope_id_for_session(conn, session_id)
+                platform = str(context.platform or "")
+                native_message_id = str(context.message_id or "").strip()
+                if native_message_id and messages_service.native_message_exists(
                     conn,
+                    platform=platform,
                     scope_id=scope_id,
-                    session_id=session_id,
-                    kind=(
-                        "image"
-                        if str(attachment.mimetype or "").startswith("image/")
-                        else "file"
-                    ),
-                    source="im_inbound",
-                    local_path=attachment.local_path,
-                    file_name=attachment.name,
-                    content_type=attachment.mimetype,
-                )
-                attachment_refs.append(
-                    {
-                        "token": token,
-                        "name": attachment.name,
-                        "mimetype": attachment.mimetype,
-                        "size": attachment.size,
-                    }
-                )
+                    native_message_id=native_message_id,
+                ):
+                    duplicate_delivery_id = ""
+                elif native_message_id:
+                    existing = message_deliveries.get_delivery_by_native_identity(
+                        conn,
+                        platform=platform,
+                        native_message_id=native_message_id,
+                        scope_id=scope_id,
+                        session_id=session_id,
+                        normalize_legacy=True,
+                    )
+                    if existing is not None:
+                        duplicate_delivery_id = str(existing["id"])
 
-        if not message_deliveries.has_substantive_input(
-            dispatch_text,
-            has_attachments=bool(attachment_refs),
-        ):
-            raise ValueError("Message contains no deliverable text or attachment")
+                if duplicate_delivery_id is None:
+                    attachment_refs: list[dict[str, Any]] = []
+                    for attachment in processed_files:
+                        if not attachment.local_path:
+                            continue
+                        token = media_service.register(
+                            conn,
+                            scope_id=scope_id,
+                            session_id=session_id,
+                            kind=(
+                                "image"
+                                if str(attachment.mimetype or "").startswith("image/")
+                                else "file"
+                            ),
+                            source="im_inbound",
+                            local_path=attachment.local_path,
+                            file_name=attachment.name,
+                            content_type=attachment.mimetype,
+                        )
+                        attachment_refs.append(
+                            {
+                                "token": token,
+                                "name": attachment.name,
+                                "mimetype": attachment.mimetype,
+                                "size": attachment.size,
+                            }
+                        )
 
-        content = {"text": display_text}
-        if attachment_refs:
-            content["attachments"] = attachment_refs
-        result = await manager.deliver(
-            DeliveryRequest(
-                session_id=session_id,
-                priority=priority_for_delivery_intent(
-                    delivery_intent_for_trigger("im")
-                ),
-                content=dispatch_text,
-                has_content=True,
-                scope_id=scope_id,
-                platform=str(context.platform or ""),
-                source="user",
-                author="user",
-                message_type="user",
-                author_id=str(context.user_id or "").strip() or None,
-                display_text=display_text,
-                content_json=content,
-                admission_context=admission_context,
-                native_message_id=str(context.message_id or "").strip() or None,
-                parent_native_message_id=str(context.thread_id or "").strip()
-                or None,
-            ),
-            context=context,
-        )
+                    if not message_deliveries.has_substantive_input(
+                        dispatch_text,
+                        has_attachments=bool(attachment_refs),
+                    ):
+                        raise ValueError(
+                            "Message contains no deliverable text or attachment"
+                        )
+
+                    content = {"text": display_text}
+                    if attachment_refs:
+                        content["attachments"] = attachment_refs
+                    request = DeliveryRequest(
+                        session_id=session_id,
+                        priority=priority,
+                        content=dispatch_text,
+                        has_content=True,
+                        delivery_id=message_deliveries.new_delivery_id(),
+                        scope_id=scope_id,
+                        platform=platform,
+                        source="user",
+                        author="user",
+                        message_type="user",
+                        author_id=str(context.user_id or "").strip() or None,
+                        display_text=display_text,
+                        content_json=content,
+                        admission_context=admission_context,
+                        native_message_id=native_message_id or None,
+                        parent_native_message_id=(
+                            str(context.thread_id or "").strip() or None
+                        ),
+                    )
+                    reserved = manager.reserve_delivery(conn, request)
+                    if str(reserved["id"]) != request.delivery_id:
+                        raise RuntimeError(
+                            "native Delivery appeared after writer reservation"
+                        )
+        except Exception:
+            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            raise
+
+        if duplicate_delivery_id is not None:
+            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if duplicate_delivery_id:
+                payload = dict(context.platform_specific or {})
+                payload["delivery_id"] = duplicate_delivery_id
+                context.platform_specific = payload
+            return True
+
+        if request is None:
+            raise RuntimeError("Delivery reservation did not produce a request")
+        result = await manager.deliver(request, context=context)
         payload = dict(context.platform_specific or {})
         payload["delivery_id"] = result.delivery_id
         context.platform_specific = payload
@@ -856,6 +929,16 @@ class MessageHandler(BaseHandler):
 
             bus.publish("queue.updated", {"session_id": session_id})
         return True
+
+    @staticmethod
+    def _cleanup_unowned_attachment_paths(paths: List[str]) -> None:
+        from pathlib import Path
+
+        for path in dict.fromkeys(str(value) for value in paths if value):
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception as err:
+                logger.warning("Failed to remove unowned attachment %s: %s", path, err)
 
     def _is_duplicate_human_delivery(self, context: MessageContext) -> bool:
         """Reject a retried native event before pre-admission side effects."""

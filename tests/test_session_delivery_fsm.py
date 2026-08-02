@@ -26,7 +26,9 @@ from core.session_turns import (
     SessionTurnManager,
     Turn,
 )
+from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
+from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage import messages_service
 from storage import workbench_sessions_service
@@ -2609,6 +2611,75 @@ def test_two_restart_recoveries_claim_reserved_submission_once(managers) -> None
 
     assert [text for _, text in starts] == ["recover once"]
     assert _row(engine, delivery_id)["state"] == "claimed"
+
+
+@pytest.mark.anyio
+async def test_concurrent_im_attachment_retry_keeps_one_reserved_owner(
+    managers,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    first_path = tmp_path / "first.txt"
+    retry_path = tmp_path / "retry.txt"
+    first_path.write_text("first", encoding="utf-8")
+    retry_path.write_text("retry", encoding="utf-8")
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        im_client=SimpleNamespace(formatter=None),
+        settings_manager=SimpleNamespace(sessions=SimpleNamespace()),
+        session_manager=SimpleNamespace(),
+        receiver_tasks={},
+    )
+    handler = MessageHandler(controller)
+    handler.set_session_handler(
+        SimpleNamespace(ensure_agent_session_id=lambda *_args, **_kwargs: "ses_fsm")
+    )
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+
+    def context() -> MessageContext:
+        return MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="native-attachment-1",
+            platform="slack",
+        )
+
+    async def admit(path: Path) -> None:
+        await handler._admit_human_delivery(
+            manager=manager,
+            context=context(),
+            dispatch_text="review attachment",
+            display_text="review attachment",
+            processed_files=[
+                FileAttachment(
+                    name=path.name,
+                    mimetype="text/plain",
+                    local_path=str(path),
+                    size=path.stat().st_size,
+                )
+            ],
+            session_key="slack::C1",
+            agent_name="codex",
+            session_anchor="base-session",
+            working_path="/tmp",
+            vibe_agent=None,
+            delivery_intent="steer",
+            downloaded_attachment_paths=[str(path)],
+            admission_context={},
+        )
+
+    await admit(first_path)
+    await admit(retry_path)
+
+    with engine.connect() as conn:
+        deliveries = conn.execute(select(message_deliveries)).mappings().all()
+        media = conn.execute(select(media_objects)).mappings().all()
+    assert len(deliveries) == 1
+    assert len(media) == 1
+    assert media[0]["local_path"] == str(first_path)
+    assert first_path.exists()
+    assert not retry_path.exists()
 
 
 def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(

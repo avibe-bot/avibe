@@ -726,9 +726,6 @@ Important options:
 
 - `--name`
 - `--session-id`
-- `--queue`
-- `--send-now`
-- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`

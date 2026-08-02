@@ -313,6 +313,59 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
         self.assertEqual(controller.agent_service.requests, [])
 
+    async def test_explicit_opencode_subagent_uses_new_turn_delivery_intent(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        server = types.SimpleNamespace(
+            ensure_running=AsyncMock(),
+            get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
+        )
+        controller.agent_service.agents = {
+            "opencode": types.SimpleNamespace(
+                _get_server=AsyncMock(return_value=server)
+            )
+        }
+        controller.get_cwd = Mock(return_value="/tmp")
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=types.SimpleNamespace(
+                id="agent-opencode",
+                name="opencode",
+                backend="opencode",
+                model=None,
+                reasoning_effort=None,
+                system_prompt=None,
+            )
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="check this")
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-subagent",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "reviewer: check this")
+
+        call = handler._admit_human_delivery.await_args.kwargs
+        self.assertEqual(call["delivery_intent"], "queue")
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["subagent_name"],
+            "reviewer",
+        )
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["base_session_id"],
+            "base-session",
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_duplicate_im_attachment_skips_download_before_admission(self):
         from modules.im.base import FileAttachment
 
