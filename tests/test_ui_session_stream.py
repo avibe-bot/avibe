@@ -219,6 +219,95 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert sent["text"] == "no stream"
 
 
+def test_route_reads_the_materialized_message_id_for_a_merged_batch(
+    isolated_state,
+    tmp_path,
+) -> None:
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    older_delivery_id = "msg_merged_segment_head"
+
+    async def dispatch(payload):
+        with create_sqlite_engine().begin() as conn:
+            current = message_deliveries.get_delivery(conn, payload["user_message_id"])
+            assert current is not None and current["state"] == "reserved"
+            older = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=older_delivery_id,
+                session_id=session_id,
+                priority="p3",
+                state="queued",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    text="older queued input",
+                    metadata={"_web_push_user_key": "remote:user-a"},
+                    author_id="remote:user-a",
+                ),
+                dispatch_text="older queued input",
+                now="2026-01-01T00:00:00Z",
+            )
+            turn_id = message_deliveries.new_turn_id()
+            claimed = message_deliveries.claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=session_id,
+                backend="claude",
+                deliveries=[older, current],
+                dispatch_text="older queued input\nnew input",
+            )
+            turn = claimed["turn"]
+            assert message_deliveries.bind_native_start(
+                conn,
+                turn_id,
+                expected_version=int(turn["version"]),
+                runtime_key=f"runtime:{turn_id}",
+                runtime_turn_id=f"runtime-turn:{turn_id}",
+                native_turn_id=f"native:{turn_id}",
+            ) is not None
+            accepted = message_deliveries.materialize_start_acceptance(
+                conn,
+                turn_id=turn_id,
+                evidence={"kind": "test_native_acceptance"},
+            )
+            current_after = message_deliveries.get_delivery(
+                conn,
+                payload["user_message_id"],
+            )
+        assert accepted and current_after is not None
+        return {
+            "status_code": 202,
+            "body": {
+                "ok": True,
+                "session_id": session_id,
+                "delivery_id": payload["user_message_id"],
+                "message_id": accepted[0]["message_id"],
+                "delivery_state": current_after["state"],
+            },
+        }
+
+    with (
+        patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)),
+        patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+    ):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "new input"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    body = response.get_json()
+    assert body["id"] == older_delivery_id
+    assert body["message_id"] == older_delivery_id
+    assert body["delivery_id"] != older_delivery_id
+
+
 def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     """When the controller reports a turn already running (202 {queued}), the
     route persists the user row, hands its id to the controller to re-type as

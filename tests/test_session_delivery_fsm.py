@@ -2584,6 +2584,118 @@ def test_reserved_attachment_only_submission_requires_a_resolvable_reference(
     assert run["cancel_requested"] == 1
 
 
+def test_fifo_claim_retires_invalid_attachment_head_and_starts_next(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    invalid_id = delivery_store.new_delivery_id()
+    valid_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=invalid_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="",
+                content={"attachments": [{"token": "deleted-token"}]},
+            ),
+            dispatch_text="",
+            now="2026-08-01T00:00:01Z",
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=valid_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="valid following input",
+            ),
+            dispatch_text="valid following input",
+            now="2026-08-01T00:00:02Z",
+        )
+
+    assert asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+
+    assert _row(engine, invalid_id)["state"] == "retired"
+    assert _row(engine, valid_id)["state"] == "claimed"
+    assert [text for _turn_id, text in starts] == ["valid following input"]
+
+
+def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
+    managers,
+    tmp_path: Path,
+) -> None:
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, starts = managers
+    attachment = tmp_path / "expires-after-claim.txt"
+    attachment.write_text("expires after claim", encoding="utf-8")
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            kind="file",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="text/plain",
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="",
+                content={"attachments": [{"token": token}]},
+            ),
+            dispatch_text="",
+        )
+        turn_id = manager._claim_fifo_batch_in_transaction(
+            conn,
+            session_id="ses_fsm",
+            backend="codex",
+        )
+        assert turn_id is not None
+    with engine.begin() as conn:
+        conn.execute(
+            update(media_objects)
+            .where(media_objects.c.token == token)
+            .values(revoked_at="2026-08-01T00:00:01Z")
+        )
+
+    assert not asyncio.run(manager._start_persisted_turn(turn_id))
+
+    assert starts == []
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_evidence_kind"] == "invalid_input_before_native_dispatch"
+
+
 def test_empty_reserved_submission_is_retired_without_native_dispatch(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     delivery_id = delivery_store.new_delivery_id()

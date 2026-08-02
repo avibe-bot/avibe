@@ -8287,8 +8287,13 @@ async def sessions_messages_create(session_id: str):
         delivery_state = str(body.get("delivery_state") or "")
         current = _current_delivery_response()
         if delivery_state == "accepted":
+            accepted_message_id = str(
+                body.get("message_id")
+                or current.get("message_id")
+                or message["id"]
+            )
             with engine.connect() as conn:
-                accepted = messages_service.get_message(conn, str(message["id"]))
+                accepted = messages_service.get_message(conn, accepted_message_id)
             if accepted is None:
                 return jsonify(
                     {

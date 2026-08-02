@@ -1079,27 +1079,48 @@ class SessionTurnManager:
             or backend in self._draining_backends
         ):
             return None
-        head = delivery_store.claimable_fifo_head(conn, session_id)
-        queued = delivery_store.claimable_fifo_prefix(conn, session_id)
-        if head is None or not queued or str(queued[0]["id"]) != str(head["id"]):
-            return None
-        segment_payloads = _collect_delivery_segment(queued)
-        segment = [
-            delivery_store.get_delivery(conn, str(row["id"]))
-            for row in segment_payloads
-        ]
-        if not segment or any(row is None for row in segment):
-            return None
-        turn_id = delivery_store.new_turn_id()
-        self._claim_start_batch(
-            conn,
-            turn_id=turn_id,
-            session_id=session_id,
-            backend=backend,
-            deliveries=[row for row in segment if row is not None],
-            dispatch_text=_segment_dispatch_text(segment_payloads),
-        )
-        return turn_id
+        while True:
+            head = delivery_store.claimable_fifo_head(conn, session_id)
+            queued = delivery_store.claimable_fifo_prefix(conn, session_id)
+            if head is None or not queued or str(queued[0]["id"]) != str(head["id"]):
+                return None
+            segment_payloads = _collect_delivery_segment(queued)
+            segment = [
+                delivery_store.get_delivery(conn, str(row["id"]))
+                for row in segment_payloads
+            ]
+            if not segment or any(row is None for row in segment):
+                return None
+            delivery_rows = [row for row in segment if row is not None]
+            invalid_rows = [
+                row
+                for row in delivery_rows
+                if not self._has_resolvable_delivery_input(conn, row)
+            ]
+            if invalid_rows:
+                for row in invalid_rows:
+                    if not self._retire_delivery_not_written(
+                        conn,
+                        session_id,
+                        str(row["id"]),
+                        reason="invalid_input_before_fifo_claim",
+                    ):
+                        raise RuntimeError("invalid FIFO Delivery retirement lost")
+                    logger.warning(
+                        "retired queued Delivery=%s because it has no resolvable input",
+                        row["id"],
+                    )
+                continue
+            turn_id = delivery_store.new_turn_id()
+            self._claim_start_batch(
+                conn,
+                turn_id=turn_id,
+                session_id=session_id,
+                backend=backend,
+                deliveries=delivery_rows,
+                dispatch_text=_segment_dispatch_text(segment_payloads),
+            )
+            return turn_id
 
     def _hydrate_delivery_context(
         self,
@@ -2543,6 +2564,7 @@ class SessionTurnManager:
             return False
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
+        invalid_input_before_dispatch = False
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             latest = delivery_store.get_turn(conn, turn_id)
@@ -2566,6 +2588,10 @@ class SessionTurnManager:
             deliveries = fresh_deliveries
             delivery = fresh_delivery
             archived_before_dispatch = session_status != "active"
+            invalid_input_before_dispatch = any(
+                not self._has_resolvable_delivery_input(conn, row)
+                for row in deliveries
+            )
             run_ids = list(
                 dict.fromkeys(
                     run_id
@@ -2610,6 +2636,21 @@ class SessionTurnManager:
                 settled_by="agent_run_terminal",
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
+            return False
+        if invalid_input_before_dispatch:
+            logger.error(
+                "durable Turn=%s lost its resolvable input before native dispatch",
+                turn_id,
+            )
+            self._terminalize_durable_turn(
+                turn_id,
+                "failed",
+                settled_by="invalid_input",
+                evidence_kind="invalid_input_before_native_dispatch",
+                abandon_unaccepted_start=True,
+                abandoned_start_outcome="invalid_input",
+            )
+            await self.drain_delivery_queue(str(turn["session_id"]))
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
@@ -2737,6 +2778,7 @@ class SessionTurnManager:
         expected_start_attempt_id: str | None = None,
         replay_unknown_start: bool = False,
         abandon_unaccepted_start: bool = False,
+        abandoned_start_outcome: str = "backend_refresh_failed",
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -2817,13 +2859,13 @@ class SessionTurnManager:
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
                                 expected_states=("claimed",),
-                                outcome="backend_refresh_failed",
+                                outcome=abandoned_start_outcome,
                                 next_state="retired",
                                 receipt={"kind": evidence_kind, **(evidence or {})},
                             )
                             if retired is None:
                                 raise RuntimeError(
-                                    "backend refresh lost an unresolved start Delivery"
+                                    "terminal settlement lost an unresolved start Delivery"
                                 )
                     elif unknown_start_reconciliation:
                         run_rows = []
