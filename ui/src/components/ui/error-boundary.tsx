@@ -50,7 +50,6 @@ export class ErrorBoundary extends React.Component<Props, State> {
   componentDidCatch(error: unknown, info: React.ErrorInfo): void {
     // The boundary swallows the throw so it can never white-screen the app — but the detail must not
     // be lost, so always surface it to the console (and any wired reporter via onError).
-    // eslint-disable-next-line no-console
     console.error('ErrorBoundary caught a render error:', error, info.componentStack);
     this.props.onError?.(error, info);
   }

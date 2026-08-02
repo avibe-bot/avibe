@@ -59,7 +59,6 @@ export function useOAuthFlowLock<TMode extends string>({
   const guardedSetAuthMode = useCallback(
     (next: TMode) => {
       if (oauthFlowActiveRef.current) {
-        // eslint-disable-next-line no-console
         console.warn(
           '[%s] rejected change to %s while OAuth flow active',
           warnTag,

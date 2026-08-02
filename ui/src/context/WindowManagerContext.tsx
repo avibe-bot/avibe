@@ -316,7 +316,6 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     restoreOnce(); // may have crossed to desktop between the initial render and this effect
     mql.addEventListener('change', restoreOnce);
     return () => mql.removeEventListener('change', restoreOnce);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Persist on any window-list change (open/close, geometry, z, min/max, title). Body-only state
