@@ -99,6 +99,10 @@ class AudioAsrProtocolError(ValueError):
     """Raised when upstream returns a success response with an invalid schema."""
 
 
+class AudioAsrInvalidDictationError(ValueError):
+    """Raised when upstream rejects composer dictation metadata or receipts."""
+
+
 class AudioAsrUnavailableError(ConnectionError):
     """Raised when the configured upstream ASR service is unavailable."""
 
@@ -131,6 +135,10 @@ class AudioAsrService:
         if not endpoint_path.startswith("/"):
             endpoint_path = f"/{endpoint_path}"
         return urljoin(f"{runtime.base_url}/", endpoint_path.lstrip("/"))
+
+    @staticmethod
+    def _dictation_endpoint_url(runtime: AudioAsrRuntimeConfig) -> str:
+        return urljoin(f"{runtime.base_url}/", "v1/voice/dictations")
 
     def is_available(self) -> bool:
         asr_config = self._get_audio_asr_config()
@@ -216,6 +224,125 @@ class AudioAsrService:
             elif isinstance(result, Exception):
                 logger.warning("Audio ASR skipped after error: %s", result)
         return transcripts
+
+    async def transcribe_voice_segment(
+        self,
+        attachment: FileAttachment | None,
+        *,
+        dictation_id: str,
+        sequence: int,
+        overlap_ms: int,
+        final: bool,
+        finalize_only: bool,
+        receipts: list[str],
+        before: str,
+        after: str,
+        timeout_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        """Forward one composer segment using the server-owned dictation contract."""
+        runtime = self._runtime_config()
+        if not self._get_audio_asr_config().enabled or not runtime:
+            raise AudioAsrUnavailableError("audio ASR upstream unavailable")
+
+        form = aiohttp.FormData()
+        form.add_field("model", self._get_audio_asr_config().model)
+        form.add_field("response_format", "json")
+        form.add_field("dictation_id", dictation_id)
+        form.add_field("sequence", str(sequence))
+        form.add_field("overlap_ms", str(overlap_ms))
+        form.add_field("final", "true" if final else "false")
+        if finalize_only:
+            form.add_field("finalize_only", "true")
+        for receipt in receipts:
+            form.add_field("receipt", receipt)
+        if before:
+            form.add_field("before", before)
+        if after:
+            form.add_field("after", after)
+
+        path: Path | None = None
+        handle = None
+        if attachment is not None:
+            path = Path(attachment.local_path or "")
+            if not path.is_file():
+                raise AudioAsrProtocolError("composer audio file is unavailable")
+            mimetype = attachment.mimetype or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            detected_audio = detect_audio_mime_from_file(path)
+            if detected_audio and not mimetype.lower().startswith(("audio/", "video/")):
+                mimetype = detected_audio[0]
+            filename = attachment.name or path.name
+            if detected_audio and not Path(filename).suffix:
+                filename = f"{filename}{detected_audio[1]}"
+            handle = path.open("rb")
+            form.add_field("file", handle, filename=filename, content_type=mimetype)
+
+        timeout = aiohttp.ClientTimeout(total=max(0.1, timeout_seconds))
+        started_at = time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    self._dictation_endpoint_url(runtime),
+                    data=form,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "avibe/dev",
+                        "X-Vibe-Instance-Id": runtime.instance_id,
+                        "X-Vibe-Device-Secret": runtime.device_secret,
+                    },
+                ) as response:
+                    try:
+                        payload = await response.json(content_type=None)
+                    except Exception as exc:
+                        raise AudioAsrProtocolError("audio ASR returned invalid JSON") from exc
+                    if response.status < 200 or response.status >= 300:
+                        upstream_error = payload.get("error") if isinstance(payload, dict) else None
+                        if response.status == 504 or upstream_error == "transcription_timeout":
+                            raise AudioAsrTimeoutError("audio ASR upstream timed out")
+                        if response.status == 422 and upstream_error == "transcription_empty":
+                            raise AudioAsrEmptyTranscriptError("audio ASR returned an empty transcript")
+                        if response.status == 422 and upstream_error == "invalid_dictation":
+                            raise AudioAsrInvalidDictationError("audio ASR rejected dictation metadata")
+                        if response.status == 503 or upstream_error in {
+                            "asr_not_configured",
+                            "asr_unavailable",
+                        }:
+                            raise AudioAsrUnavailableError("audio ASR upstream unavailable")
+                        raise AudioAsrProtocolError("audio ASR rejected the composer segment")
+        except (
+            AudioAsrEmptyTranscriptError,
+            AudioAsrInvalidDictationError,
+            AudioAsrProtocolError,
+            AudioAsrTimeoutError,
+            AudioAsrUnavailableError,
+        ):
+            raise
+        except asyncio.TimeoutError:
+            raise AudioAsrTimeoutError("audio ASR request timed out") from None
+        except aiohttp.ClientError as exc:
+            raise AudioAsrUnavailableError("audio ASR request unavailable") from exc
+        finally:
+            if handle is not None:
+                handle.close()
+
+        if not isinstance(payload, dict):
+            raise AudioAsrProtocolError("audio ASR returned a malformed success response")
+        if isinstance(payload.get("text"), str):
+            cleanup = payload.get("cleanup")
+            if cleanup not in {"success", "fallback"}:
+                raise AudioAsrProtocolError("audio ASR omitted cleanup outcome")
+        elif not (
+            isinstance(payload.get("receipt"), str)
+            and isinstance(payload.get("sequence"), int)
+            and not isinstance(payload.get("sequence"), bool)
+        ):
+            raise AudioAsrProtocolError("audio ASR returned a malformed success response")
+        logger.info(
+            "Composer voice segment completed: sequence=%s final=%s duration_ms=%s",
+            sequence,
+            final,
+            int((time.monotonic() - started_at) * 1000),
+        )
+        return payload
 
     async def _transcribe_one(
         self,

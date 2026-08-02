@@ -334,6 +334,7 @@ export type VoiceRecordingStopReason = 'finish' | 'abort' | 'error';
 export type VoiceRecordingSegmentMetadata = {
   durationMs: number;
   overlapMs?: number;
+  final: boolean;
 };
 
 export type VoiceRecordingStopMetadata = {
@@ -538,7 +539,7 @@ export class VoiceRecordingPipeline {
     }
   }
 
-  private emitSegment(retainOverlap = false): void {
+  private emitSegment(retainOverlap = false, final = false): void {
     if (!this.segmentSampleCount) return;
     const sampleCount = this.segmentSampleCount;
     const chunks = this.segmentChunks;
@@ -555,6 +556,7 @@ export class VoiceRecordingPipeline {
       {
         durationMs: Math.round(sampleCount * 1000 / this.sampleRate),
         ...(overlapMs > 0 ? { overlapMs } : {}),
+        final,
       },
     );
   }
@@ -570,7 +572,7 @@ export class VoiceRecordingPipeline {
     if (this.stopped) return;
     this.requestStop('finish');
     if (this.stopping !== 'abort' && this.segmentFreshSampleCount > 0) {
-      this.emitSegment();
+      this.emitSegment(false, true);
     }
     else {
       this.segmentChunks = [];

@@ -18,18 +18,17 @@ import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
   applyVoiceInsertion,
-  cleanupVoiceTranscript,
   voiceInsertionSnapshot,
   voiceInsertionText,
-  type VoiceCleanupResult,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
+  finalizeVoiceDictation,
   transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
   VOICE_TRANSCRIPTION_CONCURRENCY,
   VoiceTranscriptionQueue,
-  voiceTranscriptFromSegments,
+  type VoiceCleanupOutcome,
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
@@ -117,7 +116,7 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
   insertion: VoiceInsertionSnapshot;
-  cleanupOutcome?: VoiceCleanupResult['outcome'];
+  cleanupOutcome?: VoiceCleanupOutcome;
   cleanupElapsedMs?: number;
 };
 
@@ -135,24 +134,28 @@ const newVoiceDictationId = (): string => (
 );
 
 const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void> => {
+  const startedAt = Date.now();
   try {
-    const rawTranscript = voiceTranscriptFromSegments(session.segments);
-    session.finalizedSegmentCount = session.segments.length;
+    session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
     session.finalizedFailedSegmentCount = session.segments.filter(
       (segment) => segment.error,
     ).length;
-    const cleanup = await cleanupVoiceTranscript(rawTranscript, session.insertion, {
+    const result = await finalizeVoiceDictation(session.segments, {
+      dictationId: session.dictationId,
+      before: session.insertion.before,
+      after: session.insertion.after,
+    }, {
       signal: session.abortController.signal,
     });
     if (session.abortController.signal.aborted) return;
-    session.cleanupOutcome = cleanup.outcome;
-    session.cleanupElapsedMs = cleanup.elapsedMs;
-    if (!cleanup.text.trim()) throw new VoiceTranscriptionError('empty');
-    session.transcript = cleanup.text;
+    session.cleanupOutcome = result.cleanup;
+    session.cleanupElapsedMs = Date.now() - startedAt;
+    session.transcript = result.text;
     session.segments = [];
     session.error = undefined;
     session.status = 'ready';
   } catch (error) {
+    session.cleanupElapsedMs = Date.now() - startedAt;
     session.transcript = undefined;
     session.error = error;
     session.status = 'failed';
@@ -643,9 +646,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     blob: Blob,
     durationMs: number,
     overlapMs?: number,
+    final = false,
   ) => {
     const segment: VoiceSegment = {
       blob,
+      sequence: session.segments.length,
+      final,
       durationMs,
       overlapMs,
       task: Promise.resolve(),
@@ -818,12 +824,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           blob,
           metadata.durationMs,
           metadata.overlapMs,
+          metadata.final,
         ),
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
           session.backlogAtStop = session.segments.filter(
-            (segment) => !segment.text && !segment.error,
+            (segment) => !segment.final && !segment.receipt && !segment.error,
           ).length;
         },
         onError: (error) => {
@@ -851,6 +858,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
+          }
+          if (session.segments.length && !session.segments.at(-1)?.final) {
+            session.segments.push({
+              blob: null,
+              sequence: session.segments.length,
+              final: true,
+              durationMs: 0,
+              task: Promise.resolve(),
+            });
           }
           void finishVoiceSession(session);
         },
