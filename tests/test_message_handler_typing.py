@@ -292,6 +292,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
         handler._prepend_message_metadata = AsyncMock(
             return_value="[metadata]\nhello"
         )
@@ -310,6 +311,70 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             == "[metadata]\nhello"
         )
         controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_duplicate_im_attachment_skips_download_before_admission(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=True)
+        handler._process_file_attachments = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-attachment-retry",
+            platform="slack",
+            files=[
+                FileAttachment(
+                    name="report.pdf",
+                    mimetype="application/pdf",
+                    url="https://files.example/report.pdf",
+                )
+            ],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        handler._process_file_attachments.assert_not_awaited()
+        controller.session_turns.deliver.assert_not_awaited()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_inline_stop_uses_durable_empty_p0_owner(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
         self.assertEqual(controller.agent_service.requests, [])
 
     async def test_pre_request_failure_uses_plain_terminal_output(self):

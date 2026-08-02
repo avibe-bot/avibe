@@ -166,6 +166,13 @@ class MessageHandler(BaseHandler):
                 if await self._handle_inline_stop(context):
                     return None
 
+            if (
+                durable_ingress_enabled
+                and not durable_delivery_owned
+                and self._is_duplicate_human_delivery(context)
+            ):
+                return None
+
             if not self.session_handler:
                 raise RuntimeError("Session handler not initialized")
 
@@ -857,6 +864,45 @@ class MessageHandler(BaseHandler):
         return True
 
     @staticmethod
+    def _is_duplicate_human_delivery(context: MessageContext) -> bool:
+        """Reject a retried native event before attachment I/O."""
+
+        platform = str(context.platform or "").strip()
+        native_message_id = str(context.message_id or "").strip()
+        if not platform or not native_message_id:
+            return False
+        try:
+            from storage import message_deliveries, messages_service
+            from storage.db import get_cached_sqlite_engine
+
+            with get_cached_sqlite_engine().connect() as conn:
+                if messages_service.native_message_exists(
+                    conn,
+                    platform=platform,
+                    native_message_id=native_message_id,
+                ):
+                    return True
+                dedupe_key = message_deliveries.native_dedupe_key(
+                    platform,
+                    native_message_id,
+                )
+                return bool(
+                    dedupe_key
+                    and message_deliveries.get_delivery_by_dedupe(
+                        conn,
+                        dedupe_key,
+                    )
+                    is not None
+                )
+        except Exception:
+            logger.exception(
+                "Could not preflight native Message dedupe for %s:%s",
+                platform,
+                native_message_id,
+            )
+            return False
+
+    @staticmethod
     def _build_agent_request(**kwargs: Any) -> AgentRequest:
         try:
             signature = inspect.signature(AgentRequest)
@@ -1170,6 +1216,26 @@ class MessageHandler(BaseHandler):
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context)
             session_key = self._get_session_key(context)
             agent_name = self.controller.resolve_agent_for_context(context)
+            manager = getattr(self.controller, "session_turns", None)
+            cancel = getattr(manager, "cancel", None)
+            session_id = str(
+                (context.platform_specific or {}).get("agent_session_id") or ""
+            ).strip()
+            if not session_id:
+                getter = getattr(self.sessions, "get_agent_session_row_id", None)
+                if callable(getter):
+                    session_id = str(
+                        getter(session_key, base_session_id, agent_name) or ""
+                    ).strip()
+            if session_id and callable(cancel):
+                result = await cancel(session_id)
+                handled = bool(isinstance(result, dict) and result.get("ok"))
+                if not handled:
+                    await self._get_im_client(context).send_message(
+                        context,
+                        f"ℹ️ {self._t('command.stop.noActiveSession')}",
+                    )
+                return handled
             request = AgentRequest(
                 context=context,
                 message="stop",
