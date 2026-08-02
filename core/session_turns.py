@@ -2632,6 +2632,11 @@ class SessionTurnManager:
                 logger.error("durable Turn has no exact start-attempt owner: %s", turn_id)
                 return False
             attempt_id = str(turn["start_attempt_id"])
+            # The row stays ``starting`` until native acceptance, so the live
+            # projection is the launch fence for concurrent resume callers.
+            projected = self.in_flight.get(str(turn["session_id"]))
+            if projected is not None and not projected.task.done():
+                return projected.logical_turn_id == turn_id
         try:
             resolved = (
                 self._delivery_context(str(turn["session_id"]))

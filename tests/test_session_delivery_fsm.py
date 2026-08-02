@@ -1798,6 +1798,95 @@ def test_adapter_not_active_race_resumes_exact_linked_successor(
     assert started == [successor_id]
 
 
+def test_adapter_not_active_runner_cleanup_starts_linked_successor_once(
+    managers, monkeypatch
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str]]:
+        turn_id, context = await _activate(manager)
+        dispatch_started = asyncio.Event()
+
+        async def blocked_dispatch(*_args, **_kwargs):
+            dispatch_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            "core.session_turns.dispatch_turn_with_outcome",
+            blocked_dispatch,
+        )
+        await SessionTurnManager._run(
+            manager,
+            "ses_fsm",
+            context,
+            "primary",
+            logical_turn_id=turn_id,
+            durable_preallocated=True,
+        )
+        await dispatch_started.wait()
+
+        async def not_active(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "not_active"
+            return False
+
+        manager.controller.command_handler.handle_stop = not_active
+        original_terminalize = manager._terminalize_durable_turn
+        competing_terminal_written = False
+
+        def terminalize_with_competing_result(candidate, outcome, **kwargs):
+            nonlocal competing_terminal_written
+            if kwargs.get("settled_by") == "adapter_not_active":
+                assert competing_terminal_written is False
+                competing_terminal_written = True
+                won = original_terminalize(
+                    candidate,
+                    "canceled",
+                    settled_by=SETTLED_BY_STOPPED,
+                    evidence_kind="competing_terminal_result",
+                )
+                assert won["successor_turn_id"]
+            return original_terminalize(candidate, outcome, **kwargs)
+
+        monkeypatch.setattr(
+            manager,
+            "_terminalize_durable_turn",
+            terminalize_with_competing_result,
+        )
+        started: list[str] = []
+        successor_holder: asyncio.Task | None = None
+
+        async def record_successor_start(
+            session_id, start_context, _text, *, logical_turn_id=None, **_kwargs
+        ):
+            nonlocal successor_holder
+            assert logical_turn_id is not None
+            started.append(logical_turn_id)
+            successor_holder = asyncio.create_task(asyncio.Event().wait())
+            manager.in_flight[session_id] = Turn(
+                task=successor_holder,
+                context=start_context,
+                logical_turn_id=logical_turn_id,
+            )
+
+        manager._run = record_successor_start
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_id = str(old["control_successor_turn_id"])
+        assert admitted.state == "claimed"
+        if successor_holder is not None:
+            successor_holder.cancel()
+            await asyncio.gather(successor_holder, return_exceptions=True)
+        return successor_id, started
+
+    successor_id, started = asyncio.run(run())
+    assert started == [successor_id]
+
+
 def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
