@@ -1085,7 +1085,12 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.08)
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == 75:
+                break
+            await asyncio.sleep(0.01)
         await service.stop()
 
     asyncio.run(_run())
