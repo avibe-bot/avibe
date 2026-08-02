@@ -54,6 +54,8 @@ from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
+_RESTORED_IM_REGISTRATION_RETRY_DELAY_SECONDS = 0.25
+_RESTORED_IM_PLATFORMS = {"slack", "discord", "telegram", "lark", "wechat"}
 
 
 def _task_is_stopping(task: asyncio.Task) -> bool:
@@ -1613,8 +1615,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server = None
         restoration_registered = False
         try:
-            server = await self._get_server()
-            await server.mark_run_active(poll_info.opencode_session_id)
+            poll_platform = restored_platform_from_poll_info(poll_info)
+            registration_attempts = 2 if poll_platform in _RESTORED_IM_PLATFORMS else 1
+            for attempt in range(registration_attempts):
+                try:
+                    server = await self._get_server()
+                    await server.mark_run_active(poll_info.opencode_session_id)
+                    break
+                except Exception:
+                    if attempt + 1 >= registration_attempts:
+                        raise
+                    logger.warning(
+                        "Retrying restored OpenCode IM poll registration for session=%s",
+                        poll_info.opencode_session_id,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_RESTORED_IM_REGISTRATION_RETRY_DELAY_SECONDS)
             steering_snapshot = (
                 poll_info.processing_indicator.get(_STEERING_SNAPSHOT_KEY)
                 if isinstance(poll_info.processing_indicator, dict)

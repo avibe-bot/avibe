@@ -187,6 +187,46 @@ def test_restore_registration_failure_keeps_poll_if_terminal_write_fails() -> No
     assert agent._active_requests == {}
 
 
+def test_restore_im_registration_failure_retries_before_releasing_poll() -> None:
+    poll = _make_poll(platform="slack", base_session_id="C123:thread", opencode_session_id="oc-im")
+    agent, _, removed, _ = _build_agent({"oc-im": poll})
+    attempts = 0
+    poll_started = asyncio.Event()
+    release_poll = asyncio.Event()
+
+    async def _flaky_mark_run_active(_session_id: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary registration failure")
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            poll_started.set()
+            await release_poll.wait()
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    agent._test_server.mark_run_active = _flaky_mark_run_active
+    agent._poll_loop = _HeldPollLoop()
+
+    async def _run() -> int:
+        restored = await agent.restore_active_polls()
+        if restored != 1:
+            return restored
+        await asyncio.wait_for(poll_started.wait(), timeout=1)
+        task = agent._active_requests[poll.base_session_id]
+        assert not task.done()
+        release_poll.set()
+        await task
+        return restored
+
+    assert asyncio.run(_run()) == 1
+    assert attempts == 2
+    assert removed == []
+
+
 def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     poll.model_dict = {"providerID": "openai", "modelID": "gpt-5"}
