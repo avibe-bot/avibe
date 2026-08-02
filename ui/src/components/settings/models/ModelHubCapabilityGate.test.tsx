@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   MODEL_HUB_DISABLED_REDIRECT,
@@ -15,11 +15,7 @@ describe('Model Hub capability route gate', () => {
   });
 
   it('does not render the Models child while disabled or unresolved', () => {
-    let childRenders = 0;
-    const ModelsChunk = () => {
-      childRenders += 1;
-      return <div>models chunk</div>;
-    };
+    const ModelsChunk = vi.fn(() => <div>models chunk</div>);
 
     const disabledHtml = renderToStaticMarkup(
       <ModelHubRenderBoundary enabled={false} disabled={<div>disabled</div>}>
@@ -34,15 +30,11 @@ describe('Model Hub capability route gate', () => {
 
     expect(disabledHtml).toContain('disabled');
     expect(unresolvedHtml).toBe('');
-    expect(childRenders).toBe(0);
+    expect(ModelsChunk).not.toHaveBeenCalled();
   });
 
   it('renders the Models child only after the backend enables it', () => {
-    let childRenders = 0;
-    const ModelsChunk = () => {
-      childRenders += 1;
-      return <div>models chunk</div>;
-    };
+    const ModelsChunk = vi.fn(() => <div>models chunk</div>);
 
     expect(
       renderToStaticMarkup(
@@ -51,6 +43,6 @@ describe('Model Hub capability route gate', () => {
         </ModelHubRenderBoundary>,
       ),
     ).toContain('models chunk');
-    expect(childRenders).toBe(1);
+    expect(ModelsChunk).toHaveBeenCalledTimes(1);
   });
 });
