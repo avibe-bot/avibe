@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -37,6 +38,7 @@ from core.run_settlement import (
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
 )
+from core.session_activities import TERMINAL_SNAPSHOT_PHASE, SessionActivity
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
@@ -52,13 +54,71 @@ class ActivityOutputDeliveryError(RuntimeError):
         message: str,
         *,
         delivered: bool,
+        durable: bool = False,
         message_id: str | None = None,
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.delivered = delivered
+        self.durable = durable
         self.message_id = message_id
         self.cause = cause
+
+
+def terminally_discard_delivered_activity_claim(
+    registry: Any,
+    activity: SessionActivity,
+    error: BaseException,
+) -> SessionActivity:
+    """Preserve and release a claim that cannot be acknowledged after delivery."""
+
+    failed_activity = replace(
+        activity,
+        status="failed",
+        metadata={
+            **activity.metadata,
+            "terminal_error": (
+                "delivered_output_local_settlement_failed: "
+                f"{str(error).strip() or type(error).__name__}"
+            ),
+        },
+    )
+    persist = getattr(registry, "_persist_activity", None)
+    if callable(persist):
+        try:
+            persist(failed_activity, phase=TERMINAL_SNAPSHOT_PHASE)
+        except Exception:
+            logger.error(
+                "Failed to persist terminal Activity evidence after delivered "
+                "output settlement failure (activity=%s)",
+                activity.id,
+                exc_info=True,
+            )
+
+    key_builder = getattr(registry, "_activity_key", None)
+    lock = getattr(registry, "_lock", None)
+    claimed = getattr(registry, "_claimed_completed_outputs", None)
+    recovered = getattr(registry, "_recovered_output_ids", None)
+    if not callable(key_builder) or lock is None or not isinstance(claimed, dict):
+        raise RuntimeError(
+            f"Cannot terminally discard claimed Activity {activity.id}"
+        ) from error
+    activity_key = key_builder(activity)
+    with lock:
+        claimed.pop(activity_key, None)
+        if recovered is not None:
+            recovered.discard(activity_key)
+        callback = getattr(registry, "_output_settled_callback", None)
+    if callable(callback):
+        try:
+            callback(activity)
+        except Exception:
+            logger.warning(
+                "Failed to signal terminally discarded Activity output %s",
+                activity.id,
+                exc_info=True,
+            )
+    return failed_activity
 
 
 def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
@@ -1148,6 +1208,77 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
             return True
 
+    def _claimed_activity_for_output(
+        self,
+        output_semantics: MessageOutput,
+    ) -> tuple[Any, SessionActivity] | None:
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activities", None)
+        claimed = getattr(registry, "_claimed_completed_outputs", None)
+        lock = getattr(registry, "_lock", None)
+        output_id = str(output_semantics.idempotency_key or "").strip()
+        if not output_id or not isinstance(claimed, dict) or lock is None:
+            return None
+        with lock:
+            candidates = [item.entry.activity for item in claimed.values()]
+        for activity in candidates:
+            candidate_id = (
+                f"{activity.backend}-task:{activity.runtime_key}:"
+                f"{activity.id}:completion"
+            )
+            if candidate_id == output_id:
+                return registry, activity
+        return None
+
+    def _consume_delivery_only_activity(
+        self,
+        output_semantics: MessageOutput,
+        *,
+        settlement_error: BaseException | None = None,
+    ) -> None:
+        claimed = self._claimed_activity_for_output(output_semantics)
+        if claimed is None:
+            return
+        registry, activity = claimed
+        settle_runs = settlement_error is not None
+        if settlement_error is None:
+            try:
+                registry.ack_completed_output(activity)
+                return
+            except Exception as ack_error:
+                settlement_error = ack_error
+                logger.error(
+                    "Activity acknowledgement failed after delivery without durable "
+                    "message evidence; terminally discarding the claim "
+                    "(activity=%s)",
+                    activity.id,
+                    exc_info=True,
+                )
+        failed_activity = terminally_discard_delivered_activity_claim(
+            registry,
+            activity,
+            settlement_error,
+        )
+        if not settle_runs:
+            return
+        service = getattr(self.controller, "agent_service", None)
+        on_terminal = getattr(service, "on_activity_terminal", None)
+        if callable(on_terminal):
+            try:
+                settled = on_terminal(failed_activity)
+            except Exception:
+                settled = False
+                logger.error(
+                    "Failed to terminally settle delivered Activity %s after local failure",
+                    activity.id,
+                    exc_info=True,
+                )
+            if not settled:
+                logger.error(
+                    "Delivered Activity %s remains without durable Run settlement",
+                    activity.id,
+                )
+
     def _record_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -2025,6 +2156,9 @@ class ConsolidatedMessageDispatcher:
                     or workbench_terminal_waits_for_persistence
                 )
                 activity_delivery_error: ActivityOutputDeliveryError | None = None
+                activity_settlement_error: BaseException | None = None
+                durable_output_exists = False
+                activity_was_delivered = False
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
@@ -2093,17 +2227,11 @@ class ConsolidatedMessageDispatcher:
                         output_semantics.requires_delivery_for_run_settlement
                         and not durable_output_exists
                     ):
-                        activity_delivery_error = ActivityOutputDeliveryError(
-                            (
-                                "Activity output was delivered but not durably persisted"
-                                if activity_was_delivered
-                                else "Activity output was not durably persisted or delivered"
-                            ),
-                            delivered=activity_was_delivered,
-                            message_id=primary_message_id if activity_was_delivered else None,
-                        )
                         if not activity_was_delivered:
-                            raise activity_delivery_error
+                            raise ActivityOutputDeliveryError(
+                                "Activity output was not durably persisted or delivered",
+                                delivered=False,
+                            )
                     if workbench_terminal_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError(
                             "Workbench terminal output was not durably persisted"
@@ -2122,16 +2250,26 @@ class ConsolidatedMessageDispatcher:
                     except Exception as err:
                         if not activity_was_delivered:
                             raise
-                        logger.error(
-                            "Activity output reached the user but linked Run settlement failed",
-                            exc_info=True,
-                        )
-                        activity_delivery_error = ActivityOutputDeliveryError(
-                            "Activity output was delivered but linked Run settlement failed",
-                            delivered=True,
-                            message_id=primary_message_id,
-                            cause=err,
-                        )
+                        if durable_output_exists:
+                            logger.warning(
+                                "Durable Activity output requires local Run settlement retry",
+                                exc_info=True,
+                            )
+                            activity_delivery_error = ActivityOutputDeliveryError(
+                                "Activity output was delivered durably but linked Run settlement failed",
+                                delivered=True,
+                                durable=True,
+                                message_id=primary_message_id,
+                                cause=err,
+                            )
+                        else:
+                            logger.error(
+                                "Activity output reached the user without durable message "
+                                "evidence and linked Run settlement failed; terminally "
+                                "discarding the claim",
+                                exc_info=True,
+                            )
+                            activity_settlement_error = err
 
                 if primary_message_id and display_text and not output_semantics.detached:
                     # Stream the delivered result to live consumers (avibe SSE).
@@ -2151,6 +2289,20 @@ class ConsolidatedMessageDispatcher:
                     self._signal_turn_complete(
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
+                    )
+
+                if (
+                    activity_was_delivered
+                    and not durable_output_exists
+                    and output_semantics.requires_delivery_for_run_settlement
+                ):
+                    logger.warning(
+                        "Activity output reached the user without a durable message "
+                        "mirror; consuming its delivery claim after Run and Turn settlement"
+                    )
+                    self._consume_delivery_only_activity(
+                        output_semantics,
+                        settlement_error=activity_settlement_error,
                     )
 
                 if activity_delivery_error is not None:

@@ -33,7 +33,10 @@ from modules.claude_sdk_compat import (
     ToolUseBlock,
 )
 from core.message_output import terminal_output_for
-from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_dispatcher import (
+    ActivityOutputDeliveryError,
+    ConsolidatedMessageDispatcher,
+)
 from core.session_activities import TERMINAL_SNAPSHOT_PHASE
 from modules.im import MessageContext
 
@@ -1657,6 +1660,9 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
+        waiter = asyncio.create_task(agent._wait_for_activity_output(composite_key))
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
 
         original_persist = service.activities._persist_activity
         with (
@@ -1684,8 +1690,162 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             persist_terminal.call_args.kwargs["phase"],
             TERMINAL_SNAPSHOT_PHASE,
         )
-        await asyncio.wait_for(agent._wait_for_activity_output(composite_key), timeout=0.1)
+        await asyncio.wait_for(waiter, timeout=0.1)
         self.assertEqual(client.sent, ["Background verification finished"])
+
+    async def test_missing_evidence_and_run_failure_terminally_discards_once(self):
+        agent, service = _build_agent()
+        client = _ActivityDeliveryClient()
+        _install_activity_dispatcher(agent, client)
+        composite_key = "session-compound-failure:/tmp/work"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="discord",
+            platform_specific={"agent_session_id": "sess-compound-failure"},
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-compound-failure",
+            activity_id="task-compound-failure",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-compound-failure",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        terminal_settlements = []
+        agent.controller.scheduled_task_service = SimpleNamespace(
+            settle_activity_runs=lambda activity: terminal_settlements.append(
+                (activity.id, activity.status)
+            )
+        )
+        terminal_snapshots = []
+        original_persist = service.activities._persist_activity
+
+        def record_terminal(activity, *, phase):
+            terminal_snapshots.append((activity, phase))
+            return original_persist(activity, phase=phase)
+
+        class _Store:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, _run_id, **_kwargs):
+                raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        with (
+            patch("core.message_dispatcher.persist_agent_message", return_value=None),
+            patch("core.message_dispatcher.agent_message_exists", return_value=False),
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=_Store()),
+            patch.object(
+                service.activities,
+                "_persist_activity",
+                side_effect=record_terminal,
+            ),
+        ):
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+
+        self.assertEqual(client.sent, ["Background verification finished"])
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        failed, phase = terminal_snapshots[-1]
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(phase, TERMINAL_SNAPSHOT_PHASE)
+        self.assertIn(
+            "delivered_output_local_settlement_failed",
+            failed.metadata["terminal_error"],
+        )
+        self.assertEqual(
+            terminal_settlements,
+            [("task-compound-failure", "failed")],
+        )
+
+    async def test_durable_activity_run_settlement_retries_without_redelivery(self):
+        agent, service = _build_agent()
+        client = _ActivityDeliveryClient()
+        _install_activity_dispatcher(agent, client)
+        composite_key = "session-durable-settlement:/tmp/work"
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="discord",
+            platform_specific={"agent_session_id": "sess-durable-settlement"},
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-durable-settlement",
+            activity_id="task-durable-settlement",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        completed = service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-durable-settlement",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        self.assertIsNotNone(completed)
+        durable = False
+        run_attempts = []
+
+        def persist(*_args, **_kwargs):
+            nonlocal durable
+            durable = True
+            return {"id": "message-row"}
+
+        class _Store:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                run_attempts.append(run_id)
+                if len(run_attempts) == 1:
+                    raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        with (
+            patch("core.message_dispatcher.persist_agent_message", side_effect=persist),
+            patch(
+                "core.message_dispatcher.agent_message_exists",
+                side_effect=lambda *_args: durable,
+            ),
+            patch("core.message_dispatcher.SQLiteBackgroundTaskStore", return_value=_Store()),
+        ):
+            with self.assertRaises(ActivityOutputDeliveryError) as raised:
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            self.assertTrue(raised.exception.delivered)
+            self.assertTrue(raised.exception.durable)
+            self.assertTrue(
+                service.activities.has_completed_output("claude", composite_key)
+            )
+
+            self.assertFalse(
+                await agent._flush_completed_activity_outputs(composite_key, context)
+            )
+
+        self.assertEqual(client.sent, ["Background verification finished"])
+        self.assertEqual(run_attempts, ["run-origin", "run-origin"])
+        self.assertEqual(completed.status, "completed")
+        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
     async def test_undelivered_activity_retries_until_transport_succeeds(self):
         agent, service = _build_agent()

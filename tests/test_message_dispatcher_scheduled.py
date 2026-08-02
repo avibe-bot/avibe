@@ -10,8 +10,12 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.message_dispatcher as message_dispatcher_module
-from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.message_dispatcher import (
+    ActivityOutputDeliveryError,
+    ConsolidatedMessageDispatcher,
+)
 from core.message_output import MessageOutput
+from core.session_activities import SessionActivityRegistry, activity_completion_output
 from modules.im import MessageContext
 
 
@@ -460,23 +464,21 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=persist,
             ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "not durably persisted") as raised:
-                await dispatcher.emit_agent_message(
-                    context,
-                    "result",
-                    "background work finished",
-                    output=MessageOutput(
-                        completes_turn=True,
-                        completes_run=True,
-                        idempotency_key="activity-output",
-                        run_id="run-origin",
-                        metadata={"run_ids": ["run-origin", "run-linked"]},
-                        requires_delivery_for_run_settlement=True,
-                    ),
-                )
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "background work finished",
+                output=MessageOutput(
+                    completes_turn=True,
+                    completes_run=True,
+                    idempotency_key="activity-output",
+                    run_id="run-origin",
+                    metadata={"run_ids": ["run-origin", "run-linked"]},
+                    requires_delivery_for_run_settlement=True,
+                ),
+            )
 
-        self.assertIs(raised.exception.delivered, True)
-        self.assertEqual(raised.exception.message_id, "bot-msg-1")
+        self.assertEqual(message_id, "bot-msg-1")
         self.assertTrue(done.is_set())
         self.assertEqual(
             events,
@@ -542,8 +544,203 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertIs(raised.exception.delivered, True)
+        self.assertIs(raised.exception.durable, True)
         self.assertEqual(str(raised.exception.cause), "run store unavailable")
         self.assertEqual(events, [("message", "persisted"), ("run", "run-origin")])
+
+    async def test_recovered_activity_mirror_failure_sends_once_across_drains(self):
+        from core.scheduled_tasks import ScheduledTaskService
+
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        controller.agent_service = SimpleNamespace(
+            activities=registry,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        activity = registry.start(
+            backend="claude",
+            runtime_key="runtime-recovered",
+            session_id="sess-recovered",
+            activity_id="activity-recovered",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        activity = registry.complete(
+            backend="claude",
+            runtime_key="runtime-recovered",
+            activity_id="activity-recovered",
+            status="completed",
+            metadata={"summary": "Recovered output"},
+            expects_output=True,
+        )
+        self.assertIsNotNone(activity)
+        activity_key = registry._activity_key(activity)
+        with registry._lock:
+            registry._recovered_output_ids.add(activity_key)
+
+        service = object.__new__(ScheduledTaskService)
+        service.controller = controller
+        service._activity_registry = lambda: registry
+        service._settle_pending_recovered_activity_terminals = lambda: None
+
+        async def deliver_recovered(claimed):
+            message_id = await dispatcher.emit_agent_message(
+                MessageContext(
+                    user_id="scheduled",
+                    channel_id="C123",
+                    platform="slack",
+                    platform_specific={"task_trigger_kind": "activity_recovery"},
+                ),
+                "result",
+                "Recovered output",
+                output=activity_completion_output(
+                    claimed,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+            if message_id is None:
+                raise RuntimeError("recovered Activity output was not delivered")
+            registry.ack_completed_output(claimed)
+
+        service._deliver_recovered_activity_output = deliver_recovered
+
+        class _Store:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, _run_id, **_kwargs):
+                return None
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_Store(),
+            ),
+            patch.object(message_dispatcher_module, "persist_agent_message", return_value=None),
+            patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
+        ):
+            await service._drain_recovered_activity_outputs()
+            await service._drain_recovered_activity_outputs()
+
+        self.assertEqual(
+            controller.im_client.sent,
+            [("C123", None, "Recovered output")],
+        )
+        self.assertFalse(
+            registry.has_completed_output("claude", "runtime-recovered")
+        )
+
+    async def test_durable_activity_retries_run_settlement_without_second_send(self):
+        controller = _StubController()
+        registry = SessionActivityRegistry()
+        controller.agent_service = SimpleNamespace(
+            activities=registry,
+            emit_matches_runtime_turn=lambda _context: False,
+            release_runtime_turn=lambda _context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-durable",
+            session_id="sess-durable",
+            activity_id="activity-durable",
+            kind="local_agent",
+            run_id="run-origin",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-durable",
+            activity_id="activity-durable",
+            status="completed",
+            metadata={"summary": "Durable output"},
+            expects_output=True,
+        )
+        activity = registry.claim_completed_output("claude", "runtime-durable")
+        self.assertIsNotNone(activity)
+        output = activity_completion_output(
+            activity,
+            detached=True,
+            completes_turn=False,
+        )
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+        )
+        durable = False
+        run_attempts = []
+
+        def persist(*_args, **_kwargs):
+            nonlocal durable
+            durable = True
+            return {"id": "message-row"}
+
+        class _Store:
+            def get_run(self, _run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **_kwargs):
+                run_attempts.append(run_id)
+                if len(run_attempts) == 1:
+                    raise RuntimeError("run store unavailable")
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_Store(),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                side_effect=persist,
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                side_effect=lambda *_args: durable,
+            ),
+        ):
+            with self.assertRaises(ActivityOutputDeliveryError) as raised:
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "Durable output",
+                    output=output,
+                )
+            self.assertTrue(raised.exception.delivered)
+            self.assertTrue(raised.exception.durable)
+            self.assertTrue(registry.requeue_completed_output(activity))
+
+            retried = registry.claim_completed_output("claude", "runtime-durable")
+            self.assertIsNotNone(retried)
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "Durable output",
+                output=activity_completion_output(
+                    retried,
+                    detached=True,
+                    completes_turn=False,
+                ),
+            )
+            self.assertTrue(registry.ack_completed_output(retried))
+
+        self.assertTrue(str(message_id).startswith("agent-output:claude:"))
+        self.assertEqual(controller.im_client.sent, [("C123", None, "Durable output")])
+        self.assertEqual(run_attempts, ["run-origin", "run-origin"])
+        self.assertEqual(activity.status, "completed")
+        self.assertFalse(registry.has_completed_output("claude", "runtime-durable"))
 
     async def test_activity_run_settlement_follows_message_persistence(self):
         controller = _StubController()
