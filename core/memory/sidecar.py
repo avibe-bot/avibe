@@ -9,13 +9,17 @@ import json
 import os
 import re
 import stat
+from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from core.memory.artifact import EVEROS_VERSION
+from core.memory.everos import MemoryProviderFailure
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+from core.memory.report import ProfileReportGenerator
+from core.memory.types import MemoryProfile, MemoryProfileExplicitInfo, MemoryProfileTrait
 
 
 _MAX_BODY_BYTES = 64 * 1024
@@ -38,6 +42,38 @@ def serve(uds: Path) -> None:
     create_app = getattr(factory_module, "create_app")
     app = create_app()
     attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
+
+    @app.post("/avibe/v1/profile-report")
+    async def profile_report(request: Any) -> Any:
+        try:
+            payload = await request.json()
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"status": "failed", "error": "memory_provider_response_invalid"},
+                status_code=200,
+            )
+        parsed = _profile_report_payload(payload)
+        if parsed is None:
+            return JSONResponse(
+                {"status": "failed", "error": "memory_provider_response_invalid"},
+                status_code=200,
+            )
+        profile, language = parsed
+        generator = ProfileReportGenerator(
+            base_url=os.environ.get("EVEROS_LLM__BASE_URL"),
+            model=os.environ.get("EVEROS_LLM__MODEL"),
+            api_key=os.environ.get("EVEROS_LLM__API_KEY"),
+        )
+        try:
+            report = await generator.generate(profile, language)
+        except MemoryProviderFailure as failure:
+            return JSONResponse({"status": "failed", "error": failure.error}, status_code=200)
+        except Exception:
+            return JSONResponse(
+                {"status": "failed", "error": "memory_processing_failed"},
+                status_code=200,
+            )
+        return JSONResponse({"status": "ok", "report": report}, status_code=200)
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
@@ -76,6 +112,7 @@ def _request_rejection(
         "/api/v2/memory/flush",
         "/api/v2/memory/search",
         "/api/v2/memory/get",
+        "/avibe/v1/profile-report",
     }:
         return "route"
     if len(body) > _MAX_BODY_BYTES:
@@ -92,6 +129,8 @@ def _request_rejection(
         return _validate_flush(payload)
     if path == "/api/v2/memory/search":
         return _validate_search(payload)
+    if path == "/avibe/v1/profile-report":
+        return None if _profile_report_payload(payload) is not None else "profile-report"
     return _validate_get(payload)
 
 
@@ -220,6 +259,130 @@ def _validate_get(payload: dict[str, Any]) -> str | None:
     ):
         return "get"
     return None
+
+
+def _profile_report_payload(
+    payload: object,
+) -> tuple[MemoryProfile, Literal["en", "zh"]] | None:
+    """Parse the exact Avibe-owned profile-report body, never credentials."""
+
+    if not isinstance(payload, dict) or not _exact_keys(payload, {"language", "profile"}):
+        return None
+    language = payload.get("language")
+    if language not in {"en", "zh"}:
+        return None
+    profile_payload = payload.get("profile")
+    if not isinstance(profile_payload, dict) or not _exact_keys(
+        profile_payload,
+        {"summary", "explicit_info", "implicit_traits", "updated_at"},
+    ):
+        return None
+
+    summary = _optional_profile_text(profile_payload.get("summary"))
+    if profile_payload.get("summary") is not None and summary is None:
+        return None
+    explicit_info = _profile_explicit_info(profile_payload.get("explicit_info"))
+    implicit_traits = _profile_implicit_traits(profile_payload.get("implicit_traits"))
+    updated_at = _optional_profile_timestamp(profile_payload.get("updated_at"))
+    if profile_payload.get("updated_at") is not None and updated_at is None:
+        return None
+    if explicit_info is None or implicit_traits is None:
+        return None
+    if summary is None and not explicit_info and not implicit_traits and updated_at is None:
+        return None
+    return (
+        MemoryProfile(
+            summary=summary,
+            explicit_info=explicit_info,
+            implicit_traits=implicit_traits,
+            updated_at=updated_at,
+        ),
+        language,
+    )
+
+
+def _profile_explicit_info(value: object) -> tuple[MemoryProfileExplicitInfo, ...] | None:
+    if not isinstance(value, list) or len(value) > 200:
+        return None
+    entries: list[MemoryProfileExplicitInfo] = []
+    for entry in value:
+        if not isinstance(entry, dict) or not _exact_keys(entry, {"description", "category", "evidence"}):
+            return None
+        description = _optional_profile_text(entry.get("description"))
+        category = _optional_profile_text(entry.get("category"))
+        evidence = _optional_profile_text(entry.get("evidence"))
+        if description is None:
+            return None
+        if (entry.get("category") is not None and category is None) or (
+            entry.get("evidence") is not None and evidence is None
+        ):
+            return None
+        entries.append(MemoryProfileExplicitInfo(description=description, category=category, evidence=evidence))
+    return tuple(entries)
+
+
+def _profile_implicit_traits(value: object) -> tuple[MemoryProfileTrait, ...] | None:
+    if not isinstance(value, list) or len(value) > 200:
+        return None
+    entries: list[MemoryProfileTrait] = []
+    for entry in value:
+        if not isinstance(entry, dict) or not _exact_keys(
+            entry,
+            {"description", "trait", "basis", "evidence"},
+        ):
+            return None
+        description = _optional_profile_text(entry.get("description"))
+        trait = _optional_profile_text(entry.get("trait"))
+        basis = _optional_profile_text(entry.get("basis"))
+        evidence = _optional_profile_text(entry.get("evidence"))
+        if description is None:
+            return None
+        if any(
+            original is not None and normalized is None
+            for original, normalized in (
+                (entry.get("trait"), trait),
+                (entry.get("basis"), basis),
+                (entry.get("evidence"), evidence),
+            )
+        ):
+            return None
+        entries.append(
+            MemoryProfileTrait(
+                description=description,
+                trait=trait,
+                basis=basis,
+                evidence=evidence,
+            )
+        )
+    return tuple(entries)
+
+
+def _optional_profile_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeError:
+        return None
+    if not text or len(encoded) > 64 * 1024:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
+        return None
+    return text
+
+
+def _optional_profile_timestamp(value: object) -> str | None:
+    text = _optional_profile_text(value)
+    if text is None or len(text.encode("utf-8")) > 64:
+        return None
+    try:
+        instant = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if instant.tzinfo is None or instant.utcoffset() != timezone.utc.utcoffset(instant):
+        return None
+    return text
 
 
 def _valid_principal(value: object) -> bool:

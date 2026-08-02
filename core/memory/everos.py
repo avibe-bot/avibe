@@ -16,7 +16,16 @@ from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
 import httpx
 
-from core.memory.types import CaptureAttachment, MemoryErrorCode, MemoryItem, is_memory_error_code
+from core.memory.types import (
+    CaptureAttachment,
+    MemoryErrorCode,
+    MemoryItem,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
+    memory_profile_payload,
+    is_memory_error_code,
+)
 from core.memory.observations import (
     AddAck,
     FlushRejected,
@@ -38,6 +47,10 @@ _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
+_MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
+_PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS = 65.0
+_MAX_PROFILE_REPORT_REQUEST_BYTES = 64 * 1024
+_MAX_PROFILE_REPORT_OUTPUT_BYTES = 64 * 1024
 
 ProviderAttachment = CaptureAttachment
 
@@ -287,6 +300,41 @@ class EverOSPort:
         # principal, and a field here is whichever concurrent read finished last.
         return () if profile is None else (profile,)
 
+    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str:
+        """Ask the child-owned LLM route to narrate one validated profile snapshot."""
+
+        if not isinstance(profile, MemoryProfile) or language not in {"en", "zh"}:
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        payload = {
+            "language": language,
+            "profile": memory_profile_payload(profile),
+        }
+        try:
+            payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise MemoryProviderFailure("memory_provider_response_invalid") from exc
+        if len(payload_bytes) > _MAX_PROFILE_REPORT_REQUEST_BYTES:
+            raise MemoryProviderFailure("memory_input_too_large")
+        body = await self._sidecar_request(
+            "POST",
+            "/avibe/v1/profile-report",
+            payload,
+            require_json=True,
+            timeout_seconds=_PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS,
+            timeout_error="memory_sidecar_unavailable",
+        )
+        if not isinstance(body, dict):
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        if set(body) == {"status", "error"} and body.get("status") == "failed":
+            error = body.get("error")
+            raise MemoryProviderFailure(error if is_memory_error_code(error) else "memory_provider_response_invalid")
+        if set(body) != {"status", "report"} or body.get("status") != "ok":
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        report = _safe_profile_report(body.get("report"))
+        if report is None:
+            raise MemoryProviderFailure("memory_provider_response_invalid")
+        return report
+
     async def health(self) -> bool:
         try:
             await self._sidecar_request("GET", "/health", None, require_json=False)
@@ -376,6 +424,8 @@ class EverOSPort:
         payload: dict[str, Any] | None,
         *,
         require_json: bool,
+        timeout_seconds: float | None = None,
+        timeout_error: MemoryErrorCode = "memory_provider_timeout",
     ) -> dict[str, Any] | None:
         started = time.monotonic()
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
@@ -383,7 +433,10 @@ class EverOSPort:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://memory-sidecar",
-                timeout=httpx.Timeout(self._sidecar_timeout_seconds, connect=3.0),
+                timeout=httpx.Timeout(
+                    timeout_seconds if timeout_seconds is not None else self._sidecar_timeout_seconds,
+                    connect=3.0,
+                ),
                 trust_env=False,
             ) as client:
                 async with client.stream(method, route, json=payload) as response:
@@ -409,7 +462,7 @@ class EverOSPort:
             raise
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
-            raise MemoryProviderFailure("memory_provider_timeout") from exc
+            raise MemoryProviderFailure(timeout_error) from exc
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
@@ -549,10 +602,96 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
             continue
-        text = _canonical_profile_text(profile.get("profile_data"))
+        profile_data = profile.get("profile_data")
+        structured_profile = _structured_profile(profile_data)
+        text = _canonical_profile_text(profile_data)
         if text is not None:
-            return MemoryItem(kind="profile", text=text, date=_record_date(profile))
+            updated_at = structured_profile.updated_at if structured_profile is not None else None
+            return MemoryItem(
+                kind="profile",
+                text=text,
+                date=updated_at.split("T", 1)[0] if updated_at is not None else None,
+                profile=structured_profile,
+            )
     return None
+
+
+def _structured_profile(value: Any) -> MemoryProfile | None:
+    """Map only the known EverOS profile fields into stable caller-facing types."""
+
+    if not isinstance(value, dict):
+        return None
+
+    summary = _safe_text(value.get("summary")) if "summary" in value else None
+    explicit_info = _structured_explicit_info(value)
+    implicit_traits = _structured_implicit_traits(value)
+    updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
+
+    if summary is None and not explicit_info and not implicit_traits and updated_at is None:
+        return None
+    return MemoryProfile(
+        summary=summary,
+        explicit_info=explicit_info,
+        implicit_traits=implicit_traits,
+        updated_at=updated_at,
+    )
+
+
+def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExplicitInfo, ...]:
+    if "explicit_info" not in value:
+        return ()
+    entries = value["explicit_info"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileExplicitInfo] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileExplicitInfo(
+                description=description,
+                category=_safe_text(entry.get("category")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTrait, ...]:
+    if "implicit_traits" not in value:
+        return ()
+    entries = value["implicit_traits"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileTrait] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileTrait(
+                description=description,
+                trait=_safe_text(entry.get("trait")),
+                basis=_safe_text(entry.get("basis")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _normalized_profile_timestamp(value: Any) -> str | None:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= _MAX_PROFILE_TIMESTAMP_MS:
+        return None
+    try:
+        instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return instant.isoformat().replace("+00:00", "Z")
 
 
 def _episode_text(episode: dict[str, Any]) -> str | None:
@@ -582,7 +721,26 @@ def _safe_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.strip()
-    if not text or len(text.encode("utf-8")) > _MAX_ITEM_BYTES:
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeError:
+        return None
+    if not text or len(encoded) > _MAX_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
+        return None
+    return text
+
+
+def _safe_profile_report(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeError:
+        return None
+    if not text or len(encoded) > _MAX_PROFILE_REPORT_OUTPUT_BYTES:
         return None
     if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in text):
         return None
@@ -615,7 +773,12 @@ def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
     if depth > _MAX_RESPONSE_DEPTH:
         return False
     if value is None or isinstance(value, (str, bool)):
-        return not isinstance(value, str) or len(value.encode("utf-8")) <= _MAX_ITEM_BYTES
+        if not isinstance(value, str):
+            return True
+        try:
+            return len(value.encode("utf-8")) <= _MAX_ITEM_BYTES
+        except UnicodeError:
+            return False
     if isinstance(value, (int, float)):
         return not isinstance(value, float) or math.isfinite(value)
     if isinstance(value, list):
@@ -623,12 +786,19 @@ def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
             _is_bounded_json_value(item, depth=depth + 1) for item in value
         )
     if isinstance(value, dict):
-        return len(value) <= _MAX_RESPONSE_COLLECTION and all(
-            isinstance(key, str)
-            and len(key.encode("utf-8")) <= 128
-            and _is_bounded_json_value(item, depth=depth + 1)
-            for key, item in value.items()
-        )
+        if len(value) > _MAX_RESPONSE_COLLECTION:
+            return False
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return False
+            try:
+                if len(key.encode("utf-8")) > 128:
+                    return False
+            except UnicodeError:
+                return False
+            if not _is_bounded_json_value(item, depth=depth + 1):
+                return False
+        return True
     return False
 
 
@@ -716,6 +886,8 @@ class MemoryProviderPort(Protocol):
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
+    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str: ...
+
     async def health(self) -> bool: ...
 
     async def processing_healthy(self) -> bool: ...
@@ -734,10 +906,13 @@ class FakeMemoryProvider:
     flush_projects: list[str] = field(default_factory=list)
     search_scopes: list[tuple[str, str]] = field(default_factory=list)
     profile_scopes: list[tuple[str, str]] = field(default_factory=list)
+    profile_report_calls: list[tuple[MemoryProfile, Literal["en", "zh"]]] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
+    profile_report_failure: BaseException | None = None
+    profile_report_result: str = "Generated profile report."
     health_failure: BaseException | None = None
     processing_health_failure: BaseException | None = None
 
@@ -772,6 +947,12 @@ class FakeMemoryProvider:
         if self.profile_failure is not None:
             raise self.profile_failure
         return self.profile_items
+
+    async def generate_profile_report(self, profile: MemoryProfile, language: Literal["en", "zh"]) -> str:
+        self.profile_report_calls.append((profile, language))
+        if self.profile_report_failure is not None:
+            raise self.profile_report_failure
+        return self.profile_report_result
 
     async def health(self) -> bool:
         if self.health_failure is not None:

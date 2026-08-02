@@ -845,6 +845,31 @@ def create_app(
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
+    @app.post("/internal/memory/profile/report")
+    async def _memory_profile_report(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        payload = await _safe_json(request)
+        language = payload.get("language") if isinstance(payload, dict) and set(payload) == {"language"} else None
+        if language not in {"en", "zh"}:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        try:
+            return await runtime.profile_report_payload(principal_id, project_id, language)
+        except Exception:
+            logger.warning("internal memory profile report failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
         try:

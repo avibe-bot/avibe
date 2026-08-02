@@ -355,6 +355,7 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/memory/status", ("GET",)) in routes
     assert ("/internal/memory/failures", ("GET",)) in routes
     assert ("/internal/memory/profile", ("GET",)) in routes
+    assert ("/internal/memory/profile/report", ("POST",)) in routes
     assert ("/internal/memory/search", ("POST",)) in routes
     assert ("/internal/memory/remember", ("POST",)) in routes
     assert ("/internal/memory/clear", ("POST",)) in routes
@@ -392,6 +393,10 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         async def profile_payload(self, principal_id, project_id):
             calls.append(("profile", (principal_id, project_id)))
             return {"status": "ok", "items": []}
+
+        async def profile_report_payload(self, principal_id, project_id, language):
+            calls.append(("profile_report", (principal_id, project_id, language)))
+            return {"status": "ok", "report": "A readable profile report."}
 
         async def search_payload(self, query, limit, principal_id, project_id):
             calls.append(("search", (query, limit, principal_id, project_id)))
@@ -440,6 +445,15 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                     user_key="avibe:local",
                 ),
             }
+            report_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="POST",
+                    path="/internal/memory/profile/report",
+                    user_key="avibe:local",
+                ),
+            }
             session_headers = {"X-Avibe-Caller-Session": "session-1"}
             clear_headers = {
                 "X-Avibe-Memory-User-Key": "avibe:local",
@@ -454,6 +468,11 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.get("/internal/memory/status"),
                 await client.get("/internal/memory/failures"),
                 await client.get("/internal/memory/profile", headers=user_headers),
+                await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "en"},
+                    headers=report_headers,
+                ),
                 await client.post(
                     "/internal/memory/search",
                     json={"query": "safe query", "limit": 3},
@@ -473,6 +492,11 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post("/internal/reconcile-memory"),
                 await client.post("/internal/memory/search", json=[], headers=search_headers),
                 await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "fr"},
+                    headers=report_headers,
+                ),
+                await client.post(
                     "/internal/memory/remember",
                     json={"text": ""},
                     headers=session_headers,
@@ -481,22 +505,38 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             await asyncio.wait_for(capture_finished.wait(), timeout=1)
             return responses
 
-    status, failures, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
+    (
+        status,
+        failures,
+        profile,
+        report,
+        search,
+        capture,
+        clear,
+        install,
+        reconcile,
+        invalid,
+        invalid_report,
+        invalid_capture,
+    ) = asyncio.run(_go())
 
     assert status.json() == {"state": "ready", "data_exists": True}
     assert failures.json() == {"items": [], "retention_days": 90}
     assert profile.json() == {"status": "ok", "items": []}
+    assert report.json() == {"status": "ok", "report": "A readable profile report."}
     assert search.json() == {"status": "ok", "items": []}
     assert capture.json() == {"status": "accepted"}
     assert clear.json() == {"status": "completed", "epoch": 2}
     assert install.json() == {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
     assert reconcile.json() == {"ok": True, "state": "ready"}
     assert invalid.status_code == 400
+    assert invalid_report.status_code == 400
     assert invalid_capture.status_code == 400
     assert [name for name, _value in calls if name != "capture"] == [
         "status",
         "failures",
         "profile",
+        "profile_report",
         "search",
         "clear",
         "install",
@@ -622,6 +662,72 @@ def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
     assert [no_proof.status_code, agent_session.status_code, profile_proof.status_code] == [403, 403, 403]
     assert clear_proof.status_code == 200
     controller.memory_runtime.clear.assert_awaited_once_with()
+
+
+def test_memory_profile_report_requires_its_own_ui_proof_and_a_closed_language() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        profile_report_payload=AsyncMock(
+            return_value={
+                "status": "failed",
+                "error": "memory_sidecar_unavailable",
+            }
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(method: str, path: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: "avibe:local",
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method=method,
+                path=path,
+                user_key="avibe:local",
+            ),
+        }
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.post("/internal/memory/profile/report", json={"language": "en"}),
+                await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "en"},
+                    headers=headers("GET", "/internal/memory/profile"),
+                ),
+                await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "fr"},
+                    headers=headers("POST", "/internal/memory/profile/report"),
+                ),
+                await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "zh", "extra": True},
+                    headers=headers("POST", "/internal/memory/profile/report"),
+                ),
+                await client.post(
+                    "/internal/memory/profile/report",
+                    json={"language": "zh"},
+                    headers=headers("POST", "/internal/memory/profile/report"),
+                ),
+            )
+
+    missing, mismatched, invalid_language, extra_field, accepted = asyncio.run(_go())
+
+    assert [missing.status_code, mismatched.status_code] == [403, 403]
+    assert [invalid_language.status_code, extra_field.status_code] == [400, 400]
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "failed", "error": "memory_sidecar_unavailable"}
+    runtime.profile_report_payload.assert_awaited_once_with(principal_id, PROJECT, "zh")
 
 
 def test_memory_internal_reads_reject_an_unassociated_agent_session():

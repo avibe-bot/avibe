@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from core.memory.presentation import MemoryStatusBuckets
 
@@ -160,10 +160,79 @@ CaptureReceipt: TypeAlias = CaptureAccepted | CaptureDuplicate | CaptureSkipped 
 
 
 @dataclass(frozen=True)
+class MemoryProfileExplicitInfo:
+    """One directly stated profile fact from the provider."""
+
+    description: str
+    category: str | None = None
+    evidence: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryProfileTrait:
+    """One inferred profile trait, keeping its basis distinct from evidence."""
+
+    description: str
+    trait: str | None = None
+    basis: str | None = None
+    evidence: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryProfile:
+    """The recognized, readable portion of an opaque provider profile."""
+
+    summary: str | None = None
+    explicit_info: tuple[MemoryProfileExplicitInfo, ...] = ()
+    implicit_traits: tuple[MemoryProfileTrait, ...] = ()
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
 class MemoryItem:
     kind: MemoryKind
     text: str
     date: str | None = None
+    profile: MemoryProfile | None = None
+
+
+def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
+    """Project a profile into the closed, JSON-ready Memory envelope."""
+
+    return {
+        "summary": profile.summary,
+        "explicit_info": [
+            {
+                "description": info.description,
+                "category": info.category,
+                "evidence": info.evidence,
+            }
+            for info in profile.explicit_info
+        ],
+        "implicit_traits": [
+            {
+                "description": trait.description,
+                "trait": trait.trait,
+                "basis": trait.basis,
+                "evidence": trait.evidence,
+            }
+            for trait in profile.implicit_traits
+        ],
+        "updated_at": profile.updated_at,
+    }
+
+
+def memory_item_payload(item: MemoryItem) -> dict[str, Any]:
+    """Serialize one item without widening legacy item payloads with nulls."""
+
+    payload: dict[str, Any] = {
+        "kind": item.kind,
+        "text": item.text,
+        "date": item.date,
+    }
+    if item.profile is not None:
+        payload["profile"] = memory_profile_payload(item.profile)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -174,6 +243,19 @@ class MemoryItems:
 
 
 MemoryResult: TypeAlias = MemoryItems | OperationFailed
+
+
+@dataclass(frozen=True)
+class MemoryProfileReport:
+    """One transient profile-report result generated from a frozen snapshot."""
+
+    report: str | None
+    source_profile_updated_at: str | None = None
+    report_warning: Literal["empty", "unstructured"] | None = None
+    status: Literal["ok"] = "ok"
+
+
+MemoryProfileReportResult: TypeAlias = MemoryProfileReport | OperationFailed
 
 
 @dataclass(frozen=True)

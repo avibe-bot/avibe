@@ -36,7 +36,16 @@ from core.memory.process import (
     sidecar_record_path,
 )
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
-from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
+from core.memory.types import (
+    ClearCompleted,
+    MemoryItems,
+    MemoryProfileReport,
+    MemoryProfileReportResult,
+    MemoryResult,
+    MemoryStatus,
+    OperationFailed,
+    memory_item_payload,
+)
 from core.memory.worker import ProcessingEvent
 
 
@@ -285,6 +294,10 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
+        if not await self.module._cancel_profile_reports():
+            self._runtime_error = "memory_sidecar_unavailable"
+            return {"ok": False, "error": self._runtime_error}
+
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
         )
@@ -461,6 +474,22 @@ class MemoryRuntime:
             "profile_warning": "empty" if empty else None,
         }
 
+    async def profile_report_payload(
+        self,
+        principal_id: str,
+        project_id: str,
+        language: str,
+    ) -> dict[str, Any]:
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
+        return _profile_report_payload(
+            await self.module.profile_report(
+                principal_id=principal_id,
+                project_id=project_id,
+                language=language,
+            )
+        )
+
     async def search_payload(
         self,
         query: str,
@@ -524,6 +553,13 @@ class MemoryRuntime:
                 }
             if supervisor is not None:
                 async with self.module._lifecycle_lock:
+                    if not await self.module._cancel_profile_reports():
+                        self._runtime_error = "memory_sidecar_unavailable"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
                     try:
                         claims_paused = await self.module._worker.pause_and_wait()
                     except Exception:
@@ -574,10 +610,14 @@ class MemoryRuntime:
     async def close(self) -> None:
         if not self.available:
             return
-        await self._stop_worker()
-        if self._process is not None:
-            await self._process.stop()
-            self._process = None
+        async with self.module._lifecycle_lock:
+            if not await self.module._cancel_profile_reports():
+                logger.warning("Memory profile report cancellation did not drain during shutdown")
+                return
+            await self._stop_worker()
+            if self._process is not None:
+                await self._process.stop()
+                self._process = None
         self._artifact_manager.set_activation_coordinator(None)
 
     async def _apply_active_artifact_metadata(self) -> None:
@@ -683,6 +723,8 @@ class MemoryRuntime:
                 meta = None
                 sentinel_rewritten = False
                 try:
+                    if not await self.module._cancel_profile_reports():
+                        raise MemoryRuntimeActivationError("profile report cancellation did not drain")
                     if not await self.module._worker.pause_and_wait():
                         raise MemoryRuntimeActivationError("memory worker could not pause")
                     await self._stop_worker()
@@ -736,6 +778,8 @@ class MemoryRuntime:
                     raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
     async def _stop_sidecar_for_clear(self) -> None:
+        if not await self.module._cancel_profile_reports():
+            raise MemoryRuntimeActivationError("profile report cancellation did not drain")
         await self._stop_worker()
         if self._process is not None:
             await self._process.stop()
@@ -935,8 +979,26 @@ def _result_payload(result: MemoryResult) -> dict[str, Any]:
     if isinstance(result, MemoryItems):
         return {
             "status": result.status,
-            "items": [asdict(item) for item in result.items],
+            "items": [memory_item_payload(item) for item in result.items],
             "warnings": list(result.warnings),
+        }
+    return {"status": "failed", "error": "memory_processing_failed"}
+
+
+def _profile_report_payload(result: MemoryProfileReportResult) -> dict[str, Any]:
+    if isinstance(result, OperationFailed):
+        return {"status": result.status, "error": result.error}
+    if isinstance(result, MemoryProfileReport):
+        if result.report_warning is not None:
+            return {
+                "status": result.status,
+                "report": None,
+                "report_warning": result.report_warning,
+            }
+        return {
+            "status": result.status,
+            "report": result.report,
+            "source_profile_updated_at": result.source_profile_updated_at,
         }
     return {"status": "failed", "error": "memory_processing_failed"}
 

@@ -49,6 +49,10 @@ from core.memory.types import (
     MemoryItem,
     MemoryFailureLogEntry,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileReport,
+    MemoryProfileTrait,
     OperationFailed,
 )
 from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
@@ -745,6 +749,310 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
     assert result == OperationFailed(error="memory_processing_failed")
     assert "provider-search-body-canary" not in repr(result)
+
+
+async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_path: Path) -> None:
+    profile = MemoryProfile(
+        summary="Uses concise updates.",
+        explicit_info=(MemoryProfileExplicitInfo(description="Uses Python."),),
+        implicit_traits=(
+            MemoryProfileTrait(
+                description="May prefer checklists.",
+                basis="Repeated planning requests.",
+                evidence="Recent project discussions.",
+            ),
+        ),
+        updated_at="2026-08-02T10:30:00Z",
+    )
+    provider = FakeMemoryProvider(
+        profile_items=(MemoryItem(kind="profile", text="{}", profile=profile),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    scope = {
+        "principal_id": "u-11111111111111111111111111111111",
+        "project_id": PROJECT,
+    }
+
+    assert await module.profile(**scope) == MemoryItems(items=provider.profile_items)
+
+    provider.profile_items = (MemoryItem(kind="fact", text="{}", profile=profile),)
+    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
+
+    provider.profile_items = (
+        MemoryItem(kind="profile", text="{}", profile=MemoryProfile(summary="bad\x00value")),
+    )
+    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
+
+
+async def test_profile_report_reuses_same_key_task_and_keeps_waiters_isolated(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingReportProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(
+                            summary="Prefers concise technical updates.",
+                            explicit_info=(
+                                MemoryProfileExplicitInfo(
+                                    description="Uses Python for automation.",
+                                    evidence="Several project notes mention Python.",
+                                ),
+                            ),
+                            implicit_traits=(
+                                MemoryProfileTrait(
+                                    description="May prefer checklists.",
+                                    basis="Repeated requests for ordered plans.",
+                                    evidence="Planning conversations.",
+                                ),
+                            ),
+                            updated_at="2026-08-02T10:30:00Z",
+                        ),
+                    ),
+                )
+            )
+            self.report_calls = 0
+
+        async def generate_profile_report(self, profile, language):
+            assert language == "en"
+            assert profile.updated_at == "2026-08-02T10:30:00Z"
+            self.report_calls += 1
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return "Overview\n\nGenerated report."
+
+    provider = BlockingReportProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    first = asyncio.create_task(
+        module.profile_report(
+            principal_id="u-11111111111111111111111111111111",
+            project_id=PROJECT,
+            language="en",
+        )
+    )
+    await entered.wait()
+    second = asyncio.create_task(
+        module.profile_report(
+            principal_id="u-11111111111111111111111111111111",
+            project_id=PROJECT,
+            language="en",
+        )
+    )
+    await asyncio.sleep(0)
+    assert provider.report_calls == 1
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert cancelled.is_set() is False
+
+    release.set()
+    assert await second == MemoryProfileReport(
+        report="Overview\n\nGenerated report.",
+        source_profile_updated_at="2026-08-02T10:30:00Z",
+    )
+    assert module._profile_report_tasks == {}
+
+
+async def test_profile_report_keeps_different_languages_in_separate_tasks(tmp_path: Path) -> None:
+    entered: set[str] = set()
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class LanguageReportProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(summary="Known profile."),
+                    ),
+                )
+            )
+
+        async def generate_profile_report(self, profile, language):
+            del profile
+            entered.add(language)
+            if entered == {"en", "zh"}:
+                both_started.set()
+            await release.wait()
+            return f"{language} report"
+
+    provider = LanguageReportProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    scope = {
+        "principal_id": "u-11111111111111111111111111111111",
+        "project_id": PROJECT,
+    }
+    english = asyncio.create_task(module.profile_report(**scope, language="en"))
+    chinese = asyncio.create_task(module.profile_report(**scope, language="zh"))
+
+    await both_started.wait()
+    assert set(module._profile_report_tasks) == {
+        (scope["principal_id"], PROJECT, "en"),
+        (scope["principal_id"], PROJECT, "zh"),
+    }
+
+    release.set()
+    assert await english == MemoryProfileReport(report="en report")
+    assert await chinese == MemoryProfileReport(report="zh report")
+    assert module._profile_report_tasks == {}
+
+
+async def test_profile_report_retries_after_failure_and_clear_cancels_before_cleanup(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    cleanup_observed_cancellation = asyncio.Event()
+
+    class ReportProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(summary="Known profile."),
+                    ),
+                )
+            )
+            self.calls = 0
+
+        async def generate_profile_report(self, profile, language):
+            del profile, language
+            self.calls += 1
+            if self.calls == 1:
+                raise MemoryProviderFailure("memory_processing_failed")
+            if self.calls == 2:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            return "Retry succeeded."
+
+    provider = ReportProvider()
+
+    async def clear_provider_data() -> None:
+        assert cancelled.is_set()
+        cleanup_observed_cancellation.set()
+
+    module, _store, _provider = _module(
+        tmp_path,
+        provider=provider,
+        clear_provider_data=clear_provider_data,
+        owned_provider_root=True,
+    )
+    request = {
+        "principal_id": "u-11111111111111111111111111111111",
+        "project_id": PROJECT,
+        "language": "en",
+    }
+    assert await module.profile_report(**request) == OperationFailed(error="memory_processing_failed")
+    assert module._profile_report_tasks == {}
+
+    report_task = asyncio.create_task(module.profile_report(**request))
+    await entered.wait()
+    assert await module.clear() == ClearCompleted(epoch=1)
+    assert cleanup_observed_cancellation.is_set()
+    assert await report_task == OperationFailed(error="memory_sidecar_unavailable")
+    assert module._profile_report_tasks == {}
+    assert await module.profile_report(**request) == MemoryProfileReport(report="Retry succeeded.")
+    assert module._profile_report_tasks == {}
+
+
+async def test_clear_stops_after_the_bounded_report_cancellation_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    monkeypatch.setattr("core.memory.module.PROFILE_REPORT_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+
+    class CancellationIgnoringProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(summary="Known profile."),
+                    ),
+                )
+            )
+
+        async def generate_profile_report(self, profile, language):
+            del profile, language
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release.wait()
+            return "Too late."
+
+    module, _store, _provider = _module(tmp_path, provider=CancellationIgnoringProvider())
+    report = asyncio.create_task(
+        module.profile_report(
+            principal_id="u-11111111111111111111111111111111",
+            project_id=PROJECT,
+            language="en",
+        )
+    )
+    await entered.wait()
+
+    started = asyncio.get_running_loop().time()
+    assert await module.clear() == OperationFailed(error="memory_clear_failed")
+    assert asyncio.get_running_loop().time() - started < 0.5
+    assert cancellation_seen.is_set()
+
+    release.set()
+    assert await report == OperationFailed(error="memory_sidecar_unavailable")
+    assert module._profile_report_tasks == {}
+
+
+async def test_profile_report_returns_empty_unstructured_and_input_bound_results(tmp_path: Path) -> None:
+    module, _store, provider = _module(tmp_path)
+    request = {
+        "principal_id": "u-11111111111111111111111111111111",
+        "project_id": PROJECT,
+        "language": "zh",
+    }
+    assert await module.profile_report(**request) == MemoryProfileReport(
+        report=None,
+        report_warning="empty",
+    )
+
+    provider.profile_items = (MemoryItem(kind="profile", text='{"legacy":true}'),)
+    assert await module.profile_report(**request) == MemoryProfileReport(
+        report=None,
+        report_warning="unstructured",
+    )
+
+    provider.profile_items = (
+        MemoryItem(
+            kind="profile",
+            text="{}",
+            profile=MemoryProfile(summary="x" * (50 * 1024)),
+        ),
+    )
+    assert await module.profile_report(**request) == OperationFailed(error="memory_input_too_large")
+    assert await module.profile_report(
+        principal_id="not-a-principal",
+        project_id=PROJECT,
+        language="en",
+    ) == OperationFailed(error="memory_access_denied")
 
 
 async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module(tmp_path: Path) -> None:

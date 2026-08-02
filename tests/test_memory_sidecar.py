@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -18,6 +19,9 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
 
     class _App:
         def middleware(self, _kind: str):
+            return lambda handler: handler
+
+        def post(self, _path: str):
             return lambda handler: handler
 
     class _FactoryModule:
@@ -92,6 +96,145 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/api/v1/memory/add", payload) == "route"
     assert _request_rejection("GET", "/api/v2/memory/search", b"") == "route"
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
+
+
+def test_sidecar_guard_allows_only_exact_profile_report_schema() -> None:
+    payload = {
+        "language": "en",
+        "profile": {
+            "summary": "Prefers concise updates.",
+            "explicit_info": [
+                {
+                    "description": "Uses Python.",
+                    "category": "technical",
+                    "evidence": "Project notes.",
+                }
+            ],
+            "implicit_traits": [
+                {
+                    "description": "May prefer checklists.",
+                    "trait": "methodical",
+                    "basis": "Requests ordered plans.",
+                    "evidence": "Planning history.",
+                }
+            ],
+            "updated_at": "2026-08-02T10:30:00Z",
+        },
+    }
+
+    assert _request_rejection("POST", "/avibe/v1/profile-report", json.dumps(payload).encode()) is None
+    assert (
+        _request_rejection(
+            "POST",
+            "/avibe/v1/profile-report",
+            json.dumps({**payload, "api_key": "must-not-cross-the-uds"}).encode(),
+        )
+        == "profile-report"
+    )
+    assert (
+        _request_rejection(
+            "POST",
+            "/avibe/v1/profile-report",
+            json.dumps({**payload, "language": "fr"}).encode(),
+        )
+        == "profile-report"
+    )
+    malformed = {**payload, "profile": {"summary": "only this field"}}
+    assert _request_rejection("POST", "/avibe/v1/profile-report", json.dumps(malformed).encode()) == "profile-report"
+    malformed_unicode = {
+        **payload,
+        "profile": {
+            **payload["profile"],
+            "summary": "\ud800",
+        },
+    }
+    assert (
+        _request_rejection("POST", "/avibe/v1/profile-report", json.dumps(malformed_unicode).encode())
+        == "profile-report"
+    )
+
+
+def test_sidecar_report_route_builds_generator_from_child_environment_only(monkeypatch, tmp_path: Path) -> None:
+    import uvicorn
+
+    handlers: dict[str, object] = {}
+    received: dict[str, object] = {}
+
+    class _App:
+        def middleware(self, _kind: str):
+            return lambda handler: handler
+
+        def post(self, path: str):
+            def register(handler):
+                handlers[path] = handler
+                return handler
+
+            return register
+
+    class _FactoryModule:
+        @staticmethod
+        def create_app() -> _App:
+            return _App()
+
+    class _Config:
+        def __init__(self, _app, **_kwargs):
+            return None
+
+    class _Server:
+        def __init__(self, _config):
+            return None
+
+        def run(self) -> None:
+            return None
+
+    class _Generator:
+        def __init__(self, **kwargs) -> None:
+            received.update(kwargs)
+
+        async def generate(self, profile, language) -> str:
+            received["profile"] = profile
+            received["language"] = language
+            return "Overview\n\nReport."
+
+    class _Request:
+        async def json(self):
+            return {
+                "language": "zh",
+                "profile": {
+                    "summary": "喜欢简洁更新。",
+                    "explicit_info": [],
+                    "implicit_traits": [],
+                    "updated_at": "2026-08-02T10:30:00Z",
+                },
+            }
+
+    monkeypatch.setattr(sidecar, "ProfileReportGenerator", _Generator)
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
+    monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
+    monkeypatch.setattr(uvicorn, "Config", _Config)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    monkeypatch.setenv("EVEROS_LLM__BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("EVEROS_LLM__MODEL", "chat-model")
+    monkeypatch.setenv("EVEROS_LLM__API_KEY", "llm-secret")
+
+    sidecar.serve(tmp_path / "everos.sock")
+    response = asyncio.run(handlers["/avibe/v1/profile-report"](_Request()))
+
+    assert json.loads(response.body) == {"status": "ok", "report": "Overview\n\nReport."}
+    assert {
+        "base_url": received["base_url"],
+        "model": received["model"],
+        "api_key": received["api_key"],
+        "language": received["language"],
+    } == {
+        "base_url": "https://llm.example.test/v1",
+        "model": "chat-model",
+        "api_key": "llm-secret",
+        "language": "zh",
+    }
+    assert received["profile"].summary == "喜欢简洁更新。"
 
 
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:

@@ -13,9 +13,11 @@ import inspect
 import re
 from pathlib import Path
 
+from core.memory.everos import _PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS
 from core.memory.module import (
     CLEAR_CLEANUP_TIMEOUT_SECONDS,
     CLEAR_DRAIN_TIMEOUT_SECONDS,
+    PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS,
     PROVIDER_READ_TIMEOUT_SECONDS,
 )
 from core.memory.process import (
@@ -23,14 +25,17 @@ from core.memory.process import (
     _STARTUP_TIMEOUT_SECONDS,
     _STOP_TIMEOUT_SECONDS,
 )
+from core.memory.report import PROFILE_REPORT_TIMEOUT_SECONDS
 from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
     MEMORY_CLEAR_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
+    MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
     memory_profile,
+    memory_profile_report,
     memory_profile_sync,
     memory_search,
     memory_search_sync,
@@ -69,6 +74,16 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
         memory_search_sync,
     ):
         assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def test_profile_report_deadlines_are_strictly_nested() -> None:
+    assert (
+        PROFILE_REPORT_TIMEOUT_SECONDS
+        < _PROFILE_REPORT_SIDECAR_TIMEOUT_SECONDS
+        < PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS
+        < MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS
+    )
+    assert inspect.signature(memory_profile_report).parameters["timeout"].default == MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS
 
 
 def _reconcile_lifecycle_budget_seconds() -> float:

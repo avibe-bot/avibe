@@ -11,7 +11,7 @@ import shutil
 import stat
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,11 +40,17 @@ from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileReport,
+    MemoryProfileReportResult,
+    MemoryProfileTrait,
     MemoryResult,
     MemoryStatus,
     OperationFailed,
     encode_capture_attachments,
     is_memory_error_code,
+    memory_profile_payload,
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
 
@@ -62,6 +68,9 @@ MAX_PROVIDER_ITEM_BYTES = 64 * 1024
 MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
+PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS = 70.0
+PROFILE_REPORT_MAX_INPUT_BYTES = 48 * 1024
+PROFILE_REPORT_CANCELLATION_DRAIN_TIMEOUT_SECONDS = 1.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 CLEAR_CLEANUP_TIMEOUT_SECONDS = 20.0
 MAX_PROVIDER_DISK_ENTRIES = 100_000
@@ -134,6 +143,11 @@ class MemoryModule:
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
+        self._profile_report_tasks: dict[
+            tuple[str, str, Literal["en", "zh"]],
+            asyncio.Task[MemoryProfileReportResult],
+        ] = {}
+        self._profile_report_lifecycle_generation = 0
         self._clear_active = False
         self._worker = worker or MemoryWorker(
             store=store,
@@ -342,6 +356,149 @@ class MemoryModule:
             limit=MAX_PROVIDER_RESULT_ITEMS,
         )
 
+    async def profile_report(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        language: str,
+    ) -> MemoryProfileReportResult:
+        """Generate one transient narrative from a bounded, frozen profile snapshot."""
+
+        if not self._is_enabled():
+            return OperationFailed(error="memory_disabled")
+        if not is_principal_id(principal_id) or not is_project_id(project_id):
+            return OperationFailed(error="memory_access_denied")
+        if language not in {"en", "zh"}:
+            return OperationFailed(error="memory_invalid_input")
+        typed_language: Literal["en", "zh"] = language
+
+        recovery = await self._recover_interrupted_clear()
+        if recovery is not None:
+            return recovery
+        if self._clear_active:
+            return OperationFailed(error="memory_clear_failed")
+
+        async with self._lifecycle_lock:
+            if not self._is_enabled():
+                return OperationFailed(error="memory_disabled")
+            try:
+                meta = await self._store_call(self._store.ensure_meta)
+            except Exception:
+                return OperationFailed(error="memory_store_unavailable")
+            if meta.clear_in_progress:
+                return OperationFailed(error="memory_clear_failed")
+
+            key = (principal_id, project_id, typed_language)
+            task = self._profile_report_tasks.get(key)
+            if task is None:
+                provider = self._provider
+                read = await self._provider_read(lambda: provider.profile(principal_id, project_id))
+                if isinstance(read, OperationFailed):
+                    return read
+                bounded = self._bounded_items(read, limit=MAX_PROVIDER_RESULT_ITEMS)
+                if isinstance(bounded, OperationFailed):
+                    return bounded
+                profile_item = next((item for item in bounded.items if item.kind == "profile"), None)
+                if profile_item is None:
+                    return MemoryProfileReport(report=None, report_warning="empty")
+                if profile_item.profile is None:
+                    return MemoryProfileReport(report=None, report_warning="unstructured")
+                profile = profile_item.profile
+                input_bytes = self._profile_report_input_bytes(profile, typed_language)
+                if input_bytes is None:
+                    return OperationFailed(error="memory_provider_response_invalid")
+                if input_bytes > PROFILE_REPORT_MAX_INPUT_BYTES:
+                    return OperationFailed(error="memory_input_too_large")
+                task = asyncio.create_task(
+                    self._run_profile_report(
+                        provider,
+                        profile,
+                        typed_language,
+                        self._profile_report_lifecycle_generation,
+                    ),
+                    name="memory-profile-report",
+                )
+                self._profile_report_tasks[key] = task
+                task.add_done_callback(
+                    lambda completed, report_key=key: self._remove_profile_report_task(report_key, completed)
+                )
+
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A browser/request cancellation only cancels this waiter. A lifecycle
+            # cancellation targets the shared task and settles all waiters closed.
+            if task.cancelled():
+                return OperationFailed(error="memory_sidecar_unavailable")
+            raise
+
+    async def _run_profile_report(
+        self,
+        provider: MemoryProviderPort,
+        profile: MemoryProfile,
+        language: Literal["en", "zh"],
+        lifecycle_generation: int,
+    ) -> MemoryProfileReportResult:
+        try:
+            report = await asyncio.wait_for(
+                provider.generate_profile_report(profile, language),
+                timeout=PROFILE_REPORT_OPERATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            return OperationFailed(error="memory_sidecar_unavailable")
+        except asyncio.TimeoutError:
+            return OperationFailed(error="memory_provider_timeout")
+        except MemoryProviderFailure as failure:
+            return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
+        except Exception:
+            return OperationFailed(error="memory_processing_failed")
+
+        if lifecycle_generation != self._profile_report_lifecycle_generation:
+            return OperationFailed(error="memory_sidecar_unavailable")
+        if _profile_text_bytes(report) is None:
+            return OperationFailed(error="memory_provider_response_invalid")
+        return MemoryProfileReport(report=report, source_profile_updated_at=profile.updated_at)
+
+    def _remove_profile_report_task(
+        self,
+        key: tuple[str, str, Literal["en", "zh"]],
+        task: asyncio.Task[MemoryProfileReportResult],
+    ) -> None:
+        if self._profile_report_tasks.get(key) is task:
+            self._profile_report_tasks.pop(key, None)
+
+    async def _cancel_profile_reports(self) -> bool:
+        """Cancel all report work while the caller holds the lifecycle lock."""
+
+        self._profile_report_lifecycle_generation += 1
+        tasks = tuple(task for task in self._profile_report_tasks.values() if not task.done())
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return True
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=PROFILE_REPORT_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+        )
+        return not pending
+
+    @staticmethod
+    def _profile_report_input_bytes(profile: MemoryProfile, language: Literal["en", "zh"]) -> int | None:
+        try:
+            payload = json.dumps(
+                {
+                    "schema_version": 1,
+                    "language": language,
+                    "source_profile_updated_at": profile.updated_at,
+                    "profile": memory_profile_payload(profile),
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            return None
+        return len(payload)
+
     async def status(self) -> MemoryStatus:
         """Return status using the frozen precedence order."""
 
@@ -428,6 +585,8 @@ class MemoryModule:
             async with self._root_lifecycle_lock():
                 self._clear_active = True
                 try:
+                    if not await self._cancel_profile_reports():
+                        raise _ClearStepFailure("profile report cancellation did not drain in time")
                     started = await self._store_call(self._store.begin_clear)
                     if not await self._worker.pause_and_wait(
                         timeout_seconds=self._clear_drain_timeout_seconds
@@ -462,6 +621,8 @@ class MemoryModule:
                     return None
 
                 try:
+                    if not await self._cancel_profile_reports():
+                        raise _ClearStepFailure("profile report cancellation did not drain in time")
                     if not await self._worker.pause_and_wait(
                         timeout_seconds=self._clear_drain_timeout_seconds
                     ):
@@ -518,6 +679,13 @@ class MemoryModule:
                 except ValueError:
                     return OperationFailed(error="memory_provider_response_invalid")
                 total_bytes += len(date_bytes)
+            if item.profile is not None:
+                if item.kind != "profile":
+                    return OperationFailed(error="memory_provider_response_invalid")
+                profile_bytes = _profile_bytes(item.profile)
+                if profile_bytes is None:
+                    return OperationFailed(error="memory_provider_response_invalid")
+                total_bytes += profile_bytes
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
@@ -902,6 +1070,88 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
+
+
+def _profile_text_bytes(value: object) -> bytes | None:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return None
+    encoded = _utf8_bytes(value)
+    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
+        return None
+    return encoded
+
+
+def _profile_bytes(profile: object) -> int | None:
+    """Revalidate every structured profile field before it leaves the module."""
+
+    if not isinstance(profile, MemoryProfile):
+        return None
+    if (
+        profile.summary is None
+        and not profile.explicit_info
+        and not profile.implicit_traits
+        and profile.updated_at is None
+    ):
+        return None
+
+    total = 0
+
+    def optional_text(value: object) -> int | None:
+        if value is None:
+            return 0
+        encoded = _profile_text_bytes(value)
+        return len(encoded) if encoded is not None else None
+
+    summary_bytes = optional_text(profile.summary)
+    if summary_bytes is None:
+        return None
+    total += summary_bytes
+
+    if not isinstance(profile.explicit_info, tuple) or len(profile.explicit_info) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for info in profile.explicit_info:
+        if not isinstance(info, MemoryProfileExplicitInfo):
+            return None
+        description_bytes = _profile_text_bytes(info.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (info.category, info.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if not isinstance(profile.implicit_traits, tuple) or len(profile.implicit_traits) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for trait in profile.implicit_traits:
+        if not isinstance(trait, MemoryProfileTrait):
+            return None
+        description_bytes = _profile_text_bytes(trait.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (trait.trait, trait.basis, trait.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if profile.updated_at is not None:
+        timestamp_bytes = _profile_text_bytes(profile.updated_at)
+        if timestamp_bytes is None or len(timestamp_bytes) > 64:
+            return None
+        try:
+            instant = datetime.fromisoformat(profile.updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if instant.tzinfo is None or instant.utcoffset() != timezone.utc.utcoffset(instant):
+            return None
+        total += len(timestamp_bytes)
+
+    return total
 
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:

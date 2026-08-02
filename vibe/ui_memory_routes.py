@@ -297,6 +297,27 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.post("/api/memory/profile/report", include_in_schema=False)
+    async def memory_profile_report_post(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                payload = await starlette_request.json()
+            except Exception:
+                payload = None
+            language = payload.get("language") if isinstance(payload, dict) and set(payload) == {"language"} else None
+            if language not in {"en", "zh"}:
+                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_profile_report(language, user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.post("/api/memory/search", include_in_schema=False)
     async def memory_search_post(starlette_request: FastAPIRequest):
         async def handler():

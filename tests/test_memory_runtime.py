@@ -47,7 +47,13 @@ from core.memory.process import (
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
 from core.memory.store import MemoryStore
-from core.memory.types import MemoryItem, MemoryItems, OperationFailed
+from core.memory.types import (
+    MemoryItem,
+    MemoryItems,
+    MemoryProfile,
+    MemoryProfileReport,
+    OperationFailed,
+)
 from config.v2_config import (
     AgentsConfig,
     MemoryConfig,
@@ -2376,6 +2382,214 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     # Status is not scoped to a principal, so it must not expose a field whose
     # only possible value is some other principal's last profile read.
     assert "profile_warning" not in payload
+
+
+def test_memory_item_projection_omits_empty_profile_and_preserves_structured_fields() -> None:
+    legacy = memory_runtime._result_payload(
+        MemoryItems(items=(MemoryItem(kind="fact", text="Uses Python."),))
+    )
+    assert legacy == {
+        "status": "ok",
+        "items": [{"kind": "fact", "text": "Uses Python.", "date": None}],
+        "warnings": [],
+    }
+
+    structured = memory_runtime._result_payload(
+        MemoryItems(
+            items=(
+                MemoryItem(
+                    kind="profile",
+                    text="{}",
+                    profile=MemoryProfile(
+                        summary="Prefers concise updates.",
+                        updated_at="2026-08-02T10:30:00Z",
+                    ),
+                ),
+            )
+        )
+    )
+    assert structured["items"][0]["profile"] == {
+        "summary": "Prefers concise updates.",
+        "explicit_info": [],
+        "implicit_traits": [],
+        "updated_at": "2026-08-02T10:30:00Z",
+    }
+
+
+def test_profile_report_payload_keeps_empty_warnings_and_closed_errors_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+
+    class _Module:
+        async def profile_report(self, *, principal_id: str, project_id: str, language: str):
+            assert principal_id.startswith("u-")
+            assert project_id == PROJECT
+            if language == "zh":
+                return MemoryProfileReport(report=None, report_warning="empty")
+            if language == "failed":
+                return OperationFailed(error="memory_sidecar_unavailable")
+            return MemoryProfileReport(
+                report="Overview\n\nGenerated report.",
+                source_profile_updated_at="2026-08-02T10:30:00Z",
+            )
+
+    runtime._module = _Module()
+    principal = "u-" + "a" * 32
+
+    assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "zh")) == {
+        "status": "ok",
+        "report": None,
+        "report_warning": "empty",
+    }
+    assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "en")) == {
+        "status": "ok",
+        "report": "Overview\n\nGenerated report.",
+        "source_profile_updated_at": "2026-08-02T10:30:00Z",
+    }
+    assert asyncio.run(runtime.profile_report_payload(principal, PROJECT, "failed")) == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+
+
+def test_reconcile_cancels_report_before_replacing_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.memory.everos import FakeMemoryProvider
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(summary="Known profile."),
+                    ),
+                )
+            )
+
+        async def generate_profile_report(self, profile, language):
+            del profile, language
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        old_process = factory.supervised[0]
+        original_stop = old_process.stop
+
+        async def stop_after_report_cancel() -> None:
+            assert cancelled.is_set()
+            await original_stop()
+
+        old_process.stop = stop_after_report_cancel
+        provider = BlockingProvider()
+        runtime.module._replace_provider(provider)
+        report = asyncio.create_task(
+            runtime.module.profile_report(
+                principal_id="u-" + "a" * 32,
+                project_id=PROJECT,
+                language="en",
+            )
+        )
+        await entered.wait()
+        result = await asyncio.wait_for(runtime.reconcile(config), timeout=2.0)
+
+        assert result == {"ok": True, "state": "ready"}
+        assert await report == OperationFailed(error="memory_sidecar_unavailable")
+        assert old_process.stopped is True
+        assert len(factory.supervised) == 2
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_shutdown_cancels_report_before_stopping_the_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.memory.everos import FakeMemoryProvider
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingProvider(FakeMemoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                profile_items=(
+                    MemoryItem(
+                        kind="profile",
+                        text="{}",
+                        profile=MemoryProfile(summary="Known profile."),
+                    ),
+                )
+            )
+
+        async def generate_profile_report(self, profile, language):
+            del profile, language
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            config,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert (await runtime.reconcile(config))["ok"] is True
+        process = factory.supervised[0]
+        original_stop = process.stop
+
+        async def stop_after_report_cancel() -> None:
+            assert cancelled.is_set()
+            await original_stop()
+
+        process.stop = stop_after_report_cancel
+        runtime.module._replace_provider(BlockingProvider())
+        report = asyncio.create_task(
+            runtime.module.profile_report(
+                principal_id="u-" + "a" * 32,
+                project_id=PROJECT,
+                language="en",
+            )
+        )
+        await entered.wait()
+
+        await runtime.close()
+
+        assert await report == OperationFailed(error="memory_sidecar_unavailable")
+        assert process.stopped is True
+
+    asyncio.run(run())
 
 
 def _processing_config() -> MemoryProcessingConfig:

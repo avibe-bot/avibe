@@ -18,6 +18,11 @@ from core.memory.everos import (
     ProviderAttachment,
     ProviderCapture,
 )
+from core.memory.types import (
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
+)
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -359,6 +364,148 @@ def test_profile_canonicalizes_structured_profile() -> None:
 
     assert items[0].kind == "profile"
     assert items[0].text == '{"language":"Python","timezone":"UTC"}'
+    assert items[0].profile is None
+
+
+def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": {
+                                "summary": "Prefers concise technical discussions.",
+                                "explicit_info": [
+                                    {
+                                        "category": "communication",
+                                        "description": "Prefers written updates.",
+                                        "evidence": "Asked for a written summary.",
+                                    },
+                                    {"description": 42},
+                                ],
+                                "implicit_traits": [
+                                    {
+                                        "trait": "methodical",
+                                        "description": "May prefer a clear sequence of steps.",
+                                        "basis": "Repeatedly requested checklists.",
+                                        "evidence": "Three recent planning discussions.",
+                                    }
+                                ],
+                                "profile_timestamp_ms": 0,
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items == (
+        items[0],
+    )
+    assert items[0].date == "1970-01-01"
+    assert items[0].profile == MemoryProfile(
+        summary="Prefers concise technical discussions.",
+        explicit_info=(
+            MemoryProfileExplicitInfo(
+                category="communication",
+                description="Prefers written updates.",
+                evidence="Asked for a written summary.",
+            ),
+        ),
+        implicit_traits=(
+            MemoryProfileTrait(
+                trait="methodical",
+                description="May prefer a clear sequence of steps.",
+                basis="Repeatedly requested checklists.",
+                evidence="Three recent planning discussions.",
+            ),
+        ),
+        updated_at="1970-01-01T00:00:00Z",
+    )
+    assert json.loads(items[0].text)["implicit_traits"][0]["basis"] == "Repeatedly requested checklists."
+    assert json.loads(items[0].text)["implicit_traits"][0]["evidence"] == "Three recent planning discussions."
+
+
+def test_profile_rejects_wrong_shaped_known_collections() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {
+                            "user_id": "owner-1",
+                            "profile_data": {"explicit_info": "not-a-list"},
+                        }
+                    ]
+                }
+            },
+        )
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT)
+        assert raised.value.error == "memory_provider_response_invalid"
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
+
+
+def test_profile_report_uses_only_the_private_sidecar_route_and_closed_errors() -> None:
+    received: dict[str, object] = {}
+    profile = MemoryProfile(
+        summary="Prefers concise technical updates.",
+        explicit_info=(MemoryProfileExplicitInfo(description="Uses Python."),),
+        updated_at="2026-08-02T10:30:00Z",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["path"] = request.url.path
+        received["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"status": "ok", "report": "A concise report."})
+
+    with _sidecar_transport(handler):
+        report = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).generate_profile_report(profile, "zh"))
+
+    assert report == "A concise report."
+    assert received == {
+        "path": "/avibe/v1/profile-report",
+        "payload": {
+            "language": "zh",
+            "profile": {
+                "summary": "Prefers concise technical updates.",
+                "explicit_info": [
+                    {"description": "Uses Python.", "category": None, "evidence": None}
+                ],
+                "implicit_traits": [],
+                "updated_at": "2026-08-02T10:30:00Z",
+            },
+        },
+    }
+    assert "api_key" not in json.dumps(received["payload"])
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sidecar disappeared", request=request)
+
+    async def _expect_unavailable() -> None:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).generate_profile_report(profile, "en")
+        assert raised.value.error == "memory_sidecar_unavailable"
+
+    with _sidecar_transport(unavailable):
+        asyncio.run(_expect_unavailable())
+
+    def timed_out(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("sidecar deadline elapsed", request=request)
+
+    with _sidecar_transport(timed_out):
+        asyncio.run(_expect_unavailable())
 
 
 def test_invalid_search_envelope_is_closed_failure() -> None:
