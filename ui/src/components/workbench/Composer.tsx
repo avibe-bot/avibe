@@ -137,16 +137,21 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
   const startedAt = Date.now();
   try {
     session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
-    session.finalizedFailedSegmentCount = session.segments.filter(
-      (segment) => segment.error,
-    ).length;
-    const result = await finalizeVoiceDictation(session.segments, {
-      dictationId: session.dictationId,
-      before: session.insertion.before,
-      after: session.insertion.after,
-    }, {
-      signal: session.abortController.signal,
-    });
+    const result = await (async () => {
+      try {
+        return await finalizeVoiceDictation(session.segments, {
+          dictationId: session.dictationId,
+          before: session.insertion.before,
+          after: session.insertion.after,
+        }, {
+          signal: session.abortController.signal,
+        });
+      } finally {
+        session.finalizedFailedSegmentCount = session.segments.filter(
+          (segment) => segment.error,
+        ).length;
+      }
+    })();
     if (session.abortController.signal.aborted) return;
     session.cleanupOutcome = result.cleanup;
     session.cleanupElapsedMs = Date.now() - startedAt;

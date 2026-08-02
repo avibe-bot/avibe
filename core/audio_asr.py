@@ -290,10 +290,12 @@ class AudioAsrService:
                         "X-Vibe-Device-Secret": runtime.device_secret,
                     },
                 ) as response:
+                    payload = None
                     try:
                         payload = await response.json(content_type=None)
                     except Exception as exc:
-                        raise AudioAsrProtocolError("audio ASR returned invalid JSON") from exc
+                        if 200 <= response.status < 300:
+                            raise AudioAsrProtocolError("audio ASR returned invalid JSON") from exc
                     if response.status < 200 or response.status >= 300:
                         upstream_error = payload.get("error") if isinstance(payload, dict) else None
                         if response.status == 504 or upstream_error == "transcription_timeout":
