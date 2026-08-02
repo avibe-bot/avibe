@@ -44,6 +44,23 @@ from vibe.i18n import t as i18n_t
 logger = logging.getLogger(__name__)
 
 
+class ActivityOutputDeliveryError(RuntimeError):
+    """An Activity result did not complete its local output boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        delivered: bool,
+        message_id: str | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.delivered = delivered
+        self.message_id = message_id
+        self.cause = cause
+
+
 def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
     run_ids: list[str] = []
     accepted = payload.get("accepted_agent_run_ids")
@@ -2007,6 +2024,7 @@ class ConsolidatedMessageDispatcher:
                     or workbench_run_waits_for_persistence
                     or workbench_terminal_waits_for_persistence
                 )
+                activity_delivery_error: ActivityOutputDeliveryError | None = None
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
@@ -2066,28 +2084,54 @@ class ConsolidatedMessageDispatcher:
                             and agent_message_exists(target_context, native_output_id)
                         )
                     )
+                    activity_was_delivered = bool(
+                        output_semantics.requires_delivery_for_run_settlement
+                        and target_context.platform != "avibe"
+                        and primary_message_id is not None
+                    )
+                    if (
+                        output_semantics.requires_delivery_for_run_settlement
+                        and not durable_output_exists
+                    ):
+                        activity_delivery_error = ActivityOutputDeliveryError(
+                            (
+                                "Activity output was delivered but not durably persisted"
+                                if activity_was_delivered
+                                else "Activity output was not durably persisted or delivered"
+                            ),
+                            delivered=activity_was_delivered,
+                            message_id=primary_message_id if activity_was_delivered else None,
+                        )
+                        if not activity_was_delivered:
+                            raise activity_delivery_error
                     if workbench_terminal_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError(
                             "Workbench terminal output was not durably persisted"
                         )
                     if workbench_run_waits_for_persistence and not durable_output_exists:
                         raise RuntimeError("Workbench run output was not durably persisted")
-                    if (
-                        output_semantics.requires_delivery_for_run_settlement
-                        and not workbench_run_waits_for_persistence
-                        and not durable_output_exists
-                    ):
-                        raise RuntimeError(
-                            "Activity output was not durably persisted after delivery"
+                    try:
+                        self._record_agent_run_terminal_result(
+                            context,
+                            persisted_result_text,
+                            primary_message_id,
+                            is_error=is_error,
+                            terminal_error=terminal_error,
+                            output_semantics=output_semantics,
                         )
-                    self._record_agent_run_terminal_result(
-                        context,
-                        persisted_result_text,
-                        primary_message_id,
-                        is_error=is_error,
-                        terminal_error=terminal_error,
-                        output_semantics=output_semantics,
-                    )
+                    except Exception as err:
+                        if not activity_was_delivered:
+                            raise
+                        logger.error(
+                            "Activity output reached the user but linked Run settlement failed",
+                            exc_info=True,
+                        )
+                        activity_delivery_error = ActivityOutputDeliveryError(
+                            "Activity output was delivered but linked Run settlement failed",
+                            delivered=True,
+                            message_id=primary_message_id,
+                            cause=err,
+                        )
 
                 if primary_message_id and display_text and not output_semantics.detached:
                     # Stream the delivered result to live consumers (avibe SSE).
@@ -2108,6 +2152,9 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
+
+                if activity_delivery_error is not None:
+                    raise activity_delivery_error
 
                 return primary_message_id
             finally:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -383,7 +384,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
             patch.object(message_dispatcher_module, "persist_agent_message") as persist,
         ):
-            with self.assertRaisesRegex(RuntimeError, "not durably persisted"):
+            with self.assertRaisesRegex(RuntimeError, "not durably persisted") as raised:
                 await dispatcher.emit_agent_message(
                     context,
                     "result",
@@ -398,8 +399,94 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
+        self.assertIs(raised.exception.delivered, False)
         self.assertEqual(recorded, [])
         persist.assert_not_called()
+
+    async def test_delivered_activity_local_failure_settles_runs_then_origin_turn(self):
+        events = []
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda _run_id: False),
+            emit_matches_runtime_turn=lambda _context: True,
+            release_runtime_turn=lambda _context: None,
+        )
+        done = asyncio.Event()
+        sink = {
+            "on_chunk": unittest.mock.AsyncMock(side_effect=lambda _chunk: events.append("turn")),
+            "done_event": done,
+            "turn_token": "origin-turn",
+        }
+        controller.get_turn_sink = lambda _session_key: sink
+        controller.session_turns = SimpleNamespace(
+            on_terminal_result=lambda *_args, **_kwargs: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={"turn_token": "origin-turn"},
+        )
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "running"}
+
+            def record_run_output(self, run_id, **kwargs):
+                events.append(("run", run_id, kwargs["terminal_status"]))
+
+            def close(self):
+                pass
+
+        def persist(*_args, **_kwargs):
+            events.append("persist")
+            return None
+
+        with (
+            patch.object(
+                message_dispatcher_module,
+                "SQLiteBackgroundTaskStore",
+                return_value=_Store(),
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "agent_message_exists",
+                return_value=False,
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                side_effect=persist,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not durably persisted") as raised:
+                await dispatcher.emit_agent_message(
+                    context,
+                    "result",
+                    "background work finished",
+                    output=MessageOutput(
+                        completes_turn=True,
+                        completes_run=True,
+                        idempotency_key="activity-output",
+                        run_id="run-origin",
+                        metadata={"run_ids": ["run-origin", "run-linked"]},
+                        requires_delivery_for_run_settlement=True,
+                    ),
+                )
+
+        self.assertIs(raised.exception.delivered, True)
+        self.assertEqual(raised.exception.message_id, "bot-msg-1")
+        self.assertTrue(done.is_set())
+        self.assertEqual(
+            events,
+            [
+                "persist",
+                ("run", "run-origin", "succeeded"),
+                ("run", "run-linked", "succeeded"),
+                "turn",
+            ],
+        )
 
     async def test_activity_run_store_failure_propagates_after_message_persistence(self):
         controller = _StubController()
@@ -436,7 +523,10 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
             patch.object(message_dispatcher_module, "persist_agent_message", side_effect=persist),
         ):
-            with self.assertRaisesRegex(RuntimeError, "run store unavailable"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "linked Run settlement failed",
+            ) as raised:
                 await dispatcher.emit_agent_message(
                     context,
                     "result",
@@ -451,6 +541,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
+        self.assertIs(raised.exception.delivered, True)
+        self.assertEqual(str(raised.exception.cause), "run store unavailable")
         self.assertEqual(events, [("message", "persisted"), ("run", "run-origin")])
 
     async def test_activity_run_settlement_follows_message_persistence(self):

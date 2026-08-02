@@ -2,10 +2,12 @@ import asyncio
 import logging
 import os
 import uuid
+from dataclasses import replace
 from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
+from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     MessageOutput,
@@ -22,7 +24,11 @@ from core.services.agent_steering import (
     SteerResult,
     result as steer_result,
 )
-from core.session_activities import SessionActivity, activity_completion_output
+from core.session_activities import (
+    TERMINAL_SNAPSHOT_PHASE,
+    SessionActivity,
+    activity_completion_output,
+)
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
@@ -1349,8 +1355,24 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    for activity in detached_activities:
-                                        registry.ack_completed_output(activity)
+                                    self._consume_delivered_activities(
+                                        composite_key,
+                                        detached_activities,
+                                    )
+                            except ActivityOutputDeliveryError as err:
+                                if not err.delivered:
+                                    registry = self._activity_registry()
+                                    if registry is not None:
+                                        self._requeue_activities(
+                                            registry,
+                                            detached_activities,
+                                        )
+                                    raise
+                                self._consume_delivered_activities(
+                                    composite_key,
+                                    detached_activities,
+                                    delivery_error=err,
+                                )
                             except Exception:
                                 registry = self._activity_registry()
                                 if registry is not None:
@@ -1483,7 +1505,11 @@ class ClaudeAgent(BaseAgent):
                                 )
                                 registry = self._activity_registry()
                                 if registry is not None:
-                                    self._ack_request_activities(pending_request)
+                                    self._consume_delivered_activities(
+                                        composite_key,
+                                        output_activities,
+                                    )
+                                    self._clear_request_activities(pending_request)
                             else:
                                 await self.emit_result_message(
                                     context,
@@ -1493,6 +1519,20 @@ class ClaudeAgent(BaseAgent):
                                     parse_mode="markdown",
                                     request=pending_request,
                                 )
+                        except ActivityOutputDeliveryError as err:
+                            if not err.delivered:
+                                emit_failed = True
+                                self._requeue_request_activity(pending_request)
+                                await self._settle_activity_turn_after_delivery_failure(
+                                    context
+                                )
+                                raise
+                            self._consume_delivered_activities(
+                                composite_key,
+                                output_activities,
+                                delivery_error=err,
+                            )
+                            self._clear_request_activities(pending_request)
                         except Exception:
                             emit_failed = True
                             if output_activity is not None:
@@ -2039,6 +2079,112 @@ class ClaudeAgent(BaseAgent):
 
         registry.requeue_completed_outputs(activities)
 
+    def _consume_delivered_activities(
+        self,
+        composite_key: str,
+        activities: list[SessionActivity],
+        *,
+        delivery_error: ActivityOutputDeliveryError | None = None,
+    ) -> None:
+        """Consume outputs after positive delivery without allowing a resend."""
+
+        if delivery_error is not None:
+            logger.error(
+                "Claude Activity output reached the user but local completion failed; "
+                "consuming without redelivery (runtime=%s activities=%s error=%s)",
+                composite_key,
+                ",".join(activity.id for activity in activities),
+                delivery_error,
+            )
+        registry = self._activity_registry()
+        if registry is None:
+            return
+        for activity in activities:
+            if delivery_error is not None and delivery_error.cause is not None:
+                failed_activity = self._terminally_discard_activity_claim(
+                    registry,
+                    activity,
+                    delivery_error.cause,
+                )
+                self._settle_terminally_discarded_activity(failed_activity)
+                continue
+            try:
+                registry.ack_completed_output(activity)
+            except Exception as ack_error:
+                logger.error(
+                    "Activity acknowledgement failed after delivery; terminally "
+                    "discarding the claim to preserve turn liveness "
+                    "(runtime=%s activity=%s error=%s)",
+                    composite_key,
+                    activity.id,
+                    ack_error,
+                    exc_info=True,
+                )
+                failed_activity = self._terminally_discard_activity_claim(
+                    registry,
+                    activity,
+                    ack_error,
+                )
+                self._settle_terminally_discarded_activity(failed_activity)
+
+    def _settle_terminally_discarded_activity(
+        self,
+        activity: SessionActivity,
+    ) -> None:
+        service = getattr(self.controller, "agent_service", None)
+        on_terminal = getattr(service, "on_activity_terminal", None)
+        if callable(on_terminal) and not on_terminal(activity):
+            logger.error(
+                "Failed to terminally settle delivered Activity %s after local failure",
+                activity.id,
+            )
+
+    @staticmethod
+    def _terminally_discard_activity_claim(
+        registry,
+        activity: SessionActivity,
+        error: BaseException,
+    ) -> SessionActivity:
+        """Best-effort terminal snapshot for a rare post-delivery local failure."""
+
+        failed_activity = replace(
+            activity,
+            status="failed",
+            metadata={
+                **activity.metadata,
+                "terminal_error": (
+                    "delivered_output_local_settlement_failed: "
+                    f"{str(error).strip() or type(error).__name__}"
+                ),
+            },
+        )
+        persist = getattr(registry, "_persist_activity", None)
+        if callable(persist):
+            try:
+                persist(failed_activity, phase=TERMINAL_SNAPSHOT_PHASE)
+            except Exception:
+                logger.error(
+                    "Failed to persist terminal Activity evidence after delivered "
+                    "output acknowledgement failure (activity=%s)",
+                    activity.id,
+                    exc_info=True,
+                )
+
+        key_builder = getattr(registry, "_activity_key", None)
+        lock = getattr(registry, "_lock", None)
+        claimed = getattr(registry, "_claimed_completed_outputs", None)
+        recovered = getattr(registry, "_recovered_output_ids", None)
+        if not callable(key_builder) or lock is None or not isinstance(claimed, dict):
+            raise RuntimeError(
+                f"Cannot terminally discard claimed Activity {activity.id}"
+            ) from error
+        activity_key = key_builder(activity)
+        with lock:
+            claimed.pop(activity_key, None)
+            if recovered is not None:
+                recovered.discard(activity_key)
+        return failed_activity
+
     def _claim_activity_batch_for_turns(
         self,
         registry,
@@ -2455,8 +2601,9 @@ class ClaudeAgent(BaseAgent):
         message_id: str | None,
     ) -> None:
         if message_id is None:
-            raise RuntimeError(
-                f"Claude Activity output {activity.id} was not persisted or delivered"
+            raise ActivityOutputDeliveryError(
+                f"Claude Activity output {activity.id} was not persisted or delivered",
+                delivered=False,
             )
 
     async def _settle_activity_turn_after_delivery_failure(
@@ -2594,8 +2741,18 @@ class ClaudeAgent(BaseAgent):
             )
             registry = self._activity_registry()
             if registry is not None:
-                for item in activities:
-                    registry.ack_completed_output(item)
+                self._consume_delivered_activities(composite_key, activities)
+        except ActivityOutputDeliveryError as err:
+            if not err.delivered:
+                registry = self._activity_registry()
+                if registry is not None:
+                    self._requeue_activities(registry, activities)
+                raise
+            self._consume_delivered_activities(
+                composite_key,
+                activities,
+                delivery_error=err,
+            )
         except Exception:
             registry = self._activity_registry()
             if registry is not None:
@@ -2668,7 +2825,22 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=True,
                         request=matched_request,
                     )
-                    self._ack_request_activities(matched_request)
+                    self._consume_delivered_activities(
+                        composite_key,
+                        retained,
+                    )
+                    self._clear_request_activities(matched_request)
+                except ActivityOutputDeliveryError as err:
+                    if not err.delivered:
+                        self._requeue_request_activity(matched_request)
+                        await self._settle_activity_turn_after_delivery_failure(context)
+                        raise
+                    self._consume_delivered_activities(
+                        composite_key,
+                        retained,
+                        delivery_error=err,
+                    )
+                    self._clear_request_activities(matched_request)
                 except Exception:
                     self._requeue_request_activity(matched_request)
                     await self._settle_activity_turn_after_delivery_failure(context)
@@ -2701,8 +2873,16 @@ class ClaudeAgent(BaseAgent):
                     detached=True,
                     completes_turn=False,
                 )
-                for item in activities:
-                    registry.ack_completed_output(item)
+                self._consume_delivered_activities(composite_key, activities)
+            except ActivityOutputDeliveryError as err:
+                if not err.delivered:
+                    self._requeue_activities(registry, activities)
+                    raise
+                self._consume_delivered_activities(
+                    composite_key,
+                    activities,
+                    delivery_error=err,
+                )
             except Exception:
                 self._requeue_activities(registry, activities)
                 raise
