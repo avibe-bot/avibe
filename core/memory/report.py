@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from typing import Any, Literal
@@ -104,7 +105,7 @@ class ProfileReportGenerator:
             "temperature": 0.2,
             "max_tokens": PROFILE_REPORT_MAX_TOKENS,
         }
-        try:
+        async def request_completion() -> bytes:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout_seconds, connect=PROFILE_REPORT_CONNECT_TIMEOUT_SECONDS),
                 trust_env=False,
@@ -117,9 +118,17 @@ class ProfileReportGenerator:
                 ) as response:
                     if not 200 <= response.status_code < 300:
                         raise MemoryProviderFailure("memory_processing_failed")
-                    raw = await _read_bounded_response(response)
+                    return await _read_bounded_response(response)
+
+        try:
+            # httpx's phase timeouts reset while a peer continuously streams.
+            # Bound the whole request and response body so the sidecar deadline
+            # remains strictly inside the controller's outer UDS deadline.
+            raw = await asyncio.wait_for(request_completion(), timeout=self._timeout_seconds)
         except MemoryProviderFailure:
             raise
+        except asyncio.TimeoutError as exc:
+            raise MemoryProviderFailure("memory_provider_timeout") from exc
         except httpx.TimeoutException as exc:
             raise MemoryProviderFailure("memory_provider_timeout") from exc
         except (httpx.HTTPError, OSError) as exc:
@@ -152,7 +161,10 @@ def _completion_content(value: Any) -> str | None:
     choices = value.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         return None
-    message = choices[0].get("message")
+    choice = choices[0]
+    if "finish_reason" in choice and choice["finish_reason"] != "stop":
+        return None
+    message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
         return None

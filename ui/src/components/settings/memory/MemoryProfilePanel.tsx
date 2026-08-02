@@ -14,6 +14,7 @@ import type {
 import { classifyMemoryResult, memoryErrorMessage } from '../../../lib/memoryRead';
 import {
   acceptsProfileReportCompletion,
+  acceptsProfileReportSnapshot,
   profileReportLanguage,
   profileReportRequestKey,
 } from './profileReportState';
@@ -172,6 +173,19 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
       );
       if (!acceptsProfileReportCompletion(requestKey, reportKeyRef.current)) return;
       if (outcome.kind === 'ok') {
+        if (
+          outcome.value.report !== null &&
+          !acceptsProfileReportSnapshot(structuredProfile.updated_at, outcome.value.source_profile_updated_at)
+        ) {
+          setReportState({
+            key: requestKey,
+            loading: false,
+            report: null,
+            warning: null,
+            error: t('memory.profile.reportStale'),
+          });
+          return;
+        }
         setReportState({
           key: requestKey,
           loading: false,

@@ -3555,6 +3555,7 @@
       "generatingReport": "正在生成报告…",
       "reportTitle": "画像报告",
       "reportFailed": "无法生成你的画像报告。",
+      "reportStale": "生成报告时画像已更新。请刷新后重试。",
       "reportWarning": {
         "empty": "目前没有可生成报告的画像。",
         "unstructured": "该提供方画像暂时无法生成报告。"

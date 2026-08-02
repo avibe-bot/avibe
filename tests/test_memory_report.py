@@ -127,6 +127,27 @@ def test_generator_uses_bounded_openai_transport_without_logging_profile_or_secr
         (httpx.Response(200, json={"choices": [{}]}), "memory_provider_response_invalid"),
         (httpx.Response(200, json={"choices": [{"message": {"content": "  "}}]}), "memory_provider_response_invalid"),
         (
+            httpx.Response(
+                200,
+                json={"choices": [{"finish_reason": "length", "message": {"content": "Partial report"}}]},
+            ),
+            "memory_provider_response_invalid",
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"choices": [{"finish_reason": "content_filter", "message": {"content": "Filtered"}}]},
+            ),
+            "memory_provider_response_invalid",
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"choices": [{"finish_reason": None, "message": {"content": "Still streaming"}}]},
+            ),
+            "memory_provider_response_invalid",
+        ),
+        (
             httpx.Response(200, content=b'{"choices":[{"message":{"content":"\\ud800"}}]}'),
             "memory_provider_response_invalid",
         ),
@@ -179,6 +200,39 @@ def test_generator_maps_external_timeout_to_provider_timeout() -> None:
                     base_url="https://llm.example.test/v1",
                     model="chat-model",
                     api_key="llm-secret",
+                ).generate(_profile(), "en")
+            )
+
+    assert raised.value.error == "memory_provider_timeout"
+
+
+def test_generator_enforces_total_deadline_across_a_trickling_response() -> None:
+    class TricklingCompletionStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"choices":['
+            await asyncio.sleep(0.02)
+            yield b'{"message":{"content":"Overview"}}'
+            await asyncio.sleep(0.02)
+            yield b"]}"
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=TricklingCompletionStream())
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.report.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        with pytest.raises(MemoryProviderFailure) as raised:
+            asyncio.run(
+                ProfileReportGenerator(
+                    base_url="https://llm.example.test/v1",
+                    model="chat-model",
+                    api_key="llm-secret",
+                    timeout_seconds=0.03,
                 ).generate(_profile(), "en")
             )
 

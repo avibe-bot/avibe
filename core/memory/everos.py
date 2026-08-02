@@ -627,7 +627,10 @@ def _structured_profile(value: Any) -> MemoryProfile | None:
     implicit_traits = _structured_implicit_traits(value)
     updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
 
-    if summary is None and not explicit_info and not implicit_traits and updated_at is None:
+    # A provider timestamp is metadata, not readable profile content. Keep
+    # timestamp-only and future/unknown shapes on the backward-compatible raw
+    # fallback rather than rendering an empty structured panel.
+    if summary is None and not explicit_info and not implicit_traits:
         return None
     return MemoryProfile(
         summary=summary,

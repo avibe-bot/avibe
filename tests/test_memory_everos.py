@@ -432,6 +432,27 @@ def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> No
     assert json.loads(items[0].text)["implicit_traits"][0]["evidence"] == "Three recent planning discussions."
 
 
+def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() -> None:
+    raw_profile = {
+        "profile_timestamp_ms": 1_754_012_345_678,
+        "future_provider_field": {"only": "opaque data"},
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": raw_profile}]}},
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert len(items) == 1
+    assert items[0].profile is None
+    assert items[0].date is None
+    assert json.loads(items[0].text) == raw_profile
+
+
 def test_profile_rejects_wrong_shaped_known_collections() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
