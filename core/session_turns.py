@@ -2594,9 +2594,10 @@ class SessionTurnManager:
                     "turn.end",
                     _turn_event_payload(session_id, logical_turn_id),
                 )
-            successor_turn_id = terminal.get("successor_turn_id")
-            if successor_turn_id:
-                await self._start_persisted_turn(str(successor_turn_id))
+            successor_turn_id = await self._resume_linked_control_successor(
+                session_id,
+                str(logical_turn_id),
+            )
             return {
                 "state": "claimed" if successor_turn_id else "settled",
                 "reason": "not_active",
@@ -4082,17 +4083,31 @@ class SessionTurnManager:
         elif owner["state"] == "starting":
             await self._start_persisted_turn(str(owner["id"]))
 
-    @staticmethod
-    def _should_resume_durable_owner(
-        terminal_result: dict[str, Any],
-        *,
-        settled_by: str,
-    ) -> bool:
-        """Re-read ownership when terminal settlement returned a successor or Stop
-        may already have activated one in a competing terminal path."""
-        return bool(terminal_result.get("successor_turn_id")) or (
-            settled_by == SETTLED_BY_STOPPED
-        )
+    async def _resume_linked_control_successor(
+        self,
+        session_id: str,
+        terminal_turn_id: str,
+    ) -> str | None:
+        """Start only the exact replacement linked from a settled control Turn."""
+        with self._sqlite_engine().connect() as conn:
+            terminal = delivery_store.get_turn(conn, terminal_turn_id)
+            successor_id = str(
+                (terminal or {}).get("control_successor_turn_id") or ""
+            )
+            owner = delivery_store.active_turn(conn, session_id)
+        if (
+            terminal is None
+            or terminal["state"] != "terminal"
+            or str(terminal["session_id"]) != session_id
+            or terminal.get("control_mode") != "replace"
+            or not successor_id
+            or owner is None
+            or str(owner["id"]) != successor_id
+            or owner["state"] != "starting"
+        ):
+            return None
+        await self._start_persisted_turn(successor_id)
+        return successor_id
 
     async def _resume_post_terminal(self, session_id: str) -> None:
         with self._sqlite_engine().begin() as conn:
@@ -4400,17 +4415,15 @@ class SessionTurnManager:
                             await self._resume_post_terminal(session_id)
                         else:
                             await self.flush_queue(session_id)
-                    elif durable_turn_registered and self._should_resume_durable_owner(
-                        durable_terminal_result,
-                        settled_by=settled_by,
-                    ):
+                    elif durable_turn_registered:
                         # Stop may persist the old Turn's terminal snapshot before
                         # releasing this runner. In that ordering the terminal CAS
-                        # already activated the P0 successor, so this runner sees an
-                        # idempotent no-op instead of the successor ID. Re-read the
-                        # durable owner after every Stop; an activated successor
-                        # starts, while a stop-only hold keeps backlog blocked.
-                        await self._resume_durable_session(session_id)
+                        # already activated the linked P0 successor, so this runner
+                        # sees an idempotent no-op instead of the successor ID.
+                        await self._resume_linked_control_successor(
+                            session_id,
+                            str(logical_turn_id or ""),
+                        )
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
@@ -5432,11 +5445,11 @@ class SessionTurnManager:
                             await self.flush_queue(session_id)
                     except Exception:
                         logger.debug("agent-initiated turn: queue resume failed", exc_info=True)
-                elif durable_turn_registered and self._should_resume_durable_owner(
-                    durable_terminal_result,
-                    settled_by=effective_settled_by,
-                ):
-                    await self._resume_durable_session(session_id)
+                elif durable_turn_registered:
+                    await self._resume_linked_control_successor(
+                        session_id,
+                        turn_token,
+                    )
 
         try:
             task = asyncio.create_task(_holder(), name="agent-initiated-turn-holder")
