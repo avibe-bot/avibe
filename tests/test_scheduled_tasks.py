@@ -1658,10 +1658,14 @@ def test_recover_processing_drops_completed_requests(tmp_path: Path) -> None:
     assert not (store.pending_dir / f"{request.id}.json").exists()
 
 
-def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
-    """HFR-003: cancellation requeues the claim and releases its Session slot."""
+def test_direct_inflight_cancellation_terminalizes_the_exact_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-100: a canceled claimed execution releases ownership and fails its Run."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     path = tmp_path / "scheduled_tasks.json"
-    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    request_store = TaskExecutionStore()
     store = ScheduledTaskStore(path)
     task = store.add_task(
         session_key="slack::channel::C123",
@@ -1672,9 +1676,11 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     )
     request = request_store.enqueue_task_run(task.id)
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    started = asyncio.Event()
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
-        raise asyncio.CancelledError()
+        started.set()
+        await asyncio.Event().wait()
 
     controller = SimpleNamespace(
         platform_settings_managers={"slack": settings_manager},
@@ -1683,33 +1689,185 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
 
     async def _exercise() -> None:
-        # The drain now dispatches concurrently and returns immediately, so
-        # the CancelledError surfaces on the spawned execution task rather
-        # than out of _drain_requests itself. Awaiting it lets the requeue
-        # path (in _execute_claimed_request) run.
         await service._drain_requests()
         execution = service._inflight_executions.get(request.id)
         assert execution is not None
-        try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
             await execution
-        except asyncio.CancelledError:
-            pass
-        else:
-            raise AssertionError("expected CancelledError on the execution task")
         await asyncio.sleep(0)
         assert request.id not in service._inflight_executions
         assert "key:slack::channel::C123" not in service._inflight_sessions
+        assert "key:slack::channel::C123" not in service._session_lock_owners
 
     asyncio.run(_exercise())
 
-    reloaded = ScheduledTaskStore(path)
-    updated = reloaded.get_task(task.id)
-    assert updated is not None
-    assert updated.last_run_at is None
-    assert updated.enabled is True
-    assert (request_store.pending_dir / f"{request.id}.json").exists()
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == "interrupted"
+    assert settled["error"]
+    assert request_store.list_pending() == []
+
+
+def test_service_stop_terminalizes_inflight_run_without_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-101: shutdown records the interruption and restart never repeats the prompt."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="interrupted prompt",
+    )
+    successor = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="queued successor",
+    )
+    started = asyncio.Event()
+    prompts: list[str] = []
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(
+            get_user=lambda *_args, **_kwargs: None,
+        )
+    )
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        prompts.append(message)
+        if message == "interrupted prompt":
+            started.set()
+            await asyncio.Event().wait()
+
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=request_store,
+    )
+
+    async def _stop_in_flight() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await service.stop()
+        assert prompts == ["interrupted prompt"]
+
+    asyncio.run(_stop_in_flight())
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == "restarted"
+    assert settled["error"]
+    queued = request_store.get_run(successor.id)
+    assert queued is not None
+    assert queued["status"] == "queued"
+
+    restarted_store = TaskExecutionStore()
+    restarted = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=restarted_store,
+    )
+
+    async def _restart_and_drain_successor() -> None:
+        await restarted._drain_requests()
+        successor_task = restarted._inflight_executions.get(successor.id)
+        assert successor_task is not None
+        await successor_task
+
+    asyncio.run(_restart_and_drain_successor())
+
+    assert prompts == ["interrupted prompt", "queued successor"]
+    successor_result = restarted_store.get_run(successor.id)
+    assert successor_result is not None
+    assert successor_result["status"] == "succeeded"
+    assert restarted_store.list_pending() == []
     assert not (request_store.processing_dir / f"{request.id}.json").exists()
     assert not (request_store.completed_dir / f"{request.id}.json").exists()
+
+
+def test_service_stop_settles_claim_cancelled_before_execution_starts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A claimed Run is settled even if teardown wins before its coroutine starts."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="never dispatched",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _stop_before_start() -> None:
+        claimed = request_store.claim(request.id)
+        assert claimed is not None
+        service._spawn_execution(claimed, "key:slack::channel::C123")
+        await service.stop()
+
+    asyncio.run(_stop_before_start())
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == "restarted"
+
+
+def test_service_stop_preserves_terminal_run_that_won_the_race(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A recorded terminal outcome wins over the teardown fallback."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="finish before shutdown",
+    )
+    started = asyncio.Event()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(
+            get_user=lambda *_args, **_kwargs: None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": settings_manager},
+            message_handler=SimpleNamespace(
+                handle_scheduled_message=_handle_scheduled_message,
+            ),
+        ),
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _settle_then_stop() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(started.wait(), timeout=1)
+        request_store.complete(request, ok=True)
+        await service.stop()
+
+    asyncio.run(_settle_then_stop())
+
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "succeeded"
+    assert "interrupt_reason" not in settled["metadata"]
 
 
 def test_restart_recovers_running_row_and_preserves_same_session_fifo(monkeypatch, tmp_path) -> None:
@@ -2064,6 +2222,10 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     asyncio.run(_exercise())
 
     assert service._running is False
+    settled = request_store.get_run(request.id)
+    assert settled is not None
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == "restarted"
 
 
 def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
@@ -7674,8 +7836,7 @@ def test_drain_defers_im_runs_until_transport_ready_without_blocking_workbench(t
 
 
 def test_drain_serializes_executions_per_session(tmp_path: Path) -> None:
-    """Two requests for the same session never run concurrently; the second
-    stays queued until the first finishes."""
+    """HFR-003: an unstarted same-session request stays queued until its turn."""
 
     async def _exercise() -> None:
         store = TaskExecutionStore(tmp_path / "reqs")

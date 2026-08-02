@@ -41,7 +41,9 @@ from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     RUN_INTERRUPTION_REASONS,
     SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_INTERRUPTED,
     SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_RESTARTED,
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
     SWEEP_I18N_KEYS,
@@ -2376,7 +2378,7 @@ class TaskExecutionStore:
         """Settle one claimed request.
 
         ``interrupt_reason`` is the caller's structured CLASS for a failure that has
-        one — today only ``delivery_target_missing`` (see ``_execute_claimed_request``).
+        one, such as ``delivery_target_missing`` or an infrastructure teardown cause.
         It rides the SAME statement as the terminal transition, because that statement
         is also the one that stamps the owed failure notice: ``_merge_owed_failure_notice``
         applies ``extra_metadata`` to the run's ``metadata_json`` BEFORE
@@ -2507,6 +2509,13 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        # The exact claims behind those tasks. The done callback uses this as a
+        # terminalization backstop when asyncio cancels a task before its coroutine
+        # executes even one line.
+        self._inflight_requests: Dict[str, TaskExecutionRequest] = {}
+        # request id -> infrastructure cause chosen before cancellation. A raw
+        # cancellation falls back to ``interrupted`` in the execution wrapper.
+        self._inflight_cancellation_causes: Dict[str, str] = {}
         # Canonical conversation keys with an execution in flight. Used to
         # serialize turns per session (never two at once for the same
         # conversation) while still running different sessions concurrently.
@@ -2794,8 +2803,9 @@ class ScheduledTaskService:
         # outlives shutdown. The identity check is the only exemption it needs.
         if self._notice_drain_task and self._notice_drain_task is not current_task:
             self._notice_drain_task.cancel()
-        for task in list(self._inflight_executions.values()):
+        for request_id, task in list(self._inflight_executions.items()):
             if task is not current_task:
+                self._inflight_cancellation_causes[request_id] = SETTLED_BY_RESTARTED
                 task.cancel()
         try:
             self.scheduler.shutdown(wait=False)
@@ -2831,10 +2841,9 @@ class ScheduledTaskService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._notice_drain_task = None
-        # Cancel any in-flight executions so shutdown is clean. Cancellation is
-        # caught by ``_execute_claimed_request``, which requeues the run, so it
-        # is picked up again on the next start (and ``recover_processing`` on
-        # init backstops anything left ``running`` after a hard crash).
+        # Await each exact in-flight execution so its guarded terminal write lands
+        # before shutdown returns. Queued requests were never claimed and remain
+        # queued for the next start.
         inflight = list(self._inflight_executions.values())
         for task in inflight:
             try:
@@ -2842,6 +2851,8 @@ class ScheduledTaskService:
             except (asyncio.CancelledError, Exception):
                 pass
         self._inflight_executions.clear()
+        self._inflight_requests.clear()
+        self._inflight_cancellation_causes.clear()
         self._inflight_sessions.clear()
         self._session_lock_owners.clear()
 
@@ -4850,6 +4861,7 @@ class ScheduledTaskService:
             self._session_lock_owners[lock_key] = request.id
         task = asyncio.create_task(self._execute_claimed_request(request))
         self._inflight_executions[request.id] = task
+        self._inflight_requests[request.id] = request
         task.add_done_callback(
             lambda finished, rid=request.id, key=lock_key: self._on_execution_done(rid, key, finished)
         )
@@ -4858,6 +4870,11 @@ class ScheduledTaskService:
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
+        request = self._inflight_requests.pop(request_id, None)
+        interruption = self._inflight_cancellation_causes.pop(
+            request_id,
+            SETTLED_BY_INTERRUPTED,
+        )
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
             # Only if it is still OURS: a later execution may already have taken the
@@ -4866,9 +4883,26 @@ class ScheduledTaskService:
             if self._session_lock_owners.get(lock_key) == request_id:
                 self._session_lock_owners.pop(lock_key, None)
         self._drain_dirty = True
-        # ``_execute_claimed_request`` already records failures and requeues on
-        # cancellation; this only surfaces unexpected crashes in the wrapper.
+        # ``_execute_claimed_request`` already terminalizes cancellations and
+        # records ordinary failures. A task cancelled before its coroutine starts
+        # cannot reach that handler, so the same guarded writer runs here as a
+        # backstop; if the handler already settled it, this is a no-op.
         if task.cancelled():
+            if request is not None:
+                try:
+                    current = self.request_store.get_run(request.id)
+                    if not current or current.get("status") not in TERMINAL_RUN_STATUSES:
+                        self.request_store.complete(
+                            request,
+                            ok=False,
+                            error=self._t(SETTLEMENT_I18N_KEYS[interruption]),
+                            interrupt_reason=interruption,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to terminalize canceled claimed request %s",
+                        request_id,
+                    )
             return
         exc = task.exception()
         if exc is not None:
@@ -4988,8 +5022,14 @@ class ScheduledTaskService:
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
-            self.request_store.requeue(request.id)
-            should_complete = False
+            interrupt_reason = self._inflight_cancellation_causes.get(
+                request.id,
+                SETTLED_BY_INTERRUPTED,
+            )
+            error = self._t(SETTLEMENT_I18N_KEYS[interrupt_reason])
+            should_complete = True
+            settled_out_of_band = False
+            recover_queue_on_return = False
             raise
         except UnresolvableSessionTarget as exc:
             # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
@@ -5084,6 +5124,7 @@ class ScheduledTaskService:
                     or settled_out_of_band
                     or recover_queue_on_return
                 )
+                and interrupt_reason is None
             ):
                 manager = getattr(self.controller, "session_turns", None)
                 recover_queue = getattr(

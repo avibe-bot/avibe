@@ -1,13 +1,13 @@
-"""Shared vocabulary for how a turn's dispatch waiter was settled.
+"""Shared vocabulary for how an active execution ended without a backend result.
 
 Two layers need to agree on these strings and neither owns the other:
 
 * ``core/services/dispatch.py`` records WHY a streaming turn's waiter was
   released (``TurnDispatchOutcome.settled_by``), which is stamped on the live
   turn sink by the three release sites.
-* ``core/scheduled_tasks.py`` turns that into an ``agent_runs`` terminal state
-  plus ``metadata.interrupt_reason`` for a run whose backend never emitted a
-  terminal result.
+* ``core/scheduled_tasks.py`` turns a waiter settlement or an execution-level
+  teardown into an ``agent_runs`` terminal state plus
+  ``metadata.interrupt_reason``.
 
 Keeping the strings here (rather than inline at each site) is what stops the
 values in ``docs/plans/agent-run-zombie-settlement.md`` from drifting apart from
@@ -59,11 +59,18 @@ SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
 #: a cancelled task — nobody asked for this run to end, so it must not be
 #: reported as ``canceled`` with the user-stop explanation.
 #:
-#: Spelled ``backend_refresh`` rather than reusing ``harness-run-reliability``'s
-#: ``restarted``: that value is reserved for the *service* restarting around a
-#: run, which recovery retries, while this one interrupts a live turn inside a
-#: healthy process and does not.
+#: Spelled ``backend_refresh`` rather than ``restarted`` because it identifies a
+#: different infrastructure boundary: a live Agent runtime inside an otherwise
+#: healthy service, rather than the service itself shutting down.
 SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
+
+#: The scheduled service shut down while its exact claimed request was executing.
+#: The interrupted attempt is terminal; a later process must not replay it.
+SETTLED_BY_RESTARTED: Final = "restarted"
+
+#: An in-flight claimed request was cancelled without a more specific teardown
+#: cause. This is still an infrastructure interruption, never a requeue signal.
+SETTLED_BY_INTERRUPTED: Final = "interrupted"
 
 #: Settlements that mean "no terminal result will ever arrive for this run" — the
 #: ONLY ones a caller may terminalize a row from. Both settlement lanes test
@@ -75,6 +82,8 @@ SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
         SETTLED_BY_STOPPED,
         SETTLED_BY_REFUSED_CONCURRENT_TURN,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_RESTARTED,
+        SETTLED_BY_INTERRUPTED,
     }
 )
 
@@ -88,12 +97,13 @@ INTERRUPT_REASON_NO_TERMINAL_RESULT: Final = SETTLED_BY_NO_TERMINAL_RESULT
 INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
+INTERRUPT_REASON_RESTARTED: Final = SETTLED_BY_RESTARTED
+INTERRUPT_REASON_INTERRUPTED: Final = SETTLED_BY_INTERRUPTED
 
 #: Reserved for ``docs/plans/harness-run-reliability.md`` (PR2 / PR4 / PR7). Named
 #: here now because the classification below has to be closed over them before
 #: they are written, or each PR would have to remember to widen it.
 INTERRUPT_REASON_EVICTED: Final = "evicted"
-INTERRUPT_REASON_RESTARTED: Final = "restarted"
 INTERRUPT_REASON_LIFETIME_TIMEOUT: Final = "lifetime_timeout"
 
 #: The run could not be dispatched at all because the session it delivers to no
@@ -171,6 +181,7 @@ RUN_INTERRUPTION_REASONS: Final = frozenset(
     {
         SETTLED_BY_STOPPED,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_INTERRUPTED,
         INTERRUPT_REASON_EVICTED,
         INTERRUPT_REASON_RESTARTED,
         INTERRUPT_REASON_LIFETIME_TIMEOUT,
@@ -193,6 +204,8 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
     SETTLED_BY_BACKEND_REFRESH: "harness.run.interrupted.backendRefresh",
+    SETTLED_BY_RESTARTED: "harness.run.interrupted.restarted",
+    SETTLED_BY_INTERRUPTED: "harness.run.interrupted.interrupted",
 }
 
 
@@ -214,6 +227,8 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
     SETTLED_BY_BACKEND_REFRESH: "failed",
+    SETTLED_BY_RESTARTED: "failed",
+    SETTLED_BY_INTERRUPTED: "failed",
 }
 
 
