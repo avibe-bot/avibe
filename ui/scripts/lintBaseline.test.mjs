@@ -19,6 +19,31 @@ describe('compareToBaseline accepts the recorded debt unchanged', () => {
       stale: [],
     });
   });
+
+  // The gate is a count ratchet, so a violation deleted at one site and
+  // reintroduced at another inside the same (file, rule) pair passes. Recorded
+  // as an intended property rather than left implicit: a reader who assumes
+  // otherwise is relying on a guarantee this file does not make, and the same
+  // trade-off is the one ESLint's own suppressions file makes.
+  it('accepts a baselined violation replaced one-for-one within the same pair', () => {
+    const ledger = { 'src/a.ts': { 'no-explicit-any': 3 } };
+    expect(compareToBaseline(ledger, { 'src/a.ts': { 'no-explicit-any': 3 } })).toEqual({
+      unclassified: [],
+      expanded: [],
+      stale: [],
+    });
+  });
+
+  // The bound on that residual, in one place: a swap can only ever hide inside
+  // debt that is already recorded, at a count that cannot grow, in the file that
+  // already carries it.
+  it('catches the same swap the moment it changes the count, the rule or the file', () => {
+    const ledger = { 'src/a.ts': { 'no-explicit-any': 3 } };
+    expect(compareToBaseline(ledger, { 'src/a.ts': { 'no-explicit-any': 4 } }).expanded).toHaveLength(1);
+    expect(compareToBaseline(ledger, { 'src/a.ts': { 'no-explicit-any': 3, 'no-empty': 1 } }).unclassified)
+      .toHaveLength(1);
+    expect(compareToBaseline(ledger, { 'src/b.ts': { 'no-explicit-any': 3 } }).unclassified).toHaveLength(1);
+  });
 });
 
 describe('compareToBaseline fails on new debt', () => {

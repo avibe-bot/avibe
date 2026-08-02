@@ -1,13 +1,7 @@
 // The lint gate. Runs the same ESLint pass as ``eslint .``, then measures the
 // result against ``eslint-baseline.json`` — an explicit, per-file, per-rule
 // ledger of the violations that predate the cleanup and are not being fixed in
-// it (each rule's rationale lives in the ledger itself). Anything the ledger
-// does not account for fails the build.
-//
-// Why a ledger instead of ``eslint-disable`` comments or a relaxed config: both
-// of those hide the debt at the site, so nobody can see how much there is or
-// whether it is shrinking. One sorted JSON file can be read, diffed, and
-// pointed at in review.
+// it (each rule's rationale lives in the ledger itself).
 //
 // The ledger tracks two things, because a rule can be silenced two ways:
 //   ``violations`` — errors ESLint reported.
@@ -16,9 +10,35 @@
 //     and a suppressed rule also stops the React Compiler analysing that
 //     component, so the unmeasured area would grow silently.
 //
-// Any drift fails, in both directions. Growth is new debt. A shrink means the
-// ledger overstates the debt, and that slack would become budget for new
-// violations, so an improvement has to be recorded (``npm run lint:baseline``).
+// What this gate rejects, exactly:
+//   - a ``(file, rule)`` pair the ledger never recorded;
+//   - a recorded pair violated more often than the ledger allows;
+//   - a recorded pair violated less often than the ledger allows, until the
+//     ledger is updated (``npm run lint:baseline``) — unrecorded slack would
+//     become budget for new violations, so improvements have to be booked;
+//   - all three of the above independently for inline suppressions;
+//   - a rule in the ledger that nobody wrote a rationale for;
+//   - a rule-less fatal problem: a parse failure, an unresolvable config, a
+//     plugin that threw. No ledger entry could ever cover one, and a file that
+//     does not parse reports no violations at all, which a tally reads as clean.
+//
+// What it does not reject, said plainly so nobody relies on more: the counter is
+// keyed on ``(file, rule)``, not on a site. Deleting one baselined violation and
+// introducing another of the same rule in the same file leaves the count
+// unchanged and passes. That is the accepted residual of a count ratchet — the
+// same trade-off ESLint's own ``suppressions-service`` makes — and it is bounded
+// on three sides: the pair must already carry recorded debt, the count cannot
+// grow, and once the real debt is paid down the stale check forces the allowance
+// down with it.
+//
+// This file also cannot tell that ESLint was asked to look at less. Configured
+// lint scope and rule severity are pinned separately, at their owner, by
+// ``scripts/eslintConventions.test.mjs``.
+//
+// Why a ledger instead of ``eslint-disable`` comments or a relaxed config: both
+// of those hide the debt at the site, so nobody can see how much there is or
+// whether it is shrinking. One sorted JSON file can be read, diffed, and
+// pointed at in review.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,7 +54,9 @@ const BASELINE_FILE = path.join(UI_ROOT, 'eslint-baseline.json');
  *
  * Both arguments are ``{ [file]: { [rule]: count } }``. The lookup is per
  * (file, rule) — a file appearing in the baseline buys tolerance for the rules
- * recorded against it, nothing more.
+ * recorded against it, nothing more. It is a count, not an identity: within one
+ * already-recorded pair, which sites are violating is not compared. See the
+ * residual noted in the file header.
  *
  * @returns `unclassified` (rule/file pair the ledger never recorded),
  *   `expanded` (recorded pair violated more often than allowed), and `stale`
@@ -236,7 +258,8 @@ async function main() {
 
   console.log(
     `Lint baseline check passed: ${total(violations)} baselined violations, ` +
-      `${total(suppressions)} baselined suppressions, 0 new.`,
+      `${total(suppressions)} baselined suppressions, no fatal problems, ` +
+      'and no drift in any (file, rule) pair.',
   );
 }
 

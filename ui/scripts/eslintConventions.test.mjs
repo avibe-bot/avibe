@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ESLint } from 'eslint';
 
+import sharedConfig from '../eslint.config.js';
+
 // Probes the real `eslint.config.js` rather than a stand-in, so an accidental
 // loosening of the shared config fails here instead of quietly widening what
 // the lint gate tolerates across the whole UI.
@@ -103,6 +105,92 @@ describe('the shared config keeps every rule at the severity the gate counts', (
 
   it('keeps the same severities for a plain .ts file', async () => {
     expect(await severityByRule('src/__probe__/probe.ts')).toEqual(await severityByRule());
+  });
+});
+
+// The block above pins how loudly each rule fires. It says nothing about which
+// files are looked at, and `eslint-baseline.json` records only what was found —
+// never what was scanned. So widening `globalIgnores` exempts arbitrary source
+// with no signal anywhere: the pairs that file used to contribute simply go
+// stale, and the next `npm run lint:baseline` writes the exemption in as if the
+// debt had been paid. These probes are the other half of the chokepoint. They
+// pin the scope itself at its owner, `eslint.config.js`.
+//
+// Three outcomes are possible for a path, and the vocabulary matters because the
+// PR body and the plan use it too:
+//   linted      - not ignored, and the TypeScript rule set resolves for it
+//   parsed only - not ignored, but no rule resolves; only fatal parse/config
+//                 errors can ever be reported, which `fatalProblems` catches
+//   ignored     - ESLint never opens it
+async function scopeOf(filePath) {
+  if (await eslint.isPathIgnored(filePath)) return 'ignored';
+  const { rules = {} } = await eslint.calculateConfigForFile(filePath);
+  return Object.keys(rules).length > 0 ? 'linted' : 'parsed only';
+}
+
+const globalIgnoresOf = (config) =>
+  config.filter((entry) => entry.ignores && !entry.files).flatMap((entry) => entry.ignores);
+
+const ruleBearing = (config) =>
+  config.filter((entry) => entry.rules && Object.keys(entry.rules).length > 0);
+
+// `extends` expands into one config object per preset, and typescript-eslint's
+// `eslint-recommended` uses the nested form where the inner arrays are
+// AND-combined. Flatten before comparing: the property under test is which
+// extensions can be reached at all, not how the presets nest.
+const scopePatternsOf = (config) =>
+  [...new Set(ruleBearing(config).flatMap((entry) => (entry.files ?? []).flat()))].sort();
+
+describe('the shared config keeps the lint scope the ledger assumes', () => {
+  it('ignores nothing but the build output', () => {
+    expect(globalIgnoresOf(sharedConfig)).toEqual(['dist']);
+  });
+
+  it('confines every rule to TypeScript sources', () => {
+    expect(scopePatternsOf(sharedConfig)).toEqual([
+      '**/*.cts',
+      '**/*.mts',
+      '**/*.ts',
+      '**/*.tsx',
+      '**/*.{ts,tsx}',
+    ]);
+  });
+
+  // A rule-bearing config with no `files` applies everywhere, so its scope would
+  // be invisible to the union above rather than wrong in it.
+  it('leaves no rule-bearing config without an explicit scope', () => {
+    expect(ruleBearing(sharedConfig).filter((entry) => !entry.files?.length)).toEqual([]);
+  });
+});
+
+describe('a source file nobody has written yet is still measured', () => {
+  it('lints an arbitrary new .ts file', async () => {
+    expect(await scopeOf('src/does/not/exist/yet/newModule.ts')).toBe('linted');
+  });
+
+  it('lints an arbitrary new .tsx file', async () => {
+    expect(await scopeOf('src/does/not/exist/yet/NewComponent.tsx')).toBe('linted');
+  });
+
+  // Resolving rules for a path is not the same as reporting on it. This asserts
+  // the whole way through to a severity-2 message, which is what the gate counts.
+  it('errors on new debt in that unwritten file', async () => {
+    expect(
+      await errorRuleIdsFor('export const f = (v: any) => v;\n', 'src/does/not/exist/yet/newModule.ts'),
+    ).toContain('@typescript-eslint/no-explicit-any');
+  });
+
+  it('keeps the build output out of the gate', async () => {
+    expect(await scopeOf('dist/assets/index-abcdef12.js')).toBe('ignored');
+  });
+
+  // Recorded, not aspirational: `npm run lint` opens the gate script and the
+  // config itself, but no rule applies to either, so the only thing that can be
+  // reported for them is a fatal parse/config error. Broadening the scope to
+  // JS/MJS is a separate decision; this test makes it a visible one.
+  it('parses the gate script and the config without applying the rule set', async () => {
+    expect(await scopeOf('scripts/lint-baseline.mjs')).toBe('parsed only');
+    expect(await scopeOf('eslint.config.js')).toBe('parsed only');
   });
 });
 

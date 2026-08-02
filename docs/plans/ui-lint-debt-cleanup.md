@@ -280,7 +280,8 @@ would grow unobserved.
 
 ### Invariant
 
-The build fails when any of these is true, for either tally:
+The build fails when any of these is true. The first three apply to each
+tally independently; the last two are ledger-wide:
 
 1. **Unclassified** — a `(file, rule)` pair with no ledger entry. The lookup is
    per pair, so a file already listed for one rule buys no tolerance for
@@ -299,9 +300,38 @@ The build fails when any of these is true, for either tally:
    tally comparison reads as clean. Without this, breaking a file's syntax
    would be a way to make its debt disappear and still pass.
 
-The ledger can therefore only ever shrink, and it cannot hide anything: every
-tolerated violation is one greppable line naming its rule, its file, and its
-exact count, under a rule-level rationale in the same file.
+The ledger therefore never grows on its own — raising a number is an edit to a
+reviewed file, not a side effect of a push — and nothing it tolerates is
+anonymous: every tolerated violation is one greppable line naming its rule, its
+file, and its exact count, under a rule-level rationale in the same file.
+
+### What the invariant does not cover
+
+The ratchet is keyed on `(file, rule)` counts, which is less than a violation's
+identity. Two consequences follow, and both are stated here rather than left for
+a reader to discover:
+
+- **A one-for-one site replacement inside an already-recorded pair passes.**
+  Delete one baselined `no-explicit-any` in `src/lib/platforms.ts`, add another
+  anywhere in the same file, and the count is unchanged, so the gate exits 0.
+  Measured, not theorised. This is the accepted residual of a count ratchet, and
+  it is the same trade-off ESLint 9's own `suppressions-service` makes with the
+  identical `Record<file, Record<rule, {count}>>` shape. It is bounded on three
+  sides: the pair must already carry recorded debt, the count cannot grow, and
+  once that debt is genuinely paid down the *stale* check forces the allowance
+  down with it, permanently. Raising it again needs a reviewer.
+- **The ledger records what was found, never what was looked at.** Widening
+  `globalIgnores` would exempt arbitrary source with no signal in the ledger at
+  all — the exempted pairs would simply read as *stale* and the next
+  `npm run lint:baseline` would book the exemption as if the debt had been paid.
+  That hole is closed at its owner instead, by pinning the config: see the scope
+  probes in Evidence below.
+
+Closing the first one properly means keying the ledger on a site fingerprint,
+which pushes ledger churn into every unrelated PR that touches a line carrying
+baselined debt — 52 of the 240 sit in `ApiContext.tsx` alone. That cost lands
+outside this cleanup, so the count model stays and the claim is written to
+match it.
 
 ### Non-goals of the baseline
 
@@ -315,11 +345,15 @@ exact count, under a rule-level rationale in the same file.
 
 `compareToBaseline`, `missingRationales`, `fatalProblems` and `reportLines` are
 pure functions with red-first unit tests (`ui/scripts/lintBaseline.test.mjs`,
-23 cases): exact match, new rule in a new file, new rule in an already-listed
+25 cases): exact match, new rule in a new file, new rule in an already-listed
 file, expanded count, reduced count, vanished pair, deleted file, empty-run
 vacuity, each rationale branch, each `fatalProblems` discrimination, and — the
 load-bearing one — that `reportLines` still fails when a fatal error is the
 *only* problem and every tally matches.
+
+Two of those cases pin the residual above as an *intended* property rather than
+an oversight: that a one-for-one swap inside a recorded pair passes, and that
+the same swap is caught the moment it changes the count, the rule or the file.
 
 The gate script is also pinned as reviewable text. Its `(file, rule)` key joins
 on NUL, which cannot occur in either half; written as a literal byte it made
@@ -358,6 +392,31 @@ the *whole* config is pinned — every rule an error, apart from three named
 warnings and the 22 base rules `typescript-eslint` supersedes. Demoting
 `react-hooks/globals`, a rule this cleanup emptied and that has no behavioural
 probe, fails there. So does any rule that does not exist yet.
+
+That pins *how loudly* each rule fires. A second chokepoint pins *which files
+are looked at*, the hole named above, in the same file and against the same real
+config:
+
+| Probe | Pinned |
+| --- | --- |
+| global ignores | exactly `['dist']`, nothing else |
+| rule scope | every rule-bearing config confined to `**/*.{ts,tsx}` (plus the `.ts`/`.tsx`/`.mts`/`.cts` forms `typescript-eslint`'s preset expands to) |
+| unscoped config | no rule-bearing config without an explicit `files` |
+| an unwritten `src/**/*.ts` | `isPathIgnored` false, TypeScript rules resolve, and an `any` in it errors at severity 2 |
+| `dist/**` | ignored |
+| `scripts/*.mjs`, `eslint.config.js` | *parsed only* — not ignored, but no rule resolves |
+
+The last row is recorded, not aspirational. `npm run lint` opens the gate script
+and the config itself, so a syntax or config error in either fails the build
+through the *Fatal* branch, but the TypeScript rule set does not apply to them.
+Broadening the lint scope to JS/MJS is a separate decision; the probe makes it a
+visible one, because widening `files` fails that row.
+
+Red-first, all three defects applied to the real `eslint.config.js` and
+reverted: adding one ignore glob over unwritten source failed 4 cases (including
+the behavioural one — an `any` in an exempted file reports nothing at all);
+adding `**/*.mjs` to `files` failed 2; a rule-bearing config with no `files`
+failed 2.
 
 ## 4. Result
 
