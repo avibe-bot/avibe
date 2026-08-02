@@ -4388,9 +4388,16 @@ class SessionTurnManager:
                             await self._resume_post_terminal(session_id)
                         else:
                             await self.flush_queue(session_id)
-                    elif durable_turn_registered and durable_terminal_result.get(
-                        "successor_turn_id"
+                    elif durable_turn_registered and (
+                        durable_terminal_result.get("successor_turn_id")
+                        or settled_by == SETTLED_BY_STOPPED
                     ):
+                        # Stop may persist the old Turn's terminal snapshot before
+                        # releasing this runner. In that ordering the terminal CAS
+                        # already activated the P0 successor, so this runner sees an
+                        # idempotent no-op instead of the successor ID. Re-read the
+                        # durable owner after every Stop; an activated successor
+                        # starts, while a stop-only hold keeps backlog blocked.
                         await self._resume_durable_session(session_id)
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
