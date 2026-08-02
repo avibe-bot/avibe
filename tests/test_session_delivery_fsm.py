@@ -1242,6 +1242,43 @@ def test_empty_p0_establishes_durable_hold_before_stop(managers) -> None:
     asyncio.run(run())
 
 
+def test_empty_p0_preserves_hold_when_observed_turn_terminalizes_before_claim(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="backlog"),
+            context=_context(),
+        )
+    )
+    original_deliver = manager.deliver
+
+    async def terminal_race(request, *, context=None):
+        if request.priority == "p0" and request.content is None:
+            terminal = manager._terminalize_durable_turn(
+                turn_id,
+                "failed",
+                settled_by="terminal_result",
+                evidence_kind="terminal_before_stop_claim",
+            )
+            assert terminal["changed"] is True
+        return await original_deliver(request, context=context)
+
+    monkeypatch.setattr(manager, "deliver", terminal_race)
+    result = asyncio.run(manager.cancel("ses_fsm"))
+
+    assert result["ok"] is True
+    assert result["status"] == "stale_released"
+    with engine.connect() as conn:
+        assert delivery_store.queue_is_held(conn, "ses_fsm") is True
+    asyncio.run(manager._resume_post_terminal("ses_fsm"))
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    assert [text for _turn, text in starts].count("backlog") == 0
+
+
 def test_content_p0_preserves_open_hold_and_claims_successor_once(managers) -> None:
     """MESSAGE-DELIVERY-014: control, terminal, and restart converge once."""
 
@@ -2823,6 +2860,190 @@ def test_terminal_turn_without_positive_result_evidence_keeps_late_run_unsettled
         assert scheduled._drain_dirty is False
     finally:
         run_store.close()
+
+
+def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
+    managers,
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    run_id = "run-terminal-settlement-retry"
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                delivery_id=initial["id"],
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    terminal = manager._terminalize_durable_turn(
+        turn_id,
+        "completed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result",
+        evidence={"settles_run": True, "result_text": "done"},
+    )
+    assert terminal["changed"] is True
+    with engine.connect() as conn:
+        terminal_turn = delivery_store.get_turn(conn, turn_id)
+    assert terminal_turn is not None
+
+    class _FlakyTerminalSettlement:
+        calls = 0
+
+        def settle_agent_runs_from_terminal_turn(self, execution_ids, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("transient settlement failure")
+            with engine.begin() as conn:
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id.in_(list(execution_ids)))
+                    .values(status="succeeded", completed_at=now, updated_at=now)
+                )
+
+    settlement = _FlakyTerminalSettlement()
+    manager.controller.scheduled_task_service = settlement
+    manager._settle_agent_run_ids_from_terminal_turn([run_id], terminal_turn)
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(agent_runs.c.status).where(agent_runs.c.id == run_id)
+        ).scalar_one() == "running"
+
+    assert run_id not in manager.owned_agent_run_ids()
+    assert settlement.calls == 2
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(agent_runs.c.status).where(agent_runs.c.id == run_id)
+        ).scalar_one() == "succeeded"
+
+
+def test_restored_opencode_generation_rebinds_turn_control_and_steer(
+    managers,
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    old_native_id = "opencode:native-session:old-generation"
+    new_native_id = "opencode:native-session:new-generation"
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_backend="opencode")
+        )
+
+    context = _context()
+    context.platform_specific["agent_session_target"]["agent_backend"] = "opencode"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="active"),
+            context=context,
+        )
+    )
+    assert admitted.turn_id is not None
+    turn_id = admitted.turn_id
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    manager._active_identity = lambda _backend, _session, logical: (
+        logical,
+        old_native_id,
+    )
+    manager.on_native_start(
+        context,
+        backend="opencode",
+        runtime_key="opencode:native-session",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+
+    steer_delivery_id = delivery_store.new_delivery_id()
+    steer_attempt_id = delivery_store.new_attempt_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=steer_delivery_id,
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="steer after restart",
+            ),
+            dispatch_text="steer after restart",
+        )
+        delivery = delivery_store.get_delivery(conn, steer_delivery_id)
+        assert delivery is not None
+        steering = delivery_store.open_steer_attempt(
+            conn,
+            steer_delivery_id,
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id=steer_attempt_id,
+            expected_native_turn_id=old_native_id,
+        )
+        assert steering is not None
+        assert delivery_store.mark_attempt_unknown(
+            conn,
+            steer_delivery_id,
+            expected_version=int(steering["version"]),
+            receipt={"reason": "restart"},
+        ) is not None
+        turn = delivery_store.get_turn(conn, turn_id)
+        assert turn is not None
+        assert delivery_store.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "pending",
+                "control_mode": "stop_only",
+                "control_attempt_id": delivery_store.new_attempt_id(),
+                "control_expected_native_turn_id": old_native_id,
+            },
+        ) is not None
+
+    reconciled_native_ids: list[str] = []
+
+    async def reconcile(_backend, request):
+        reconciled_native_ids.append(request.expected_native_turn_id)
+        return steer_result(SteerOutcome.UNKNOWN, reason="still_unknown")
+
+    manager._active_identity = lambda _backend, _session, logical: (
+        logical,
+        new_native_id,
+    )
+    manager._reconcile_steer_attempt = reconcile
+    manager._run_pending_interrupt = AsyncMock(return_value={"state": "waiting_terminal"})
+
+    asyncio.run(manager.recover_durable_delivery_state())
+
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+        steer = delivery_store.get_delivery(conn, steer_delivery_id)
+    assert turn is not None
+    assert turn["native_turn_id"] == new_native_id
+    assert turn["control_expected_native_turn_id"] == new_native_id
+    assert steer is not None
+    assert steer["current_expected_native_turn_id"] == new_native_id
+    assert reconciled_native_ids == [new_native_id]
+    manager._run_pending_interrupt.assert_awaited_once_with("ses_fsm", turn_id)
 
 
 def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) -> None:

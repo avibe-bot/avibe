@@ -153,6 +153,27 @@ def _start_replay_count(deliveries: list[dict[str, Any]]) -> int:
     return max(counts, default=0)
 
 
+def _opencode_native_session_id(native_turn_id: str | None) -> str | None:
+    value = str(native_turn_id or "").strip()
+    if not value.startswith("opencode:"):
+        return None
+    native_session_id, separator, generation = value[len("opencode:") :].rpartition(":")
+    if not separator or not native_session_id or not generation:
+        return None
+    return native_session_id
+
+
+def _same_opencode_native_session(
+    persisted_native_turn_id: str | None,
+    restored_native_turn_id: str | None,
+) -> bool:
+    persisted_session = _opencode_native_session_id(persisted_native_turn_id)
+    return bool(
+        persisted_session
+        and persisted_session == _opencode_native_session_id(restored_native_turn_id)
+    )
+
+
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
     """Capture the scheduled run's provenance to persist on its queued row so
     flush_queue can restore it (#84):
@@ -371,6 +392,7 @@ class DeliveryRequest:
     has_content: bool | None = None
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
+    expected_turn_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -574,6 +596,50 @@ class SessionTurnManager:
         run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
         self._settle_agent_run_ids(run_ids, settled_by)
 
+    def _reconcile_terminal_agent_runs(self) -> None:
+        """Retry exact terminal-snapshot settlement before the stale-run sweep."""
+
+        with self._sqlite_engine().connect() as conn:
+            pairs = list(
+                conn.execute(
+                    select(
+                        agent_runs.c.id.label("run_id"),
+                        delivery_rows.c.turn_id,
+                    )
+                    .join(
+                        delivery_rows,
+                        delivery_rows.c.id == agent_runs.c.delivery_id,
+                    )
+                    .join(
+                        session_turn_rows,
+                        session_turn_rows.c.id == delivery_rows.c.turn_id,
+                    )
+                    .where(
+                        agent_runs.c.status.in_(
+                            ["queued", "pending", "running", "processing"]
+                        )
+                    )
+                    .where(delivery_rows.c.state == "accepted")
+                    .where(session_turn_rows.c.state == "terminal")
+                ).mappings()
+            )
+            run_ids_by_turn: dict[str, list[str]] = {}
+            terminal_turns: dict[str, dict[str, Any]] = {}
+            for pair in pairs:
+                turn_id = str(pair["turn_id"] or "")
+                run_id = str(pair["run_id"] or "")
+                if not turn_id or not run_id:
+                    continue
+                run_ids_by_turn.setdefault(turn_id, []).append(run_id)
+            for turn_id in run_ids_by_turn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                if turn is not None:
+                    terminal_turns[turn_id] = turn
+        for turn_id, run_ids in run_ids_by_turn.items():
+            turn = terminal_turns.get(turn_id)
+            if turn is not None:
+                self._settle_agent_run_ids_from_terminal_turn(run_ids, turn)
+
     @staticmethod
     def _append_accepted_agent_run_ids(spec: dict[str, Any], run_ids: list[str]) -> None:
         accepted = spec.get("accepted_agent_run_ids")
@@ -622,6 +688,7 @@ class SessionTurnManager:
         for sink in list(self.active_turn_sinks.values()):
             owned |= self._agent_run_ids_from_spec(sink)
         if self._durable_schema_available():
+            self._reconcile_terminal_agent_runs()
             with self._sqlite_engine().connect() as conn:
                 owned.update(
                     str(run_id)
@@ -1881,6 +1948,19 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
+                    observed_turn_id = str(request.expected_turn_id or "").strip()
+                    if observed_turn_id:
+                        observed_turn = delivery_store.get_turn(conn, observed_turn_id)
+                        if (
+                            observed_turn is not None
+                            and observed_turn["session_id"] == request.session_id
+                            and observed_turn["state"] == "terminal"
+                        ):
+                            delivery_store.set_queue_hold(
+                                conn,
+                                request.session_id,
+                                held=True,
+                            )
                     return DeliveryResult(None, None, "settled", reason="not_active")
                 delivery = self._insert_delivery(
                     conn,
@@ -3497,6 +3577,23 @@ class SessionTurnManager:
                         runtime_turn_id=latest.get("runtime_turn_id"),
                         native_turn_id=identity[1],
                     )
+                    if (
+                        bound is None
+                        and latest["state"] == "active"
+                        and latest.get("start_receipt_outcome") == "accepted"
+                        and str(latest.get("backend") or "") == "opencode"
+                        and _same_opencode_native_session(
+                            latest.get("native_turn_id"),
+                            identity[1],
+                        )
+                    ):
+                        bound = delivery_store.rebind_restored_native_generation(
+                            conn,
+                            turn_id,
+                            expected_version=int(latest["version"]),
+                            expected_native_turn_id=str(latest["native_turn_id"]),
+                            restored_native_turn_id=identity[1],
+                        )
                     if bound is not None:
                         initial_batch = delivery_store.initial_deliveries_for_turn(
                             conn, turn_id
@@ -4570,7 +4667,12 @@ class SessionTurnManager:
                 ),
             }
         result = await self.deliver(
-            DeliveryRequest(session_id=session_id, priority="p0", content=None),
+            DeliveryRequest(
+                session_id=session_id,
+                priority="p0",
+                content=None,
+                expected_turn_id=str(owner["id"]),
+            ),
             context=turn.context if turn is not None else None,
         )
         if result.state in {"waiting_terminal", "interrupt_waiting"}:

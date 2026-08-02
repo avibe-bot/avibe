@@ -838,6 +838,77 @@ def bind_native_start(
     )
 
 
+def rebind_restored_native_generation(
+    conn: Connection,
+    turn_id: str,
+    *,
+    expected_version: int,
+    expected_native_turn_id: str,
+    restored_native_turn_id: str,
+) -> dict[str, Any] | None:
+    """Rotate one restored runtime generation and every unresolved exact target."""
+
+    turn = get_turn(conn, turn_id)
+    if (
+        turn is None
+        or turn["state"] != "active"
+        or turn.get("start_receipt_outcome") != "accepted"
+        or int(turn["version"]) != expected_version
+        or str(turn.get("native_turn_id") or "") != expected_native_turn_id
+        or not restored_native_turn_id
+        or restored_native_turn_id == expected_native_turn_id
+    ):
+        return None
+    turn_values: dict[str, Any] = {"native_turn_id": restored_native_turn_id}
+    if (
+        turn.get("control_state")
+        in {"pending", "interrupting", "waiting_terminal", "reconciling"}
+        and str(turn.get("control_expected_native_turn_id") or "")
+        == expected_native_turn_id
+    ):
+        turn_values["control_expected_native_turn_id"] = restored_native_turn_id
+    rebound = cas_turn(
+        conn,
+        turn_id,
+        expected_version=expected_version,
+        expected_states=("active",),
+        values=turn_values,
+    )
+    if rebound is None:
+        return None
+
+    attempts = list(
+        conn.execute(
+            select(message_deliveries).where(
+                message_deliveries.c.current_target_turn_id == turn_id,
+                message_deliveries.c.state.in_(("steering", "reconciling_steer")),
+                message_deliveries.c.current_expected_native_turn_id
+                == expected_native_turn_id,
+            )
+        ).mappings()
+    )
+    for attempt in attempts:
+        saved = cas_delivery(
+            conn,
+            str(attempt["id"]),
+            expected_version=int(attempt["version"]),
+            expected_states=(str(attempt["state"]),),
+            values={
+                "current_expected_native_turn_id": restored_native_turn_id,
+            },
+            history_event={
+                "kind": "native_generation_rebind",
+                "attempt_id": attempt.get("current_attempt_id"),
+                "turn_id": turn_id,
+                "previous_native_turn_id": expected_native_turn_id,
+                "restored_native_turn_id": restored_native_turn_id,
+            },
+        )
+        if saved is None:
+            raise RuntimeError("restored native generation lost a Delivery attempt CAS")
+    return rebound
+
+
 def mark_start_unknown(
     conn: Connection,
     turn_id: str,
