@@ -26,9 +26,15 @@ import { useRef, type RefObject } from 'react';
  *   during the render itself.
  *
  * The contract is therefore "current *now*, in this render", and
- * `useLatestRef.test.tsx` pins it. Reading the result during render defeats the
- * purpose and stays an error at the call site — `scripts/eslintConventions.test.mjs`
- * pins that too.
+ * `useLatestRef.test.tsx` pins it.
+ *
+ * One thing the linter cannot do for you: it does not see through this hook, so
+ * reading the returned `.current` *during render* at a call site is not flagged
+ * the way reading a plain `useRef` is. That read is still wrong — the component
+ * will not re-render when the value changes. Read it from effects, listeners,
+ * timers and async callbacks only. `scripts/eslintConventions.test.mjs` pins
+ * that the rule itself is still on for the ordinary case, so the exemption above
+ * stays one line rather than becoming a config-wide relaxation.
  */
 export function useLatestRef<T>(value: T): RefObject<T> {
   const ref = useRef(value);

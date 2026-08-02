@@ -323,6 +323,13 @@ each of which failed the gate and was reverted:
 | the same `any` behind a disable comment | `NEW … 1 suppressed messages (not in the baseline)` |
 | one recorded `any` fixed, ledger untouched | `STALE … 1 errors, baseline still records 2` |
 
+The two *config* decisions are pinned the same way, as executable probes against
+the real `eslint.config.js` rather than as prose
+(`ui/scripts/eslintConventions.test.mjs`): an unmarked unused binding still
+errors while an `_`-marked one does not (G1), and `react-hooks/refs` still
+errors on an ordinary ref read *and* write during render, so the one blanket
+exemption in `useLatestRef.ts` cannot quietly become a config-wide relaxation.
+
 ## 4. Result
 
 | Rule | Before | Fixed | Suppressed | Baselined |

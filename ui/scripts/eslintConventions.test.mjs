@@ -48,3 +48,35 @@ describe('no-unused-vars still reports genuinely dead bindings', () => {
     expect(await ruleIdsFor('export function f() {\n  try {\n    JSON.parse("1");\n  } catch (err) {\n    return null;\n  }\n  return 1;\n}\n')).toContain(UNUSED);
   });
 });
+
+// `src/lib/useLatestRef.ts` carries the only `react-hooks/refs` exemption that is
+// not a per-site judgement call. That is defensible only while the rule still
+// applies everywhere else: switching it off in the shared config, or dropping it
+// to a warning, would silently retire the whole class. Pin both directions.
+const REFS = 'react-hooks/refs';
+const componentUsing = (body) =>
+  `import { useRef } from 'react';\nexport function C({ v }: { v: number }) {\n  const r = useRef(v);\n${body}\n}\n`;
+
+describe('react-hooks/refs still errors on the ordinary ref misuse', () => {
+  it('reports a ref read during render', async () => {
+    expect(await ruleIdsFor(componentUsing('  return <div>{r.current}</div>;'), 'src/__probe__/Probe.tsx')).toContain(
+      REFS,
+    );
+  });
+
+  it('reports a ref write during render', async () => {
+    expect(
+      await ruleIdsFor(componentUsing('  r.current = v;\n  return <div>ok</div>;'), 'src/__probe__/Probe.tsx'),
+    ).toContain(REFS);
+  });
+
+  it('leaves a ref touched only from an effect alone', async () => {
+    const code =
+      "import { useEffect, useRef } from 'react';\n" +
+      'export function C({ v }: { v: number }) {\n' +
+      '  const r = useRef(v);\n' +
+      '  useEffect(() => {\n    r.current = v;\n  }, [v]);\n' +
+      '  return <div>ok</div>;\n}\n';
+    expect(await ruleIdsFor(code, 'src/__probe__/Probe.tsx')).not.toContain(REFS);
+  });
+});
