@@ -159,6 +159,10 @@ class MessageHandler(BaseHandler):
                 and active_thread_id
                 and control_message.strip().lower() in ["stop", "/stop"]
             ):
+                if durable_ingress_enabled and not self._claim_native_human_event(
+                    context
+                ):
+                    return None
                 if await self._handle_inline_stop(context):
                     return None
 

@@ -377,6 +377,41 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.agent_service.stop_requests, [])
         self.assertEqual(controller.agent_service.requests, [])
 
+    async def test_retried_inline_stop_cannot_cancel_a_newer_turn(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        controller.settings_manager.sessions.try_record_processed_message = Mock(
+            side_effect=[True, False]
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop-retry",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_pre_request_failure_uses_plain_terminal_output(self):
         controller = _StubController(
             platform="slack",

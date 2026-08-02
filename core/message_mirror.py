@@ -73,6 +73,16 @@ def scope_id_for_context(context: MessageContext) -> Optional[str]:
     return settings_service.make_scope_id(*identity)
 
 
+def _agent_message_scope_id(conn, context: MessageContext) -> Optional[str]:
+    """Resolve the same scope used when an accepted agent Message is persisted."""
+
+    if context.platform == "avibe":
+        session_id = (context.platform_specific or {}).get("agent_session_id")
+        session_row = _session_row(conn, session_id) if session_id else None
+        return session_row["scope_id"] if session_row else None
+    return scope_id_for_context(context)
+
+
 def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
     identity = _scope_identity_for_context(context)
     if identity is None:
@@ -526,7 +536,7 @@ def agent_message_exists(context: MessageContext, native_message_id: str | None)
             return messages_service.native_message_exists(
                 conn,
                 platform=platform,
-                scope_id=scope_id_for_context(context),
+                scope_id=_agent_message_scope_id(conn, context),
                 native_message_id=identity,
             )
     except Exception:
