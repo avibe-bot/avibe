@@ -8,6 +8,7 @@ import {
   stripRestoreParam,
   type PersistedWindow,
 } from '../lib/workbenchPersistence';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // One open app window. Bounds are in CSS px relative to the window LAYER (the
 // workbench main area, right of the sidebar). z drives stacking + focus order.
@@ -128,6 +129,12 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   // Restore in the lazy initializer when the shell mounts at desktop width, so `windows` never
   // starts empty there (which would let the first debounced save wipe the stored layout). A shell
   // that mounts narrow restores later, on crossing the breakpoint (see the effect below).
+  //
+  // The initializer marks `restoredRef` and seeds the id/z/open sequences, which is a ref write
+  // during render. It runs exactly once, before anything is mounted, and is the same bootstrap the
+  // after-widen path performs from an effect; moving it out would put the first debounced save back
+  // in a position to wipe the stored layout.
+  // eslint-disable-next-line react-hooks/refs -- Mount-time bootstrap; see above.
   const [windows, setWindows] = useState<WindowInstance[]>(() => {
     if (!isDesktopViewport()) return [];
     restoredRef.current = true;
@@ -135,8 +142,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   });
 
   // Latest windows for the debounced/pagehide save closures (which fire after render).
-  const windowsRef = useRef(windows);
-  windowsRef.current = windows;
+  const windowsRef = useLatestRef(windows);
 
   // Per-window close guards: a body (e.g. a dirty editor) registers a getter that
   // returns a confirm message when closing would lose work. Held in a ref so it
@@ -384,8 +390,7 @@ export function useWindowManager(): WindowManagerValue {
 // non-windowed (full-page) mount, where windowId is undefined.
 export function useWindowCloseGuard(windowId: string | undefined, message: string | null): void {
   const { setCloseGuard } = useWindowManager();
-  const messageRef = useRef(message);
-  messageRef.current = message;
+  const messageRef = useLatestRef(message);
   useEffect(() => {
     if (!windowId) return;
     setCloseGuard(windowId, () => messageRef.current);
@@ -399,8 +404,7 @@ export function useWindowCloseGuard(windowId: string | undefined, message: strin
 // without re-registering. No-ops for a non-windowed (full-page) mount, where windowId is undefined.
 export function useWindowState(windowId: string | undefined, getState: () => unknown): void {
   const { setStateProvider } = useWindowManager();
-  const getStateRef = useRef(getState);
-  getStateRef.current = getState;
+  const getStateRef = useLatestRef(getState);
   useEffect(() => {
     if (!windowId) return;
     setStateProvider(windowId, () => getStateRef.current());

@@ -93,6 +93,7 @@ import {
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -3018,8 +3019,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   const settleTimerRef = useRef<number | null>(null);
   // Mirror loadingOlder so the settle timer (which closes over a stale value)
   // can avoid re-arming while a page load is still in flight.
-  const loadingOlderPropRef = useRef(loadingOlder);
-  loadingOlderPropRef.current = loadingOlder;
+  const loadingOlderPropRef = useLatestRef(loadingOlder);
   // A failed load adds no content → no anchor restore → the viewport stays at the
   // top, where the position gate below would never re-arm. Mark it so the settle
   // re-arms regardless of position and a later scroll can retry. Re-arming at

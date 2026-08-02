@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useToast } from '@/context/ToastContext';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 export interface UseOAuthFlowLockOptions<TMode extends string> {
   /** The real auth-mode setter that the page owns. */
@@ -53,8 +54,7 @@ export function useOAuthFlowLock<TMode extends string>({
   // Ref so the guard always sees the latest value without rebuilding the
   // callback (and therefore the SegmentedRadio's ``onChange`` reference)
   // on every render.
-  const oauthFlowActiveRef = useRef(oauthFlowActive);
-  oauthFlowActiveRef.current = oauthFlowActive;
+  const oauthFlowActiveRef = useLatestRef(oauthFlowActive);
 
   const guardedSetAuthMode = useCallback(
     (next: TMode) => {

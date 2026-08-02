@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { APP_LIST } from '../apps/registry';
 import { useApi } from './ApiContext';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // The workbench Dock is durable, cross-device *product* state (see
 // core/dock_store.py). Two layers (§7.1c): `pins` is the INSTALLED set of AI
@@ -140,8 +141,7 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const api = useApi();
   const [doc, setDoc] = useState<DockDoc>(DEFAULT_DOC);
   // Latest committed doc for the async actions' rollback (avoids stale closures).
-  const docRef = useRef(doc);
-  docRef.current = doc;
+  const docRef = useLatestRef(doc);
   // Dock writes are serialized. Each mutation shows its optimistic doc at once
   // (responsiveness), then queues the server request so requests run in action
   // order — never overlapping. A monotonic counter marks the latest mutation and

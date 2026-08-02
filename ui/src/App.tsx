@@ -347,6 +347,12 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // bridge, the stale setup-required state immediately redirects back to
         // /setup, so the first finish appears to "not take" even though the
         // config was already saved with setup_completed=true.
+        //
+        // Reading a ref during render is normally wrong because the component
+        // will not re-render when it changes. Here that is the intent: this
+        // branch only bridges the single frame before the re-validation effect
+        // (which owns the re-render) flips `guardStatus` to loading.
+        // eslint-disable-next-line react-hooks/refs -- Deliberate one-frame bridge; see above.
         if (previousIsSetupRouteRef.current) {
             return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
         }
