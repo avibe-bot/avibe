@@ -110,6 +110,13 @@ class MessageHandler(BaseHandler):
             if is_human and hasattr(self.controller, "update_checker"):
                 self.controller.update_checker.record_activity()
 
+            if (
+                durable_ingress_enabled
+                and not durable_delivery_owned
+                and self._is_duplicate_human_delivery(context)
+            ):
+                return None
+
             # If message is empty AND no files attached (e.g., user just @mentioned bot without text),
             # trigger the /start command instead of sending empty message to agent
             has_files = bool(context.files)
@@ -123,33 +130,22 @@ class MessageHandler(BaseHandler):
                 and not durable_delivery_owned
                 and not durable_ingress_enabled
             ):
-                # Claim the message before processing so duplicate IM deliveries or
-                # parallel runtime instances cannot start separate agent turns.
-                message_ts = context.message_id
-                thread_ts = context.thread_id or context.message_id
-                if message_ts and thread_ts:
-                    try_record = getattr(self.sessions, "try_record_processed_message", None)
-                    if callable(try_record):
-                        recorded = try_record(context.channel_id, thread_ts, message_ts)
-                    else:
-                        recorded = not self.sessions.is_message_already_processed(
-                            context.channel_id,
-                            thread_ts,
-                            message_ts,
-                        )
-                        if recorded:
-                            self.sessions.record_processed_message(context.channel_id, thread_ts, message_ts)
-                    if not recorded:
-                        logger.info(
-                            f"Skipping already processed message: channel={context.channel_id}, "
-                            f"thread={thread_ts}, message={message_ts}"
-                        )
-                        return None
+                if not self._claim_native_human_event(context):
+                    return None
 
             if is_human and not durable_delivery_owned and not has_files:
                 maybe_consume_setup_reply = getattr(self.controller.agent_auth_service, "maybe_consume_setup_reply", None)
                 if callable(maybe_consume_setup_reply):
-                    consumed = await maybe_consume_setup_reply(context, control_message)
+                    kwargs = {}
+                    if durable_ingress_enabled:
+                        kwargs["claim_native_event"] = lambda: self._claim_native_human_event(
+                            context
+                        )
+                    consumed = await maybe_consume_setup_reply(
+                        context,
+                        control_message,
+                        **kwargs,
+                    )
                     if consumed:
                         return None
 
@@ -165,13 +161,6 @@ class MessageHandler(BaseHandler):
             ):
                 if await self._handle_inline_stop(context):
                     return None
-
-            if (
-                durable_ingress_enabled
-                and not durable_delivery_owned
-                and self._is_duplicate_human_delivery(context)
-            ):
-                return None
 
             if not self.session_handler:
                 raise RuntimeError("Session handler not initialized")
@@ -865,7 +854,7 @@ class MessageHandler(BaseHandler):
 
     @staticmethod
     def _is_duplicate_human_delivery(context: MessageContext) -> bool:
-        """Reject a retried native event before attachment I/O."""
+        """Reject a retried native event before pre-admission side effects."""
 
         platform = str(context.platform or "").strip()
         native_message_id = str(context.message_id or "").strip()
@@ -901,6 +890,37 @@ class MessageHandler(BaseHandler):
                 native_message_id,
             )
             return False
+
+    def _claim_native_human_event(self, context: MessageContext) -> bool:
+        """Fence a native control input that intentionally creates no Delivery."""
+
+        message_ts = context.message_id
+        thread_ts = context.thread_id or context.message_id
+        if not message_ts or not thread_ts:
+            return True
+        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        if callable(try_record):
+            recorded = try_record(context.channel_id, thread_ts, message_ts)
+        else:
+            recorded = not self.sessions.is_message_already_processed(
+                context.channel_id,
+                thread_ts,
+                message_ts,
+            )
+            if recorded:
+                self.sessions.record_processed_message(
+                    context.channel_id,
+                    thread_ts,
+                    message_ts,
+                )
+        if not recorded:
+            logger.info(
+                "Skipping already processed message: channel=%s, thread=%s, message=%s",
+                context.channel_id,
+                thread_ts,
+                message_ts,
+            )
+        return bool(recorded)
 
     @staticmethod
     def _build_agent_request(**kwargs: Any) -> AgentRequest:

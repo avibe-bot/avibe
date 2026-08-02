@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -63,6 +63,7 @@ MessageHandler = _load_message_handler_class()
 class _StubSessions:
     def __init__(self):
         self.recorded = []
+        self._claimed = set()
 
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
         return False
@@ -70,6 +71,14 @@ class _StubSessions:
     def record_processed_message(self, channel_id, thread_ts, message_ts):
         self.recorded.append((channel_id, thread_ts, message_ts))
         return None
+
+    def try_record_processed_message(self, channel_id, thread_ts, message_ts):
+        key = (channel_id, thread_ts, message_ts)
+        if key in self._claimed:
+            return False
+        self._claimed.add(key)
+        self.recorded.append(key)
+        return True
 
 
 class _StubSettingsManager:
@@ -159,6 +168,39 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
             "auth-code#oauth-state",
         )
         self.assertEqual(controller.settings_manager.sessions.recorded, [("C1", "m1", "m1")])
+
+    async def test_durable_setup_reply_claims_native_event_before_consuming(self):
+        controller = _StubController()
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        consumed = []
+
+        async def consume_once(context, message, *, claim_native_event):
+            if not claim_native_event():
+                return True
+            consumed.append(message)
+            return True
+
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(
+            side_effect=consume_once
+        )
+        handler = MessageHandler(controller)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            message_id="m-setup",
+        )
+
+        await handler.handle_user_message(context, "sk-opencode-secret")
+        await handler.handle_user_message(context, "sk-opencode-secret")
+
+        self.assertEqual(consumed, ["sk-opencode-secret"])
+        self.assertEqual(
+            controller.settings_manager.sessions.recorded,
+            [("C1", "m-setup", "m-setup")],
+        )
+        controller.session_turns.deliver.assert_not_awaited()
 
 
 if __name__ == "__main__":

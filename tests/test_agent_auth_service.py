@@ -904,6 +904,39 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertTrue(consumed)
         service.submit_code.assert_awaited_once_with(context, "sk-opencode-secret", backend_hint="opencode")
 
+    async def test_maybe_consume_setup_reply_fences_duplicate_before_submission(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+        flow = AgentAuthFlow(
+            flow_id="flow-opencode-duplicate",
+            backend="opencode",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=SimpleNamespace(returncode=None),
+            reader_task=done_task,
+            waiter_task=done_task,
+            pty_master_fd=11,
+            awaiting_code=True,
+            provider="opencode",
+        )
+        service._flows[flow.flow_key] = flow
+        service.submit_code = AsyncMock()
+        claim_native_event = Mock(return_value=False)
+
+        consumed = await service.maybe_consume_setup_reply(
+            context,
+            "sk-opencode-secret",
+            claim_native_event=claim_native_event,
+        )
+
+        self.assertTrue(consumed)
+        claim_native_event.assert_called_once_with()
+        service.submit_code.assert_not_awaited()
+
     async def test_maybe_consume_setup_reply_accepts_non_sk_opencode_credential(self):
         controller = _StubController()
         service = AgentAuthService(controller)

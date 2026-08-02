@@ -858,7 +858,13 @@ class AgentAuthService:
         flow.awaiting_code = False
         await self._send_message(context, f"✅ {self._t('command.setup.codeSubmitted', backend=flow.backend)}")
 
-    async def maybe_consume_setup_reply(self, context: MessageContext, message: str) -> bool:
+    async def maybe_consume_setup_reply(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        claim_native_event: Callable[[], bool] | None = None,
+    ) -> bool:
         """Intercept plain-text replies for active setup flows before normal agent routing."""
         if not message or message.lstrip().startswith("/"):
             return False
@@ -866,6 +872,8 @@ class AgentAuthService:
         flow = self._find_flow_for_submission(context, "claude")
         if flow is not None and flow.backend == "claude" and flow.initiator_user_id == context.user_id:
             if self._allows_proactive_code_submission(flow) and self._parse_claude_callback_code(message) is not None:
+                if claim_native_event is not None and not claim_native_event():
+                    return True
                 await self.submit_code(context, message, backend_hint="claude")
                 return True
 
@@ -877,6 +885,8 @@ class AgentAuthService:
             and opencode_flow.awaiting_code
             and self._looks_like_direct_opencode_credential(message)
         ):
+            if claim_native_event is not None and not claim_native_event():
+                return True
             await self.submit_code(context, message.strip(), backend_hint="opencode")
             return True
 
