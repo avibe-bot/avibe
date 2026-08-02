@@ -7,6 +7,7 @@ import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
 import { Select } from '../ui/select';
+import { errorMessage } from '@/lib/errorMessage';
 
 export type CreateViaChatKind = 'task' | 'watch';
 
@@ -81,8 +82,8 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
       navigate(`/chat/${encodeURIComponent(session.id)}`, {
         state: { initialMessage: prompt },
       });
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
       setSubmitting(false);
     }
   };

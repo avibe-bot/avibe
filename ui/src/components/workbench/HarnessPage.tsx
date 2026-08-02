@@ -83,6 +83,7 @@ import { loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
+import { errorMessage } from '@/lib/errorMessage';
 
 // Detail-panel schedule, in words. The literal it was derived from is printed
 // beside it by the caller — humanizing must never be the only copy of a value
@@ -365,9 +366,9 @@ export const HarnessPage: React.FC = () => {
         setRunsHasMore(page.has_more);
         if (page.run_types) setPresentRunTypes(page.run_types);
       }
-    } catch (err: any) {
+    } catch (err) {
       if (!isCurrent()) return;
-      setError(err?.message ?? String(err));
+      setError(errorMessage(err) ?? String(err));
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -436,8 +437,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: task.enabled } : t)));
       } finally {
         markPending(task.id, false);
@@ -458,8 +459,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         if (tasks.length === 1 && tasksPage > 1) setTasksPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(task.id, false);
       }
@@ -478,8 +479,8 @@ export const HarnessPage: React.FC = () => {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
         setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: watch.enabled } : w)));
       } finally {
         markPending(watch.id, false);
@@ -500,8 +501,8 @@ export const HarnessPage: React.FC = () => {
         setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         if (watches.length === 1 && watchesPage > 1) setWatchesPage((page) => Math.max(1, page - 1));
         else await refresh();
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err) {
+        setError(errorMessage(err) ?? String(err));
       } finally {
         markPending(watch.id, false);
       }

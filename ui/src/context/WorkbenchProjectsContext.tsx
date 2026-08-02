@@ -5,6 +5,7 @@ import { useApi } from './ApiContext';
 import type { ProjectDefaultAgent, WorkbenchProject, WorkbenchSession, WorkbenchSessionCreate } from './ApiContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
+import { errorMessage } from '@/lib/errorMessage';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -207,10 +208,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       setProjects(result.projects);
       applyBootstrapSessions(result.sessions ?? {});
       setProjectsError(null);
-    } catch (err: any) {
+    } catch (err) {
       // Don't strand consumers on an empty-state for a transient failure — keep
       // any list we had and surface the error (mobile shows a retry).
-      setProjectsError(err?.message ?? String(err));
+      setProjectsError(errorMessage(err) ?? String(err));
     }
   }, [api, applyBootstrapSessions]);
 
@@ -324,8 +325,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       for (const projectId of largeProjectIds) {
         void reconcileSessions(projectId);
       }
-    } catch (err: any) {
-      setProjectsError(err?.message ?? String(err));
+    } catch (err) {
+      setProjectsError(errorMessage(err) ?? String(err));
       const projectIds = [...bootstrapGroups.values()].flat();
       for (const projectId of [...projectIds, ...largeProjectIds]) {
         void reconcileSessions(projectId);

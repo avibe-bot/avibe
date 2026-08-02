@@ -92,6 +92,7 @@ import {
   type LiveActivityState,
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
+import { errorMessage } from '@/lib/errorMessage';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -1028,10 +1029,10 @@ export const ChatPage: React.FC = () => {
       // for the fresh page, so clear directly (Codex P2).
       if (bootstrap.turn_state.foreground === 'running') markWorking();
       else if (bootstrap.turn_state.foreground === 'idle') setWorking(false);
-    } catch (err: any) {
+    } catch (err) {
       // Only surface the error if we're still on the session that failed — a
       // stale failure must not stamp an error onto the chat the user moved to.
-      if (sessionId === sessionIdRef.current) setError(err?.message ?? String(err));
+      if (sessionId === sessionIdRef.current) setError(errorMessage(err) ?? String(err));
     } finally {
       // Same guard: a stale load finishing must not flip the new session out of
       // its own loading state into a premature not-found / error view (Codex P2).
@@ -1413,10 +1414,10 @@ export const ChatPage: React.FC = () => {
             appendMessage(body as WorkbenchMessage);
           }
         }
-      } catch (err: any) {
+      } catch (err) {
         if (sessionId === sessionIdRef.current) {
           setWorking(false);
-          setError(err?.message ?? String(err));
+          setError(errorMessage(err) ?? String(err));
           // Signal the composer the send didn't start so it restores the text +
           // uploaded chips — the user can retry without re-uploading (Codex r5).
           return false;
@@ -1595,9 +1596,9 @@ export const ChatPage: React.FC = () => {
           setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
         }
       }
-    } catch (err: any) {
+    } catch (err) {
       // The cancel request itself threw (network) — surface it; keep Stop.
-      if (sessionId === sessionIdRef.current) setError(err?.message ?? String(err));
+      if (sessionId === sessionIdRef.current) setError(errorMessage(err) ?? String(err));
     }
   }, [api, sessionId, working, t, syncTurnState]);
 
@@ -1668,12 +1669,12 @@ export const ChatPage: React.FC = () => {
         setWorking(false);
         void refreshQueue();
       }
-    } catch (err: any) {
+    } catch (err) {
       // Same session guard as the success path: a rejection after a chat switch
       // must not clear the new chat's working / stamp this error on it (Codex P2).
       if (sessionId === sessionIdRef.current) {
         setWorking(false);
-        setError(err?.message ?? String(err));
+        setError(errorMessage(err) ?? String(err));
       }
     }
   }, [api, sessionId, queue, t, refreshQueue, markWorking]);
@@ -1851,7 +1852,7 @@ export const ChatPage: React.FC = () => {
         // the sessionIdRef guards on send/cancel.
         if (patchedId !== sessionIdRef.current) return;
         setSession(updated);
-      } catch (err: any) {
+      } catch (err) {
         if (patchedId !== sessionIdRef.current) return;
         // The archive itself has already converged through the shared
         // ``onSessionArchived`` subscription (the title editor and route picker are
@@ -1859,7 +1860,7 @@ export const ChatPage: React.FC = () => {
         // wording is per-verb: the global ``errors.session_archived`` copy that
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
-        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (err?.message ?? String(err)));
+        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
       }
     },
     [api, session, t],
