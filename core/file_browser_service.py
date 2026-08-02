@@ -791,14 +791,15 @@ def write_file(
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
-                if expected_mtime is not None:
-                    try:
-                        disk_mtime = _mtime_seconds(target.stat())
-                    except FileNotFoundError as exc:
-                        raise ConflictError("conflict", "File was removed before save") from exc
-                    if abs(disk_mtime - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
-                        raise ConflictError("conflict", "File changed on disk")
-                    _advance_mtime_token(Path(temp_name), expected_mtime)
+                    if expected_mtime is not None:
+                        try:
+                            disk_mtime = _mtime_seconds(target.stat())
+                        except FileNotFoundError as exc:
+                            raise ConflictError("conflict", "File was removed before save") from exc
+                        if abs(disk_mtime - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
+                            raise ConflictError("conflict", "File changed on disk")
+                        _advance_mtime_token(Path(temp_name), expected_mtime)
+                        os.fsync(handle.fileno())
                 os.replace(temp_name, target)
                 temp_name = ""
                 _fsync_dir(parent)

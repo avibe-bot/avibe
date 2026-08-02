@@ -37,7 +37,10 @@
   but an atomic replacement can inherit the saved file's token on ext4; the
   writer owns advancing a successful replacement's token beyond the accepted
   baseline, verifying the post-`utime` stat, using a coarse-filesystem fallback,
-  and failing before replacement if no distinct token is observable.
+  and failing before replacement if no distinct token is observable. Contents
+  and the advanced token are one durable publication unit, so the writer also
+  keeps the temp descriptor open and flushes the token mutation before replace;
+  a failed durability flush must leave the original file published.
   Processed-message retention orders only by `created_at`, while
   multiple SQLite inserts can receive the same wall-clock value; the SQLite
   store owns deterministic insertion order and will use the table rowid only as
@@ -56,7 +59,8 @@
 5. The configured async pytest mode and marker are provided by an explicit
    development dependency.
 6. A successful conditional file replacement invalidates its accepted `mtime`
-   token even when the filesystem initially timestamps both versions equally.
+   token even when the filesystem initially timestamps both versions equally,
+   and durably flushes that token before publishing the replacement.
 7. Equal-timestamp processed-message claims retain and load in SQLite insertion
    order.
 
@@ -76,16 +80,19 @@
    order is clean.
 6. Force a replacement temp file to the accepted `mtime` and force 205
    processed-message claims to one timestamp; confirm stale writes still
-   conflict and retention keeps the newest 200 claims in insertion order.
+   conflict and retention keeps the newest 200 claims in insertion order. Pin
+   the conditional-write order as token `utime`, temp-file `fsync`, then
+   `os.replace`, and prove a failed token flush cannot publish.
 
 ## Verification results
 
 - Deterministic red tests reproduced the canonical Slack module replacement,
   the unchanged directory-stat reload token, a same-`mtime` atomic replacement,
+  a missing durability flush between token advancement and replacement,
   equal-timestamp SQLite retention, and the missing native async runner.
 - The platform/Slack order passed in both directions (`19 passed` each), and the
   changed modules plus their neighboring suites passed with `482 passed, 1
   skipped, 379 warnings`.
 - The isolated Incus full suite ran in one process with `pytest_asyncio.plugin`
-  registered and `VIBE_SHOW_RUNTIME_SOURCE` unset: `7151 passed, 55 skipped,
-  3904 warnings` in 1097.02 seconds, with zero failures.
+  registered and `VIBE_SHOW_RUNTIME_SOURCE` unset: `7154 passed, 55 skipped,
+  3904 warnings` in 870.92 seconds, with zero failures.

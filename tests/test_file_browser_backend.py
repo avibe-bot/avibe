@@ -399,12 +399,16 @@ def test_write_is_atomic_and_detects_mtime_conflict(tmp_path, monkeypatch):
     real_fsync = fs.os.fsync
     real_utime = fs.os.utime
     replacement_utimes: list[int] = []
+    regular_fsyncs = 0
 
     def fsync_at_accepted_mtime(fd: int) -> None:
+        nonlocal regular_fsyncs
         real_fsync(fd)
         current = os.fstat(fd)
         if stat.S_ISREG(current.st_mode):
-            real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+            regular_fsyncs += 1
+            if regular_fsyncs == 1:
+                real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
 
     def round_first_replacement_utime(target, *, ns):
         if isinstance(target, int):
@@ -440,12 +444,16 @@ def test_write_fails_before_replace_when_mtime_token_cannot_advance(tmp_path, mo
     accepted_mtime_ns = path.stat().st_mtime_ns
     real_fsync = fs.os.fsync
     real_utime = fs.os.utime
+    regular_fsyncs = 0
 
     def fsync_at_accepted_mtime(fd: int) -> None:
+        nonlocal regular_fsyncs
         real_fsync(fd)
         current = os.fstat(fd)
         if stat.S_ISREG(current.st_mode):
-            real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+            regular_fsyncs += 1
+            if regular_fsyncs == 1:
+                real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
 
     def round_replacement_utime(target, *, ns):
         if isinstance(target, int):
@@ -458,6 +466,77 @@ def test_write_fails_before_replace_when_mtime_token_cannot_advance(tmp_path, mo
 
     with pytest.raises(FileBrowserError) as exc:
         fs.write_file(str(path), "second", expected_mtime=first["mtime"])
+
+    assert exc.value.code == "fs_error"
+    assert path.read_text(encoding="utf-8") == "first"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+def test_conditional_write_syncs_advanced_mtime_before_replace(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+    path.write_text("first", encoding="utf-8")
+    accepted_mtime = fs._mtime_seconds(path.stat())
+    accepted_mtime_ns = path.stat().st_mtime_ns
+    real_fsync = fs.os.fsync
+    real_utime = fs.os.utime
+    real_replace = fs.os.replace
+    regular_fsyncs = 0
+    events: list[str] = []
+
+    def capture_fsync(fd: int) -> None:
+        nonlocal regular_fsyncs
+        real_fsync(fd)
+        current = os.fstat(fd)
+        if stat.S_ISREG(current.st_mode):
+            regular_fsyncs += 1
+            events.append("fsync")
+            if regular_fsyncs == 1:
+                real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+
+    def capture_utime(target, *, ns):
+        events.append("utime")
+        real_utime(target, ns=ns)
+
+    def capture_replace(source, target) -> None:
+        events.append("replace")
+        real_replace(source, target)
+
+    monkeypatch.setattr(fs.os, "fsync", capture_fsync)
+    monkeypatch.setattr(fs.os, "utime", capture_utime)
+    monkeypatch.setattr(fs.os, "replace", capture_replace)
+
+    result = fs.write_file(str(path), "second", expected_mtime=accepted_mtime)
+
+    assert path.read_text(encoding="utf-8") == "second"
+    assert result["mtime"] != accepted_mtime
+    assert events[:4] == ["fsync", "utime", "fsync", "replace"]
+
+
+def test_conditional_write_does_not_publish_when_mtime_fsync_fails(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+    path.write_text("first", encoding="utf-8")
+    accepted_mtime = fs._mtime_seconds(path.stat())
+    accepted_mtime_ns = path.stat().st_mtime_ns
+    real_fsync = fs.os.fsync
+    real_utime = fs.os.utime
+    regular_fsyncs = 0
+
+    def fail_mtime_fsync(fd: int) -> None:
+        nonlocal regular_fsyncs
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode):
+            real_fsync(fd)
+            return
+        regular_fsyncs += 1
+        if regular_fsyncs == 2:
+            raise OSError("mtime fsync failed")
+        real_fsync(fd)
+        real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+
+    monkeypatch.setattr(fs.os, "fsync", fail_mtime_fsync)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.write_file(str(path), "second", expected_mtime=accepted_mtime)
 
     assert exc.value.code == "fs_error"
     assert path.read_text(encoding="utf-8") == "first"
