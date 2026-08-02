@@ -13,21 +13,22 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateIndex
 
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
-from storage import migrations
+from storage import message_deliveries, messages_service, migrations
 from storage.background import SQLiteBackgroundTaskStore
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
-from storage.settings_service import SQLiteSettingsService
+from storage.settings_service import SQLiteSettingsService, upsert_scope
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260801_0044"
+HEAD_REVISION = "20260802_0045"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -98,6 +99,180 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 
     assert len(heads) == 1
     assert heads[0] == HEAD_REVISION
+
+
+def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260801_0044")
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        now = messages_service._utc_now_iso()
+        first_scope = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="chat-1",
+            now=now,
+        )
+        messages_service.append(
+            conn,
+            scope_id=first_scope,
+            session_id=None,
+            platform="telegram",
+            author="user",
+            text="first",
+            native_message_id="1",
+        )
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    with engine.begin() as conn:
+        now = messages_service._utc_now_iso()
+        second_scope = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="chat-2",
+            now=now,
+        )
+        messages_service.append(
+            conn,
+            scope_id=second_scope,
+            session_id=None,
+            platform="telegram",
+            author="user",
+            text="second",
+            native_message_id="1",
+        )
+        indexes = {
+            row[1]
+            for row in conn.exec_driver_sql("pragma index_list(messages)")
+        }
+    assert "uq_messages_platform_scope_native" in indexes
+    assert "uq_messages_platform_native_unscoped" in indexes
+
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=second_scope,
+            session_id=None,
+            platform="telegram",
+            author="user",
+            text="duplicate",
+            native_message_id="1",
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="conversation-scoped Message identities would collide",
+    ):
+        command.downgrade(migrations.alembic_config(db_path), "20260801_0044")
+
+
+def test_scoped_native_message_identity_upgrade_preserves_accepted_delivery(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260801_0044")
+    engine = create_sqlite_engine(db_path)
+    now = "2026-08-02T00:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="chat-accepted",
+            now=now,
+        )
+        conn.exec_driver_sql(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values (
+                'ses_accepted', ?, 'codex', 'codex', 'codex', 'accepted',
+                '/tmp', '', 'active', 'foreground', 0, 'idle', '{}', ?, ?, ?
+            )
+            """,
+            (scope_id, now, now, now),
+        )
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_accepted_delivery",
+            session_id="ses_accepted",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id="ses_accepted",
+                platform="telegram",
+                author="user",
+                source="user",
+                message_type="user",
+                text="accepted",
+                native_message_id="1",
+            ),
+            dispatch_text="accepted",
+            dedupe_key="telegram:1",
+            now=now,
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="turn_accepted_delivery",
+            session_id="ses_accepted",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="accepted",
+        )
+        turn = message_deliveries.bind_native_start(
+            conn,
+            "turn_accepted_delivery",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="runtime",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        )
+        assert turn is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id="turn_accepted_delivery",
+            evidence={"kind": "test"},
+        )
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    with engine.connect() as conn:
+        accepted = conn.exec_driver_sql(
+            "select message_id, dedupe_key from message_deliveries "
+            "where id='msg_accepted_delivery'"
+        ).one()
+        message = conn.exec_driver_sql(
+            "select scope_id, native_message_id from messages "
+            "where id='msg_accepted_delivery'"
+        ).one()
+        foreign_key_errors = conn.exec_driver_sql("pragma foreign_key_check").all()
+    assert accepted == (
+        "msg_accepted_delivery",
+        message_deliveries.native_dedupe_key(
+            "telegram",
+            "1",
+            scope_id=scope_id,
+        ),
+    )
+    assert message == (scope_id, "1")
+    assert foreign_key_errors == []
+
+    command.downgrade(migrations.alembic_config(db_path), "20260801_0044")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select message_id, dedupe_key from message_deliveries "
+            "where id='msg_accepted_delivery'"
+        ).one() == ("msg_accepted_delivery", "telegram:1")
+        assert conn.exec_driver_sql("pragma foreign_key_check").all() == []
 
 
 def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(

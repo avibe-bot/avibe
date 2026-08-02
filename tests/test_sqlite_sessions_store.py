@@ -3104,6 +3104,7 @@ def test_sessions_store_atomically_claims_processed_messages_across_instances(tm
     second = SessionsStore(sessions_path)
     try:
         assert first.try_add_to_processed_set("C123", "171717.123", "171717.456") is True
+        assert second.has_processed_message("C123", "171717.123", "171717.456") is True
         assert second.try_add_to_processed_set("C123", "171717.123", "171717.456") is False
         assert second.is_message_in_processed_set("C123", "171717.123", "171717.456") is True
     finally:

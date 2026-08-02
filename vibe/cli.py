@@ -35,6 +35,7 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
     AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
@@ -1180,6 +1181,7 @@ def _agent_run_examples_text() -> str:
         Session target:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
+          Add --queue to persist this Run as P3 behind the active Turn.
           Add --send-now to admit this new Run as content P0 and replace the active Turn.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
@@ -4858,6 +4860,8 @@ def cmd_agent_run(args):
         delivery_intent = (
             AGENT_RUN_DELIVERY_SEND_NOW
             if bool(getattr(args, "send_now", False))
+            else AGENT_RUN_DELIVERY_QUEUE
+            if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
         if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
@@ -4945,7 +4949,10 @@ def cmd_agent_run(args):
                 raise TaskCliError(
                     "--send-now requires a Web/Workbench Agent Session",
                     code="send_now_unsupported_target",
-                    hint="Omit --send-now to queue work for an IM-backed Session.",
+                    hint=(
+                        "Omit --send-now to steer the active IM Turn or start a new "
+                        "Turn when idle."
+                    ),
                     help_command="vibe agent run --help",
                     details={
                         "session_id": session_id,
@@ -13123,10 +13130,16 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
-    agent_run_parser.add_argument(
+    agent_run_delivery_group = agent_run_parser.add_mutually_exclusive_group()
+    agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
         help="Replace the active Turn with this new Run; start it immediately when idle",
+    )
+    agent_run_delivery_group.add_argument(
+        "--queue",
+        action="store_true",
+        help="Queue this Run behind the active Turn instead of steering it",
     )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")

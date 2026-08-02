@@ -4556,6 +4556,71 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["message"] == "complete delegated result"
 
 
+def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Scenario: MESSAGE-DELIVERY-008 closed-loop subscriber fan-out."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-fanout-caller",
+    )
+    target_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-fanout-target",
+    )
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(
+            session_id=target_session_id,
+            message=message,
+            agent_name="codex",
+            callback_session_id=caller_session_id,
+        )
+        for message in ("participant one", "participant two")
+    ]
+    for request in requests:
+        assert request_store.claim(request.id) is not None
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service.settle_agent_runs_from_terminal_turn(
+        [request.id for request in requests],
+        turn_id="turn-shared-by-two-runs",
+        outcome="completed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result",
+        evidence={
+            "settles_run": True,
+            "result_text": "shared immutable terminal result",
+        },
+    )
+
+    asyncio.run(service._drain_callbacks())
+    asyncio.run(service._drain_callbacks())
+
+    originals = [request_store.get_run(request.id) for request in requests]
+    assert all(row is not None and row["callback_status"] == "sent" for row in originals)
+    callbacks = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback"
+    ]
+    assert len(callbacks) == 2
+    assert {run["parent_run_id"] for run in callbacks} == {
+        request.id for request in requests
+    }
+    assert {run["message"] for run in callbacks} == {
+        "shared immutable terminal result"
+    }
+    assert {
+        run["metadata"]["delivery_intent"] for run in callbacks
+    } == {"steer"}
+
+
 def test_historical_conflated_sent_callback_stays_inert_on_startup(
     tmp_path: Path,
     monkeypatch,
@@ -6376,8 +6441,16 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text):
-        submitted.append((sid, text, ctx.platform, ctx.platform_specific.get("task_execution_id")))
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
+        submitted.append(
+            (
+                sid,
+                text,
+                ctx.platform,
+                ctx.platform_specific.get("task_execution_id"),
+                delivery_intent,
+            )
+        )
         return "ran"
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
@@ -6404,12 +6477,14 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert run is not None
     assert run["status"] == "running"
     assert run.get("completed_at") is None
-    assert submitted == [(session_id, "run in workbench session", "avibe", request.id)]
+    assert submitted == [
+        (session_id, "run in workbench session", "avibe", request.id, "queue")
+    ]
     assert handler_calls == []
 
 
-def test_legacy_queue_delivery_intent_normalizes_to_current_steer() -> None:
-    assert normalize_agent_run_delivery_intent("queue") == "steer"
+def test_explicit_queue_delivery_intent_remains_queued() -> None:
+    assert normalize_agent_run_delivery_intent("queue") == "queue"
 
 
 def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypatch, tmp_path) -> None:
@@ -6884,11 +6959,16 @@ def test_claimed_watch_stays_nonterminal_after_delivery_ownership_transfer(
     )
     submitted: list[tuple[str, str, str]] = []
 
-    async def _submit_scheduled(sid, ctx, text):
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
         from core.session_turns import TurnSubmissionResult
 
         submitted.append(
-            (sid, text, str(ctx.platform_specific.get("task_execution_id") or ""))
+            (
+                sid,
+                text,
+                str(ctx.platform_specific.get("task_execution_id") or ""),
+                delivery_intent,
+            )
         )
         return TurnSubmissionResult(
             route="enqueued",
@@ -6922,7 +7002,7 @@ def test_claimed_watch_stays_nonterminal_after_delivery_ownership_transfer(
     assert stored is not None
     assert stored["status"] == "running"
     assert stored.get("completed_at") is None
-    assert submitted == [(session_id, "watch result", request.id)]
+    assert submitted == [(session_id, "watch result", request.id, "steer")]
 
 
 def test_drain_requests_records_scheduled_create_per_run_reserved_session(tmp_path: Path) -> None:
@@ -7770,11 +7850,12 @@ def _make_avibe_session(
     metadata: dict | None = None,
     visibility: str = "foreground",
     scope_native_id: str = "proj_gate_exec",
+    platform: str = "avibe",
+    scope_type: str = "project",
     agent_backend: str = "claude",
     agent_name: str = "worker",
 ) -> str:
-    """Create a real avibe workbench session so ``resolve_session_id_target``
-    resolves it to ``platform='avibe'`` (the gate trigger)."""
+    """Create a real persisted Session target for delivery-gate tests."""
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -7787,8 +7868,8 @@ def _make_avibe_session(
     with engine.begin() as conn:
         scope_id = upsert_scope(
             conn,
-            platform="avibe",
-            scope_type="project",
+            platform=platform,
+            scope_type=scope_type,
             native_id=scope_native_id,
             now="2026-05-31T00:00:00Z",
         )
@@ -7832,8 +7913,8 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text):
-        submitted.append((sid, text, getattr(ctx, "platform", None)))
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
+        submitted.append((sid, text, getattr(ctx, "platform", None), delivery_intent))
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append(message)
@@ -7858,19 +7939,29 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
     )
 
     assert error is None, "dispatched-success returns None so ok=not error stays true"
-    assert submitted == [(session_id, "run the digest", "avibe")], "routed through the turn gate"
+    assert submitted == [
+        (session_id, "run the digest", "avibe", "queue")
+    ], "routed through the turn gate"
     assert handler_calls == [], "the direct handle_scheduled_message path is bypassed for avibe"
 
 
-def test_execute_request_im_bypasses_gate(monkeypatch, tmp_path) -> None:
-    """An IM (slack/discord/...) scheduled run NEVER touches the gate — it keeps
-    the direct ``handle_scheduled_message`` path byte-for-byte, even when a gate
-    is present on the controller."""
+def test_execute_request_im_watch_steers_through_delivery_owner(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An IM Watch uses the same durable P1 owner as every Session target."""
+    session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        platform="slack",
+        scope_type="channel",
+        scope_native_id="C123",
+    )
     submitted: list = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text):
-        submitted.append((sid, text))
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
+        submitted.append((sid, text, delivery_intent))
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append((message, context.platform))
@@ -7898,13 +7989,14 @@ def test_execute_request_im_bypasses_gate(monkeypatch, tmp_path) -> None:
             deliver_key=None,
             prompt="send digest",
             execution_id="exec-im-1",
-            trigger_kind="scheduled",
+            trigger_kind="watch",
+            session_id=session_id,
         )
     )
 
     assert error is None
-    assert submitted == [], "IM runs must never reach the turn gate"
-    assert handler_calls == [("send digest", "slack")], "IM keeps the direct scheduled path"
+    assert submitted == [(session_id, "send digest", "steer")]
+    assert handler_calls == []
 
 
 def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) -> None:

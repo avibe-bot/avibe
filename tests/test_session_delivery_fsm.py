@@ -26,7 +26,9 @@ from core.session_turns import (
     SessionTurnManager,
     Turn,
 )
+from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
+from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage import messages_service
 from storage import workbench_sessions_service
@@ -317,6 +319,148 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
         turn = delivery_store.get_turn(conn, admitted.turn_id)
     assert turn is not None
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
+
+
+def test_im_p1_materializes_only_after_exact_native_acceptance(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        active_turn_id, _ = await _activate(manager, text="active")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def accept(_backend, request):
+            assert request.text == "steer this exact text"
+            entered.set()
+            await release.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accept
+        pending = asyncio.create_task(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p1",
+                    content="steer this exact text",
+                    platform="slack",
+                    source="user",
+                    author="user",
+                    message_type="user",
+                    author_id="U42",
+                    author_name="Ada",
+                    native_message_id="slack-msg-42",
+                ),
+                context=_context(),
+            )
+        )
+        await entered.wait()
+        with engine.connect() as conn:
+            delivery = conn.execute(
+                select(message_deliveries).where(
+                    message_deliveries.c.dedupe_key == "slack:slack-msg-42"
+                )
+            ).mappings().one()
+            materialized = conn.execute(
+                select(messages.c.id).where(
+                    messages.c.native_message_id == "slack-msg-42"
+                )
+            ).first()
+        assert delivery["state"] == "steering"
+        assert delivery["message_id"] is None
+        assert materialized is None
+
+        release.set()
+        accepted = await pending
+        assert accepted.state == "accepted"
+        return active_turn_id, str(accepted.delivery_id)
+
+    turn_id, delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, delivery_id)
+        message = conn.execute(
+            select(messages).where(messages.c.id == delivery_id)
+        ).mappings().one()
+    assert delivery is not None
+    assert delivery["turn_id"] == turn_id
+    assert delivery["message_id"] == delivery_id
+    assert message["platform"] == "slack"
+    assert message["native_message_id"] == "slack-msg-42"
+    assert message["content_text"] == "steer this exact text"
+    assert message["author_id"] == "U42"
+
+
+def test_duplicate_im_p1_reuses_one_delivery_and_one_native_steer(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        await _activate(manager, text="active")
+        manager._steer = AsyncMock(
+            return_value=steer_result(SteerOutcome.ACCEPTED)
+        )
+        request = DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p1",
+            content="deliver once",
+            platform="slack",
+            source="user",
+            author="user",
+            message_type="user",
+            native_message_id="slack-duplicate-1",
+        )
+
+        first = await manager.deliver(request, context=_context())
+        duplicate = await manager.deliver(request, context=_context())
+
+        manager._steer.assert_awaited_once()
+        return first.delivery_id, duplicate.delivery_id
+
+    first_id, duplicate_id = asyncio.run(run())
+    assert duplicate_id == first_id
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(message_deliveries).where(
+                message_deliveries.c.dedupe_key == "slack:slack-duplicate-1"
+            )
+        ).mappings().all()
+    assert len(rows) == 1
+    assert rows[0]["state"] == "accepted"
+
+
+def test_delivery_admission_context_restores_route_without_message_metadata(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="route me",
+                metadata={"visible": "record metadata"},
+                admission_context={
+                    "message_handler_route": {
+                        "base_session_id": "slack_C1:reviewer",
+                        "subagent_name": "reviewer",
+                        "routing_subagent": True,
+                    }
+                },
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = _context()
+
+    payload = manager._hydrate_delivery_context(context, delivery)
+
+    assert payload["metadata"] == {"visible": "record metadata"}
+    assert context.platform_specific["delivery_admission_context"] == {
+        "message_handler_route": {
+            "base_session_id": "slack_C1:reviewer",
+            "subagent_name": "reviewer",
+            "routing_subagent": True,
+        }
+    }
 
 
 def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
@@ -2467,6 +2611,75 @@ def test_two_restart_recoveries_claim_reserved_submission_once(managers) -> None
 
     assert [text for _, text in starts] == ["recover once"]
     assert _row(engine, delivery_id)["state"] == "claimed"
+
+
+@pytest.mark.anyio
+async def test_concurrent_im_attachment_retry_keeps_one_reserved_owner(
+    managers,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    first_path = tmp_path / "first.txt"
+    retry_path = tmp_path / "retry.txt"
+    first_path.write_text("first", encoding="utf-8")
+    retry_path.write_text("retry", encoding="utf-8")
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        im_client=SimpleNamespace(formatter=None),
+        settings_manager=SimpleNamespace(sessions=SimpleNamespace()),
+        session_manager=SimpleNamespace(),
+        receiver_tasks={},
+    )
+    handler = MessageHandler(controller)
+    handler.set_session_handler(
+        SimpleNamespace(ensure_agent_session_id=lambda *_args, **_kwargs: "ses_fsm")
+    )
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+
+    def context() -> MessageContext:
+        return MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="native-attachment-1",
+            platform="slack",
+        )
+
+    async def admit(path: Path) -> None:
+        await handler._admit_human_delivery(
+            manager=manager,
+            context=context(),
+            dispatch_text="review attachment",
+            display_text="review attachment",
+            processed_files=[
+                FileAttachment(
+                    name=path.name,
+                    mimetype="text/plain",
+                    local_path=str(path),
+                    size=path.stat().st_size,
+                )
+            ],
+            session_key="slack::C1",
+            agent_name="codex",
+            session_anchor="base-session",
+            working_path="/tmp",
+            vibe_agent=None,
+            delivery_intent="steer",
+            downloaded_attachment_paths=[str(path)],
+            admission_context={},
+        )
+
+    await admit(first_path)
+    await admit(retry_path)
+
+    with engine.connect() as conn:
+        deliveries = conn.execute(select(message_deliveries)).mappings().all()
+        media = conn.execute(select(media_objects)).mappings().all()
+    assert len(deliveries) == 1
+    assert len(media) == 1
+    assert media[0]["local_path"] == str(first_path)
+    assert first_path.exists()
+    assert not retry_path.exists()
 
 
 def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(

@@ -48,14 +48,46 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
+def _scope_identity_for_context(context: MessageContext) -> tuple[str, str, str] | None:
     platform = (context.platform or "").strip()
     is_dm = bool((context.platform_specific or {}).get("is_dm", False))
-    use_user_scope = is_dm and context.channel_id and context.user_id and context.channel_id == context.user_id
+    use_user_scope = bool(
+        is_dm
+        and context.channel_id
+        and context.user_id
+        and context.channel_id == context.user_id
+    )
     scope_type = "user" if use_user_scope else DEFAULT_SCOPE_TYPE
     native_id = ((context.user_id if use_user_scope else context.channel_id) or "").strip()
     if not platform or not native_id:
         return None
+    return platform, scope_type, native_id
+
+
+def scope_id_for_context(context: MessageContext) -> Optional[str]:
+    """Return the stable native conversation identity without writing storage."""
+
+    identity = _scope_identity_for_context(context)
+    if identity is None:
+        return None
+    return settings_service.make_scope_id(*identity)
+
+
+def _agent_message_scope_id(conn, context: MessageContext) -> Optional[str]:
+    """Resolve the same scope used when an accepted agent Message is persisted."""
+
+    if context.platform == "avibe":
+        session_id = (context.platform_specific or {}).get("agent_session_id")
+        session_row = _session_row(conn, session_id) if session_id else None
+        return session_row["scope_id"] if session_row else None
+    return scope_id_for_context(context)
+
+
+def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
+    identity = _scope_identity_for_context(context)
+    if identity is None:
+        return None
+    platform, scope_type, native_id = identity
     try:
         return settings_service.upsert_scope(
             conn,
@@ -504,6 +536,7 @@ def agent_message_exists(context: MessageContext, native_message_id: str | None)
             return messages_service.native_message_exists(
                 conn,
                 platform=platform,
+                scope_id=_agent_message_scope_id(conn, context),
                 native_message_id=identity,
             )
     except Exception:

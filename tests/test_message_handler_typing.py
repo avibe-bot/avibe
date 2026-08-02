@@ -281,6 +281,190 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_im_human_input_enters_delivery_owner_before_backend(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        controller.settings_manager.sessions.try_record_processed_message = Mock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(
+            return_value="[metadata]\nhello"
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        handler._admit_human_delivery.assert_awaited_once()
+        assert (
+            handler._admit_human_delivery.await_args.kwargs["dispatch_text"]
+            == "[metadata]\nhello"
+        )
+        controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_explicit_opencode_subagent_uses_new_turn_delivery_intent(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        server = types.SimpleNamespace(
+            ensure_running=AsyncMock(),
+            get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
+        )
+        controller.agent_service.agents = {
+            "opencode": types.SimpleNamespace(
+                _get_server=AsyncMock(return_value=server)
+            )
+        }
+        controller.get_cwd = Mock(return_value="/tmp")
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=types.SimpleNamespace(
+                id="agent-opencode",
+                name="opencode",
+                backend="opencode",
+                model=None,
+                reasoning_effort=None,
+                system_prompt=None,
+            )
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._prepend_message_metadata = AsyncMock(return_value="check this")
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-subagent",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "reviewer: check this")
+
+        call = handler._admit_human_delivery.await_args.kwargs
+        self.assertEqual(call["delivery_intent"], "queue")
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["subagent_name"],
+            "reviewer",
+        )
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["base_session_id"],
+            "base-session",
+        )
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_duplicate_im_attachment_skips_download_before_admission(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=True)
+        handler._process_file_attachments = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-attachment-retry",
+            platform="slack",
+            files=[
+                FileAttachment(
+                    name="report.pdf",
+                    mimetype="application/pdf",
+                    url="https://files.example/report.pdf",
+                )
+            ],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        handler._process_file_attachments.assert_not_awaited()
+        controller.session_turns.deliver.assert_not_awaited()
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_inline_stop_uses_durable_empty_p0_owner(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
+        self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_retried_inline_stop_cannot_cancel_a_newer_turn(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        cancel = AsyncMock(return_value={"ok": True, "status": "cancel_requested"})
+        controller.session_turns = types.SimpleNamespace(
+            deliver=AsyncMock(),
+            cancel=cancel,
+        )
+        controller.settings_manager.sessions.try_record_processed_message = Mock(
+            side_effect=[True, False]
+        )
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="m-stop-retry",
+            platform="slack",
+            platform_specific={
+                "agent_session_id": "ses-durable",
+                "control_text": "stop",
+            },
+        )
+
+        await handler.handle_user_message(context, "stop")
+        await handler.handle_user_message(context, "stop")
+
+        cancel.assert_awaited_once_with("ses-durable")
+        self.assertEqual(controller.agent_service.stop_requests, [])
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_pre_request_failure_uses_plain_terminal_output(self):
         controller = _StubController(
             platform="slack",

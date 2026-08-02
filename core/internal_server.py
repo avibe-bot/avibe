@@ -133,11 +133,11 @@ def create_app(controller: "Controller") -> FastAPI:
         *,
         delivery_intent: str = "steer",
     ) -> Any:
-        """Run a scheduled / watch turn through the SAME unified ``manager.submit``
-        the interactive Chat path uses, so a scheduled run can never preempt an
-        active Chat turn and gets the full turn lifecycle (in_flight + turn.start /
-        turn.end + Stop) the Chat page renders (Codex P2). Its submission is a
-        Delivery until exact native acceptance materializes the harness Message.
+        """Run a Harness input through the same durable owner as interactive Chat.
+
+        The explicit source intent decides whether it queues, steers, or replaces.
+        The submission remains a Delivery until exact native acceptance materializes
+        the harness Message.
         """
         if not session_id:
             submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
@@ -160,10 +160,9 @@ def create_app(controller: "Controller") -> FastAPI:
             run_update_event_transaction,
         )
 
+        submission_platform = str(getattr(context, "platform", None) or "avibe").strip()
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
-        dedupe_key = message_deliveries.native_dedupe_key(
-            "avibe", native_message_id
-        )
+        dedupe_key: str | None = None
         delivery_id: str | None = None
         delivery_request: DeliveryRequest | None = None
         scope_id: str | None = None
@@ -179,16 +178,26 @@ def create_app(controller: "Controller") -> FastAPI:
             from storage.models import agent_runs, agent_sessions
 
             reserve_write_lock(conn)
-            existing = (
-                message_deliveries.get_delivery_by_dedupe(conn, dedupe_key)
-                if dedupe_key
-                else None
+            scope_id = _scope_id_for_session(conn, session_id)
+            dedupe_key = message_deliveries.native_dedupe_key(
+                submission_platform,
+                native_message_id,
+                scope_id=scope_id,
+            )
+            existing = message_deliveries.get_delivery_by_native_identity(
+                conn,
+                platform=submission_platform,
+                native_message_id=native_message_id,
+                scope_id=scope_id,
+                session_id=session_id,
+                normalize_legacy=True,
             )
             legacy_accepted = bool(
                 native_message_id
                 and messages_service.native_message_exists(
                     conn,
-                    platform="avibe",
+                    platform=submission_platform,
+                    scope_id=scope_id,
                     native_message_id=native_message_id,
                 )
             )
@@ -256,8 +265,10 @@ def create_app(controller: "Controller") -> FastAPI:
                 delivery_id = str(existing["id"])
                 delivery_request = manager._request_from_delivery(existing)
                 scope_id = delivery_request.scope_id
-                effective_delivery_intent = (
-                    "send_now" if delivery_request.priority == "p0" else "steer"
+                from core.message_priority import delivery_intent_for_priority
+
+                effective_delivery_intent = delivery_intent_for_priority(
+                    delivery_request.priority
                 )
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
@@ -272,19 +283,21 @@ def create_app(controller: "Controller") -> FastAPI:
                         persisted_spec.get("task_execution_id") or execution_id
                     ).strip()
             else:
-                scope_id = _scope_id_for_session(conn, session_id)
+                from core.message_priority import priority_for_delivery_intent
+
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
+                priority = priority_for_delivery_intent(delivery_intent)
                 message_deliveries.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
                     session_id=session_id,
-                    priority="p0" if delivery_intent == "send_now" else "p1",
+                    priority=priority,
                     state=admitted_state,
                     snapshot=message_deliveries.message_snapshot(
                         scope_id=scope_id,
                         session_id=session_id,
-                        platform="avibe",
+                        platform=submission_platform,
                         author="harness",
                         source="harness",
                         message_type="harness",
@@ -300,7 +313,7 @@ def create_app(controller: "Controller") -> FastAPI:
                     dedupe_key=dedupe_key,
                     history_event={
                         "kind": "admission",
-                        "priority": "p0" if delivery_intent == "send_now" else "p1",
+                        "priority": priority,
                         "state": admitted_state,
                     },
                 )
@@ -332,12 +345,15 @@ def create_app(controller: "Controller") -> FastAPI:
                 delivery_owner_transferred = True
 
         if delivery_request is None:
+            from core.message_priority import priority_for_delivery_intent
+
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority="p0" if delivery_intent == "send_now" else "p1",
+                priority=priority_for_delivery_intent(delivery_intent),
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
+                platform=submission_platform,
                 source="harness",
                 author="harness",
                 message_type="harness",
@@ -518,12 +534,19 @@ def create_app(controller: "Controller") -> FastAPI:
         from storage import workbench_sessions_service
 
         payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
         session_id = str(payload.get("session_id") or "").strip()
         delivery_id = str(payload.get("user_message_id") or "").strip()
+        if not delivery_id:
+            from core.workbench_media import file_attachments_from_specs
+
+            raw_text = payload.get("text")
+            if not (
+                isinstance(raw_text, str) and raw_text.strip()
+            ) and not file_attachments_from_specs(payload.get("files")):
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "text or files is required"},
+                )
         if not session_id or not delivery_id:
             return JSONResponse(
                 status_code=400,
@@ -548,6 +571,23 @@ def create_app(controller: "Controller") -> FastAPI:
                     reason="session_archived",
                 )
                 delivery = message_deliveries.get_delivery(conn, delivery_id)
+            delivery_payload = (
+                message_deliveries.delivery_payload(delivery)
+                if delivery is not None and delivery["session_id"] == session_id
+                else None
+            )
+            attachment_specs: list[dict[str, Any]] = []
+            if delivery_payload is not None:
+                from core.workbench_media import resolve_attachment_specs
+
+                attachment_specs = resolve_attachment_specs(
+                    conn,
+                    session_id=session_id,
+                    attachments=(delivery_payload.get("content") or {}).get(
+                        "attachments"
+                    )
+                    or [],
+                )
         if archived or delivery is None or delivery["session_id"] != session_id:
             return JSONResponse(
                 status_code=409,
@@ -571,20 +611,49 @@ def create_app(controller: "Controller") -> FastAPI:
                     "queued": delivery["state"] == "queued",
                 },
             )
+        # The HTTP request only wakes the durable owner. Prompt, provenance, and
+        # attachments always come from the reservation, never from a stale caller.
+        dispatch_payload = {
+            **payload,
+            "text": str(delivery.get("dispatch_text") or ""),
+            "files": attachment_specs,
+            "platform": delivery_payload.get("platform"),
+            "user_id": delivery_payload.get("author_id"),
+            "message_id": delivery_payload.get("native_message_id") or delivery_id,
+            "thread_id": delivery_payload.get("parent_native_message_id"),
+            "scope_id": delivery_payload.get("scope_id"),
+            "display_text": delivery_payload.get("text"),
+            "content": dict(delivery_payload.get("content") or {}),
+            "metadata": dict(delivery_payload.get("metadata") or {}),
+            "author_id": delivery_payload.get("author_id"),
+            "author_name": delivery_payload.get("author_name"),
+        }
+        try:
+            text, context = await _build_dispatch_payload(dispatch_payload)
+        except ValueError as err:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
         if context.platform_specific is None:
             context.platform_specific = {}
         context.platform_specific.update(
             {
                 "delivery_id": delivery_id,
-                "scope_id": payload.get("scope_id"),
-                "display_text": payload.get("display_text"),
-                "message_content": payload.get("content"),
-                "message_metadata": payload.get("metadata") or {},
-                "author_id": payload.get("author_id"),
-                "author_name": payload.get("author_name"),
+                "scope_id": dispatch_payload.get("scope_id"),
+                "display_text": dispatch_payload.get("display_text"),
+                "message_content": dispatch_payload.get("content"),
+                "message_metadata": dispatch_payload.get("metadata") or {},
+                "author_id": dispatch_payload.get("author_id"),
+                "author_name": dispatch_payload.get("author_name"),
             }
         )
-        submission = await manager.submit(session_id, context, text)
+        from core.message_priority import delivery_intent_for_priority
+
+        delivery_intent = delivery_intent_for_priority(str(delivery["priority"]))
+        submission = await manager.submit(
+            session_id,
+            context,
+            text,
+            delivery_intent=delivery_intent,
+        )
         with get_cached_sqlite_engine().connect() as conn:
             settled = message_deliveries.get_delivery(conn, delivery_id)
         return JSONResponse(
@@ -781,8 +850,8 @@ def create_app(controller: "Controller") -> FastAPI:
 
     # Expose the per-session turn gate to in-process callers (the scheduler)
     # WITHOUT going through the HTTP surface: ``ScheduledTaskService`` runs on the
-    # same loop and routes avibe scheduled / watch turns through
-    # ``submit_scheduled`` so they share the Chat path's queueing + lifecycle.
+    # same loop and routes persisted Session inputs through ``submit_scheduled``
+    # so they share the Chat path's durable priority and lifecycle authority.
     # ``in_flight`` is the SAME dict object as ``app.state.in_flight_dispatches``
     # (the cancel endpoint, turn-state, and the tests all read it), so a scheduled
     # run registered by ``_run_turn`` is Stoppable through ``/internal/cancel``.
@@ -1006,23 +1075,37 @@ def _build_session_context(
     message_id: Optional[str] = None,
     files: Optional[list] = None,
 ) -> MessageContext:
-    """Build the avibe ``MessageContext`` for a workbench session.
+    """Rebuild a Session's routing context from its durable scope and target.
 
     Shared by the dispatch endpoint and the cancel endpoint so a stop reuses
     the exact same session-routing context (chosen agent / model / effort,
     native session id, workdir) the turn ran under — that's what lets cancel
     reuse the IM ``/stop`` path to interrupt the right backend session.
-    Defaults to ``platform="avibe"``.
+    Workbench and IM Sessions use the same builder; Delivery hydration adds the
+    exact sender and native Message identity afterward.
     """
 
-    # ``agent_session_id`` is the agent_sessions PK; persist_agent_message reads
-    # it to attribute avibe agent replies to the right session (IM stamps it at
-    # session-resolve time). For avibe the dispatch session_id IS that PK.
-    platform_specific: dict[str, Any] = {
-        "workbench_session_id": session_id,
-        "agent_session_id": session_id,
-    }
+    from core.scheduled_tasks import resolve_session_id_target
+
+    target_info = resolve_session_id_target(session_id)
     session_row = _lookup_session(session_id)
+    resolved_platform = platform or target_info.session_key.platform or "avibe"
+    is_dm = target_info.session_key.scope_type == "user"
+    resolved_channel_id = channel_id or (
+        session_id
+        if resolved_platform == "avibe"
+        else target_info.session_key.scope_id
+    )
+    resolved_user_id = user_id or (
+        target_info.session_key.scope_id if is_dm else "workbench"
+    )
+    platform_specific: dict[str, Any] = {
+        "agent_session_id": session_id,
+        "platform": resolved_platform,
+        "is_dm": is_dm,
+    }
+    if resolved_platform == "avibe":
+        platform_specific["workbench_session_id"] = session_id
     if session_row is not None:
         target = {
             "id": session_row.get("id"),
@@ -1047,10 +1130,10 @@ def _build_session_context(
             platform_specific["vibe_agent_name"] = session_row["agent_name"]
 
     return MessageContext(
-        user_id=str(user_id or "workbench"),
-        channel_id=str(channel_id or session_id),
-        platform=platform or "avibe",
-        thread_id=thread_id,
+        user_id=str(resolved_user_id),
+        channel_id=str(resolved_channel_id),
+        platform=resolved_platform,
+        thread_id=thread_id or target_info.session_key.thread_id,
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,

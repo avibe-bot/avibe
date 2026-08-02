@@ -1054,8 +1054,10 @@ def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
         )
 
     controller = None
+    dispatched_text: list[str] = []
 
-    async def handler(context, _text):
+    async def handler(context, text):
+        dispatched_text.append(text)
         controller.mark_turn_complete(context)
 
     controller = _build_controller_double(handler)
@@ -1069,7 +1071,7 @@ def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     transport = httpx.ASGITransport(app=app)
     payload = {
         "session_id": session["id"],
-        "text": "Dispatch exactly once.",
+        "text": "stale caller text must not replace the reservation",
         "user_message_id": row["id"],
     }
 
@@ -1092,6 +1094,7 @@ def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     assert first.json()["delivery_state"] in {"claimed", "accepted"}
     assert replay.status_code == 202
     assert replay.json()["duplicate"] is True
+    assert dispatched_text == ["Dispatch exactly once."]
     controller.message_handler.handle_user_message.assert_awaited_once()
     with engine.connect() as conn:
         settled = messages_service.get_message(conn, row["id"], session_id=session["id"])
@@ -1404,7 +1407,7 @@ def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
         ),
     ],
 )
-def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
+def test_dispatch_async_defers_show_annotation_and_runs_it_after_active_turn(
     monkeypatch,
     tmp_path,
     comment,
@@ -1505,10 +1508,16 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
             assert queued.status_code == 202
             assert queued.json()["queued"] is True
             with engine.connect() as conn:
-                queued_rows = message_deliveries.list_queued(conn, session_id)
-                assert [row["id"] for row in queued_rows] == [annotation["delivery_id"]]
-                assert queued_rows[0]["text"] == annotation["transcript_text"]
-                assert queued_rows[0]["dispatch_text"] == enriched_dispatch_text
+                pending = message_deliveries.get_delivery(
+                    conn,
+                    annotation["delivery_id"],
+                )
+                assert pending is not None
+                assert pending["priority"] == "p1"
+                assert pending["state"] == "pending_steer"
+                payload = message_deliveries.delivery_payload(pending)
+                assert payload["text"] == annotation["transcript_text"]
+                assert pending["dispatch_text"] == enriched_dispatch_text
                 visible = messages_service.list_session_messages(
                     conn,
                     session_id=session_id,
@@ -3655,7 +3664,11 @@ def test_agent_run_send_now_idle_start_failure_is_reconciled_without_replay(
     with engine.connect() as conn:
         delivery = message_deliveries.get_delivery_by_dedupe(
             conn,
-            f"avibe:agent_run:{request.id}",
+            message_deliveries.native_dedupe_key(
+                "avibe",
+                f"agent_run:{request.id}",
+                scope_id=scope_id,
+            ),
         )
         assert delivery is not None
         assert delivery["state"] == "claimed"
@@ -4120,7 +4133,11 @@ def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tm
         with engine.connect() as conn:
             reserved = message_deliveries.get_delivery_by_dedupe(
                 conn,
-                "avibe:watch:def-watch:reserved-retry",
+                message_deliveries.native_dedupe_key(
+                    "avibe",
+                    "watch:def-watch:reserved-retry",
+                    scope_id=session["scope_id"],
+                ),
             )
             assert reserved is not None
             assert reserved["state"] == "reserved"

@@ -292,12 +292,20 @@ class ShowSessionEventStore:
                             content["attachments"] = attachments
                         metadata.update(_annotation_metadata(event_payload, anchor))
                     if requests_dispatch:
+                        from core.message_priority import (
+                            delivery_intent_for_trigger,
+                            priority_for_delivery_intent,
+                        )
+
+                        priority = priority_for_delivery_intent(
+                            delivery_intent_for_trigger("show_annotation")
+                        )
                         delivery_id = message_deliveries.new_delivery_id()
                         delivery_row = message_deliveries.insert_delivery(
                             conn,
                             delivery_id=delivery_id,
                             session_id=session_id,
-                            priority="p3",
+                            priority=priority,
                             state="reserved",
                             snapshot=message_deliveries.message_snapshot(
                                 scope_id=session["scope_id"],
@@ -321,7 +329,7 @@ class ShowSessionEventStore:
                             dedupe_key=f"show:{event_id}",
                             history_event={
                                 "kind": "admission",
-                                "priority": "p3",
+                                "priority": priority,
                                 "state": "reserved",
                             },
                         )

@@ -373,9 +373,9 @@ agent_events = Table(
 # Platform-agnostic chat message store. Every IM adapter (Slack, Discord,
 # Telegram, Lark, WeChat, Avibe/Web UI) writes user+agent turns here so the
 # workbench Inbox and per-session history can read from a single ORM
-# surface instead of round-tripping the platform's own API. ``platform`` +
-# ``native_message_id`` is unique when present so a duplicate webhook
-# delivery is a no-op upsert. ``read_at`` drives unread counts for the
+# surface instead of round-tripping the platform's own API. Native message
+# identity is scoped to its conversation because some platforms reuse message
+# ids across chats. ``read_at`` drives unread counts for the
 # Inbox; legacy IM platforms ignore it.
 messages = Table(
     "messages",
@@ -416,7 +416,21 @@ messages = Table(
     Column("updated_at", String, nullable=False),
     Column("delivered_at", String, nullable=True),
     Column("read_at", String, nullable=True),
-    UniqueConstraint("platform", "native_message_id", name="uq_messages_platform_native"),
+    Index(
+        "uq_messages_platform_scope_native",
+        "platform",
+        "scope_id",
+        "native_message_id",
+        unique=True,
+        sqlite_where=text("scope_id is not null and native_message_id is not null"),
+    ),
+    Index(
+        "uq_messages_platform_native_unscoped",
+        "platform",
+        "native_message_id",
+        unique=True,
+        sqlite_where=text("scope_id is null and native_message_id is not null"),
+    ),
     Index("ix_messages_session_created", "session_id", "created_at"),
     Index("ix_messages_session_created_id", "session_id", "created_at", "id"),
     Index("ix_messages_session_type_created_id", "session_id", "type", "created_at", "id"),
