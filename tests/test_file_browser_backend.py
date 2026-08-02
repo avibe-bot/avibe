@@ -4,6 +4,7 @@ import errno
 import io
 import logging
 import os
+import stat
 import sys
 import threading
 import time
@@ -389,13 +390,25 @@ def test_rename_no_replace_refuses_existing_directory_target(tmp_path, monkeypat
     assert dst.is_dir()
 
 
-def test_write_is_atomic_and_detects_mtime_conflict(tmp_path):
+def test_write_is_atomic_and_detects_mtime_conflict(tmp_path, monkeypatch):
     path = tmp_path / "doc.txt"
     first = fs.write_file(str(path), "first")
     assert path.read_text(encoding="utf-8") == "first"
 
-    fs.write_file(str(path), "second", expected_mtime=first["mtime"])
+    accepted_mtime_ns = path.stat().st_mtime_ns
+    real_fsync = fs.os.fsync
+
+    def fsync_at_accepted_mtime(fd: int) -> None:
+        real_fsync(fd)
+        current = os.fstat(fd)
+        if stat.S_ISREG(current.st_mode):
+            os.utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+
+    monkeypatch.setattr(fs.os, "fsync", fsync_at_accepted_mtime)
+
+    second = fs.write_file(str(path), "second", expected_mtime=first["mtime"])
     assert path.read_text(encoding="utf-8") == "second"
+    assert second["mtime"] != first["mtime"]
 
     with pytest.raises(FileBrowserError) as exc:
         fs.write_file(str(path), "stale", expected_mtime=first["mtime"])

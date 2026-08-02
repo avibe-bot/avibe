@@ -148,12 +148,23 @@ def normalize_agent_run_delivery_intent(value: Any) -> str:
     return normalized
 
 
-def _path_signature(path: Path) -> Optional[tuple[int, int, int]]:
+_PathSignature = tuple[int, int, int]
+_DirectoryEntrySignature = tuple[tuple[str, Optional[_PathSignature]], ...]
+
+
+def _path_signature(path: Path) -> Optional[_PathSignature]:
     try:
         stat = path.stat()
     except FileNotFoundError:
         return None
     return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _directory_entry_signature(path: Path) -> _DirectoryEntrySignature:
+    return tuple(
+        (entry.name, _path_signature(entry))
+        for entry in sorted(path.glob("*.json"), key=lambda candidate: candidate.name)
+    )
 
 
 def _run_file_state_for_status(status: Optional[str]) -> Optional[str]:
@@ -1000,7 +1011,7 @@ class ScheduledTaskStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
-        self._signature: Optional[tuple[int, int, int]] = None
+        self._signature: Optional[_PathSignature] = None
         self._tasks: Dict[str, ScheduledTask] = {}
         #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
         #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
@@ -1510,13 +1521,13 @@ class TaskExecutionStore:
         self.processing_dir.mkdir(parents=True, exist_ok=True)
         self.completed_dir.mkdir(parents=True, exist_ok=True)
 
-    def _state_signature(self) -> tuple[Optional[tuple[int, int, int]], ...] | None:
+    def _state_signature(self) -> tuple[_DirectoryEntrySignature, ...] | None:
         if self._sqlite is not None:
             return None
         return (
-            _path_signature(self.pending_dir),
-            _path_signature(self.processing_dir),
-            _path_signature(self.completed_dir),
+            _directory_entry_signature(self.pending_dir),
+            _directory_entry_signature(self.processing_dir),
+            _directory_entry_signature(self.completed_dir),
         )
 
     def maybe_reload(self) -> bool:

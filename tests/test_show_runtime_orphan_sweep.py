@@ -11,6 +11,8 @@ outliving the service that spawned it:
 from __future__ import annotations
 
 import asyncio
+import os
+import select
 import subprocess
 import sys
 import time
@@ -84,17 +86,27 @@ def _spawn_fake_orphan(workspace_root: str) -> subprocess.Popen:
     line is indistinguishable from a real orphan for the purposes of the sweep.
     ``start_new_session`` mirrors the real spawn (its own session/pgroup).
     """
+    ready_read, ready_write = os.pipe()
     argv = [
         sys.executable,
         "-c",
-        "import time; time.sleep(120)",
+        f"import os, time; os.write({ready_write}, b'1'); os.close({ready_write}); time.sleep(120)",
         "cli.js",
         "--workspace-root",
         workspace_root,
         "--fallback-delay-seconds",
         "8",
     ]
-    return subprocess.Popen(argv, start_new_session=True)
+    with os.fdopen(ready_read, "rb") as ready:
+        try:
+            proc = subprocess.Popen(argv, start_new_session=True, pass_fds=(ready_write,))
+        finally:
+            os.close(ready_write)
+        readable, _, _ = select.select([ready], [], [], 5)
+        if not readable or ready.read(1) != b"1":
+            _reap(proc)
+            raise AssertionError("fake orphan did not reach its executed child process")
+    return proc
 
 
 def _gone(pid: int, timeout: float = 5.0) -> bool:

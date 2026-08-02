@@ -527,6 +527,19 @@ def _mtime_seconds(stat_result: os.stat_result) -> float:
     return stat_result.st_mtime_ns / 1_000_000_000
 
 
+_MTIME_CONFLICT_TOLERANCE_SECONDS = 1e-6
+_MTIME_TOKEN_STEP_NS = 2_000
+
+
+def _advance_mtime_token(path: Path, expected_mtime: float) -> None:
+    stat_result = path.stat()
+    if abs(_mtime_seconds(stat_result) - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
+        return
+    expected_ns = round(float(expected_mtime) * 1_000_000_000)
+    next_mtime_ns = max(stat_result.st_mtime_ns, expected_ns) + _MTIME_TOKEN_STEP_NS
+    os.utime(path, ns=(stat_result.st_atime_ns, next_mtime_ns))
+
+
 def _extension(path: Path) -> str:
     suffix = path.suffix
     return suffix[1:].lower() if suffix.startswith(".") else suffix.lower()
@@ -718,7 +731,7 @@ def write_file(
             current_mtime = _mtime_seconds(target.stat())
         except FileNotFoundError as exc:
             raise ConflictError("conflict", "File was removed before save") from exc
-        if abs(current_mtime - float(expected_mtime)) > 1e-6:
+        if abs(current_mtime - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
             raise ConflictError("conflict", "File changed on disk")
 
     def _write() -> dict[str, Any]:
@@ -777,8 +790,9 @@ def write_file(
                         disk_mtime = _mtime_seconds(target.stat())
                     except FileNotFoundError as exc:
                         raise ConflictError("conflict", "File was removed before save") from exc
-                    if abs(disk_mtime - float(expected_mtime)) > 1e-6:
+                    if abs(disk_mtime - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
                         raise ConflictError("conflict", "File changed on disk")
+                    _advance_mtime_token(Path(temp_name), expected_mtime)
                 os.replace(temp_name, target)
                 temp_name = ""
                 _fsync_dir(parent)

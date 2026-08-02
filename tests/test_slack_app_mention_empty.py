@@ -1,8 +1,7 @@
-import importlib.util
+import importlib
 import sys
 import types
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -89,14 +88,7 @@ def _install_slack_stubs() -> None:
 
 
 def _load_local_slack_bot():
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-    sys.modules.pop("modules.im.slack", None)
-    spec = importlib.util.spec_from_file_location("modules.im.slack", repo_root / "modules" / "im" / "slack.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["modules.im.slack"] = module
-    spec.loader.exec_module(module)
+    module = importlib.import_module("modules.im.slack")
     return module.SlackBot
 
 
@@ -113,6 +105,14 @@ class _ResponseLike:
 
 
 class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
+    def test_loader_preserves_the_canonical_slack_module(self):
+        canonical = sys.modules["modules.im.slack"]
+
+        loaded_class = _load_local_slack_bot()
+
+        self.assertIs(sys.modules["modules.im.slack"], canonical)
+        self.assertIs(loaded_class, canonical.SlackBot)
+
     async def test_empty_app_mention_dispatches_empty_message_for_start_menu(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         received = {}
