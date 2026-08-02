@@ -53,9 +53,9 @@ Rules:
   run also posts to its IM scope, the callback still happens.
 - Callback sends all terminal outcomes for v1: success, failure, cancellation,
   and terminal errors. Do not add filtering flags yet.
-- The callback message should enter the Caller Session through the same
-  scheduled/watch-style turn path, so it queues behind any active turn instead
-  of interrupting it.
+- The callback message enters the Caller Session as P1: it steers the active
+  Turn when possible, starts when idle, and falls back to P3 after a definitive
+  steer refusal. It never interrupts the active Turn.
 - The callback message should trigger the Caller Session Agent as a normal
   follow-up message. It is not just passive transcript decoration.
 

@@ -281,6 +281,37 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_im_human_input_enters_delivery_owner_before_backend(self):
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        controller.settings_manager.sessions.try_record_processed_message = Mock()
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._admit_human_delivery = AsyncMock(return_value=True)
+        handler._prepend_message_metadata = AsyncMock(
+            return_value="[metadata]\nhello"
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        handler._admit_human_delivery.assert_awaited_once()
+        assert (
+            handler._admit_human_delivery.await_args.kwargs["dispatch_text"]
+            == "[metadata]\nhello"
+        )
+        controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
+        self.assertEqual(controller.agent_service.requests, [])
+
     async def test_pre_request_failure_uses_plain_terminal_output(self):
         controller = _StubController(
             platform="slack",

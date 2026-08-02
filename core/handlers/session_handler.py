@@ -1828,6 +1828,9 @@ class SessionHandler(BaseHandler):
         session_key: str,
         agent_name: str,
         session_anchor: str,
+        working_path: Optional[str] = None,
+        vibe_agent_id: Optional[str] = None,
+        vibe_agent_name: Optional[str] = None,
     ) -> Optional[str]:
         # avibe: pin the reserved workbench row id before any hidden-row creation
         # (mirrors BaseAgent.ensure_agent_session_id) so a pre-bind setup/query
@@ -1843,7 +1846,19 @@ class SessionHandler(BaseHandler):
                 return reserved_id
         ensure = getattr(self.sessions, "ensure_agent_session_id", None)
         if callable(ensure):
-            agent_session_id = ensure(session_key, agent_name, session_anchor)
+            ensure_kwargs: dict[str, Any] = {}
+            if working_path is not None:
+                ensure_kwargs["workdir"] = working_path
+            if vibe_agent_id is not None:
+                ensure_kwargs["vibe_agent_id"] = vibe_agent_id
+            if vibe_agent_name is not None:
+                ensure_kwargs["vibe_agent_name"] = vibe_agent_name
+            agent_session_id = ensure(
+                session_key,
+                agent_name,
+                session_anchor,
+                **ensure_kwargs,
+            )
         else:
             getter = getattr(self.sessions, "get_agent_session_row_id", None)
             agent_session_id = getter(session_key, session_anchor, agent_name) if callable(getter) else None

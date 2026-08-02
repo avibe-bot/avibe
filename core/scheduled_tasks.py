@@ -92,8 +92,13 @@ logger = logging.getLogger(__name__)
 
 AGENT_RUN_DELIVERY_STEER = "steer"
 AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
+AGENT_RUN_DELIVERY_QUEUE = "queue"
 AGENT_RUN_DELIVERY_INTENTS = frozenset(
-    {AGENT_RUN_DELIVERY_STEER, AGENT_RUN_DELIVERY_SEND_NOW}
+    {
+        AGENT_RUN_DELIVERY_STEER,
+        AGENT_RUN_DELIVERY_SEND_NOW,
+        AGENT_RUN_DELIVERY_QUEUE,
+    }
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
@@ -138,8 +143,6 @@ def normalize_agent_run_delivery_intent(value: Any) -> str:
     """Return the durable Agent Run delivery intent or reject an unknown value."""
 
     normalized = str(value or AGENT_RUN_DELIVERY_STEER).strip().lower()
-    if normalized == "queue":
-        normalized = AGENT_RUN_DELIVERY_STEER
     if normalized not in AGENT_RUN_DELIVERY_INTENTS:
         raise ValueError(f"unsupported Agent Run delivery intent: {normalized}")
     return normalized
@@ -754,6 +757,8 @@ def enqueue_session_callback(
         if existing is not None:
             return TaskExecutionRequest.from_dict(existing)
     target = resolve_session_id_target(session_id)
+    from core.message_priority import delivery_intent_for_trigger
+
     return request_store.enqueue_agent_run(
         session_id=session_id,
         session_key=target.session_key.to_key(),
@@ -767,6 +772,7 @@ def enqueue_session_callback(
         source_kind="callback",
         source_actor=source_actor,
         parent_run_id=parent_run_id,
+        delivery_intent=delivery_intent_for_trigger("callback"),
         metadata={"callback_parent_run_id": parent_run_id} if parent_run_id else {},
     )
 
@@ -5327,8 +5333,8 @@ class ScheduledTaskService:
                 complete_on_return=True,
                 delivery_outcome=delivery_outcome,
             )
-        if target.platform == "avibe" and session_id and gate is not None:
-            if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW:
+        if session_id and gate is not None:
+            if delivery_intent != AGENT_RUN_DELIVERY_STEER:
                 state = await gate.submit_scheduled(
                     session_id,
                     context,
@@ -6574,21 +6580,23 @@ class ScheduledTaskService:
         # ``context`` carries the avibe ``agent_session_id`` (set in
         # ``_build_context``). No dot bookkeeping here.
         #
-        # Route avibe runs through the per-session turn gate the Chat HTTP path
-        # uses, so a scheduled / watch / webhook / agent_run turn targeting an
-        # avibe session QUEUES behind an active Chat turn (never preempts it) and
-        # gets the in_flight + turn.start / turn.end lifecycle that makes the Chat
-        # page show the working indicator + Stop (Codex P2). The gate runs on the
-        # controller's loop and is published by ``internal_server.create_app``.
+        # Route every persisted Session target through the durable owner. The
+        # source policy decides whether this input queues or steers; the platform
+        # only controls native routing and outward delivery.
         # Returning ``None`` keeps ``ok = not error`` true (the run's own outcome
         # surfaces via the outbound terminal result + sidebar dot, exactly as the
-        # interactive Chat turn does). IM targets NEVER touch the gate — they keep
-        # the direct ``handle_scheduled_message`` path byte-for-byte.
+        # interactive Chat turn does).
         gate = getattr(self.controller, "session_turn_gate", None)
-        if target.platform == "avibe" and session_id and gate is not None:
+        if session_id and gate is not None:
+            from core.message_priority import delivery_intent_for_trigger
             from core.session_turns import TurnSubmissionResult
 
-            submission = await gate.submit_scheduled(session_id, context, prompt)
+            submission = await gate.submit_scheduled(
+                session_id,
+                context,
+                prompt,
+                delivery_intent=delivery_intent_for_trigger(trigger_kind),
+            )
             if isinstance(submission, TurnSubmissionResult):
                 result = TaskDispatchResult(
                     error=None,

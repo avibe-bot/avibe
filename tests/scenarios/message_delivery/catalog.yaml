@@ -58,10 +58,10 @@ scenarios:
     test: tests/test_scheduled_tasks.py::test_base_agent_terminal_markdown_example_persists_complete_run_and_callback
   - id: MESSAGE-DELIVERY-008
     name: Run callbacks use only terminal output while directed child Runs remain independent
-    status: partial
+    status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_scheduled_tasks.py::test_directed_run_and_callback_remain_distinct_while_target_busy
+    test: tests/test_scheduled_tasks.py::test_one_terminal_turn_fans_out_each_accepted_run_callback_once
   - id: MESSAGE-DELIVERY-009
     name: P1 terminal race produces one accepted attachment or one P3 fallback owner
     status: covered
@@ -128,6 +128,18 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_held_old_backlog_does_not_block_new_idle_p3
+  - id: MESSAGE-DELIVERY-201
+    name: Every approved producer class maps to one explicit delivery priority
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_message_priority_cutover.py::test_source_policy_has_one_explicit_delivery_intent
+  - id: MESSAGE-DELIVERY-202
+    name: Ordinary IM input remains outside transcript until exact P1 acceptance
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_im_p1_materializes_only_after_exact_native_acceptance
 next_priority:
-  - MESSAGE-DELIVERY-201
-  - MESSAGE-DELIVERY-202
+  - MESSAGE-DELIVERY-301
+  - MESSAGE-DELIVERY-302

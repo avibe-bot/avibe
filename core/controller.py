@@ -210,11 +210,10 @@ class Controller:
         # the ``active_turn_sinks`` property below delegate to it.
 
         # Per-session turn gate, published by ``core.internal_server.create_app``
-        # once the internal server is built on the loop. The scheduler routes
-        # avibe scheduled / watch turns through it so they QUEUE behind an active
-        # Chat turn (never preempt it) and get the Chat path's turn lifecycle
-        # (in_flight + turn.start / turn.end + Stop). ``None`` until the server is
-        # up — callers must treat its absence as "fall back to the direct path".
+        # once the internal server is built on the loop. Persisted Session inputs
+        # route through it so their source policy can queue, steer, or replace via
+        # the same durable lifecycle (in_flight + turn.start / turn.end + Stop).
+        # ``None`` until the server is up; callers then fall back to the direct path.
         self.session_turn_gate: Optional[Any] = None
 
         # Per-session turn owner (FSM). Created here so the controller owns it from

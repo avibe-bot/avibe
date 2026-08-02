@@ -159,6 +159,22 @@ def get_delivery_by_dedupe(conn: Connection, dedupe_key: str) -> dict[str, Any] 
     )
 
 
+def delivery_admission_context(delivery: dict[str, Any]) -> dict[str, Any]:
+    """Return immutable operational context captured by the admission event."""
+
+    try:
+        history = json.loads(str(delivery.get("delivery_history_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    events = history.get("events") if isinstance(history, dict) else None
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("kind") != "admission":
+            continue
+        context = event.get("context")
+        return dict(context) if isinstance(context, dict) else {}
+    return {}
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,

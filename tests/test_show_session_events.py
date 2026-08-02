@@ -1374,6 +1374,7 @@ def test_dispatching_show_event_reserves_delivery_outside_transcript(isolated_st
 
     assert dispatching["message"] is None
     assert dispatching["message_id"] is None
+    assert dispatching["delivery"]["priority"] == "p1"
     assert dispatching["delivery"]["state"] == "reserved"
     assert dispatching["delivery"]["author"] == messages_service.HARNESS_TYPE
     assert dispatching["delivery"]["source"] == messages_service.HARNESS_TYPE

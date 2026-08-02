@@ -403,6 +403,7 @@ class DeliveryRequest:
     display_text: str | None = None
     content_json: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+    admission_context: dict[str, Any] | None = None
     native_message_id: str | None = None
     parent_native_message_id: str | None = None
 
@@ -1130,8 +1131,15 @@ class SessionTurnManager:
         """Restore dispatch inputs only from the durable Delivery snapshot."""
 
         payload = delivery_store.delivery_payload(delivery)
-        context.message_id = str(delivery["id"])
         context.platform = str(payload.get("platform") or context.platform or "avibe")
+        native_message_id = str(payload.get("native_message_id") or "").strip()
+        context.message_id = (
+            native_message_id
+            if context.platform != "avibe" and native_message_id
+            else str(delivery["id"])
+        )
+        if payload.get("author_id"):
+            context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         context.platform_specific.update(
@@ -1144,6 +1152,9 @@ class SessionTurnManager:
                 "author_id": payload.get("author_id"),
                 "author_name": payload.get("author_name"),
                 "native_message_id": payload.get("native_message_id"),
+                "delivery_admission_context": (
+                    delivery_store.delivery_admission_context(delivery)
+                ),
             }
         )
         from core.workbench_media import (
@@ -1252,6 +1263,12 @@ class SessionTurnManager:
             request.platform,
             request.native_message_id,
         )
+        if dedupe_key:
+            existing = delivery_store.get_delivery_by_dedupe(conn, dedupe_key)
+            if existing is not None:
+                if existing["session_id"] != request.session_id:
+                    raise ValueError("Delivery dedupe identity belongs to another Session")
+                return existing
         return delivery_store.insert_delivery(
             conn,
             delivery_id=delivery_id,
@@ -1261,7 +1278,16 @@ class SessionTurnManager:
             snapshot=SessionTurnManager._delivery_snapshot(request),
             dispatch_text=str(request.content or ""),
             dedupe_key=dedupe_key,
-            history_event={"kind": "admission", "priority": priority, "state": state},
+            history_event={
+                "kind": "admission",
+                "priority": priority,
+                "state": state,
+                **(
+                    {"context": dict(request.admission_context)}
+                    if request.admission_context
+                    else {}
+                ),
+            },
         )
 
     def _active_identity(
@@ -2713,7 +2739,14 @@ class SessionTurnManager:
                         }
                     )
             else:
-                resolved.message_id = str(delivery["id"])
+                native_message_id = str(
+                    delivery_payload.get("native_message_id") or ""
+                ).strip()
+                resolved.message_id = (
+                    native_message_id
+                    if resolved.platform != "avibe" and native_message_id
+                    else str(delivery["id"])
+                )
             text = str(turn.get("dispatch_text") or "")
         except Exception:
             logger.exception(
@@ -4066,11 +4099,12 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        delivery_intent: Literal["queue", "send_now"] = "queue",
+        delivery_intent: Literal["queue", "send_now", "steer"] = "queue",
     ) -> TurnSubmissionResult:
         """Admit one caller through the durable Delivery owner."""
-        if delivery_intent not in {"queue", "send_now"}:
-            raise ValueError(f"unsupported delivery intent: {delivery_intent}")
+        from core.message_priority import priority_for_delivery_intent
+
+        priority = priority_for_delivery_intent(delivery_intent)
         if not (isinstance(session_id, str) and session_id):
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
@@ -4093,7 +4127,7 @@ class SessionTurnManager:
                 delivery_id = candidate
         request = DeliveryRequest(
             session_id=session_id,
-            priority="p0" if delivery_intent == "send_now" else "p3",
+            priority=priority,
             content=text,
             has_content=delivery_store.has_substantive_input(
                 text,
@@ -4101,7 +4135,7 @@ class SessionTurnManager:
             ),
             delivery_id=delivery_id,
             scope_id=str(spec.get("scope_id") or "").strip() or None,
-            platform="avibe",
+            platform=str(getattr(context, "platform", None) or "avibe"),
             source=source_value,
             author="harness" if source == SOURCE_SCHEDULED else "user",
             message_type="harness" if source == SOURCE_SCHEDULED else "user",
