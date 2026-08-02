@@ -452,6 +452,7 @@ export type ApiContextType = {
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
+  generateMemoryProfileReport: (language: MemoryProfileReportLanguage) => Promise<MemoryProfileReportResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
@@ -1690,14 +1691,46 @@ export type MemoryFailureLogResult =
 
 export type MemoryItemKind = 'profile' | 'episode' | 'fact';
 
+export type MemoryProfileExplicitInfo = {
+  description: string;
+  category: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfileTrait = {
+  description: string;
+  trait: string | null;
+  basis: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfile = {
+  summary: string | null;
+  explicit_info: MemoryProfileExplicitInfo[];
+  implicit_traits: MemoryProfileTrait[];
+  updated_at: string | null;
+};
+
 export type MemoryItem = {
   kind: MemoryItemKind;
   text: string;
   date: string | null;
+  profile?: MemoryProfile;
 };
 
 export type MemoryItemsResult =
   | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
+  | MemoryFailure;
+
+export type MemoryProfileReportLanguage = 'en' | 'zh';
+
+export type MemoryProfileReportResult =
+  | {
+      status: 'ok';
+      report: string | null;
+      source_profile_updated_at?: string | null;
+      report_warning?: 'empty' | 'unstructured';
+    }
   | MemoryFailure;
 
 export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
@@ -2738,6 +2771,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
+    generateMemoryProfileReport: (language) =>
+      postJson('/api/memory/profile/report', { language }, { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),

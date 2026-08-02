@@ -11,6 +11,8 @@ export type MemoryResource<T, A extends unknown[] = []> = {
   loading: boolean;
   /** At least one request has settled; `!loaded` is the first-paint state. */
   loaded: boolean;
+  /** Increments for every accepted payload, including an explicit refresh with identical data. */
+  revision: number;
   /**
    * The backend answered with the non-loopback forbidden body at least once.
    * Sticky: the page turns it into the "available on this device only" state,
@@ -62,6 +64,7 @@ export type MemoryResourceState<T> = {
   error: string | null;
   loading: boolean;
   loaded: boolean;
+  revision: number;
   forbidden: boolean;
 };
 
@@ -75,6 +78,7 @@ export const INITIAL_MEMORY_RESOURCE_STATE: MemoryResourceState<never> = {
   error: null,
   loading: false,
   loaded: false,
+  revision: 0,
   forbidden: false,
 };
 
@@ -94,7 +98,7 @@ export function memoryRequestSettled<T>(
 ): MemoryResourceState<T> {
   const applied: MemoryResourceState<T> =
     settlement.kind === 'ok'
-      ? { ...prev, data: settlement.value, error: null }
+      ? { ...prev, data: settlement.value, error: null, revision: prev.revision + 1 }
       : {
           ...prev,
           data: policy.resetDataOnError ? null : prev.data,
@@ -187,7 +191,7 @@ export function useMemoryResource<T, A extends unknown[] = []>({
   const reloadIfIdle = useCallback((...args: A) => run(args, true), [run]);
 
   const setData = useCallback((value: T) => {
-    setState((prev) => ({ ...prev, data: value, error: null }));
+    setState((prev) => ({ ...prev, data: value, error: null, revision: prev.revision + 1 }));
   }, []);
 
   return { ...state, reload, reloadIfIdle, setData };

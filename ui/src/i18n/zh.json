@@ -3546,6 +3546,19 @@
       "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
+      "summary": "概览",
+      "explicitInfo": "明确信息",
+      "implicitTraits": "偏好与模式",
+      "basis": "依据",
+      "evidence": "证据",
+      "generateReport": "生成画像报告",
+      "generatingReport": "正在生成报告…",
+      "reportTitle": "画像报告",
+      "reportFailed": "无法生成你的画像报告。",
+      "reportWarning": {
+        "empty": "目前没有可生成报告的画像。",
+        "unstructured": "该提供方画像暂时无法生成报告。"
+      },
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {

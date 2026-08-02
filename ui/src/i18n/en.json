@@ -3546,6 +3546,19 @@
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
+      "summary": "Summary",
+      "explicitInfo": "Known information",
+      "implicitTraits": "Preferences and patterns",
+      "basis": "Basis",
+      "evidence": "Evidence",
+      "generateReport": "Generate profile report",
+      "generatingReport": "Generating report…",
+      "reportTitle": "Profile report",
+      "reportFailed": "Couldn't generate your profile report.",
+      "reportWarning": {
+        "empty": "There is no profile available to turn into a report yet.",
+        "unstructured": "This provider profile can't be turned into a report yet."
+      },
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
