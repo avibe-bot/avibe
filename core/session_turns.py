@@ -4082,6 +4082,18 @@ class SessionTurnManager:
         elif owner["state"] == "starting":
             await self._start_persisted_turn(str(owner["id"]))
 
+    @staticmethod
+    def _should_resume_durable_owner(
+        terminal_result: dict[str, Any],
+        *,
+        settled_by: str,
+    ) -> bool:
+        """Re-read ownership when terminal settlement returned a successor or Stop
+        may already have activated one in a competing terminal path."""
+        return bool(terminal_result.get("successor_turn_id")) or (
+            settled_by == SETTLED_BY_STOPPED
+        )
+
     async def _resume_post_terminal(self, session_id: str) -> None:
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -4388,9 +4400,9 @@ class SessionTurnManager:
                             await self._resume_post_terminal(session_id)
                         else:
                             await self.flush_queue(session_id)
-                    elif durable_turn_registered and (
-                        durable_terminal_result.get("successor_turn_id")
-                        or settled_by == SETTLED_BY_STOPPED
+                    elif durable_turn_registered and self._should_resume_durable_owner(
+                        durable_terminal_result,
+                        settled_by=settled_by,
                     ):
                         # Stop may persist the old Turn's terminal snapshot before
                         # releasing this runner. In that ordering the terminal CAS
@@ -5366,6 +5378,9 @@ class SessionTurnManager:
             finally:
                 sink = self.get_turn_sink(session_key)
                 settled_by = str((sink or {}).get("settled_by") or "")
+                effective_settled_by = (
+                    SETTLED_BY_STOPPED if cancelled else settled_by
+                )
                 terminal_evidence = (sink or {}).get("terminal_evidence")
                 self.pop_turn_sink(session_key, done)
                 current = self.in_flight.get(session_id)
@@ -5386,16 +5401,10 @@ class SessionTurnManager:
                             turn_token,
                             self._durable_terminal_outcome(
                                 is_error=terminal_is_error,
-                                settled_by=(
-                                    SETTLED_BY_STOPPED
-                                    if cancelled
-                                    else settled_by or None
-                                ),
+                                settled_by=effective_settled_by or None,
                             ),
                             settled_by=(
-                                SETTLED_BY_STOPPED
-                                if cancelled
-                                else settled_by or SETTLED_BY_TERMINAL_RESULT
+                                effective_settled_by or SETTLED_BY_TERMINAL_RESULT
                             ),
                             evidence_kind="agent_initiated_terminal",
                             evidence=(
@@ -5423,8 +5432,9 @@ class SessionTurnManager:
                             await self.flush_queue(session_id)
                     except Exception:
                         logger.debug("agent-initiated turn: queue resume failed", exc_info=True)
-                elif durable_turn_registered and durable_terminal_result.get(
-                    "successor_turn_id"
+                elif durable_turn_registered and self._should_resume_durable_owner(
+                    durable_terminal_result,
+                    settled_by=effective_settled_by,
                 ):
                     await self._resume_durable_session(session_id)
 

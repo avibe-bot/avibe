@@ -1641,6 +1641,60 @@ def test_stopped_runner_starts_successor_already_activated_by_terminal_result(
     assert started == [successor_id]
 
 
+@pytest.mark.parametrize("cancel_holder", [False, True])
+def test_stopped_agent_initiated_holder_starts_already_activated_successor(
+    managers, monkeypatch, cancel_holder
+) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, list[str]]:
+        context = _context()
+        assert manager.register_agent_initiated_turn(context) is True
+        await asyncio.sleep(0)
+        turn_id = str(context.platform_specific["turn_token"])
+
+        admitted = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p0", content="successor"),
+            context=_context(),
+        )
+        assert admitted.state == "waiting_terminal"
+        with engine.connect() as conn:
+            old = delivery_store.get_turn(conn, turn_id)
+        assert old is not None
+        successor_id = str(old["control_successor_turn_id"])
+
+        manager._finish_durable_terminal_result(
+            "ses_fsm",
+            turn_id,
+            is_error=False,
+            settled_by=SETTLED_BY_STOPPED,
+        )
+        with engine.connect() as conn:
+            successor = delivery_store.get_turn(conn, successor_id)
+        assert successor is not None and successor["state"] == "starting"
+
+        started: list[str] = []
+
+        async def record_start(candidate: str, **_kwargs) -> bool:
+            started.append(candidate)
+            return True
+
+        monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
+        holder = manager.in_flight["ses_fsm"].task
+        sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+        assert sink is not None
+        if cancel_holder:
+            holder.cancel()
+        else:
+            sink["settled_by"] = SETTLED_BY_STOPPED
+            sink["done_event"].set()
+        await asyncio.gather(holder, return_exceptions=True)
+        return successor_id, started
+
+    successor_id, started = asyncio.run(run())
+    assert started == [successor_id]
+
+
 def test_empty_p0_supersedes_in_flight_content_replacement(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
