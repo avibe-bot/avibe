@@ -1179,6 +1179,11 @@ class SessionTurnManager:
             has_attachments=bool(specs),
         )
 
+    @staticmethod
+    def _delivery_has_attachment_references(delivery: dict[str, Any]) -> bool:
+        payload = delivery_store.delivery_payload(delivery)
+        return bool((payload.get("content") or {}).get("attachments"))
+
     def _hydrate_delivery_batch_context(
         self,
         context: "MessageContext",
@@ -1552,7 +1557,23 @@ class SessionTurnManager:
                 and identity is not None
                 and identity[0] == observed_id
             )
-            if same_active:
+            if current is not None and self._delivery_has_attachment_references(delivery):
+                claimed = delivery_store.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"priority": "p3", "state": "queued"},
+                    history_event={
+                        "kind": "steer",
+                        "turn_id": str(current["id"]),
+                        "outcome": "attachments_require_new_turn",
+                    },
+                )
+                if claimed is None:
+                    raise RuntimeError("attachment P1 fallback claim lost")
+                delivery = claimed
+            elif same_active:
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
                 turn_id = observed_id
@@ -1730,6 +1751,19 @@ class SessionTurnManager:
                     dispatch_text=dispatch_text,
                 )
                 claimed_rows = claimed["deliveries"]
+            elif any(
+                self._delivery_has_attachment_references(row)
+                for row in delivery_rows
+            ):
+                if not delivery_store.set_queue_hold(conn, session_id, held=False):
+                    raise RuntimeError("attachment queue promotion lost its Session hold CAS")
+                return DeliveryResult(
+                    delivery_id,
+                    None,
+                    "queued",
+                    str(current_turn["id"]),
+                    reason="attachments_wait_for_new_turn",
+                )
             elif (
                 observed_turn_id
                 and str(current_turn["id"]) == observed_turn_id
@@ -2653,6 +2687,7 @@ class SessionTurnManager:
                 retire_unwritten_delivery_ids=invalid_delivery_ids,
             )
             if terminal.get("changed"):
+                self._publish_queue_update(str(turn["session_id"]))
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
         try:
@@ -3404,6 +3439,15 @@ class SessionTurnManager:
                 bus.publish("inbox.session.updated", inbox_row)
         except Exception:
             logger.exception("accepted Delivery publish failed for %s", delivery_id)
+
+    @staticmethod
+    def _publish_queue_update(session_id: str) -> None:
+        try:
+            from core.inbox_events import bus
+
+            bus.publish("queue.updated", {"session_id": session_id})
+        except Exception:
+            logger.exception("Delivery queue update publish failed for %s", session_id)
 
     def _publish_terminal_inbox_update(self, session_id: str) -> None:
         """Publish the Inbox projection only after terminal ownership commits."""

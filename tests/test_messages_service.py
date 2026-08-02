@@ -1268,6 +1268,51 @@ def test_remove_queued_cancels_only_its_exact_agent_run(isolated_state):
         ] == [deliveries[1]["id"]]
 
 
+def test_bulk_delivery_run_cancellation_defers_updated_rows(isolated_state):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import (
+        attach_agent_run_delivery_in_connection,
+        cancel_agent_runs_for_retired_deliveries_in_connection,
+        pop_deferred_run_event_rows_from_connection,
+    )
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_bulk_cancel")
+    store = TaskExecutionStore()
+    request = store.enqueue_agent_run(
+        session_id="ses_bulk_cancel",
+        message="retired delegated work",
+        agent_name="worker",
+    )
+    with engine.begin() as conn:
+        delivery = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_bulk_cancel",
+            author="harness",
+            source="harness",
+            text=request.message or "",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            request.id,
+            session_id="ses_bulk_cancel",
+            delivery_id=str(delivery["id"]),
+        )
+        assert cancel_agent_runs_for_retired_deliveries_in_connection(
+            conn,
+            session_id="ses_bulk_cancel",
+            delivery_ids=[str(delivery["id"])],
+        ) == [request.id]
+        deferred = pop_deferred_run_event_rows_from_connection(conn)
+
+    assert [(row["id"], row["status"]) for row in deferred] == [
+        (request.id, "canceled")
+    ]
+
+
 def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
     isolated_state,
 ):

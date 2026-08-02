@@ -2658,10 +2658,14 @@ def test_fifo_claim_retires_invalid_attachment_head_and_starts_next(
 def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
     managers,
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    from core.inbox_events import bus
     from storage import media_service
 
     manager, _other, engine, _engine_b, starts = managers
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(bus, "publish", lambda event, payload: published.append((event, payload)))
     attachment = tmp_path / "expires-after-claim.txt"
     attachment.write_text("expires after claim", encoding="utf-8")
     delivery_id = delivery_store.new_delivery_id()
@@ -2715,6 +2719,7 @@ def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
     assert turn is not None
     assert turn["state"] == "terminal"
     assert turn["terminal_evidence_kind"] == "invalid_input_before_native_dispatch"
+    assert ("queue.updated", {"session_id": "ses_fsm"}) in published
 
 
 def test_final_dispatch_gate_preserves_valid_batch_members(
@@ -3605,6 +3610,104 @@ def test_stale_send_now_does_not_release_the_queue_hold(managers) -> None:
         current = delivery_store.active_turn(conn, "ses_fsm")
     assert current is not None and current["id"] == replacement_turn_id
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+
+
+def test_send_now_keeps_attachment_head_for_the_next_turn(
+    managers,
+    tmp_path: Path,
+) -> None:
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager, text="active turn"))
+    attachment = tmp_path / "queued-input.txt"
+    attachment.write_text("queued attachment", encoding="utf-8")
+    with engine.begin() as conn:
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            kind="file",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="text/plain",
+        )
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="review this file",
+                content_json={"attachments": [{"token": token}]},
+            ),
+            context=_context(),
+        )
+    )
+    with engine.begin() as conn:
+        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    promoted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content=None,
+                expected_delivery_id=str(queued.delivery_id),
+            ),
+            context=_context(),
+        )
+    )
+
+    assert promoted.state == "queued"
+    assert promoted.reason == "attachments_wait_for_new_turn"
+    manager._steer.assert_not_awaited()
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    with engine.connect() as conn:
+        assert not delivery_store.queue_is_held(conn, "ses_fsm")
+
+
+def test_content_p1_with_attachment_queues_behind_an_active_turn(
+    managers,
+    tmp_path: Path,
+) -> None:
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager, text="active turn"))
+    attachment = tmp_path / "priority-input.txt"
+    attachment.write_text("priority attachment", encoding="utf-8")
+    with engine.begin() as conn:
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            kind="file",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="text/plain",
+        )
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content="review this first",
+                content_json={"attachments": [{"token": token}]},
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admitted.state == "queued"
+    manager._steer.assert_not_awaited()
+    row = _row(engine, str(admitted.delivery_id))
+    assert row["priority"] == "p3"
+    assert row["state"] == "queued"
 
 
 def test_archive_keeps_unknown_and_materializes_late_positive_evidence(managers) -> None:

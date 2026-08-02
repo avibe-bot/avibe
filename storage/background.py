@@ -2030,6 +2030,7 @@ def cancel_agent_runs_for_retired_deliveries_in_connection(
     )
     if transition.rowcount != len(run_ids):
         raise RuntimeError("Delivery retirement lost an exact Agent Run transition")
+    _defer_run_ids_updated_from_connection(conn, run_ids)
     return run_ids
 
 
