@@ -13,6 +13,7 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
+from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.reply_enhancer import strip_silent_blocks
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -164,6 +165,7 @@ class ClaudeAgent(BaseAgent):
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
 
+            mark_backend_dispatch_attempted(request.context)
             await client.query(message, session_id=runtime_session_key)
             if (
                 runtime_session_key not in self.receiver_tasks

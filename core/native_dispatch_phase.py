@@ -41,3 +41,9 @@ def backend_dispatch_attempted(context: Any) -> Optional[bool]:
     if phase == DISPATCH_PHASE_ATTEMPTING:
         return True
     return None
+
+
+def mark_backend_dispatch_attempted(context: Any) -> None:
+    """Record the boundary immediately before an adapter's native write."""
+
+    set_dispatch_phase(context, DISPATCH_PHASE_ATTEMPTING)

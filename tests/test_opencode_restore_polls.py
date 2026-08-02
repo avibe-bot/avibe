@@ -51,6 +51,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             self.messages_error = None
             self.status = {"type": "busy"}
             self.status_error = None
+            self.mark_run_active_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
@@ -60,6 +61,8 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return list(self.messages)
 
         async def mark_run_active(self, session_id):
+            if self.mark_run_active_error is not None:
+                raise self.mark_run_active_error
             return None
 
         async def mark_run_inactive(self, session_id):
@@ -135,6 +138,53 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._test_prompt_calls = prompt_calls
     agent._test_server = server
     return agent, status_writes, removed, request_sessions
+
+
+def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-restore-failed",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.mark_run_active_error = RuntimeError("registration failed")
+    failed: list[tuple[str, str, str]] = []
+
+    def _fail(turn_id: str, *, backend: str, reason: str) -> bool:
+        failed.append((turn_id, backend, reason))
+        return True
+
+    agent.controller.session_turns.fail_restored_backend_turn = _fail
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert failed == [("turn-restore-failed", "opencode", "poll_registration_failed")]
+    assert removed == ["oc-1"]
+    assert agent._active_requests == {}
+
+
+def test_restore_registration_failure_keeps_poll_if_terminal_write_fails() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    poll.processing_indicator = {
+        "platform": "avibe",
+        "opencode_native_steering": {
+            "target_session_id": "ses_wb",
+            "logical_turn_id": "turn-restore-failed",
+        },
+    }
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    agent._test_server.mark_run_active_error = RuntimeError("registration failed")
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("terminal write failed")
+
+    agent.controller.session_turns.fail_restored_backend_turn = _fail
+
+    assert asyncio.run(agent.restore_active_polls()) == 0
+    assert removed == []
+    assert agent._active_requests == {}
 
 
 def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:

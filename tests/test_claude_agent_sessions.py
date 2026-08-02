@@ -8,6 +8,11 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
@@ -864,8 +869,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController()
         controller.emit_agent_message = AsyncMock()
         runtime_key = "wechat_o9:reviewer:/tmp/work"
+        request_context = SimpleNamespace(platform_specific={})
+        set_dispatch_phase(request_context, DISPATCH_PHASE_PREWRITE)
+
+        async def _query_at_native_boundary(*_args, **_kwargs):
+            self.assertIs(backend_dispatch_attempted(request_context), True)
+
         client = SimpleNamespace(
-            query=AsyncMock(),
+            query=AsyncMock(side_effect=_query_at_native_boundary),
             _vibe_runtime_base_session_id="wechat_o9:reviewer",
             _vibe_runtime_session_key=runtime_key,
         )
@@ -884,7 +895,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._receive_messages = AsyncMock()
 
         request = SimpleNamespace(
-            context=SimpleNamespace(),
+            context=request_context,
             message="hello",
             working_path="/tmp/work",
             base_session_id="wechat_o9",

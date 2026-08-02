@@ -6,6 +6,8 @@ from pathlib import Path
 from config.v2_settings import ChannelSettings, SettingsState
 from core import chat_discovery
 from storage.migrations import run_migrations
+from storage import message_deliveries as delivery_store
+from storage.workbench_sessions_service import create_session
 from storage.settings_service import SQLiteSettingsService
 
 
@@ -1042,6 +1044,57 @@ def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path)
     finally:
         engine.dispose()
     assert kept is not None
+
+
+def test_delete_scope_with_pending_delivery_dismisses_instead_of_deleting(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "pending", name="Pending", db_path=db_path)
+    scope_id = chat_discovery.make_scope_id(
+        "telegram",
+        chat_discovery.CHANNEL_SCOPE_TYPE,
+        "pending",
+    )
+
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.begin() as conn:
+            session = create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                title="Pending delivery",
+            )
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id="delivery-pending-scope",
+                session_id=str(session["id"]),
+                priority="p3",
+                state="queued",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=str(session["id"]),
+                    platform="telegram",
+                    author="user",
+                    source="user",
+                    text="queued input",
+                ),
+                dispatch_text="queued input",
+            )
+    finally:
+        engine.dispose()
+
+    assert chat_discovery.delete_scope("telegram", "pending", db_path=db_path) == {
+        "removed": False,
+        "dismissed": True,
+    }
+
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.connect() as conn:
+            assert delivery_store.get_delivery(conn, "delivery-pending-scope") is not None
+    finally:
+        engine.dispose()
 
 
 def test_remember_chat_clears_dismissed_on_passive_rediscovery(tmp_path: Path) -> None:

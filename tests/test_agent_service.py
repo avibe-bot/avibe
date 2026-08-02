@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.message_output import terminal_turn_output
-from core.native_dispatch_phase import backend_dispatch_attempted
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    backend_dispatch_attempted,
+    set_dispatch_phase,
+)
 from core.session_activities import SessionActivityRegistry
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -138,6 +142,7 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
         service.register(agent)
 
         request = _request("hi")
+        set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
         await service.handle_message("claude", request)
 
         # on_running (gate confirmed) must precede the bubble hooks, which in turn
@@ -149,7 +154,7 @@ def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
             "begin_status_bubble",
             "handle_message",
         ]
-        assert backend_dispatch_attempted(request.context) is True
+        assert backend_dispatch_attempted(request.context) is False
 
     asyncio.run(_run())
 

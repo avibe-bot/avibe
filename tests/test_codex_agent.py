@@ -2793,6 +2793,12 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
 
     async def test_start_turn_uses_sandbox_policy_object(self):
+        from core.native_dispatch_phase import (
+            DISPATCH_PHASE_PREWRITE,
+            backend_dispatch_attempted,
+            set_dispatch_phase,
+        )
+
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(get_codex_overrides=Mock(return_value=(None, None, None)))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -2810,8 +2816,15 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             subagent_name=None,
             subagent_model=None,
             subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}))
+        set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
+
+        async def _send_at_native_boundary(*_args, **_kwargs):
+            self.assertIs(backend_dispatch_attempted(request.context), True)
+            return {"turn": {"id": "turn-1"}}
+
+        transport = SimpleNamespace(send_request=AsyncMock(side_effect=_send_at_native_boundary))
 
         thread_id = await agent._start_turn(transport, request, "thread-1")
 
@@ -2826,7 +2839,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 "sandboxPolicy": {"type": "dangerFullAccess"},
             },
         )
-        agent.controller.get_codex_overrides.assert_not_called()
+        agent.controller.get_codex_overrides.assert_called_once_with(request.context)
 
     async def test_start_turn_writes_current_caller_env_script_for_reused_threads(self):
         agent = object.__new__(CodexAgent)

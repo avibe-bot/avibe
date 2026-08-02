@@ -20,6 +20,7 @@ import aiohttp
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
+from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.resource_governance import governor_from_controller
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -866,6 +867,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 session_key=request.session_key,
             )
+            mark_backend_dispatch_attempted(request.context)
             native_start_phase = "may_have_written"
             await server.prompt_async(
                 session_id=session_id,
@@ -1416,7 +1418,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         restored_count = 0
         stale_poll_ids = []
-        restoration_ready_events: list[asyncio.Event] = []
+        restoration_results: list[
+            tuple[asyncio.Future[bool], asyncio.Event, Any]
+        ] = []
 
         for session_id, poll_info in active_polls.items():
             poll_platform = restored_platform_from_poll_info(poll_info)
@@ -1546,16 +1550,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
             )
 
-            restoration_ready = asyncio.Event()
+            restoration_ready = asyncio.get_running_loop().create_future()
+            restoration_published = asyncio.Event()
             task = asyncio.create_task(
                 self._run_restored_poll_loop_with_tracking(
                     poll_info,
                     reconcile_initial_status=status_unknown,
                     reconcile_after_message_ids=reconcile_after_message_ids,
                     restoration_ready=restoration_ready,
+                    restoration_published=restoration_published,
                 )
             )
-            restoration_ready_events.append(restoration_ready)
+            restoration_results.append(
+                (restoration_ready, restoration_published, poll_info)
+            )
             self._active_requests[poll_info.base_session_id] = task
             self._session_manager.set_request_session(
                 poll_info.base_session_id,
@@ -1563,19 +1571,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 poll_info.working_path,
                 restored_session_key_from_poll_info(poll_info),
             )
-            # Publish the restored status only after both native registries are
-            # complete.  The controller's global restoration barrier may now expose
-            # this exact logical/native owner to durable reconciliation.
-            workbench_session_id = self._workbench_session_id_for_poll(poll_info)
-            if workbench_session_id:
-                self.controller.session_turns.restore_running(workbench_session_id)
-            restored_count += 1
-
         for session_id in stale_poll_ids:
             self.sessions.remove_active_poll(session_id)
 
-        if restoration_ready_events:
-            await asyncio.gather(*(event.wait() for event in restoration_ready_events))
+        if restoration_results:
+            registered = await asyncio.gather(
+                *(future for future, _, _ in restoration_results)
+            )
+            for is_registered, (_, published, poll_info) in zip(
+                registered,
+                restoration_results,
+            ):
+                try:
+                    if not is_registered:
+                        continue
+                    workbench_session_id = self._workbench_session_id_for_poll(poll_info)
+                    if workbench_session_id:
+                        self.controller.session_turns.restore_running(workbench_session_id)
+                    restored_count += 1
+                finally:
+                    published.set()
 
         if restored_count > 0:
             logger.info(f"Restored {restored_count} active poll loop(s)")
@@ -1590,11 +1605,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         *,
         reconcile_initial_status: bool = False,
         reconcile_after_message_ids: set[str] | None = None,
-        restoration_ready: asyncio.Event | None = None,
+        restoration_ready: asyncio.Future[bool] | None = None,
+        restoration_published: asyncio.Event | None = None,
     ) -> None:
         current_task = asyncio.current_task()
         steer_state = None
         server = None
+        restoration_registered = False
         try:
             server = await self._get_server()
             await server.mark_run_active(poll_info.opencode_session_id)
@@ -1659,8 +1676,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     server,
                     steer_state,
                 )
-            if restoration_ready is not None:
-                restoration_ready.set()
+            restoration_registered = True
+            if restoration_ready is not None and not restoration_ready.done():
+                restoration_ready.set_result(True)
+            if restoration_published is not None:
+                await restoration_published.wait()
             delivery_recovery_complete = getattr(
                 self.controller,
                 "_delivery_recovery_complete",
@@ -1669,9 +1689,43 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if delivery_recovery_complete is not None:
                 await delivery_recovery_complete.wait()
             await self._poll_loop.run_restored_poll_loop(poll_info)
+        except Exception as err:
+            if restoration_registered:
+                raise
+            else:
+                steering_snapshot = (
+                    poll_info.processing_indicator.get(_STEERING_SNAPSHOT_KEY)
+                    if isinstance(poll_info.processing_indicator, dict)
+                    else None
+                )
+                logical_turn_id = (
+                    str(steering_snapshot.get("logical_turn_id") or "").strip()
+                    if isinstance(steering_snapshot, dict)
+                    else ""
+                )
+                terminal_persisted = False
+                if logical_turn_id:
+                    try:
+                        terminal_persisted = bool(
+                            self.controller.session_turns.fail_restored_backend_turn(
+                                logical_turn_id,
+                                backend="opencode",
+                                reason="poll_registration_failed",
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to terminalize OpenCode Turn=%s after poll registration error",
+                            logical_turn_id,
+                        )
+                if terminal_persisted:
+                    self.sessions.remove_active_poll(poll_info.opencode_session_id)
+                logger.error(
+                    "OpenCode poll registration failed for session=%s: %s",
+                    poll_info.opencode_session_id,
+                    err,
+                )
         finally:
-            if restoration_ready is not None:
-                restoration_ready.set()
             if current_task is not None:
                 self._restored_poll_servers.pop(current_task, None)
             if steer_state is not None:
@@ -1680,10 +1734,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 if self._steering_states.get(poll_info.base_session_id) is steer_state:
                     self._steering_states.pop(poll_info.base_session_id, None)
             if server is not None:
-                await server.mark_run_inactive(poll_info.opencode_session_id)
+                try:
+                    await server.mark_run_inactive(poll_info.opencode_session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear restored OpenCode run marker for session=%s",
+                        poll_info.opencode_session_id,
+                    )
             if self._active_requests.get(poll_info.base_session_id) is current_task:
                 self._active_requests.pop(poll_info.base_session_id, None)
                 self._session_manager.pop_request_session(poll_info.base_session_id)
+            if restoration_ready is not None and not restoration_ready.done():
+                restoration_ready.set_result(False)
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:
         """Prepare message with file attachment information.

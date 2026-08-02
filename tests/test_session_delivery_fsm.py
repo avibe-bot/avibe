@@ -2109,6 +2109,58 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     assert status == "failed"
 
 
+def test_restore_registration_failure_terminalizes_exact_start(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="restore registration failure",
+            ),
+            dispatch_text="restore registration failure",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="opencode",
+            deliveries=[delivery],
+            dispatch_text="restore registration failure",
+        )
+
+    assert manager.fail_restored_backend_turn(
+        turn_id,
+        backend="opencode",
+        reason="poll_registration_failed",
+    )
+
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+        status = conn.execute(
+            select(agent_sessions.c.agent_status).where(
+                agent_sessions.c.id == "ses_fsm"
+            )
+        ).scalar_one()
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "failed"
+    assert turn["terminal_evidence_kind"] == "backend_restore_failed"
+    assert status == "failed"
+
+
 def test_materialized_message_preserves_submission_and_acceptance_times(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     turn_id, _context_value = asyncio.run(_activate(manager, text="ordered input"))

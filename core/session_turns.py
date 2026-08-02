@@ -4528,6 +4528,31 @@ class SessionTurnManager:
             )
         return released
 
+    def fail_restored_backend_turn(
+        self,
+        turn_id: str,
+        *,
+        backend: str,
+        reason: str,
+    ) -> bool:
+        """Terminal-fail an exact durable owner whose backend restore cannot register."""
+
+        terminal = self._terminalize_durable_turn(
+            turn_id,
+            "failed",
+            settled_by=SETTLED_BY_BACKEND_REFRESH,
+            evidence_kind="backend_restore_failed",
+            evidence={"backend": backend, "reason": reason},
+            abandon_unaccepted_start=True,
+        )
+        if terminal.get("changed"):
+            logger.error(
+                "Failed restored %s Turn=%s after backend registration error",
+                backend,
+                turn_id,
+            )
+        return bool(terminal.get("changed"))
+
     async def cancel(self, session_id: str) -> dict:
         """Persist one empty-P0 control request against the exact active Turn."""
         turn = self.in_flight.get(session_id)

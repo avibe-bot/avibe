@@ -6,10 +6,6 @@ from typing import Any, Callable, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
 from core.message_output import terminal_output_for, terminal_turn_output
-from core.native_dispatch_phase import (
-    DISPATCH_PHASE_ATTEMPTING,
-    set_dispatch_phase,
-)
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -263,7 +259,6 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
-            set_dispatch_phase(request.context, DISPATCH_PHASE_ATTEMPTING)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a
