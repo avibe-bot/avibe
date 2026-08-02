@@ -1702,7 +1702,7 @@ def retire_for_run_cancellation(
     )
 
 
-def retire_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
+def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
     """Retire only states proven not written; ambiguity remains reconcilable."""
 
     rows = [
@@ -1714,6 +1714,7 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
         ).mappings()
     ]
     retired = 0
+    retired_delivery_ids: list[str] = []
     for row in rows:
         if cas_delivery(
             conn,
@@ -1737,7 +1738,11 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, int]:
             history_event={"kind": "retire", "reason": "session_archive"},
         ) is not None:
             retired += 1
-    return {"retired": retired}
+            retired_delivery_ids.append(str(row["id"]))
+    return {
+        "retired": retired,
+        "delivery_ids": retired_delivery_ids,
+    }
 
 
 def set_queue_hold(conn: Connection, session_id: str, *, held: bool) -> bool:

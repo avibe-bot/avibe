@@ -65,13 +65,21 @@ def _insert_def(conn, *, def_id: str, session_id: str, definition_type: str, del
     )
 
 
-def _insert_run(conn, *, run_id: str, session_id: str, status: str) -> None:
+def _insert_run(
+    conn,
+    *,
+    run_id: str,
+    session_id: str,
+    status: str,
+    delivery_id: str | None = None,
+) -> None:
     conn.execute(
         agent_runs.insert().values(
             id=run_id,
             run_type="agent",
             status=status,
             session_id=session_id,
+            delivery_id=delivery_id,
             cancel_requested=0,
             created_at=NOW,
             updated_at=NOW,
@@ -346,8 +354,20 @@ def test_archive_clears_queued_and_pending_messages(tmp_path: Path) -> None:
 
     engine = create_sqlite_engine(db_path)
     with engine.begin() as conn:
-        message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q1")
+        queued_run_delivery = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id=sid,
+            text="q1",
+        )
         message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=sid, text="q2")
+        _insert_run(
+            conn,
+            run_id="run_delivery_archive",
+            session_id=sid,
+            status="running",
+            delivery_id=str(queued_run_delivery["id"]),
+        )
         # A send mid-dispatch reserved its row as ``pending``; the user also has a
         # saved composer draft.
         message_deliveries.insert_delivery(
@@ -380,6 +400,12 @@ def test_archive_clears_queued_and_pending_messages(tmp_path: Path) -> None:
         assert message_deliveries.list_queued(conn, sid) == []
         assert _pending_ids(conn, sid) == []
         assert not message_deliveries.get_draft(conn, sid)
+        archived_run = conn.execute(
+            select(agent_runs).where(agent_runs.c.id == "run_delivery_archive")
+        ).mappings().one()
+        assert archived_run["status"] == "canceled"
+        assert archived_run["cancel_requested"] == 1
+        assert archived_run["completed_at"] is not None
 
 
 def test_archived_show_page_cannot_be_republished(monkeypatch, tmp_path: Path) -> None:

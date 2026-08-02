@@ -871,6 +871,31 @@ class SessionTurnManager:
             parent_native_message_id=payload.get("parent_native_message_id"),
         )
 
+    def _committed_delivery_result(
+        self,
+        delivery_id: str,
+        *,
+        attempted_turn_id: str | None = None,
+    ) -> DeliveryResult:
+        """Return the exact post-transition Delivery instead of a cached claim."""
+
+        with self._sqlite_engine().connect() as conn:
+            delivery = delivery_store.get_delivery(conn, delivery_id)
+        if delivery is None:
+            raise RuntimeError(f"durable Delivery disappeared after transition: {delivery_id}")
+        turn_id = str(
+            delivery.get("turn_id")
+            or delivery.get("current_target_turn_id")
+            or attempted_turn_id
+            or ""
+        ).strip()
+        return DeliveryResult(
+            delivery_id,
+            str(delivery.get("message_id") or "").strip() or None,
+            str(delivery["state"]),
+            turn_id or None,
+        )
+
     @staticmethod
     def _claim_start_batch(
         conn: Connection,
@@ -1272,6 +1297,10 @@ class SessionTurnManager:
             )
         if turn_id:
             await self._start_persisted_turn(turn_id, context=start_context)
+            return self._committed_delivery_result(
+                str(delivery["id"]),
+                attempted_turn_id=turn_id,
+            )
         return DeliveryResult(
             str(delivery["id"]),
             str(delivery.get("message_id") or "") or None,
@@ -1412,6 +1441,10 @@ class SessionTurnManager:
 
         if delivery["state"] == "claimed" and turn_id:
             await self._start_persisted_turn(turn_id, context=context)
+            return self._committed_delivery_result(
+                str(delivery["id"]),
+                attempted_turn_id=turn_id,
+            )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
             receipt = await self._attempt_steer(
                 steer_backend,
@@ -1504,7 +1537,6 @@ class SessionTurnManager:
             if any(row is None or row["state"] != "queued" for row in segment):
                 return DeliveryResult(delivery_id, None, "refused", reason="stale_head")
             delivery_rows = [row for row in segment if row is not None]
-            delivery_store.set_queue_hold(conn, session_id, held=False)
             current_turn = delivery_store.active_turn(conn, session_id)
             if current_turn is None:
                 turn_id = delivery_store.new_turn_id()
@@ -1551,12 +1583,18 @@ class SessionTurnManager:
                     "refused",
                     reason="stale_turn",
                 )
+            if not claimed_rows:
+                return DeliveryResult(delivery_id, None, "refused", reason="claim_lost")
+            if not delivery_store.set_queue_hold(conn, session_id, held=False):
+                raise RuntimeError("successful queue promotion lost its Session hold CAS")
 
-        if not claimed_rows:
-            return DeliveryResult(delivery_id, None, "refused", reason="claim_lost")
         leader = claimed_rows[0]
         if leader["state"] == "claimed" and turn_id:
             await self._start_persisted_turn(turn_id)
+            return self._committed_delivery_result(
+                delivery_id,
+                attempted_turn_id=turn_id,
+            )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
             receipt = await self._attempt_steer(
                 steer_backend,
@@ -1769,6 +1807,10 @@ class SessionTurnManager:
             )
         if start_turn_id:
             await self._start_persisted_turn(start_turn_id, context=context)
+            return self._committed_delivery_result(
+                delivery_id,
+                attempted_turn_id=start_turn_id,
+            )
         return DeliveryResult(
             delivery_id,
             None,
@@ -1946,7 +1988,10 @@ class SessionTurnManager:
 
         if current is None and successor_id:
             await self._start_persisted_turn(successor_id, context=context)
-            return DeliveryResult(delivery_id, None, "claimed", successor_id)
+            return self._committed_delivery_result(
+                str(delivery_id),
+                attempted_turn_id=successor_id,
+            )
         if joined:
             return DeliveryResult(
                 delivery_id,

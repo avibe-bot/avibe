@@ -36,6 +36,7 @@ from storage.session_reclaim import (
     RECLAIM_DELETE,
     reclaim_bound_definitions,
     reconcile_explicit_overrides,
+    retire_session_delivery_owners,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
@@ -1186,7 +1187,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
         vault_grants,
     )
 
-    delivery_store.retire_for_archive(conn, session_id)
+    retire_session_delivery_owners(conn, session_id)
     delivery_store.set_draft(conn, session_id, None)
     revoked_vault_grant_rows = [
         dict(row)

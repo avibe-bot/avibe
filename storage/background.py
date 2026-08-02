@@ -1984,6 +1984,55 @@ def cancel_queued_agent_run_delivery_in_connection(
     return True
 
 
+def cancel_agent_runs_for_retired_deliveries_in_connection(
+    conn: Any,
+    *,
+    session_id: str,
+    delivery_ids: list[str],
+) -> list[str]:
+    """Terminal-cancel every nonterminal Run whose exact Delivery was retired."""
+
+    normalized_session_id = str(session_id or "").strip()
+    normalized_delivery_ids = list(
+        dict.fromkeys(
+            str(delivery_id or "").strip()
+            for delivery_id in delivery_ids
+            if str(delivery_id or "").strip()
+        )
+    )
+    if not normalized_session_id or not normalized_delivery_ids:
+        return []
+    active_statuses = _status_query_values("queued") + _status_query_values("running")
+    run_ids = list(
+        conn.execute(
+            select(agent_runs.c.id)
+            .where(agent_runs.c.session_id == normalized_session_id)
+            .where(agent_runs.c.delivery_id.in_(normalized_delivery_ids))
+            .where(agent_runs.c.status.in_(active_statuses))
+        ).scalars()
+    )
+    if not run_ids:
+        return []
+    now = _utc_now_iso()
+    transition = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id.in_(run_ids))
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(agent_runs.c.delivery_id.in_(normalized_delivery_ids))
+        .where(agent_runs.c.status.in_(active_statuses))
+        .values(
+            status="canceled",
+            cancel_requested=1,
+            cancel_requested_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    if transition.rowcount != len(run_ids):
+        raise RuntimeError("archive lost an exact Delivery-owned Agent Run transition")
+    return run_ids
+
+
 def record_agent_run_delivery_outcome_in_connection(
     conn: Any,
     run_id: str,

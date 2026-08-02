@@ -48,6 +48,7 @@ from storage.session_reclaim import (
     reclaim_bound_definitions,
     reclaim_ledger_transaction,
     reconcile_explicit_overrides,
+    retire_session_delivery_owners,
 )
 from storage.settings_service import make_scope_id, upsert_scope
 from storage import message_deliveries as delivery_store
@@ -2250,7 +2251,7 @@ def _delete_agent_session_rows(
                 .where(agent_runs.c.status.in_(("pending", "queued")))
                 .values(status="canceled", completed_at=now, updated_at=now)
             )
-            delivery_store.retire_for_archive(conn, session_id)
+            retire_session_delivery_owners(conn, session_id)
             delivery_store.set_draft(conn, session_id, None)
             retained = conn.execute(
                 update(agent_sessions)

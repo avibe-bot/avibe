@@ -123,6 +123,29 @@ def current_reclaim_ledger() -> list[dict[str, Any]] | None:
     return _teardown_ledger.get()
 
 
+def retire_session_delivery_owners(
+    conn: Connection,
+    session_id: str,
+) -> dict[str, Any]:
+    """Retire proven-unwritten Deliveries and cancel their Runs atomically."""
+
+    from storage import message_deliveries as delivery_store
+    from storage.background import (
+        cancel_agent_runs_for_retired_deliveries_in_connection,
+    )
+
+    retired = delivery_store.retire_for_archive(conn, session_id)
+    canceled_run_ids = cancel_agent_runs_for_retired_deliveries_in_connection(
+        conn,
+        session_id=session_id,
+        delivery_ids=list(retired.get("delivery_ids") or []),
+    )
+    return {
+        **retired,
+        "canceled_run_ids": canceled_run_ids,
+    }
+
+
 @contextmanager
 def reclaim_ledger_transaction() -> Iterator[None]:
     """Scope ledger entries to a transaction; discard them if it does not commit.

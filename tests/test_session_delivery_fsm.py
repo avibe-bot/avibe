@@ -14,6 +14,7 @@ from sqlalchemy import select, update
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
+    SOURCE_SCHEDULED,
     DeliveryRequest,
     SessionTurnManager,
     Turn,
@@ -1618,6 +1619,40 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
 
 
+def test_submit_reports_the_requeued_state_after_prewrite_failure(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    published: list[tuple[str, dict]] = []
+
+    def fail_before_dispatch(*_args, **_kwargs):
+        raise OSError("attachment lookup failed before dispatch")
+
+    manager._hydrate_delivery_context = fail_before_dispatch
+    monkeypatch.setattr(
+        "core.inbox_events.bus.publish",
+        lambda event, payload: published.append((event, payload)),
+    )
+
+    result = asyncio.run(
+        manager.submit(
+            "ses_fsm",
+            _context(),
+            "retry exact scheduled work",
+            source=SOURCE_SCHEDULED,
+        )
+    )
+
+    assert result.route == "enqueued"
+    assert result.queue_persisted is True
+    assert starts == []
+    rows = _rows(engine)
+    assert len(rows) == 1
+    assert rows[0]["state"] == "queued"
+    assert ("queue.updated", {"session_id": "ses_fsm"}) in published
+
+
 def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     delivery_id = delivery_store.new_delivery_id()
@@ -2458,6 +2493,50 @@ def test_repeated_refusal_then_acceptance_preserves_attempt_history(managers) ->
     ]
     assert row["turn_id"] == t2
     assert row["current_attempt_id"] is None
+
+
+def test_stale_send_now_does_not_release_the_queue_hold(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    old_turn_id, _ = asyncio.run(_activate(manager, text="old turn"))
+    queued = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="held backlog"),
+            context=_context(),
+        )
+    )
+    with engine.connect() as conn:
+        old_turn = delivery_store.get_turn(conn, old_turn_id)
+    assert old_turn is not None
+    with engine.begin() as conn:
+        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+    assert asyncio.run(manager.terminalize_turn(old_turn_id))
+    replacement_turn_id, replacement_context = asyncio.run(
+        _activate(manager, text="replacement turn", priority="p1")
+    )
+    manager._observe_active_delivery_turn = lambda _session_id: (
+        old_turn,
+        (old_turn_id, f"native-{old_turn_id}"),
+    )
+
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p1",
+                content=None,
+                expected_delivery_id=str(queued.delivery_id),
+            ),
+            context=replacement_context,
+        )
+    )
+
+    assert result.state == "refused"
+    assert result.reason == "stale_turn"
+    with engine.connect() as conn:
+        assert delivery_store.queue_is_held(conn, "ses_fsm")
+        current = delivery_store.active_turn(conn, "ses_fsm")
+    assert current is not None and current["id"] == replacement_turn_id
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
 
 
 def test_archive_keeps_unknown_and_materializes_late_positive_evidence(managers) -> None:
