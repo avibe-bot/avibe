@@ -2550,6 +2550,44 @@ class ScheduledTaskService:
         lang = str(getattr(config, "language", "en") or "en")
         return i18n_t(key, lang, **kwargs)
 
+    def _execution_interruption(self, execution_id: str) -> str:
+        return self._inflight_cancellation_causes.get(
+            execution_id,
+            SETTLED_BY_INTERRUPTED,
+        )
+
+    def _retire_interrupted_one_shot(
+        self,
+        task: ScheduledTask,
+        *,
+        execution_id: str,
+        disable_one_shot: bool,
+        interruption: Optional[str] = None,
+    ) -> None:
+        """Consume a scheduler-owned one-shot whose claimed fire was interrupted."""
+
+        if not disable_one_shot or task.schedule_type != "at":
+            return
+        interruption = interruption or self._execution_interruption(execution_id)
+        error = self._t(SETTLEMENT_I18N_KEYS[interruption])
+        try:
+            recorded = self.store.mark_task_result(
+                task.id,
+                error=error,
+                disable_one_shot=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to retire interrupted one-shot task %s",
+                task.id,
+            )
+            return
+        if not recorded:
+            logger.warning(
+                "Interrupted one-shot task %s changed before it could be retired",
+                task.id,
+            )
+
     @staticmethod
     def _activity_run_ids(activity: Any) -> list[str]:
         run_ids: list[str] = []
@@ -4890,6 +4928,15 @@ class ScheduledTaskService:
         if task.cancelled():
             if request is not None:
                 try:
+                    if request.source_kind == "scheduler" and request.task_id:
+                        definition = self.store.get_task(request.task_id)
+                        if definition is not None and definition.enabled:
+                            self._retire_interrupted_one_shot(
+                                definition,
+                                execution_id=request.id,
+                                disable_one_shot=True,
+                                interruption=interruption,
+                            )
                     current = self.request_store.get_run(request.id)
                     if not current or current.get("status") not in TERMINAL_RUN_STATUSES:
                         self.request_store.complete(
@@ -5022,10 +5069,7 @@ class ScheduledTaskService:
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
-            interrupt_reason = self._inflight_cancellation_causes.get(
-                request.id,
-                SETTLED_BY_INTERRUPTED,
-            )
+            interrupt_reason = self._execution_interruption(request.id)
             error = self._t(SETTLEMENT_I18N_KEYS[interrupt_reason])
             should_complete = True
             settled_out_of_band = False
@@ -5191,6 +5235,11 @@ class ScheduledTaskService:
             else:
                 error = dispatch_result
         except asyncio.CancelledError:
+            self._retire_interrupted_one_shot(
+                task,
+                execution_id=execution_id,
+                disable_one_shot=disable_one_shot,
+            )
             self.reconcile_jobs()
             raise
         except UnresolvableSessionTarget as exc:
@@ -5234,6 +5283,11 @@ class ScheduledTaskService:
                     else:
                         error = dispatch_result
                 except asyncio.CancelledError:
+                    self._retire_interrupted_one_shot(
+                        task,
+                        execution_id=execution_id,
+                        disable_one_shot=disable_one_shot,
+                    )
                     self.reconcile_jobs()
                     raise
                 except Exception as retry_exc:

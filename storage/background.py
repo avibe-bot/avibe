@@ -1212,6 +1212,7 @@ RUN_INTERRUPTION_REASONS = frozenset(
     {
         "stopped",
         "backend_refresh",
+        "interrupted",
         "evicted",
         "restarted",
         "lifetime_timeout",

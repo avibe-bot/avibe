@@ -1717,11 +1717,20 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
 ) -> None:
     """HFR-101: shutdown records the interruption and restart never repeats the prompt."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
-    request_store = TaskExecutionStore()
-    request = request_store.enqueue_hook_send(
+    task_path = tmp_path / "scheduled_tasks.json"
+    store = ScheduledTaskStore(task_path)
+    task = store.add_task(
         session_key="slack::channel::C123",
         prompt="interrupted prompt",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
     )
     successor = request_store.enqueue_hook_send(
         session_key="slack::channel::C123",
@@ -1767,13 +1776,19 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
     queued = request_store.get_run(successor.id)
     assert queued is not None
     assert queued["status"] == "queued"
+    retired = ScheduledTaskStore(task_path).get_task(task.id)
+    assert retired is not None
+    assert retired.enabled is False
+    assert retired.last_error == settled["error"]
 
     restarted_store = TaskExecutionStore()
     restarted = ScheduledTaskService(
         controller=controller,
-        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        store=ScheduledTaskStore(task_path),
         request_store=restarted_store,
     )
+    restarted.reconcile_jobs()
+    assert restarted.scheduler.get_job(task.id) is None
 
     async def _restart_and_drain_successor() -> None:
         await restarted._drain_requests()
@@ -1798,14 +1813,24 @@ def test_service_stop_settles_claim_cancelled_before_execution_starts(
 ) -> None:
     """A claimed Run is settled even if teardown wins before its coroutine starts."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = TaskExecutionStore()
-    request = request_store.enqueue_hook_send(
+    task_path = tmp_path / "scheduled_tasks.json"
+    store = ScheduledTaskStore(task_path)
+    task = store.add_task(
         session_key="slack::channel::C123",
         prompt="never dispatched",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
     )
     service = ScheduledTaskService(
         controller=SimpleNamespace(platform_settings_managers={}),
-        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        store=store,
         request_store=request_store,
     )
 
@@ -1821,6 +1846,9 @@ def test_service_stop_settles_claim_cancelled_before_execution_starts(
     assert settled is not None
     assert settled["status"] == "failed"
     assert settled["metadata"]["interrupt_reason"] == "restarted"
+    retired = ScheduledTaskStore(task_path).get_task(task.id)
+    assert retired is not None
+    assert retired.enabled is False
 
 
 def test_service_stop_preserves_terminal_run_that_won_the_race(
