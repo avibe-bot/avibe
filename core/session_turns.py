@@ -2564,7 +2564,7 @@ class SessionTurnManager:
             return False
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
-        invalid_input_before_dispatch = False
+        invalid_delivery_ids: set[str] = set()
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             latest = delivery_store.get_turn(conn, turn_id)
@@ -2588,10 +2588,11 @@ class SessionTurnManager:
             deliveries = fresh_deliveries
             delivery = fresh_delivery
             archived_before_dispatch = session_status != "active"
-            invalid_input_before_dispatch = any(
-                not self._has_resolvable_delivery_input(conn, row)
+            invalid_delivery_ids = {
+                str(row["id"])
                 for row in deliveries
-            )
+                if not self._has_resolvable_delivery_input(conn, row)
+            }
             run_ids = list(
                 dict.fromkeys(
                     run_id
@@ -2630,27 +2631,29 @@ class SessionTurnManager:
             )
             return False
         if run_terminal_before_dispatch:
-            self._terminalize_durable_turn(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="agent_run_terminal",
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
+            if terminal.get("changed"):
+                await self._resume_post_terminal(str(turn["session_id"]))
             return False
-        if invalid_input_before_dispatch:
+        if invalid_delivery_ids:
             logger.error(
                 "durable Turn=%s lost its resolvable input before native dispatch",
                 turn_id,
             )
-            self._terminalize_durable_turn(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
-                "failed",
+                "not_written",
                 settled_by="invalid_input",
                 evidence_kind="invalid_input_before_native_dispatch",
-                abandon_unaccepted_start=True,
-                abandoned_start_outcome="invalid_input",
+                retire_unwritten_delivery_ids=invalid_delivery_ids,
             )
-            await self.drain_delivery_queue(str(turn["session_id"]))
+            if terminal.get("changed"):
+                await self._resume_post_terminal(str(turn["session_id"]))
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
@@ -2778,7 +2781,7 @@ class SessionTurnManager:
         expected_start_attempt_id: str | None = None,
         replay_unknown_start: bool = False,
         abandon_unaccepted_start: bool = False,
-        abandoned_start_outcome: str = "backend_refresh_failed",
+        retire_unwritten_delivery_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -2795,6 +2798,7 @@ class SessionTurnManager:
         replayed_unknown_start = False
         unknown_start_exhausted = False
         unknown_start_run_ids: list[str] = []
+        forced_retire_ids = retire_unwritten_delivery_ids or set()
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
             turn = delivery_store.get_turn(conn, turn_id)
@@ -2859,7 +2863,7 @@ class SessionTurnManager:
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
                                 expected_states=("claimed",),
-                                outcome=abandoned_start_outcome,
+                                outcome="backend_refresh_failed",
                                 next_state="retired",
                                 receipt={"kind": evidence_kind, **(evidence or {})},
                             )
@@ -2924,8 +2928,13 @@ class SessionTurnManager:
                                 )
                     elif outcome == "not_written":
                         for initial in initial_batch:
+                            retire_unwritten = str(initial["id"]) in forced_retire_ids
                             owned_run_terminal = False
-                            run_ids = delivery_store.agent_run_ids_for_delivery(conn, initial)
+                            run_ids = (
+                                []
+                                if retire_unwritten
+                                else delivery_store.agent_run_ids_for_delivery(conn, initial)
+                            )
                             if run_ids:
                                 run_rows = list(
                                     conn.execute(
@@ -2946,17 +2955,15 @@ class SessionTurnManager:
                                         for row in run_rows
                                     )
                                 )
-                            next_state = (
-                                "queued"
-                                if session_status == "active" and not owned_run_terminal
-                                else "retired"
-                            )
+                            next_state = "queued"
+                            if retire_unwritten or session_status != "active" or owned_run_terminal:
+                                next_state = "retired"
                             definitive = self._record_definitive_delivery_attempt(
                                 conn,
                                 str(initial["id"]),
                                 expected_version=int(initial["version"]),
                                 expected_states=("claimed",),
-                                outcome="not_written",
+                                outcome=("invalid_input" if retire_unwritten else "not_written"),
                                 next_state=next_state,
                                 next_priority="p3",
                                 receipt={"kind": evidence_kind, **(evidence or {})},

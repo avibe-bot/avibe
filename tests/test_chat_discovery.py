@@ -1097,6 +1097,56 @@ def test_delete_scope_with_pending_delivery_dismisses_instead_of_deleting(tmp_pa
         engine.dispose()
 
 
+def test_delete_scope_ignores_retired_delivery_snapshots(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "retired", name="Retired", db_path=db_path)
+    scope_id = chat_discovery.make_scope_id(
+        "telegram",
+        chat_discovery.CHANNEL_SCOPE_TYPE,
+        "retired",
+    )
+
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.begin() as conn:
+            session = create_session(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                title="Retired delivery",
+            )
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id="delivery-retired-scope",
+                session_id=str(session["id"]),
+                priority="p3",
+                state="queued",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=str(session["id"]),
+                    platform="telegram",
+                    author="user",
+                    source="user",
+                    text="retired input",
+                ),
+                dispatch_text="retired input",
+            )
+            assert delivery_store.retire_not_written(
+                conn,
+                str(session["id"]),
+                "delivery-retired-scope",
+                reason="test_retirement",
+            )
+    finally:
+        engine.dispose()
+
+    assert chat_discovery.delete_scope("telegram", "retired", db_path=db_path) == {
+        "removed": True,
+        "dismissed": False,
+    }
+
+
 def test_remember_chat_clears_dismissed_on_passive_rediscovery(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 

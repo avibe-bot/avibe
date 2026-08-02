@@ -1931,6 +1931,7 @@ def test_submit_reports_the_requeued_state_after_prewrite_failure(
 def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     delivery_id = delivery_store.new_delivery_id()
+    surviving_delivery_id = delivery_store.new_delivery_id()
     turn_id = delivery_store.new_turn_id()
     attempt_id = delivery_store.new_attempt_id()
     run_id = "run-canceled-after-start-claim"
@@ -1968,13 +1969,30 @@ def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(manage
             ),
             dispatch_text="must not run",
         )
+        surviving = delivery_store.insert_delivery(
+            conn,
+            delivery_id=surviving_delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="surviving batch input",
+            ),
+            dispatch_text="surviving batch input",
+        )
         delivery_store.claim_start_batch(
             conn,
             turn_id=turn_id,
             session_id="ses_fsm",
             backend="codex",
-            deliveries=[delivery],
-            dispatch_text="must not run",
+            deliveries=[delivery, surviving],
+            dispatch_text="must not run\n\nsurviving batch input",
             attempt_id=attempt_id,
         )
         conn.execute(
@@ -1984,8 +2002,11 @@ def test_terminal_agent_run_wins_after_start_claim_before_native_dispatch(manage
         )
 
     assert asyncio.run(manager._start_persisted_turn(turn_id, context=_context())) is False
-    assert starts == []
+    assert [text for _turn_id, text in starts] == ["surviving batch input"]
     assert _row(engine, delivery_id)["state"] == "retired"
+    surviving_after = _row(engine, surviving_delivery_id)
+    assert surviving_after["state"] == "claimed"
+    assert surviving_after["turn_id"] != turn_id
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
     assert turn is not None and turn["terminal_outcome"] == "not_written"
@@ -2694,6 +2715,85 @@ def test_final_dispatch_gate_retires_batch_when_attachment_expires_after_claim(
     assert turn is not None
     assert turn["state"] == "terminal"
     assert turn["terminal_evidence_kind"] == "invalid_input_before_native_dispatch"
+
+
+def test_final_dispatch_gate_preserves_valid_batch_members(
+    managers,
+    tmp_path: Path,
+) -> None:
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, starts = managers
+    attachment = tmp_path / "expired-batch-member.txt"
+    attachment.write_text("expires after claim", encoding="utf-8")
+    valid_id = delivery_store.new_delivery_id()
+    invalid_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_fsm",
+            kind="file",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="text/plain",
+        )
+        valid = delivery_store.insert_delivery(
+            conn,
+            delivery_id=valid_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="surviving text",
+            ),
+            dispatch_text="surviving text",
+        )
+        invalid = delivery_store.insert_delivery(
+            conn,
+            delivery_id=invalid_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="",
+                content={"attachments": [{"token": token}]},
+            ),
+            dispatch_text="",
+        )
+        turn_id = delivery_store.new_turn_id()
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="codex",
+            deliveries=[valid, invalid],
+            dispatch_text="surviving text",
+        )
+        conn.execute(
+            update(media_objects)
+            .where(media_objects.c.token == token)
+            .values(revoked_at="2026-08-01T00:00:01Z")
+        )
+
+    assert not asyncio.run(manager._start_persisted_turn(turn_id))
+
+    assert _row(engine, invalid_id)["state"] == "retired"
+    valid_after = _row(engine, valid_id)
+    assert valid_after["state"] == "claimed"
+    assert valid_after["turn_id"] != turn_id
+    assert [text for _turn_id, text in starts] == ["surviving text"]
 
 
 def test_empty_reserved_submission_is_retired_without_native_dispatch(managers) -> None:

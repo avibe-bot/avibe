@@ -957,7 +957,7 @@ def _scope_has_history(conn: Connection, scope_id: str) -> bool:
     """True if deleting the scope would destroy or invalidate retained history.
 
     ``messages``, ``agent_events`` and ``media_objects`` cascade-delete with the
-    scope row. Unaccepted Deliveries retain the prospective Message scope inside
+    scope row. Nonterminal Deliveries retain the prospective Message scope inside
     their immutable snapshot and need that Scope to survive materialization.
     """
     for table in (messages, agent_events, media_objects):
@@ -972,6 +972,7 @@ def _scope_has_history(conn: Connection, scope_id: str) -> bool:
             func.json_extract(message_deliveries.c.snapshot_json, "$.scope_id")
             == scope_id
         )
+        .where(message_deliveries.c.state != "retired")
         .limit(1)
     ).first()
     return delivery_exists is not None
