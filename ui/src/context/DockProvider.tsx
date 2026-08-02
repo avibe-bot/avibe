@@ -1,13 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from './ApiContext';
+import { DockContext, type DockValue } from './DockContext';
 import {
   BUILTIN_DOCK_IDS,
   reconcileDock,
   seedDefaultDock,
   showDockId,
   type DockDoc,
-  type DockPin,
 } from './dockDoc';
 import { useLatestRef } from '@/lib/useLatestRef';
 
@@ -15,31 +15,6 @@ import { useLatestRef } from '@/lib/useLatestRef';
 // knows (see dockDoc.ts for the shape and the reconcile rules), and exposes optimistic
 // install (pin) / uninstall (unpin) / dock / undock / reorder actions that roll back if
 // the server rejects the write.
-export interface DockValue {
-  /** Reconciled docked subset (built-in ids + `show:<id>` pins), in user order. */
-  order: string[];
-  /** Installed AI pages (built-ins are implicitly installed, not listed here). */
-  pins: DockPin[];
-  /** Whether a session's Show Page is installed (pinned). */
-  isPinned: (sessionId: string) => boolean;
-  /** Whether a Dock id (built-in or `show:<id>`) is currently in the Dock. */
-  isDocked: (dockId: string) => boolean;
-  /** The pin record for a session, or null. */
-  pinFor: (sessionId: string) => DockPin | null;
-  /** Install a session's Show Page — also docks it (optimistic; idempotent). */
-  pin: (sessionId: string) => Promise<void>;
-  /** Uninstall a session's Show Page — removes it from install + Dock (optimistic; idempotent). */
-  unpin: (sessionId: string) => Promise<void>;
-  /** Add a known tile (built-in or installed page) to the Dock (optimistic; idempotent). */
-  dock: (dockId: string) => Promise<void>;
-  /** Remove a tile from the Dock, keeping it installed (optimistic; idempotent). */
-  undock: (dockId: string) => Promise<void>;
-  /** Persist a new resident-tile order (optimistic; rolls back if rejected). */
-  setOrder: (order: string[]) => Promise<void>;
-}
-
-const DockContext = createContext<DockValue | null>(null);
-
 // Every-built-in-docked default so the Dock renders its resident tiles
 // immediately (no flicker) before the server document loads. Matches the
 // server's fresh-instance seed; reconcileDock takes over once the GET resolves.
@@ -200,9 +175,3 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   return <DockContext.Provider value={value}>{children}</DockContext.Provider>;
 };
-
-export function useDock(): DockValue {
-  const ctx = useContext(DockContext);
-  if (!ctx) throw new Error('useDock must be used within a DockProvider');
-  return ctx;
-}

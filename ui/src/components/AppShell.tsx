@@ -16,7 +16,7 @@ import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
 import { WindowManagerProvider } from '../context/WindowManagerProvider';
-import { DockProvider } from '../context/DockContext';
+import { DockProvider } from '../context/DockProvider';
 import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
