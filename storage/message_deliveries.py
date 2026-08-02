@@ -293,25 +293,24 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
 
 def has_substantive_input(
     dispatch_text: str | None,
-    content: dict[str, Any] | None = None,
     *,
     has_attachments: bool = False,
 ) -> bool:
-    """Whether an admission contains text or an actual attachment."""
+    """Whether an admission contains text or a previously resolved attachment."""
 
-    if str(dispatch_text or "").strip():
-        return True
-    attachments = (content or {}).get("attachments")
-    return has_attachments or (isinstance(attachments, list) and bool(attachments))
+    return bool(str(dispatch_text or "").strip()) or has_attachments
 
 
-def has_substantive_content(delivery: dict[str, Any]) -> bool:
+def has_substantive_content(
+    delivery: dict[str, Any],
+    *,
+    has_attachments: bool = False,
+) -> bool:
     """Whether a reserved Delivery can produce a meaningful backend input."""
 
-    payload = delivery_payload(delivery)
     return has_substantive_input(
         delivery.get("dispatch_text"),
-        payload.get("content"),
+        has_attachments=has_attachments,
     )
 
 

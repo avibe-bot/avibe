@@ -34,6 +34,7 @@ from storage.db import create_sqlite_engine
 from storage.models import (
     agent_runs,
     agent_sessions,
+    media_objects,
     message_deliveries,
     messages,
     metadata,
@@ -2500,6 +2501,87 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
 
     assert dispatched == [("", [str(attachment)])]
     assert _row(engine, delivery_id)["state"] == "claimed"
+
+
+@pytest.mark.parametrize("invalid_reference", ["missing", "revoked", "wrong_session"])
+def test_reserved_attachment_only_submission_requires_a_resolvable_reference(
+    managers,
+    tmp_path: Path,
+    invalid_reference: str,
+) -> None:
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    token = "missing-attachment-token"
+    if invalid_reference == "wrong_session":
+        _seed_session(engine, "ses_other")
+    with engine.begin() as conn:
+        if invalid_reference != "missing":
+            attachment = tmp_path / f"{invalid_reference}.txt"
+            attachment.write_text("invalid durable attachment", encoding="utf-8")
+            attachment_session_id = "ses_fsm"
+            if invalid_reference == "wrong_session":
+                attachment_session_id = "ses_other"
+            token = media_service.register(
+                conn,
+                scope_id=None,
+                session_id=attachment_session_id,
+                kind="file",
+                source="user_upload",
+                local_path=str(attachment),
+                file_name=attachment.name,
+                content_type="text/plain",
+            )
+            if invalid_reference == "revoked":
+                conn.execute(
+                    update(media_objects)
+                    .where(media_objects.c.token == token)
+                    .values(revoked_at="2026-08-01T00:00:01Z")
+                )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="",
+                content={"attachments": [{"token": token}]},
+            ),
+            dispatch_text="",
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id=f"run_invalid_attachment_{invalid_reference}",
+                run_type="agent",
+                status="queued",
+                session_id="ses_fsm",
+                delivery_id=delivery_id,
+                cancel_requested=0,
+                created_at="2026-08-01T00:00:00Z",
+                updated_at="2026-08-01T00:00:00Z",
+                metadata_json="{}",
+            )
+        )
+
+    assert asyncio.run(manager.recover_durable_delivery_state()) == ["ses_fsm"]
+
+    assert starts == []
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        run = conn.execute(
+            select(agent_runs).where(
+                agent_runs.c.id == f"run_invalid_attachment_{invalid_reference}"
+            )
+        ).mappings().one()
+    assert run["status"] == "canceled"
+    assert run["cancel_requested"] == 1
 
 
 def test_empty_reserved_submission_is_retired_without_native_dispatch(managers) -> None:

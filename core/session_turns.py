@@ -917,13 +917,21 @@ class SessionTurnManager:
             parent_native_message_id=request.parent_native_message_id,
         )
 
-    def _request_from_delivery(self, delivery: dict[str, Any]) -> DeliveryRequest:
+    def _request_from_delivery(
+        self,
+        delivery: dict[str, Any],
+        *,
+        has_attachments: bool = False,
+    ) -> DeliveryRequest:
         payload = delivery_store.delivery_payload(delivery)
         return DeliveryRequest(
             session_id=str(delivery["session_id"]),
             priority=str(delivery["priority"]),
             content=str(delivery.get("dispatch_text") or ""),
-            has_content=delivery_store.has_substantive_content(delivery),
+            has_content=delivery_store.has_substantive_content(
+                delivery,
+                has_attachments=has_attachments,
+            ),
             delivery_id=str(delivery["id"]),
             scope_id=payload.get("scope_id"),
             platform=str(payload.get("platform") or "avibe"),
@@ -1131,6 +1139,24 @@ class SessionTurnManager:
             )
         context.files = file_attachments_from_specs(specs)
         return payload
+
+    @staticmethod
+    def _has_resolvable_delivery_input(
+        conn: Connection,
+        delivery: dict[str, Any],
+    ) -> bool:
+        payload = delivery_store.delivery_payload(delivery)
+        from core.workbench_media import resolve_attachment_specs
+
+        specs = resolve_attachment_specs(
+            conn,
+            session_id=str(delivery["session_id"]),
+            attachments=(payload.get("content") or {}).get("attachments") or [],
+        )
+        return delivery_store.has_substantive_content(
+            delivery,
+            has_attachments=bool(specs),
+        )
 
     def _hydrate_delivery_batch_context(
         self,
@@ -3784,31 +3810,42 @@ class SessionTurnManager:
             reservations = delivery_store.recoverable_reservations(conn, session_id)
         for reservation in reservations:
             target_session = str(reservation["session_id"])
-            if not delivery_store.has_substantive_content(reservation):
-                with self._sqlite_engine().begin() as conn:
-                    reserve_write_lock(conn)
-                    latest = delivery_store.get_delivery(
-                        conn, str(reservation["id"])
+            with self._sqlite_engine().begin() as conn:
+                reserve_write_lock(conn)
+                latest = delivery_store.get_delivery(conn, str(reservation["id"]))
+                if latest is None or latest["state"] != "reserved":
+                    continue
+                retired = False
+                if not self._has_resolvable_delivery_input(conn, latest):
+                    retired = delivery_store.retire_reserved(
+                        conn,
+                        target_session,
+                        str(latest["id"]),
+                        reason="empty_or_invalid_reserved_submission",
                     )
-                    retired = bool(
-                        latest is not None
-                        and latest["state"] == "reserved"
-                        and not delivery_store.has_substantive_content(latest)
-                        and delivery_store.retire_reserved(
+                    if retired:
+                        retired_delivery = delivery_store.get_delivery(
                             conn,
-                            target_session,
                             str(latest["id"]),
-                            reason="empty_reserved_submission",
                         )
-                    )
-                if retired:
-                    recovered.append(target_session)
+                        self._cancel_runs_for_retired_delivery(conn, retired_delivery)
+                else:
+                    reservation = latest
+            if retired:
+                logger.warning(
+                    "retired reserved Delivery=%s because it has no resolvable input",
+                    reservation["id"],
+                )
+                recovered.append(target_session)
                 continue
             try:
                 context = self._delivery_context(target_session)
                 self._hydrate_delivery_context(context, reservation)
                 result = await self.deliver(
-                    self._request_from_delivery(reservation),
+                    self._request_from_delivery(
+                        reservation,
+                        has_attachments=bool(context.files),
+                    ),
                     context=context,
                 )
             except Exception:
@@ -3967,9 +4004,6 @@ class SessionTurnManager:
             content=text,
             has_content=delivery_store.has_substantive_input(
                 text,
-                spec.get("message_content")
-                if isinstance(spec.get("message_content"), dict)
-                else None,
                 has_attachments=bool(getattr(context, "files", None)),
             ),
             delivery_id=delivery_id,
