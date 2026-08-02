@@ -170,22 +170,28 @@ def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     )
 
 
-def ordering_head(conn: Connection, session_id: str) -> dict[str, Any] | None:
-    """Oldest queued row or unresolved row that fences later FIFO work."""
+def ordering_head(
+    conn: Connection,
+    session_id: str,
+    *,
+    include_claimable: bool = True,
+) -> dict[str, Any] | None:
+    """Oldest eligible queued row or unresolved ordering fence."""
+
+    predicates = [message_deliveries.c.state.in_(FENCE_STATES)]
+    if include_claimable:
+        predicates.append(
+            and_(
+                message_deliveries.c.priority == "p3",
+                message_deliveries.c.state.in_(CLAIMABLE_QUEUE_STATES),
+            )
+        )
 
     return _one(
         conn,
         select(message_deliveries)
         .where(message_deliveries.c.session_id == session_id)
-        .where(
-            or_(
-                and_(
-                    message_deliveries.c.priority == "p3",
-                    message_deliveries.c.state.in_(CLAIMABLE_QUEUE_STATES),
-                ),
-                message_deliveries.c.state.in_(FENCE_STATES),
-            )
-        )
+        .where(or_(*predicates))
         .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
         .limit(1),
     )

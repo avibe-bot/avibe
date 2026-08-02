@@ -1389,11 +1389,21 @@ class SessionTurnManager:
                 queued_payloads = delivery_store.claimable_fifo_prefix(
                     conn, request.session_id
                 )
-                segment_payloads = (
-                    [delivery_store.delivery_payload(delivery)]
+                held_fence = (
+                    delivery_store.ordering_head(
+                        conn,
+                        request.session_id,
+                        include_claimable=False,
+                    )
                     if held
-                    else _collect_delivery_segment(queued_payloads)
+                    else None
                 )
+                if held and held_fence is not None:
+                    segment_payloads = []
+                elif held:
+                    segment_payloads = [delivery_store.delivery_payload(delivery)]
+                else:
+                    segment_payloads = _collect_delivery_segment(queued_payloads)
                 segment = [
                     delivery_store.get_delivery(conn, str(row["id"]))
                     for row in segment_payloads
@@ -4145,12 +4155,12 @@ class SessionTurnManager:
                             settled_by=settled_by,
                             terminal_is_error=terminal_is_error,
                         )
-                    # Converge the no-terminal-result outcome onto the OUTBOUND status
-                    # chokepoint. The normal path already emitted a terminal result;
-                    # only ``failed`` reaches here without one: dispatch raised before
-                    # any backend turn (missing/disabled backend) → empty error result
-                    # → dot red. This is a real terminal FAILURE, not a timeout.
-                    if failed:
+                    # Only definitive pre-write failure may synthesize an empty
+                    # terminal result. Once native work may have produced output, a
+                    # persistence failure leaves the durable Turn unresolved for
+                    # exact reconciliation; an empty fallback would overwrite that
+                    # evidence with a fabricated terminal response.
+                    if definitive_prewrite_exit:
                         try:
                             await self.controller.emit_agent_message(
                                 context,
@@ -4536,6 +4546,18 @@ class SessionTurnManager:
         released_sessions: set[str] = set()
         legacy_projection_sessions: set[str] = set()
         tasks_to_settle: list[asyncio.Task] = []
+        restored_owners: list[dict[str, Any]] = []
+        if self._durable_schema_available():
+            with self._sqlite_engine().connect() as conn:
+                # Refresh owns exactly the generation that existed when draining
+                # began. Cancelling one of these Turns may activate a replacement;
+                # that successor belongs to the post-refresh generation and must
+                # remain deferred until the backend reopens.
+                restored_owners = delivery_store.live_turns_for_backend_sessions(
+                    conn,
+                    backend,
+                    base_session_ids,
+                )
         for session_id, turn in list(self.in_flight.items()):
             if session_id not in base_session_ids:
                 continue
@@ -4575,14 +4597,6 @@ class SessionTurnManager:
             for session_id in legacy_projection_sessions:
                 self.controller.set_agent_status(session_id, "idle")
         released_restored: set[str] = set()
-        restored_owners: list[dict[str, Any]] = []
-        if self._durable_schema_available():
-            with self._sqlite_engine().connect() as conn:
-                restored_owners = delivery_store.live_turns_for_backend_sessions(
-                    conn,
-                    backend,
-                    base_session_ids,
-                )
         for owner in restored_owners:
             owner_id = str(owner["id"])
             if owner["state"] == "starting":

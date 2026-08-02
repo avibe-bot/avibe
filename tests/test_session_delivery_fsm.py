@@ -13,7 +13,11 @@ from sqlalchemy import select, update
 
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import TurnDispatchOutcome
-from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_ATTEMPTING,
+    DISPATCH_PHASE_PREWRITE,
+    set_dispatch_phase,
+)
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
@@ -494,6 +498,66 @@ def test_post_native_terminal_storage_failure_retains_owner_and_running_projecti
     assert status == "running"
 
 
+def test_terminal_output_persistence_failure_does_not_emit_empty_fallback(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, context = asyncio.run(_activate(manager, text="visible native result"))
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(agent_status="running")
+        )
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+
+    async def terminal_persistence_failure(_controller, dispatch_context, *_args, **_kwargs):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_ATTEMPTING)
+        manager.on_terminal_result(
+            dispatch_context,
+            is_error=False,
+            terminal_evidence={"kind": "native_result"},
+        )
+        raise OSError("terminal output persistence failed")
+
+    async def empty_fallback(_context, _message_type, _text, **_kwargs):
+        manager.on_terminal_result(_context, is_error=True)
+        manager.on_terminal_delivery_complete(_context)
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        terminal_persistence_failure,
+    )
+    manager.controller.emit_agent_message = AsyncMock(side_effect=empty_fallback)
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            context,
+            "visible native result",
+            logical_turn_id=turn_id,
+            delivery_id=str(initial["id"]),
+            durable_preallocated=True,
+        )
+        await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    manager.controller.emit_agent_message.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+        status = conn.execute(
+            select(agent_sessions.c.agent_status).where(
+                agent_sessions.c.id == "ses_fsm"
+            )
+        ).scalar_one()
+    assert turn is not None and turn["state"] == "active"
+    assert status == "running"
+
+
 def test_turn_state_repairs_only_an_exact_ownerless_running_projection(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     with engine.begin() as conn:
@@ -545,6 +609,51 @@ def test_older_reserved_submission_fences_later_queue_drain(managers) -> None:
     assert starts == []
     assert _row(engine, "msg_reserved_first")["state"] == "reserved"
     assert _row(engine, "msg_queued_second")["state"] == "queued"
+
+
+def test_hold_bypass_still_respects_an_unresolved_reservation_fence(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    with engine.begin() as conn:
+        for delivery_id, state, submitted_at in (
+            ("msg_held_backlog", "queued", "2026-08-01T00:00:01Z"),
+            ("msg_reserved_fence", "reserved", "2026-08-01T00:00:02Z"),
+        ):
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p3",
+                state=state,
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text=delivery_id,
+                ),
+                dispatch_text=delivery_id,
+                now=submitted_at,
+            )
+        assert delivery_store.set_queue_hold(conn, "ses_fsm", held=True)
+
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="new held admission",
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admitted.state == "queued"
+    assert starts == []
+    with engine.connect() as conn:
+        assert delivery_store.active_turn(conn, "ses_fsm") is None
+    assert _row(engine, "msg_reserved_fence")["state"] == "reserved"
 
 
 def test_terminal_between_p1_observation_and_claim_starts_same_submission_once(managers) -> None:
@@ -2144,6 +2253,82 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     assert turn["terminal_outcome"] == "failed"
     assert turn["terminal_evidence_kind"] == "backend_refresh_start_failed"
     assert status == "failed"
+
+
+def test_backend_refresh_preserves_successor_activated_by_old_turn_cancellation(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    native_started = asyncio.Event()
+
+    async def long_native_turn(_controller, context, *_args, **_kwargs):
+        logical_turn_id = str(context.platform_specific["turn_token"])
+        context.platform_specific["agent_runtime_turn_token"] = (
+            f"runtime-{logical_turn_id}"
+        )
+        manager._active_identity = lambda _backend, _session_id, logical_id: (
+            logical_id,
+            f"native-{logical_id}",
+        )
+        manager.on_native_start(
+            context,
+            backend="codex",
+            runtime_key=f"runtime-key-{logical_turn_id}",
+            runtime_turn_id=f"runtime-{logical_turn_id}",
+        )
+        native_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        long_native_turn,
+    )
+
+    async def run() -> tuple[str, str, str]:
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="old backend work",
+            ),
+            context=_context(),
+        )
+        assert admitted.turn_id
+        await asyncio.wait_for(native_started.wait(), timeout=3)
+        replacement = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement after refresh",
+            ),
+            context=_context(),
+        )
+        assert replacement.state == "waiting_terminal"
+        with engine.connect() as conn:
+            old_turn = delivery_store.get_turn(conn, str(admitted.turn_id))
+        assert old_turn is not None and old_turn["control_successor_turn_id"]
+        successor_turn_id = str(old_turn["control_successor_turn_id"])
+
+        manager.begin_backend_drain("codex")
+        released = await manager.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={"ses_fsm"},
+        )
+        assert released == 1
+        return str(admitted.turn_id), successor_turn_id, str(replacement.delivery_id)
+
+    old_turn_id, successor_turn_id, replacement_delivery_id = asyncio.run(run())
+
+    with engine.connect() as conn:
+        old_turn = delivery_store.get_turn(conn, old_turn_id)
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+        replacement = delivery_store.get_delivery(conn, replacement_delivery_id)
+    assert old_turn is not None and old_turn["state"] == "terminal"
+    assert successor is not None and successor["state"] == "starting"
+    assert replacement is not None and replacement["state"] == "claimed"
+    assert manager._deferred_restart_sessions == {"codex": {"ses_fsm"}}
 
 
 def test_restore_registration_failure_terminalizes_exact_start(managers) -> None:
