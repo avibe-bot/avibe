@@ -29,7 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import globals from 'globals';
+import { EXPECTED_BROWSER_GLOBALS } from './browserGlobals.mjs';
 
 /**
  * Directory names the declared lint policy already places outside the domain:
@@ -174,6 +174,10 @@ export const EXPECTED_RULES = {
  * nothing, a processor rewrites what the rules are handed, a missing plugin id
  * makes its rules unresolvable, ``linterOptions`` decides whether unused
  * suppressions are surfaced, and ``globals`` decides which identifiers exist.
+ *
+ * Every field is a committed value. ``globals`` is the one that could not be
+ * written inline — see ``./browserGlobals.mjs`` for why it is a snapshot and not
+ * a read of the same dependency the resolved config derives from.
  */
 export const EXPECTED_POLICY = {
   rules: EXPECTED_RULES,
@@ -184,7 +188,7 @@ export const EXPECTED_POLICY = {
   processor: null,
   plugins: ['@', '@typescript-eslint', 'react-hooks', 'react-refresh'],
   linterOptions: { reportUnusedDisableDirectives: 1 },
-  globals: globals.browser,
+  globals: EXPECTED_BROWSER_GLOBALS,
 };
 
 /**

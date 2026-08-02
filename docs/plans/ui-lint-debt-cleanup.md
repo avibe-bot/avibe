@@ -352,15 +352,16 @@ them together, and — the load-bearing one — a subprocess regression proving
 failing. That last case runs the real command rather than an injected fake,
 because a fake would only pin the ordering its author already imagined.
 
-The measurement itself is pinned in `ui/scripts/lintPolicy.test.mjs` (35 cases):
+The measurement itself is pinned in `ui/scripts/lintPolicy.test.mjs` (40 cases):
 the walk against a synthetic tree and against the real one, its symlink
 semantics asserted equal to ESLint's own enumerator, the positive invariant that
 every intended file resolves the pinned policy, and one case per drift —
 `basePath`, scoped `ignores`, a dropped rule, a demoted rule, loosened options
 at unchanged severity, an unpinned rule appearing, each language and plugin
 boundary, each globals direction, grouping, both coverage directions, the
-vacuous-empty case, every inline directive family, and `eslint-disable-next-line`
-still reaching `suppressedMessages`.
+vacuous-empty case, every inline directive family, `eslint-disable-next-line`
+still reaching `suppressedMessages`, and the independence of the expected
+globals catalog from the package the resolved config derives from.
 
 Two of those cases pin the residual above as an *intended* property rather than
 an oversight: that a one-for-one swap inside a recorded pair passes, and that
@@ -459,6 +460,50 @@ enforcement policy surfaces before it silently changes what
 auto-generator and no snapshot-update path — a contract that rewrites itself
 records drift instead of gating it.
 
+#### The reference has to be independent of the subject
+
+That claim held on every axis but one, and the exception had a different shape
+from the seven blind complements above. `EXPECTED_POLICY.globals` *read* the
+installed `globals` package's `browser` export — the same export
+`eslint.config.js` builds `languageOptions.globals` from. The subject was fully
+measured: all 1169 names and their writability values were compared, in both
+directions. The *reference* just was not independent of it, so on that one axis
+the comparison was `X === X`.
+
+It is a real hole because `no-global-assign` runs at error with no exceptions, so
+each of the 1044 readonly names in that catalog is an identifier product code may
+not reassign. Upstream flipping one to writable, or dropping one altogether,
+narrows what the gate enforces — and both sides of the check would have moved
+together and passed. The only trace would have been a version bump in
+`package-lock.json`.
+
+So the catalog is a committed value now, in `ui/scripts/browserGlobals.mjs`:
+1169 names with their boolean writability (`false` readonly, `true` writable,
+which is what the resolved config actually contains), and neither that file nor
+`lintPolicy.mjs` imports `globals` at all. It is 1196 lines because being long is
+what makes an upstream change readable — the file *is* the review prompt.
+Nothing regenerates it; a generator would restore the self-reference it exists to
+remove. Exactly one test compares the snapshot against the installed package, so
+an upgrade fails by name in one legible place instead of passing silently
+everywhere.
+
+Red-first here means three assertions that fail against the previous head and
+pass now, each for its own reason: mutating `globals.browser` at runtime no
+longer moves `EXPECTED_POLICY.globals`; the expected catalog is not that object
+by identity; and neither policy module imports `globals`, asserted structurally
+by walking the modules' own `ImportDeclaration` nodes rather than by matching
+source text. The first two catch a live pointer, the third catches the copy that
+would be taken at load time and would still move on every upgrade.
+
+The failures a `globals` upgrade now produces, each surfacing on its own with the
+rest of the policy reading as unchanged:
+
+| Upstream change | Under the live read | Under the committed catalog |
+| --- | --- | --- |
+| a browser global is added | both sides gain it, no drift | `1 unexpected global(s): …`, exit 1 |
+| a browser global is removed | both sides lose it, no drift | `1 expected global(s) absent: …`, exit 1 |
+| one is loosened to writable | both sides flip, `no-global-assign` quietly stops covering it, no drift | `1 global(s) changed writability: …`, exit 1 |
+
 What remains hand-written is the *boundary* of the TypeScript policy, kept small
 and behavioural: `scripts/*.mjs` and `eslint.config.js` are opened by the run but
 resolve the empty rule map, so only a fatal parse or config error can be reported
@@ -483,7 +528,7 @@ The third row is the whole argument in one line: an enforcement rule left the
 gate, every test passed, and the ledger reported no drift.
 
 The cost is one extra parse of the 514 sources: `npm run lint` goes from 9.1 s
-to 10.9 s. The `calculateConfigForFile` sweep across all of them is 12.6 ms.
+to 11.3 s. The `calculateConfigForFile` sweep across all of them is 12.6 ms.
 
 ## 4. Result
 

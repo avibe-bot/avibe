@@ -8,6 +8,7 @@ import { ESLint, Linter } from 'eslint';
 import globals from 'globals';
 
 import sharedConfig from '../eslint.config.js';
+import { EXPECTED_BROWSER_GLOBALS } from './browserGlobals.mjs';
 import {
   DEPENDENCY_ROOTS,
   EXPECTED_POLICY,
@@ -27,6 +28,7 @@ import {
 // found and never what was looked at.
 
 const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const SCRIPTS_ROOT = fileURLToPath(new URL('./', import.meta.url));
 
 let eslint;
 beforeAll(() => {
@@ -197,7 +199,7 @@ describe('policyDifferences pins the whole effective policy, not a projection of
 
   it('holds the browser globals to the contract the config declares', () => {
     expect(policyDifferences({ ...actual, globals: {} })).toEqual([
-      expect.stringContaining(`${Object.keys(globals.browser).length} expected global(s) absent`),
+      expect.stringContaining(`${Object.keys(EXPECTED_BROWSER_GLOBALS).length} expected global(s) absent`),
     ]);
     expect(policyDifferences({ ...actual, globals: { ...actual.globals, __injected__: 'readonly' } })).toEqual([
       '1 unexpected global(s): __injected__',
@@ -207,9 +209,82 @@ describe('policyDifferences pins the whole effective policy, not a projection of
     ]);
   });
 
+  it('reports a one-name catalog change as the only difference there is', () => {
+    // What a `globals` upgrade actually looks like in the resolved config: one
+    // name appears, one disappears, or one stops being readonly. Each has to
+    // surface on its own, with the rest of the policy reading as unchanged —
+    // otherwise the failure is unattributable and gets waved through.
+    const { structuredClone: _dropped, ...withoutOne } = actual.globals;
+    const cases = [
+      ['upstream addition', { ...actual.globals, upstreamAddition: false }, '1 unexpected global(s): upstreamAddition'],
+      ['upstream removal', withoutOne, '1 expected global(s) absent: structuredClone'],
+      ['loosened to writable', { ...actual.globals, structuredClone: true }, '1 global(s) changed writability: structuredClone'],
+    ];
+    for (const [label, catalog, expected] of cases) {
+      expect(policyDifferences({ ...actual, globals: catalog }), label).toEqual([expected]);
+    }
+  });
+
   it('pins the resolved parser rather than whatever the config happens to name', () => {
     expect(EXPECTED_POLICY.parser).toBe('typescript-eslint/parser');
     expect(actual.parser).toBe(EXPECTED_POLICY.parser);
+  });
+});
+
+describe('the expected browser globals are a committed value, not a read of the dependency', () => {
+  // The last hole in the policy contract, and a different shape from the earlier
+  // ones: the subject was complete — all 1169 names and writability values were
+  // compared — but the *reference* was `globals.browser` itself, the same export
+  // `eslint.config.js` resolves from. On that one axis the comparison was
+  // `X === X`, so an upstream catalog change moved both sides together and passed,
+  // and the only trace was a version bump in the lockfile.
+
+  const importsOf = (filename) => {
+    const linter = new Linter();
+    const code = fs.readFileSync(path.join(SCRIPTS_ROOT, filename), 'utf8');
+    linter.verify(code, { languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } }, { filename });
+    const sourceCode = linter.getSourceCode();
+    if (sourceCode === null) throw new Error(`${filename} did not parse`);
+    return sourceCode.ast.body.filter((node) => node.type === 'ImportDeclaration').map((node) => node.source.value);
+  };
+
+  it('does not move when the installed catalog moves under it', () => {
+    const snapshot = { ...EXPECTED_POLICY.globals };
+    const original = { structuredClone: globals.browser.structuredClone, window: globals.browser.window };
+    try {
+      globals.browser.upstreamAddition = false;
+      delete globals.browser.structuredClone;
+      globals.browser.window = true;
+
+      expect(EXPECTED_POLICY.globals).toEqual(snapshot);
+      expect(EXPECTED_POLICY.globals).not.toHaveProperty('upstreamAddition');
+      expect(EXPECTED_POLICY.globals.structuredClone).toBe(false);
+      expect(EXPECTED_POLICY.globals.window).toBe(false);
+    } finally {
+      delete globals.browser.upstreamAddition;
+      Object.assign(globals.browser, original);
+    }
+  });
+
+  it('is not the installed catalog, by identity either', () => {
+    expect(EXPECTED_BROWSER_GLOBALS).not.toBe(globals.browser);
+    expect(EXPECTED_POLICY.globals).toBe(EXPECTED_BROWSER_GLOBALS);
+  });
+
+  it('is reached without the policy modules importing the dependency at all', () => {
+    // A copy taken at load time would pass the mutation case above and still move
+    // on every upgrade, so independence is also asserted where it is decided: the
+    // module graph. Nothing in the expected side may reach `globals`.
+    expect(importsOf('browserGlobals.mjs')).toEqual([]);
+    expect(importsOf('lintPolicy.mjs')).not.toContain('globals');
+  });
+
+  it('is checked against the installed catalog in exactly one place, loudly', () => {
+    // A snapshot has to be a snapshot *of* something. This is that statement, and
+    // it is the whole reason the snapshot may be trusted as a reference: when the
+    // dependency changes, this fails by name here instead of passing silently
+    // everywhere.
+    expect(EXPECTED_BROWSER_GLOBALS).toEqual(globals.browser);
   });
 });
 
