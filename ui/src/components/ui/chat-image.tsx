@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Download } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { useImageViewer } from '@/components/ui/image-viewer';
+import { useImageViewer } from '@/components/ui/image-viewer-context';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { cn } from '@/lib/utils';
 

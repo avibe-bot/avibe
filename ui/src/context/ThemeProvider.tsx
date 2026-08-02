@@ -1,20 +1,12 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
-export type ThemeMode = 'system' | 'light' | 'dark';
+import { ThemeContext, type ThemeMode } from './ThemeContext';
+
 type ResolvedTheme = 'light' | 'dark';
-
-type ThemeContextValue = {
-  mode: ThemeMode;
-  resolvedTheme: ResolvedTheme;
-  setMode: (mode: ThemeMode) => void;
-  cycleMode: () => void;
-};
 
 const STORAGE_KEY = 'vibe-remote-theme';
 const VALID_MODES: ThemeMode[] = ['system', 'light', 'dark'];
 const DEFAULT_MODE: ThemeMode = 'system';
-
-const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 function getSystemTheme(): ResolvedTheme {
   if (
@@ -128,11 +120,3 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };
-
-export function useTheme() {
-  const context = useContext(ThemeContext);
-  if (!context) {
-    throw new Error('useTheme must be used within ThemeProvider');
-  }
-  return context;
-}

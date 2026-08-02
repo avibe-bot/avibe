@@ -15,7 +15,7 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
-import { WindowManagerProvider } from '../context/WindowManagerContext';
+import { WindowManagerProvider } from '../context/WindowManagerProvider';
 import { DockProvider } from '../context/DockContext';
 import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';

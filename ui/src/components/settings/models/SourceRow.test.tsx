@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ToastProvider } from '@/context/ToastContext';
+import { ToastProvider } from '@/context/ToastProvider';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { SourceRow } from './SourceRow';
