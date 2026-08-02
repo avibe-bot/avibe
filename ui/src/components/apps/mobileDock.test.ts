@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { showDockId } from '../../context/DockContext';
+import { showDockId } from '../../context/dockDoc';
 import { mobileRouteForDockId, showAppRoutePath } from './mobileDock';
 
 describe('showAppRoutePath', () => {

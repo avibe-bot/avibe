@@ -5,7 +5,8 @@ import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, 
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
-import { selectApiErrorFields, useApi } from '../../context/ApiContext';
+import { useApi } from '../../context/ApiContext';
+import { selectApiErrorFields } from '../../context/apiErrorParse';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
@@ -94,6 +95,7 @@ import {
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
 import { useLatestRef } from '@/lib/useLatestRef';
+import { sessionAgentDisplayName } from './sessionAgentName';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -102,18 +104,6 @@ import { useLatestRef } from '@/lib/useLatestRef';
 // hours) keeps Stop + the indicator for as long as ``/turn-state`` reports
 // ``in_flight:true``; only an idle reading (past the post-send grace) clears it.
 const WORKING_RECONCILE_INTERVAL_MS = 60 * 1000;
-
-export function sessionAgentDisplayName(
-  session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
-  agents: VibeAgentBrief[],
-): string | null {
-  const agentName = session.agent_name?.trim() || null;
-  if (!agentName) return null;
-  const agent =
-    (session.agent_id ? agents.find((candidate) => candidate.id === session.agent_id) : undefined) ??
-    agents.find((candidate) => candidate.name === agentName);
-  return agent?.display_name?.trim() || agentName;
-}
 
 // Grace window after we optimistically set ``working`` from a local send before
 // an idle ``/turn-state`` reading is trusted to CLEAR it. A just-sent turn isn't

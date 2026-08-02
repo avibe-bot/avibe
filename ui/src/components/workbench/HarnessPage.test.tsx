@@ -19,11 +19,9 @@ import {
   RunDetail,
   RunTriggerChip,
   WatchDetail,
-  agentDisplayName,
-  harnessEmptyStateKey,
-  harnessTabFromParam,
 } from './HarnessPage';
-import { loadHarnessAgentCatalog } from './harnessAgents';
+import { agentDisplayName, loadHarnessAgentCatalog } from './harnessAgents';
+import { harnessEmptyStateKey, harnessTabFromParam } from './harnessTabs';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();

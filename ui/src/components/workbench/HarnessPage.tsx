@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
+import { DEFAULT_TAB, harnessEmptyStateKey, harnessTabFromParam, TAB_ORDER, type TabKey } from './harnessTabs';
 import type {
   HarnessDefinitionCounts,
   HarnessDefinitionStatus,
@@ -79,7 +80,7 @@ import type {
   HarnessLifecycleState,
   HarnessRowAlert,
 } from './harnessLifecycle';
-import { loadHarnessAgentCatalog } from './harnessAgents';
+import { agentDisplayName, loadHarnessAgentCatalog } from './harnessAgents';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
@@ -103,8 +104,6 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
   return task.schedule_type || t('harness.unknownSchedule');
 }
 
-type TabKey = 'tasks' | 'watches' | 'runs';
-
 // Status segments per tab. Definitions filter by what they are doing; runs by
 // execution outcome. One control renders whichever set the tab needs.
 const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
@@ -116,27 +115,6 @@ const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', '
 // selector also offers types read back from the ledger that the UI has no
 // built-in name for, and those are just as selectable.
 type RunTypeFilter = string;
-
-const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'runs'];
-const DEFAULT_TAB: TabKey = 'tasks';
-
-// Which tab a ``?tab=`` param opens. Anything that is not a tab opens the
-// default rather than selecting nothing — ``?tab=webhooks`` still arrives from
-// links and bookmarks made before the Webhooks tab was removed, and must land
-// on Tasks, not on an empty page with no tab lit.
-//
-// One function rather than a guard here and a ``useState`` initializer three
-// hundred lines away, so removing a tab later cannot strand its old links.
-export function harnessTabFromParam(param: string | null | undefined): TabKey {
-  return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
-}
-
-export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
-  if (!hasStoredRows) {
-    return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
-  }
-  return kind === 'tasks' ? 'harness.noTaskMatches' : kind === 'watches' ? 'harness.noWatchMatches' : 'harness.noRunMatches';
-}
 
 const PAGE_LIMIT = 30;
 const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = {
@@ -1568,13 +1546,6 @@ const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
 interface RunDetailProps {
   run: HarnessRun;
   agent?: VibeAgentBrief;
-}
-
-export function agentDisplayName(
-  agentName: string | null | undefined,
-  agent?: Pick<VibeAgentBrief, 'display_name'>,
-): string {
-  return agent?.display_name || agentName || '—';
 }
 
 export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {

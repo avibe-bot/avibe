@@ -1,12 +1,12 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ModelHubRenderBoundary } from './ModelHubCapabilityGate';
 import {
   MODEL_HUB_DISABLED_REDIRECT,
   MODEL_HUB_SETTINGS_PATH,
-  ModelHubRenderBoundary,
   modelHubRouteTarget,
-} from './ModelHubCapabilityGate';
+} from './modelHubRoutes';
 
 describe('Model Hub capability route gate', () => {
   it('redirects both current and legacy model routes while disabled', () => {

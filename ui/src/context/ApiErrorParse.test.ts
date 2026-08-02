@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { archivedConflictSessionId, selectApiErrorFields } from './ApiContext';
+import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 
 // ── Codex review #4 (ui_server.py:6611) ───────────────────────────────────────
 // PATCH /api/sessions/<id> on an archived session answered

@@ -7,7 +7,7 @@ import {
   seedDefaultDock,
   showDockId,
   type DockDoc,
-} from './DockContext';
+} from './dockDoc';
 
 const BUILTINS = ['files', 'terminal', 'editor'];
 
