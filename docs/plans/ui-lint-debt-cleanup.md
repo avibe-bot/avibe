@@ -292,6 +292,12 @@ The build fails when any of these is true, for either tally:
 4. **Unexplained** — a rule appears in the ledger with no entry in its
    `rationale` map. A rule nobody had to explain is exactly how an unrelated
    error class slips in and stops being visible.
+5. **Fatal** — ESLint reported a problem with no rule id: a parse failure, an
+   unresolvable config, a plugin that threw. This one is unconditional, and it
+   has to be: such a problem has no `(file, rule)` key to be recorded under,
+   and a file that does not parse reports *no violations at all*, which a pure
+   tally comparison reads as clean. Without this, breaking a file's syntax
+   would be a way to make its debt disappear and still pass.
 
 The ledger can therefore only ever shrink, and it cannot hide anything: every
 tolerated violation is one greppable line naming its rule, its file, and its
@@ -307,11 +313,20 @@ exact count, under a rule-level rationale in the same file.
 
 ### Evidence
 
-`compareToBaseline` and `missingRationales` are pure functions with red-first
-unit tests (`ui/scripts/lintBaseline.test.mjs`, 13 cases): exact match, new
-rule in a new file, new rule in an already-listed file, expanded count, reduced
-count, vanished pair, deleted file, empty-run vacuity, and each rationale
-branch.
+`compareToBaseline`, `missingRationales`, `fatalProblems` and `reportLines` are
+pure functions with red-first unit tests (`ui/scripts/lintBaseline.test.mjs`,
+23 cases): exact match, new rule in a new file, new rule in an already-listed
+file, expanded count, reduced count, vanished pair, deleted file, empty-run
+vacuity, each rationale branch, each `fatalProblems` discrimination, and — the
+load-bearing one — that `reportLines` still fails when a fatal error is the
+*only* problem and every tally matches.
+
+The gate script is also pinned as reviewable text. Its `(file, rule)` key joins
+on NUL, which cannot occur in either half; written as a literal byte it made
+the whole script binary to git (`Bin 0 -> 8114 bytes`), so the gate everyone is
+asked to trust stopped appearing in diffs. `pairKey` writes it as an escape,
+with identical runtime meaning, and a test asserts the source contains no raw
+NUL.
 
 The wired command was then driven end to end against all four evasion routes,
 each of which failed the gate and was reverted:
@@ -323,12 +338,26 @@ each of which failed the gate and was reverted:
 | the same `any` behind a disable comment | `NEW … 1 suppressed messages (not in the baseline)` |
 | one recorded `any` fixed, ledger untouched | `STALE … 1 errors, baseline still records 2` |
 
-The two *config* decisions are pinned the same way, as executable probes against
-the real `eslint.config.js` rather than as prose
+The *config* decisions are pinned the same way, as executable probes against the
+real `eslint.config.js` rather than as prose
 (`ui/scripts/eslintConventions.test.mjs`): an unmarked unused binding still
 errors while an `_`-marked one does not (G1), and `react-hooks/refs` still
 errors on an ordinary ref read *and* write during render, so the one blanket
 exemption in `useLatestRef.ts` cannot quietly become a config-wide relaxation.
+
+Those probes assert **severity 2**, not merely that the rule fired. The gate
+tallies severity-2 messages, so a rule demoted to a warning would still appear
+in `messages`, still pass a presence check, and still change no count in the
+ledger — while no longer gating anything. Measured: with `react-hooks/refs` and
+`no-unused-vars` demoted to `warn`, the presence-only form of these probes
+passed 10/10.
+
+A behavioural probe only defends the rule someone thought to write it for, so
+one further test closes the class at its chokepoint: the resolved severity of
+the *whole* config is pinned — every rule an error, apart from three named
+warnings and the 22 base rules `typescript-eslint` supersedes. Demoting
+`react-hooks/globals`, a rule this cleanup emptied and that has no behavioural
+probe, fails there. So does any rule that does not exist yet.
 
 ## 4. Result
 
@@ -377,9 +406,26 @@ Plus `git diff --check` and a full review of the diff against `origin/master`.
 
 Exact before/after totals for every command are recorded in the PR body.
 
-## 6. Out of scope, reported separately
+## 6. CI enforcement
 
-`.github/workflows/lint.yml` never runs `npm run lint`. Until that changes,
-this cleanup can silently rot again. The workflow change is outside this
-lane's file ownership and is raised with the orchestrator rather than made
-here.
+`.github/workflows/lint.yml` never ran `npm run lint` — which is how the debt
+reached 362 errors in the first place (§1). A gate nobody runs is not a gate,
+so this cleanup would have rotted again on the same schedule.
+
+The `build-linux-artifacts` job now runs it, after `validate:theme` and before
+`npm test`:
+
+```yaml
+      - name: Build UI assets
+        working-directory: ui
+        run: |
+          npm ci
+          npm run validate:theme
+          npm run lint
+          npm test
+          npm run build
+```
+
+One added line, in a file this lane does not otherwise own; the extension was
+approved for exactly this hunk. It costs one ESLint pass in a job that has
+already installed `node_modules`.
