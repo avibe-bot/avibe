@@ -11696,6 +11696,7 @@ def _resolve_show_event_after_ambiguous_live_timeout(
 ) -> dict | None:
     """Wait for acceptance, then let the caller replay the same reservation."""
     from core.show_session_events import ShowSessionEventStore
+    from storage.delivery_states import ADMITTED_DELIVERY_STATES
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -11707,8 +11708,12 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             if event is None:
                 return None
             delivery = event.get("delivery")
-            if isinstance(delivery, dict) and delivery.get("state") != "reserved":
-                return event
+            if isinstance(delivery, dict):
+                state = delivery.get("state")
+                if state in ADMITTED_DELIVERY_STATES:
+                    return event
+                if state == "retired":
+                    return None
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.05)

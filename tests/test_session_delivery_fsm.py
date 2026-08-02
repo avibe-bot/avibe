@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import TurnDispatchOutcome
+from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
@@ -1986,6 +1987,126 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
     assert turn is not None
     assert turn["terminal_outcome"] == "not_written"
     assert turn["settled_by"] == "no_terminal_result"
+
+
+def test_definite_handler_prewrite_exception_requeues_through_terminal_boundary(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="retry after terminal persistence failure",
+            ),
+            dispatch_text="retry after terminal persistence failure",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="opencode",
+            deliveries=[delivery],
+            dispatch_text="retry after terminal persistence failure",
+        )
+
+    async def definite_prewrite_exception(_controller, context, *_args, **_kwargs):
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        raise OSError("terminal error persistence failed")
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        definite_prewrite_exception,
+    )
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            _context(),
+            "retry after terminal persistence failure",
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    assert _row(engine, delivery_id)["state"] == "queued"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["start_receipt_outcome"] == "not_written"
+
+
+def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
+    managers,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="ambiguous during forced refresh",
+            ),
+            dispatch_text="ambiguous during forced refresh",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="ambiguous during forced refresh",
+        )
+    manager.begin_backend_drain("codex")
+
+    released = asyncio.run(
+        manager.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={"ses_fsm"},
+        )
+    )
+
+    assert released == 1
+    assert _row(engine, delivery_id)["state"] == "retired"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+        status = conn.execute(
+            select(agent_sessions.c.agent_status).where(agent_sessions.c.id == "ses_fsm")
+        ).scalar_one()
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "failed"
+    assert turn["terminal_evidence_kind"] == "backend_refresh_start_failed"
+    assert status == "failed"
 
 
 def test_materialized_message_preserves_submission_and_acceptance_times(managers) -> None:

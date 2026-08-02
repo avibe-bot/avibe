@@ -27,6 +27,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
+from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
@@ -2619,6 +2620,7 @@ class SessionTurnManager:
         evidence: dict[str, Any] | None = None,
         expected_start_attempt_id: str | None = None,
         replay_unknown_start: bool = False,
+        abandon_unaccepted_start: bool = False,
     ) -> dict[str, Any]:
         if not self._durable_schema_available():
             return {
@@ -2669,12 +2671,20 @@ class SessionTurnManager:
                     and all(row["state"] == "claimed" for row in initial_batch)
                     and turn.get("start_receipt_outcome") == "unknown"
                 )
+                abandoned_start = bool(
+                    abandon_unaccepted_start
+                    and outcome == "failed"
+                    and initial_batch
+                    and all(row["state"] == "claimed" for row in initial_batch)
+                    and turn.get("start_receipt_outcome") != "accepted"
+                )
                 if (
                     initial_batch
                     and all(row["state"] == "claimed" for row in initial_batch)
                     and outcome != "not_written"
                     and turn.get("start_receipt_outcome") != "accepted"
                     and not unknown_start_reconciliation
+                    and not abandoned_start
                 ):
                     return {
                         "changed": False,
@@ -2684,7 +2694,22 @@ class SessionTurnManager:
                         "reason": "start_acceptance_unproven",
                     }
                 if initial_batch and all(row["state"] == "claimed" for row in initial_batch):
-                    if unknown_start_reconciliation:
+                    if abandoned_start:
+                        for initial in initial_batch:
+                            retired = self._record_definitive_delivery_attempt(
+                                conn,
+                                str(initial["id"]),
+                                expected_version=int(initial["version"]),
+                                expected_states=("claimed",),
+                                outcome="backend_refresh_failed",
+                                next_state="retired",
+                                receipt={"kind": evidence_kind, **(evidence or {})},
+                            )
+                            if retired is None:
+                                raise RuntimeError(
+                                    "backend refresh lost an unresolved start Delivery"
+                                )
+                    elif unknown_start_reconciliation:
                         run_rows = []
                         run_ids = list(
                             dict.fromkeys(
@@ -3967,11 +3992,12 @@ class SessionTurnManager:
                 # value so it is not misreported as a user stop (Codex P1).
                 raise
             except Exception:
-                # dispatch_turn raised before any backend turn was actually
-                # dispatched (missing/disabled backend, synchronous setup error).
-                # No agent reply was produced, so this is a terminal FAILURE — it must
-                # NOT auto-flush the send-while-busy queue onto a fresh turn.
-                failed = True
+                # Preserve the exact boundary phase even when the handler's own
+                # terminal-error persistence raises. A proven pre-write failure is
+                # safe to requeue; anything at or beyond adapter entry is logged and
+                # retained as an unknown start instead of guessing that it was absent.
+                definitive_prewrite_exit = backend_dispatch_attempted(context) is False
+                failed = not definitive_prewrite_exit
                 settled_by = SETTLED_BY_NO_TERMINAL_RESULT
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
@@ -4028,13 +4054,19 @@ class SessionTurnManager:
                     # any backend turn (missing/disabled backend) → empty error result
                     # → dot red. This is a real terminal FAILURE, not a timeout.
                     if failed:
-                        await self.controller.emit_agent_message(
-                            context,
-                            "result",
-                            "",
-                            is_error=True,
-                            output=terminal_turn_output(),
-                        )
+                        try:
+                            await self.controller.emit_agent_message(
+                                context,
+                                "result",
+                                "",
+                                is_error=True,
+                                output=terminal_turn_output(),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed to persist terminal dispatch error for session=%s",
+                                session_id,
+                            )
                     # Settle before flushing: the next turn must not start while a run
                     # this one owned is still ``running``. Placed after the failure
                     # emit above so the honest outbound terminal writes first and this
@@ -4455,12 +4487,32 @@ class SessionTurnManager:
                     base_session_ids,
                 )
         for owner in restored_owners:
-            terminal = self._terminalize_durable_turn(
-                str(owner["id"]),
-                "canceled",
-                settled_by=SETTLED_BY_BACKEND_REFRESH,
-                evidence_kind="backend_refresh",
-            )
+            owner_id = str(owner["id"])
+            if owner["state"] == "starting":
+                terminal = self._terminalize_durable_turn(
+                    owner_id,
+                    "failed",
+                    settled_by=SETTLED_BY_BACKEND_REFRESH,
+                    evidence_kind="backend_refresh_start_failed",
+                    evidence={
+                        "backend": backend,
+                        "reason": "forced_refresh_during_unresolved_start",
+                    },
+                    abandon_unaccepted_start=True,
+                )
+                if terminal.get("changed"):
+                    logger.error(
+                        "Forced %s refresh failed unresolved durable Turn=%s",
+                        backend,
+                        owner_id,
+                    )
+            else:
+                terminal = self._terminalize_durable_turn(
+                    owner_id,
+                    "canceled",
+                    settled_by=SETTLED_BY_BACKEND_REFRESH,
+                    evidence_kind="backend_refresh",
+                )
             if terminal.get("changed"):
                 released_restored.add(str(owner["session_id"]))
         for session_id in released_restored:

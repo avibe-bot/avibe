@@ -3405,6 +3405,29 @@ def test_show_event_cli_pending_timeout_allows_same_reservation_retry(monkeypatc
     assert resolved is None
 
 
+def test_show_event_cli_retired_delivery_is_not_reported_as_accepted(monkeypatch):
+    class FakeStore:
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "delivery": {"id": "msg_retired", "state": "retired"},
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_retired"},
+        wait_seconds=1,
+    )
+
+    assert resolved is None
+
+
 def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
