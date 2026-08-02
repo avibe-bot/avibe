@@ -11,8 +11,6 @@ outliving the service that spawned it:
 from __future__ import annotations
 
 import asyncio
-import os
-import select
 import subprocess
 import sys
 import time
@@ -86,26 +84,23 @@ def _spawn_fake_orphan(workspace_root: str) -> subprocess.Popen:
     line is indistinguishable from a real orphan for the purposes of the sweep.
     ``start_new_session`` mirrors the real spawn (its own session/pgroup).
     """
-    ready_read, ready_write = os.pipe()
     argv = [
         sys.executable,
         "-c",
-        f"import os, time; os.write({ready_write}, b'1'); os.close({ready_write}); time.sleep(120)",
+        "import sys, time; sys.stdout.buffer.write(b'1'); sys.stdout.buffer.flush(); time.sleep(120)",
         "cli.js",
         "--workspace-root",
         workspace_root,
         "--fallback-delay-seconds",
         "8",
     ]
-    with os.fdopen(ready_read, "rb") as ready:
-        try:
-            proc = subprocess.Popen(argv, start_new_session=True, pass_fds=(ready_write,))
-        finally:
-            os.close(ready_write)
-        readable, _, _ = select.select([ready], [], [], 5)
-        if not readable or ready.read(1) != b"1":
-            _reap(proc)
-            raise AssertionError("fake orphan did not reach its executed child process")
+    proc = subprocess.Popen(argv, start_new_session=True, stdout=subprocess.PIPE)
+    assert proc.stdout is not None
+    ready = proc.stdout.read(1)
+    proc.stdout.close()
+    if ready != b"1":
+        _reap(proc)
+        raise AssertionError("fake orphan did not reach its executed child process")
     return proc
 
 

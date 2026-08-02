@@ -14,8 +14,8 @@
   before the child completes `exec`, so `psutil` temporarily reports an empty or
   parent-shaped command line. An Incus stress probe missed 7 of 200 immediate
   command-line reads. The test helper owns child readiness and will use an
-  explicit pipe handshake from the executed child, with no sleep, retry, or
-  production behavior change.
+  explicit stdout-pipe byte from the executed child, with no sleep, polling,
+  platform-specific file-descriptor passing, or production behavior change.
 - The file-backed `TaskExecutionStore` owns its reload token. Directory
   `(mtime_ns, size, inode)` metadata can remain identical when a JSON entry is
   added or moved within one ext4 clock tick. The signature will instead be the
@@ -30,11 +30,15 @@
   `pytest-asyncio` explicitly to the dev dependency group and lockfile, and run
   the existing active-event-loop bridge test as a native async test so the
   ordinary suite enforces `asyncio_mode = "auto"` even without E2E credentials.
+  The sharded unit-test workflow must install the declared dev group rather
+  than maintaining a separate partial test-dependency list.
 - The first post-fix Incus full suite exposed two additional same-tick
   assumptions. File Browser returns `mtime` as its optimistic-concurrency token,
   but an atomic replacement can inherit the saved file's token on ext4; the
   writer owns advancing a successful replacement's token beyond the accepted
-  baseline. Processed-message retention orders only by `created_at`, while
+  baseline, verifying the post-`utime` stat, using a coarse-filesystem fallback,
+  and failing before replacement if no distinct token is observable.
+  Processed-message retention orders only by `created_at`, while
   multiple SQLite inserts can receive the same wall-clock value; the SQLite
   store owns deterministic insertion order and will use the table rowid only as
   the tie-breaker for equal timestamps. Neither fix needs a sleep, retry, or

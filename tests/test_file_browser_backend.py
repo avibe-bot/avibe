@@ -397,18 +397,32 @@ def test_write_is_atomic_and_detects_mtime_conflict(tmp_path, monkeypatch):
 
     accepted_mtime_ns = path.stat().st_mtime_ns
     real_fsync = fs.os.fsync
+    real_utime = fs.os.utime
+    replacement_utimes: list[int] = []
 
     def fsync_at_accepted_mtime(fd: int) -> None:
         real_fsync(fd)
         current = os.fstat(fd)
         if stat.S_ISREG(current.st_mode):
-            os.utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+            real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+
+    def round_first_replacement_utime(target, *, ns):
+        if isinstance(target, int):
+            real_utime(target, ns=ns)
+            return
+        replacement_utimes.append(ns[1])
+        if len(replacement_utimes) == 1:
+            real_utime(target, ns=(ns[0], accepted_mtime_ns))
+        else:
+            real_utime(target, ns=ns)
 
     monkeypatch.setattr(fs.os, "fsync", fsync_at_accepted_mtime)
+    monkeypatch.setattr(fs.os, "utime", round_first_replacement_utime)
 
     second = fs.write_file(str(path), "second", expected_mtime=first["mtime"])
     assert path.read_text(encoding="utf-8") == "second"
     assert second["mtime"] != first["mtime"]
+    assert len(replacement_utimes) == 2
 
     with pytest.raises(FileBrowserError) as exc:
         fs.write_file(str(path), "stale", expected_mtime=first["mtime"])
@@ -418,6 +432,36 @@ def test_write_is_atomic_and_detects_mtime_conflict(tmp_path, monkeypatch):
         fs.write_file(str(tmp_path / "large.txt"), "x" * (fs.MAX_FILE_BYTES + 1))
     assert large_exc.value.code == "too_large"
     assert not list(tmp_path.glob(".large.txt.*.tmp"))
+
+
+def test_write_fails_before_replace_when_mtime_token_cannot_advance(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+    first = fs.write_file(str(path), "first")
+    accepted_mtime_ns = path.stat().st_mtime_ns
+    real_fsync = fs.os.fsync
+    real_utime = fs.os.utime
+
+    def fsync_at_accepted_mtime(fd: int) -> None:
+        real_fsync(fd)
+        current = os.fstat(fd)
+        if stat.S_ISREG(current.st_mode):
+            real_utime(fd, ns=(current.st_atime_ns, accepted_mtime_ns))
+
+    def round_replacement_utime(target, *, ns):
+        if isinstance(target, int):
+            real_utime(target, ns=ns)
+            return
+        real_utime(target, ns=(ns[0], accepted_mtime_ns))
+
+    monkeypatch.setattr(fs.os, "fsync", fsync_at_accepted_mtime)
+    monkeypatch.setattr(fs.os, "utime", round_replacement_utime)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.write_file(str(path), "second", expected_mtime=first["mtime"])
+
+    assert exc.value.code == "fs_error"
+    assert path.read_text(encoding="utf-8") == "first"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
 
 
 def test_write_maps_mkstemp_permission_error(tmp_path, monkeypatch):

@@ -529,6 +529,7 @@ def _mtime_seconds(stat_result: os.stat_result) -> float:
 
 _MTIME_CONFLICT_TOLERANCE_SECONDS = 1e-6
 _MTIME_TOKEN_STEP_NS = 2_000
+_MTIME_TOKEN_COARSE_STEP_NS = 2_000_000_000
 
 
 def _advance_mtime_token(path: Path, expected_mtime: float) -> None:
@@ -536,8 +537,13 @@ def _advance_mtime_token(path: Path, expected_mtime: float) -> None:
     if abs(_mtime_seconds(stat_result) - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
         return
     expected_ns = round(float(expected_mtime) * 1_000_000_000)
-    next_mtime_ns = max(stat_result.st_mtime_ns, expected_ns) + _MTIME_TOKEN_STEP_NS
-    os.utime(path, ns=(stat_result.st_atime_ns, next_mtime_ns))
+    baseline_ns = max(stat_result.st_mtime_ns, expected_ns)
+    for step_ns in (_MTIME_TOKEN_STEP_NS, _MTIME_TOKEN_COARSE_STEP_NS):
+        os.utime(path, ns=(stat_result.st_atime_ns, baseline_ns + step_ns))
+        stat_result = path.stat()
+        if abs(_mtime_seconds(stat_result) - float(expected_mtime)) > _MTIME_CONFLICT_TOLERANCE_SECONDS:
+            return
+    raise OSError("filesystem did not preserve an advanced mtime token")
 
 
 def _extension(path: Path) -> str:
