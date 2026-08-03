@@ -10,9 +10,10 @@ import asyncio
 import hashlib
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -1151,49 +1152,36 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
             return True
 
-    def _claimed_activity_for_output(
+    def _claimed_activity_batch_for_output(
         self,
         output_semantics: MessageOutput,
-    ) -> tuple[Any, SessionActivity] | None:
+    ) -> tuple[Any, list[SessionActivity]] | None:
         service = getattr(self.controller, "agent_service", None)
         registry = getattr(service, "activities", None)
         find_claimed = getattr(
             registry,
-            "claimed_completed_output_for_idempotency_key",
+            "claimed_completed_output_batch_for_output",
             None,
         )
-        output_id = str(output_semantics.idempotency_key or "").strip()
-        if not output_id or not callable(find_claimed):
+        if not callable(find_claimed):
             return None
-        activity = find_claimed(output_id)
-        return (registry, activity) if activity is not None else None
+        activities = list(find_claimed(output_semantics))
+        return (registry, activities) if activities else None
 
-    def _settle_activity_output_claim(
+    def _settle_activity_output_claims(
         self,
         output_semantics: MessageOutput,
         *,
         accepted_message_exists: bool,
         settlement_error: BaseException | None = None,
-    ) -> bool:
-        claimed = self._claimed_activity_for_output(output_semantics)
+    ) -> bool | None:
+        claimed = self._claimed_activity_batch_for_output(output_semantics)
         if claimed is None:
-            return False
-        registry, activity = claimed
-        settle = getattr(registry, "settle_completed_output_delivery", None)
+            return None
+        registry, activities = claimed
+        settle = getattr(registry, "settle_completed_output_batch", None)
         if not callable(settle):
             return False
-        if settlement_error is None:
-            return bool(
-                settle(
-                    activity,
-                    accepted_message_exists=accepted_message_exists,
-                )
-            )
-
-        build_failure = getattr(registry, "delivered_output_failure", None)
-        if not callable(build_failure):
-            return False
-        failed_activity = build_failure(activity, settlement_error)
         service = getattr(self.controller, "agent_service", None)
         on_terminal = getattr(service, "on_activity_terminal", None)
 
@@ -1205,25 +1193,76 @@ class ConsolidatedMessageDispatcher:
             except Exception:
                 logger.error(
                     "Failed to terminally settle delivered Activity %s after local failure",
-                    activity.id,
+                    terminal_activity.id,
                     exc_info=True,
                 )
                 return False
 
         settled = bool(
             settle(
-                activity,
+                output_semantics,
                 accepted_message_exists=accepted_message_exists,
-                terminal_activity=failed_activity,
-                settle_terminal=settle_terminal,
+                settlement_error=settlement_error,
+                settle_terminal=(settle_terminal if settlement_error is not None else None),
             )
         )
         if not settled:
             logger.error(
-                "Delivered Activity %s remains claimed without complete local settlement",
-                activity.id,
+                "Delivered Activity batch %s remains claimed without complete local settlement",
+                ",".join(activity.id for activity in activities),
             )
         return settled
+
+    @staticmethod
+    def _output_with_accepted_provenance(
+        output_semantics: MessageOutput,
+        accepted_message: Any,
+    ) -> MessageOutput:
+        if not isinstance(accepted_message, Mapping):
+            return output_semantics
+        metadata = accepted_message.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return output_semantics
+
+        def identities(name: str) -> tuple[str, ...]:
+            values = metadata.get(name)
+            if not isinstance(values, list):
+                return ()
+            return tuple(
+                dict.fromkeys(
+                    value
+                    for item in values
+                    if (value := str(item or "").strip())
+                )
+            )
+
+        activity_ids = identities("activity_ids")
+        run_ids = identities("run_ids")
+        return replace(
+            output_semantics,
+            activity_ids=activity_ids or output_semantics.activity_ids,
+            run_ids=run_ids or output_semantics.run_ids,
+        )
+
+    @classmethod
+    def _accepted_message_result_text(
+        cls,
+        accepted_message: Any,
+        fallback_text: str,
+        fallback_footer: str | None,
+    ) -> str:
+        if not isinstance(accepted_message, Mapping):
+            return cls._fold_footer(fallback_text, fallback_footer)
+        text = str(accepted_message.get("text") or "")
+        content = accepted_message.get("content")
+        footer = (
+            str(content.get("result_footer") or "")
+            if isinstance(content, Mapping)
+            else ""
+        )
+        if footer and not text.rstrip().endswith(footer):
+            return cls._fold_footer(text, footer)
+        return text
 
     def _record_agent_run_terminal_result(
         self,
@@ -1240,8 +1279,12 @@ class ConsolidatedMessageDispatcher:
         semantics = output_semantics or MessageOutput(completes_turn=True)
         require_confirmation = semantics.requires_delivery_for_run_settlement
         run_ids: list[str] = []
+        for value in semantics.run_ids:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
         explicit_run_id = str(semantics.run_id or "").strip()
-        if explicit_run_id:
+        if explicit_run_id and explicit_run_id not in run_ids:
             run_ids.append(explicit_run_id)
         explicit_run_ids = semantics.metadata.get("run_ids")
         if isinstance(explicit_run_ids, list):
@@ -1641,7 +1684,7 @@ class ConsolidatedMessageDispatcher:
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
                 if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claim(
+                    self._settle_activity_output_claims(
                         output_semantics,
                         accepted_message_exists=False,
                     )
@@ -1669,8 +1712,17 @@ class ConsolidatedMessageDispatcher:
         if canonical_type == "result":
             persist_text = enhanced.text if enhanced.text.strip() else text
 
-        if native_output_id and agent_message_exists(target_context, native_output_id):
+        accepted_message = (
+            agent_message_exists(target_context, native_output_id)
+            if native_output_id
+            else None
+        )
+        if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
+            accepted_output_semantics = self._output_with_accepted_provenance(
+                output_semantics,
+                accepted_message,
+            )
             # An existing row is the STRONGEST receipt available — stronger than a
             # send that returned an id, because it proves the write committed. Report
             # it here or a caller holding a durable notice cannot distinguish "already
@@ -1692,8 +1744,9 @@ class ConsolidatedMessageDispatcher:
                     "evidence": "duplicate_short_circuit",
                 }
             try:
-                if canonical_type == "result" and output_semantics.settles_run:
-                    duplicate_result_text = self._fold_footer(
+                if canonical_type == "result" and accepted_output_semantics.settles_run:
+                    duplicate_result_text = self._accepted_message_result_text(
+                        accepted_message,
                         persist_text,
                         result_footer if mutates_turn_lifecycle else None,
                     )
@@ -1703,20 +1756,29 @@ class ConsolidatedMessageDispatcher:
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
-                        output_semantics=output_semantics,
+                        output_semantics=accepted_output_semantics,
                     )
                 if mutates_turn_lifecycle:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(
                         context,
-                        settled_by=self._turn_release_settlement(output_semantics),
+                        settled_by=self._turn_release_settlement(
+                            accepted_output_semantics
+                        ),
                     )
-                if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claim(
-                        output_semantics,
+                if accepted_output_semantics.requires_delivery_for_run_settlement:
+                    settlement_complete = self._settle_activity_output_claims(
+                        accepted_output_semantics,
                         accepted_message_exists=True,
                     )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Accepted Activity output has incomplete local settlement",
+                            delivered=True,
+                            durable=True,
+                            message_id=native_output_id,
+                        )
                 # A previously persisted output is a successful idempotent
                 # delivery attempt. Return its stable identity so a recovered
                 # Activity can acknowledge its durable Outbox snapshot instead
@@ -1812,7 +1874,7 @@ class ConsolidatedMessageDispatcher:
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
                 if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claim(
+                    self._settle_activity_output_claims(
                         output_semantics,
                         accepted_message_exists=persisted_output is not None,
                     )
@@ -2120,6 +2182,8 @@ class ConsolidatedMessageDispatcher:
                 activity_settlement_error: BaseException | None = None
                 durable_output_exists = False
                 activity_was_delivered = False
+                settlement_output_semantics = output_semantics
+                settlement_result_text = persisted_result_text
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
@@ -2172,13 +2236,24 @@ class ConsolidatedMessageDispatcher:
                         )
 
                 if settlement_waits_for_persistence:
-                    durable_output_exists = bool(
-                        persisted_output is not None
-                        or (
-                            native_output_id
-                            and agent_message_exists(target_context, native_output_id)
-                        )
+                    accepted_message = persisted_output or (
+                        agent_message_exists(target_context, native_output_id)
+                        if native_output_id
+                        else None
                     )
+                    durable_output_exists = bool(accepted_message)
+                    if accepted_message:
+                        settlement_output_semantics = (
+                            self._output_with_accepted_provenance(
+                                output_semantics,
+                                accepted_message,
+                            )
+                        )
+                        settlement_result_text = self._accepted_message_result_text(
+                            accepted_message,
+                            persisted_result_text,
+                            None,
+                        )
                     activity_was_delivered = bool(
                         output_semantics.requires_delivery_for_run_settlement
                         and target_context.platform != "avibe"
@@ -2202,11 +2277,11 @@ class ConsolidatedMessageDispatcher:
                     try:
                         self._record_agent_run_terminal_result(
                             context,
-                            persisted_result_text,
+                            settlement_result_text,
                             primary_message_id,
                             is_error=is_error,
                             terminal_error=terminal_error,
-                            output_semantics=output_semantics,
+                            output_semantics=settlement_output_semantics,
                         )
                     except Exception as err:
                         if not activity_was_delivered:
@@ -2256,11 +2331,19 @@ class ConsolidatedMessageDispatcher:
                     raise activity_delivery_error
 
                 if output_semantics.requires_delivery_for_run_settlement:
-                    self._settle_activity_output_claim(
-                        output_semantics,
+                    settlement_complete = self._settle_activity_output_claims(
+                        settlement_output_semantics,
                         accepted_message_exists=durable_output_exists,
                         settlement_error=activity_settlement_error,
                     )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Activity output was delivered but local settlement is incomplete",
+                            delivered=activity_was_delivered or durable_output_exists,
+                            durable=durable_output_exists,
+                            message_id=primary_message_id,
+                            cause=activity_settlement_error,
+                        )
 
                 return primary_message_id
             finally:

@@ -185,7 +185,9 @@ def test_activity_output_native_id_is_stable_across_recovery_contexts():
 
     assert live_id == recovered_id
     assert live_id is not None
-    assert live_id.startswith("agent-output:claude:activity:task-1:")
+    assert live_id.startswith(
+        "agent-output:claude:activity-batch:claude:runtime-1:activity:task-1:"
+    )
     assert output.requires_delivery_for_run_settlement is True
 
 
@@ -300,6 +302,148 @@ def test_delivered_output_without_durable_evidence_stays_claimed_when_terminal_w
     callback.assert_not_called()
 
 
+def test_terminal_callback_is_not_durable_delivery_evidence():
+    callback = mock.Mock()
+    registry = SessionActivityRegistry()
+    registry.set_output_settled_callback(callback)
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+        run_id="run-1",
+    )
+    registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-1",
+        status="completed",
+        expects_output=True,
+    )
+    claimed = registry.claim_completed_output("claude", "runtime-1")
+    assert claimed is not None
+    terminal = registry.delivered_output_failure(
+        claimed,
+        RuntimeError("run store unavailable"),
+    )
+    settle_terminal = mock.Mock(return_value=True)
+
+    with mock.patch.object(
+        registry,
+        "_persist_activity",
+        side_effect=RuntimeError("terminal write unavailable"),
+    ):
+        assert registry.settle_completed_output_delivery(
+            claimed,
+            accepted_message_exists=False,
+            terminal_activity=terminal,
+            settle_terminal=settle_terminal,
+        ) is False
+
+    settle_terminal.assert_called_once_with(terminal)
+    assert registry.has_completed_output("claude", "runtime-1") is True
+    assert registry.claim_completed_output("claude", "runtime-1") is None
+    callback.assert_not_called()
+
+
+def test_activity_batch_receipt_is_stable_for_every_member_after_restart():
+    registry = SessionActivityRegistry()
+    for activity_id, run_id in (("task-a", "run-a"), ("task-b", "run-b")):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+            run_id=run_id,
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+    claimed = registry.claim_completed_output_batch("claude", "runtime-1")
+    assert [activity.id for activity in claimed] == ["task-a", "task-b"]
+
+    batch_output = activity_completion_output(
+        claimed[-1],
+        activities=claimed,
+        detached=True,
+        completes_turn=False,
+    )
+    recovered_output = activity_completion_output(
+        claimed[0],
+        detached=True,
+        completes_turn=False,
+    )
+    context = SimpleNamespace(
+        platform_specific={"vibe_agent_backend": "claude"},
+    )
+
+    assert batch_output.activity_ids == ("task-a", "task-b")
+    assert batch_output.run_ids == ("run-a", "run-b")
+    assert batch_output.native_message_id(context) == recovered_output.native_message_id(
+        context
+    )
+
+
+def test_batch_callbacks_run_after_all_claims_release_and_outside_registry_lock():
+    registry = SessionActivityRegistry()
+    for activity_id in ("task-a", "task-b"):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="background_task",
+            turn_id="turn-1",
+        )
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id=activity_id,
+            status="completed",
+            expects_output=True,
+        )
+    claimed = registry.claim_completed_output_batch("claude", "runtime-1")
+    output = activity_completion_output(
+        claimed[-1],
+        activities=claimed,
+        detached=True,
+        completes_turn=False,
+    )
+    observations = []
+
+    def callback(activity):
+        inspected = threading.Event()
+
+        def inspect_registry():
+            observations.append(
+                (
+                    activity.id,
+                    registry.has_completed_output("claude", "runtime-1"),
+                )
+            )
+            inspected.set()
+
+        worker = threading.Thread(target=inspect_registry)
+        worker.start()
+        worker.join(timeout=0.2)
+        assert inspected.is_set()
+
+    registry.set_output_settled_callback(callback)
+
+    assert registry.settle_completed_output_batch(
+        output,
+        accepted_message_exists=True,
+    ) is True
+    assert observations == [("task-a", False), ("task-b", False)]
+
+
 def test_delivered_output_settlement_invokes_callback_outside_registry_lock():
     registry = SessionActivityRegistry()
     registry.start(
@@ -351,6 +495,11 @@ def test_claimed_output_mutation_is_owned_by_the_registry_api():
     ):
         source = (repo_root / relative_path).read_text(encoding="utf-8")
         assert "_claimed_completed_outputs" not in source
+
+    claude_source = (repo_root / "modules/agents/claude_agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert ".ack_completed_output(" not in claude_source
 
 
 def test_activity_updates_are_independent_and_runtime_disconnect_terminates_all():

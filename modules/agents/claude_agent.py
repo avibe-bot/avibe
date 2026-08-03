@@ -1347,13 +1347,8 @@ class ClaudeAgent(BaseAgent):
                                     completes_turn=False,
                                     subtype=getattr(message, "subtype", "") or "",
                                     duration_ms=getattr(message, "duration_ms", 0),
+                                    activities=detached_activities,
                                 )
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    self._consume_delivered_activities(
-                                        composite_key,
-                                        detached_activities,
-                                    )
                             except ActivityOutputDeliveryError as err:
                                 if not err.delivered or err.durable:
                                     registry = self._activity_registry()
@@ -1368,10 +1363,11 @@ class ClaudeAgent(BaseAgent):
                                             context,
                                         )
                                     raise
-                                self._consume_delivered_activities(
+                                logger.error(
+                                    "Delivered Claude Activity batch remains fail-closed "
+                                    "after incomplete local settlement (runtime=%s error=%s)",
                                     composite_key,
-                                    detached_activities,
-                                    delivery_error=err,
+                                    err,
                                 )
                             except Exception:
                                 registry = self._activity_registry()
@@ -1503,13 +1499,7 @@ class ClaudeAgent(BaseAgent):
                                     duration_ms=getattr(message, "duration_ms", 0),
                                     request=pending_request,
                                 )
-                                registry = self._activity_registry()
-                                if registry is not None:
-                                    self._consume_delivered_activities(
-                                        composite_key,
-                                        output_activities,
-                                    )
-                                    self._clear_request_activities(pending_request)
+                                self._clear_request_activities(pending_request)
                             else:
                                 await self.emit_result_message(
                                     context,
@@ -1533,10 +1523,11 @@ class ClaudeAgent(BaseAgent):
                                         context,
                                     )
                                 raise
-                            self._consume_delivered_activities(
+                            logger.error(
+                                "Delivered Claude Activity batch remains fail-closed "
+                                "after incomplete local settlement (runtime=%s error=%s)",
                                 composite_key,
-                                output_activities,
-                                delivery_error=err,
+                                err,
                             )
                             self._clear_request_activities(pending_request)
                         except Exception:
@@ -2061,20 +2052,29 @@ class ClaudeAgent(BaseAgent):
             return []
         return list(getattr(request, "output_activities", None) or [])
 
-    def _attach_request_activity(
+    def _attach_request_activities(
         self,
         request: AgentRequest,
-        activity: SessionActivity,
+        activities: list[SessionActivity],
     ) -> None:
         retained = list(getattr(request, "output_activities", None) or [])
-        if all(item is not activity for item in retained):
-            retained.append(activity)
+        retained_ids = {item.id for item in retained}
+        for activity in activities:
+            if activity.id not in retained_ids:
+                retained.append(activity)
+                retained_ids.add(activity.id)
+        registry = self._activity_registry()
+        bind_batch = getattr(registry, "bind_completed_output_batch", None)
+        if callable(bind_batch):
+            retained = list(bind_batch(retained))
         request.output_activities = retained
-        request.output = self._activity_message_output(
-            activity,
-            detached=False,
-            completes_turn=True,
-        )
+        if retained:
+            request.output = self._activity_message_output(
+                retained[-1],
+                activities=retained,
+                detached=False,
+                completes_turn=True,
+            )
 
     @staticmethod
     def _requeue_activities(
@@ -2084,43 +2084,6 @@ class ClaudeAgent(BaseAgent):
         """Restore a claimed batch to its Registry-owned queue positions."""
 
         registry.requeue_completed_outputs(activities)
-
-    def _consume_delivered_activities(
-        self,
-        composite_key: str,
-        activities: list[SessionActivity],
-        *,
-        delivery_error: ActivityOutputDeliveryError | None = None,
-    ) -> None:
-        """Consume outputs after positive delivery without allowing a resend."""
-
-        if delivery_error is not None:
-            logger.error(
-                "Claude Activity output reached the user but local completion failed; "
-                "consuming without redelivery (runtime=%s activities=%s error=%s)",
-                composite_key,
-                ",".join(activity.id for activity in activities),
-                delivery_error,
-            )
-        registry = self._activity_registry()
-        if registry is None:
-            return
-        ack = getattr(registry, "ack_completed_output", None)
-        if not callable(ack):
-            return
-        for activity in activities:
-            try:
-                ack(activity)
-            except Exception as ack_error:
-                logger.error(
-                    "Activity acknowledgement failed after delivery; the Registry "
-                    "retains settlement ownership "
-                    "(runtime=%s activity=%s error=%s)",
-                    composite_key,
-                    getattr(activity, "id", ""),
-                    ack_error,
-                    exc_info=True,
-                )
 
     def _claim_activity_batch_for_turns(
         self,
@@ -2135,14 +2098,6 @@ class ClaudeAgent(BaseAgent):
             composite_key,
             turn_ids=turn_ids,
         )
-
-    def _attach_request_activities(
-        self,
-        request: AgentRequest,
-        activities: list[SessionActivity],
-    ) -> None:
-        for activity in activities:
-            self._attach_request_activity(request, activity)
 
     @staticmethod
     def _request_activity_turn_ids(request: AgentRequest | None) -> set[str]:
@@ -2165,14 +2120,6 @@ class ClaudeAgent(BaseAgent):
         if request is None:
             return
         request.output_activities = []
-
-    def _ack_request_activities(self, request: AgentRequest | None) -> None:
-        activities = self._request_activities(request)
-        registry = self._activity_registry()
-        if registry is not None:
-            for activity in activities:
-                registry.ack_completed_output(activity)
-        self._clear_request_activities(request)
 
     def _requeue_request_activity(self, request: AgentRequest | None) -> None:
         activities = self._request_activities(request)
@@ -2523,11 +2470,13 @@ class ClaudeAgent(BaseAgent):
     def _activity_message_output(
         activity: SessionActivity,
         *,
+        activities: list[SessionActivity] | None = None,
         detached: bool,
         completes_turn: bool,
     ) -> MessageOutput:
         return activity_completion_output(
             activity,
+            activities=activities,
             detached=detached,
             completes_turn=completes_turn,
         )
@@ -2574,13 +2523,20 @@ class ClaudeAgent(BaseAgent):
         subtype: str = "success",
         duration_ms: int = 0,
         request: AgentRequest | None = None,
+        activities: list[SessionActivity] | None = None,
     ) -> None:
         """Apply the Activity's explicit visible-or-silent output policy."""
 
-        output = self._activity_message_output(
-            activity,
-            detached=detached,
-            completes_turn=completes_turn,
+        request_output = getattr(request, "output", None) if request is not None else None
+        output = (
+            request_output
+            if isinstance(request_output, MessageOutput)
+            else self._activity_message_output(
+                activity,
+                activities=activities,
+                detached=detached,
+                completes_turn=completes_turn,
+            )
         )
         visible_text = str(text or "")
         if not strip_silent_blocks(visible_text).strip():
@@ -2675,20 +2631,19 @@ class ClaudeAgent(BaseAgent):
                 text,
                 detached=True,
                 completes_turn=False,
+                activities=activities,
             )
-            registry = self._activity_registry()
-            if registry is not None:
-                self._consume_delivered_activities(composite_key, activities)
         except ActivityOutputDeliveryError as err:
             if not err.delivered or err.durable:
                 registry = self._activity_registry()
                 if registry is not None:
                     self._requeue_activities(registry, activities)
                 raise
-            self._consume_delivered_activities(
+            logger.error(
+                "Delivered Claude Activity batch remains fail-closed after incomplete "
+                "local settlement (runtime=%s error=%s)",
                 composite_key,
-                activities,
-                delivery_error=err,
+                err,
             )
         except Exception:
             registry = self._activity_registry()
@@ -2762,10 +2717,6 @@ class ClaudeAgent(BaseAgent):
                         completes_turn=True,
                         request=matched_request,
                     )
-                    self._consume_delivered_activities(
-                        composite_key,
-                        retained,
-                    )
                     self._clear_request_activities(matched_request)
                 except ActivityOutputDeliveryError as err:
                     if not err.delivered or err.durable:
@@ -2773,10 +2724,11 @@ class ClaudeAgent(BaseAgent):
                         if not err.delivered:
                             await self._settle_activity_turn_after_delivery_failure(context)
                         raise
-                    self._consume_delivered_activities(
+                    logger.error(
+                        "Delivered Claude Activity batch remains fail-closed after "
+                        "incomplete local settlement (runtime=%s error=%s)",
                         composite_key,
-                        retained,
-                        delivery_error=err,
+                        err,
                     )
                     self._clear_request_activities(matched_request)
                 except Exception:
@@ -2810,16 +2762,17 @@ class ClaudeAgent(BaseAgent):
                     result_text,
                     detached=True,
                     completes_turn=False,
+                    activities=activities,
                 )
-                self._consume_delivered_activities(composite_key, activities)
             except ActivityOutputDeliveryError as err:
                 if not err.delivered or err.durable:
                     self._requeue_activities(registry, activities)
                     raise
-                self._consume_delivered_activities(
+                logger.error(
+                    "Delivered Claude Activity batch remains fail-closed after incomplete "
+                    "local settlement (runtime=%s error=%s)",
                     composite_key,
-                    activities,
-                    delivery_error=err,
+                    err,
                 )
             except Exception:
                 self._requeue_activities(registry, activities)

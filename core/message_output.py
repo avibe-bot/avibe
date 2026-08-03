@@ -38,9 +38,12 @@ class MessageOutput:
     detached: bool = False
     idempotency_key: str | None = None
     activity_id: str | None = None
+    activity_ids: tuple[str, ...] = ()
+    activity_batch_id: str | None = None
     causation_id: str | None = None
     sequence: int | None = None
     run_id: str | None = None
+    run_ids: tuple[str, ...] = ()
     requires_delivery_for_run_settlement: bool = False
     settled_by: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -62,7 +65,10 @@ class MessageOutput:
         values: dict[str, Any] = {
             "turn_id": str(spec.get("turn_token") or "").strip() or None,
             "activity_id": self.activity_id,
+            "activity_ids": list(self.activity_ids) or None,
+            "activity_batch_id": self.activity_batch_id,
             "run_id": self.run_id or inferred_run_id or None,
+            "run_ids": list(self.run_ids) or None,
             "causation_id": self.causation_id,
             "sequence": self.sequence,
             "output_id": self.idempotency_key,
@@ -84,10 +90,14 @@ class MessageOutput:
         ).strip()
         if not backend and isinstance(target, dict):
             backend = str(target.get("agent_backend") or "").strip()
-        activity_lineage = f"activity:{self.activity_id}" if self.activity_id else ""
+        activity_lineage = (
+            f"activity-batch:{self.activity_batch_id}"
+            if self.activity_batch_id
+            else (f"activity:{self.activity_id}" if self.activity_id else "")
+        )
         lineage = str(
-            self.run_id
-            or activity_lineage
+            activity_lineage
+            or self.run_id
             or spec.get("task_execution_id")
             or spec.get("agent_session_id")
             or spec.get("agent_runtime_turn_key")

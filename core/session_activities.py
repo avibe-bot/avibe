@@ -109,15 +109,33 @@ class _CompletedOutputEntry:
 class _ClaimedCompletedOutput:
     entry: _CompletedOutputEntry
     recovered: bool
+    externally_retryable: bool = True
 
 
 def activity_completion_output(
     activity: SessionActivity,
     *,
+    activities: list[SessionActivity] | tuple[SessionActivity, ...] | None = None,
     detached: bool,
     completes_turn: bool,
 ) -> MessageOutput:
-    """Build stable Message/Run provenance for one Activity completion."""
+    """Build stable Message/Run provenance for one Activity output batch."""
+
+    members = tuple(activities or (activity,))
+    if not members:
+        members = (activity,)
+    batch_id = _activity_output_batch_id(members[0])
+    activity_ids = tuple(dict.fromkeys(member.id for member in members))
+    run_ids: list[str] = []
+    for member in members:
+        values = [member.run_id]
+        linked = member.metadata.get("run_ids")
+        if isinstance(linked, list):
+            values.extend(linked)
+        for value in values:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
 
     return MessageOutput(
         completes_turn=completes_turn,
@@ -125,22 +143,33 @@ def activity_completion_output(
         detached=detached,
         idempotency_key=_activity_output_idempotency_key(activity),
         activity_id=activity.id,
+        activity_ids=activity_ids,
+        activity_batch_id=batch_id,
         causation_id=activity.parent_activity_id,
         sequence=1,
         run_id=activity.run_id,
+        run_ids=tuple(run_ids),
         requires_delivery_for_run_settlement=True,
         metadata={
             "activity_kind": activity.kind,
             "activity_status": activity.status,
             "backend": activity.backend,
-            "run_ids": activity.metadata.get("run_ids"),
             "turn_id": activity.turn_id,
         },
     )
 
 
+def _activity_output_batch_id(activity: SessionActivity) -> str:
+    assigned = str(activity.metadata.get("output_batch_id") or "").strip()
+    if assigned:
+        return assigned
+    turn_id = str(activity.turn_id or "").strip()
+    member_id = f"turn:{turn_id}" if turn_id else f"activity:{activity.id}"
+    return f"{activity.backend}:{activity.runtime_key}:{member_id}"
+
+
 def _activity_output_idempotency_key(activity: SessionActivity) -> str:
-    return f"{activity.backend}-task:{activity.runtime_key}:{activity.id}:completion"
+    return f"{activity.backend}-activity-output:{_activity_output_batch_id(activity)}:completion"
 
 
 class SessionActivityRegistry:
@@ -539,17 +568,50 @@ class SessionActivityRegistry:
             else:
                 head_turn_id = str(queue[0].activity.turn_id or "").strip()
                 if not head_turn_id:
-                    return self._claim_completed_outputs(
+                    claimed = self._claim_completed_outputs(
                         backend,
                         runtime_key,
                         limit=1,
                     )
+                    return self.bind_completed_output_batch(claimed)
                 identities = {head_turn_id}
-            return self._claim_completed_outputs(
+            claimed = self._claim_completed_outputs(
                 backend,
                 runtime_key,
                 turn_ids=identities,
             )
+            return self.bind_completed_output_batch(claimed)
+
+    def bind_completed_output_batch(
+        self,
+        activities: list[SessionActivity],
+    ) -> list[SessionActivity]:
+        """Persist one receipt identity onto every claimed batch member."""
+
+        if not activities:
+            return []
+        batch_id = _activity_output_batch_id(activities[0])
+        bound: list[SessionActivity] = []
+        with self._lock:
+            for activity in activities:
+                activity_key = self._activity_key(activity)
+                claimed = self._claimed_completed_outputs.get(activity_key)
+                if claimed is None:
+                    continue
+                if activity.metadata.get("output_batch_id") == batch_id:
+                    bound.append(activity)
+                    continue
+                updated = replace(
+                    activity,
+                    metadata={**activity.metadata, "output_batch_id": batch_id},
+                )
+                self._persist_activity(updated, phase="awaiting_output")
+                self._claimed_completed_outputs[activity_key] = replace(
+                    claimed,
+                    entry=replace(claimed.entry, activity=updated),
+                )
+                bound.append(updated)
+        return bound
 
     def claimed_completed_output_for_idempotency_key(
         self,
@@ -566,6 +628,34 @@ class SessionActivityRegistry:
                 if _activity_output_idempotency_key(activity) == identity:
                     return activity
         return None
+
+    def claimed_completed_output_batch_for_output(
+        self,
+        output: MessageOutput,
+    ) -> list[SessionActivity]:
+        """Return the ordered claimed set protected by one output receipt."""
+
+        activity_ids = set(output.activity_ids)
+        if output.activity_id:
+            activity_ids.add(output.activity_id)
+        receipt_id = str(output.idempotency_key or "").strip()
+        with self._lock:
+            claimed = sorted(
+                self._claimed_completed_outputs.values(),
+                key=lambda item: item.entry.sequence,
+            )
+            if receipt_id:
+                return [
+                    item.entry.activity
+                    for item in claimed
+                    if _activity_output_idempotency_key(item.entry.activity)
+                    == receipt_id
+                ]
+            return [
+                item.entry.activity
+                for item in claimed
+                if item.entry.activity.id in activity_ids
+            ]
 
     def _claim_completed_outputs(
         self,
@@ -644,9 +734,12 @@ class SessionActivityRegistry:
         with self._lock:
             for activity in activities:
                 activity_key = self._activity_key(activity)
-                claimed = self._claimed_completed_outputs.pop(activity_key, None)
+                claimed = self._claimed_completed_outputs.get(activity_key)
                 if claimed is None:
                     continue
+                if not claimed.externally_retryable:
+                    continue
+                self._claimed_completed_outputs.pop(activity_key, None)
                 key = (str(activity.backend), str(activity.runtime_key))
                 restored_by_runtime[key].append(claimed)
                 if claimed.recovered:
@@ -670,9 +763,12 @@ class SessionActivityRegistry:
         key = (str(activity.backend), str(activity.runtime_key))
         activity_key = self._activity_key(activity)
         with self._lock:
-            claimed = self._claimed_completed_outputs.pop(activity_key, None)
+            claimed = self._claimed_completed_outputs.get(activity_key)
             if claimed is None:
                 return False
+            if not claimed.externally_retryable:
+                return False
+            self._claimed_completed_outputs.pop(activity_key, None)
             if recovered is None:
                 recovered = claimed.recovered
             queue = self._completed_outputs[key]
@@ -711,71 +807,135 @@ class SessionActivityRegistry:
             },
         )
 
-    def settle_completed_output_delivery(
+    def settle_completed_output_batch(
         self,
-        activity: SessionActivity,
+        output: MessageOutput,
         *,
         accepted_message_exists: bool,
-        terminal_activity: SessionActivity | None = None,
+        settlement_error: BaseException | None = None,
         settle_terminal: Callable[[SessionActivity], bool] | None = None,
+        terminal_activities: tuple[SessionActivity, ...] | None = None,
     ) -> bool:
-        """Persist the terminal barrier, release the claim, then wake waiters.
+        """Settle every claimed member protected by one delivered receipt.
 
-        An accepted Message is the durable anti-redelivery receipt. Without one,
-        a failed acknowledgement must first replace the awaiting-output snapshot
-        with terminal evidence; if that write also fails, the claim stays held.
+        Claim release requires accepted-Message evidence or an Activity terminal
+        write/delete that actually succeeded. Run-settlement callbacks are invoked
+        outside the Registry lock and never count as anti-redelivery evidence.
         """
 
-        activity_key = self._activity_key(activity)
-        if terminal_activity is not None:
-            terminal_persisted = False
-            with self._lock:
+        activities = self.claimed_completed_output_batch_for_output(output)
+        if not activities:
+            return False
+        terminal_by_id = {
+            activity.id: activity for activity in (terminal_activities or ())
+        }
+        if settlement_error is not None:
+            terminal_by_id.update(
+                {
+                    activity.id: self.delivered_output_failure(
+                        activity,
+                        settlement_error,
+                    )
+                    for activity in activities
+                    if activity.id not in terminal_by_id
+                }
+            )
+
+        evidence_safe: dict[tuple[str, str, str], bool] = {}
+        claimed_by_key: dict[
+            tuple[str, str, str], _ClaimedCompletedOutput
+        ] = {}
+        with self._lock:
+            for activity in activities:
+                activity_key = self._activity_key(activity)
                 claimed = self._claimed_completed_outputs.get(activity_key)
                 if claimed is None:
-                    return False
-                try:
-                    self._persist_activity(
-                        terminal_activity,
-                        phase=TERMINAL_SNAPSHOT_PHASE,
+                    continue
+                claimed = replace(claimed, externally_retryable=False)
+                terminal_activity = terminal_by_id.get(activity.id)
+                if terminal_activity is not None:
+                    claimed = replace(
+                        claimed,
+                        entry=replace(claimed.entry, activity=terminal_activity),
                     )
-                    terminal_persisted = True
-                except Exception:
-                    logger.error(
-                        "Failed to persist delivered Activity terminal evidence "
-                        "(activity=%s)",
-                        activity.id,
-                        exc_info=True,
-                    )
+                self._claimed_completed_outputs[activity_key] = claimed
+                claimed_by_key[activity_key] = claimed
 
-            terminal_settled = settle_terminal is None
+                persisted = False
+                try:
+                    if terminal_activity is not None:
+                        self._persist_activity(
+                            terminal_activity,
+                            phase=TERMINAL_SNAPSHOT_PHASE,
+                        )
+                    else:
+                        self._delete_activity(activity)
+                    persisted = True
+                except Exception:
+                    if terminal_activity is None:
+                        try:
+                            self._persist_activity(
+                                activity,
+                                phase=TERMINAL_SNAPSHOT_PHASE,
+                            )
+                            persisted = True
+                        except Exception:
+                            pass
+                    if not persisted:
+                        logger.error(
+                            "Delivered Activity lacks local terminal evidence "
+                            "(activity=%s accepted_message=%s)",
+                            activity.id,
+                            accepted_message_exists,
+                            exc_info=True,
+                        )
+                evidence_safe[activity_key] = bool(
+                    persisted or accepted_message_exists
+                )
+
+        terminal_settled = True
+        if terminal_by_id:
+            terminal_settled = settle_terminal is not None
             if settle_terminal is not None:
-                try:
-                    terminal_settled = bool(settle_terminal(terminal_activity))
-                except Exception:
-                    terminal_settled = False
-                    logger.error(
-                        "Failed to settle delivered Activity terminal state "
-                        "(activity=%s)",
-                        activity.id,
-                        exc_info=True,
-                    )
-            if not terminal_settled:
-                return False
-            terminal_evidence_safe = (
-                terminal_persisted
-                or accepted_message_exists
-                or settle_terminal is not None
-            )
-            if not terminal_evidence_safe:
-                return False
+                for activity in activities:
+                    terminal_activity = terminal_by_id.get(activity.id)
+                    if terminal_activity is None:
+                        continue
+                    try:
+                        if not settle_terminal(terminal_activity):
+                            terminal_settled = False
+                    except Exception:
+                        terminal_settled = False
+                        logger.error(
+                            "Failed to settle delivered Activity terminal state "
+                            "(activity=%s)",
+                            activity.id,
+                            exc_info=True,
+                        )
 
-            with self._lock:
+        if not terminal_settled:
+            return False
+
+        released: list[SessionActivity] = []
+        with self._lock:
+            if len(claimed_by_key) != len(activities) or not all(
+                evidence_safe.values()
+            ):
+                return False
+            for activity in activities:
+                activity_key = self._activity_key(activity)
+                claimed = claimed_by_key.get(activity_key)
                 if self._claimed_completed_outputs.get(activity_key) is not claimed:
                     return False
+            for activity in activities:
+                activity_key = self._activity_key(activity)
                 self._claimed_completed_outputs.pop(activity_key, None)
                 self._recovered_output_ids.discard(activity_key)
-                callback = self._output_settled_callback
-            if callback is not None:
+                released.append(activity)
+            callback = self._output_settled_callback
+
+        if callback is not None:
+            for activity in released:
                 try:
                     callback(activity)
                 except Exception:
@@ -784,50 +944,34 @@ class SessionActivityRegistry:
                         activity.id,
                         exc_info=True,
                     )
-            return True
+        return len(released) == len(activities)
 
-        with self._lock:
-            claimed = self._claimed_completed_outputs.get(activity_key)
-            if claimed is None:
-                return False
-            claimed_activity = claimed.entry.activity
-            try:
-                self._delete_activity(claimed_activity)
-            except Exception:
-                try:
-                    self._persist_activity(
-                        claimed_activity,
-                        phase=TERMINAL_SNAPSHOT_PHASE,
-                    )
-                except Exception:
-                    if not accepted_message_exists:
-                        logger.error(
-                            "Retaining delivered Activity claim without durable "
-                            "Message or terminal evidence (activity=%s)",
-                            activity.id,
-                            exc_info=True,
-                        )
-                        return False
-                    logger.error(
-                        "Releasing delivered Activity claim using accepted Message "
-                        "evidence after acknowledgement and terminal snapshot "
-                        "failure (activity=%s)",
-                        activity.id,
-                        exc_info=True,
-                    )
-            self._claimed_completed_outputs.pop(activity_key, None)
-            self._recovered_output_ids.discard(activity_key)
-            callback = self._output_settled_callback
-        if callback is not None:
-            try:
-                callback(activity)
-            except Exception:
-                logger.warning(
-                    "Failed to signal settled Activity output %s",
-                    activity.id,
-                    exc_info=True,
-                )
-        return True
+    def settle_completed_output_delivery(
+        self,
+        activity: SessionActivity,
+        *,
+        accepted_message_exists: bool,
+        terminal_activity: SessionActivity | None = None,
+        settle_terminal: Callable[[SessionActivity], bool] | None = None,
+    ) -> bool:
+        """Single-member adapter for non-batched Registry callers."""
+
+        output = activity_completion_output(
+            activity,
+            detached=True,
+            completes_turn=False,
+        )
+        return self.settle_completed_output_batch(
+            output,
+            accepted_message_exists=accepted_message_exists,
+            settlement_error=(
+                RuntimeError("delivered output terminal settlement")
+                if terminal_activity is not None
+                else None
+            ),
+            settle_terminal=settle_terminal,
+            terminal_activities=(terminal_activity,) if terminal_activity else None,
+        )
 
     def ack_completed_output(self, activity: SessionActivity) -> bool:
         """Settle a delivered completion when no durable Message is known here."""

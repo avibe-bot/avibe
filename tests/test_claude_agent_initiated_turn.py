@@ -32,7 +32,7 @@ from modules.claude_sdk_compat import (
     TextBlock,
     ToolUseBlock,
 )
-from core.message_output import terminal_output_for
+from core.message_output import MessageOutput, terminal_output_for
 from core.message_dispatcher import (
     ActivityOutputDeliveryError,
     ConsolidatedMessageDispatcher,
@@ -344,6 +344,19 @@ def _install_activity_dispatcher(agent: ClaudeAgent, client: _ActivityDeliveryCl
     ).emit_agent_message
 
 
+def _dispatcher_owned_emit(service: AgentService, *, message_id="message-id"):
+    async def emit(*_args, **kwargs):
+        output = kwargs.get("output")
+        if isinstance(output, MessageOutput) and output.requires_delivery_for_run_settlement:
+            service.activities.settle_completed_output_batch(
+                output,
+                accepted_message_exists=True,
+            )
+        return message_id
+
+    return AsyncMock(side_effect=emit)
+
+
 class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_opens_turn_on_free_gate_so_guard_passes(self):
         running_calls: list = []
@@ -498,7 +511,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             output_activities=[],
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         def _complete(activity_id: str, summary: str) -> None:
             service.activities.start(
@@ -580,7 +593,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             output_activities=[],
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         for activity_id in ("task-build", "task-rebuild"):
             service.activities.start(
@@ -683,7 +696,11 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             expects_output=True,
         )
 
-        async def _emit_result(ctx, *_args, **_kwargs):
+        async def _emit_result(ctx, *_args, **kwargs):
+            service.activities.settle_completed_output_batch(
+                kwargs["output"],
+                accepted_message_exists=True,
+            )
             service.release_runtime_turn(ctx)
             return "message-id"
 
@@ -757,7 +774,13 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detached)
         self.assertEqual(detached.id, "task-detached")
         service.activities.ack_completed_output(detached)
-        agent._ack_request_activities(pending_request)
+        self.assertTrue(
+            service.activities.settle_completed_output_batch(
+                pending_request.output,
+                accepted_message_exists=True,
+            )
+        )
+        agent._clear_request_activities(pending_request)
 
     async def test_terminal_only_task_event_keeps_current_turn_origin(self):
         agent, service = _build_agent()
@@ -886,7 +909,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-eof",
             },
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         await agent._receive_messages(
             _completed_task_notification_client(),
@@ -1040,14 +1063,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(emitted_provenance[0]["run_id"], "run-origin")
 
     async def test_detached_unsolicited_error_keeps_sdk_failure_text(self):
-        agent, _service = _build_agent()
+        agent, service = _build_agent()
         composite_key = "session-detached-unsolicited-error:/tmp/work"
         context = SimpleNamespace(
             platform_specific={"agent_session_id": "sess-detached-unsolicited-error"}
         )
         agent._detached_unsolicited_outputs.add(composite_key)
         agent._detached_unsolicited_text[composite_key] = "Earlier assistant text"
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         class ResultMessage:
             subtype = "error_during_execution"
@@ -1154,7 +1177,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         agent._detached_unsolicited_outputs.add(composite_key)
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         def _content_block(block_type, **values):
             block = object.__new__(block_type)
@@ -1439,7 +1462,10 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             expects_output=True,
         )
         agent.emit_result_message = AsyncMock()
-        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        agent.controller.emit_agent_message = _dispatcher_owned_emit(
+            service,
+            message_id=None,
+        )
 
         should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
@@ -1480,7 +1506,10 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             expects_output=True,
         )
         agent.emit_result_message = AsyncMock()
-        agent.controller.emit_agent_message = AsyncMock(return_value=None)
+        agent.controller.emit_agent_message = _dispatcher_owned_emit(
+            service,
+            message_id=None,
+        )
 
         should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
@@ -1597,12 +1626,12 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 pass
 
-        original_settle = service.activities.settle_completed_output_delivery
+        original_settle = service.activities.settle_completed_output_batch
 
-        def record_settle(activity, **kwargs):
-            settled = original_settle(activity, **kwargs)
+        def record_settle(output, **kwargs):
+            settled = original_settle(output, **kwargs)
             if settled:
-                events.append(("ack", activity.id))
+                events.extend(("ack", activity_id) for activity_id in output.activity_ids)
             return settled
 
         with (
@@ -1614,7 +1643,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 service.activities,
-                "settle_completed_output_delivery",
+                "settle_completed_output_batch",
                 side_effect=record_settle,
             ),
         ):
@@ -1667,8 +1696,11 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(waiter.done())
 
         terminal_writes = []
+        persist_activity = service.activities._persist_activity
 
         def fail_terminal_write(activity, *, phase):
+            if phase != TERMINAL_SNAPSHOT_PHASE:
+                return persist_activity(activity, phase=phase)
             terminal_writes.append((activity, phase))
             raise RuntimeError("terminal activity store unavailable")
 
@@ -1748,6 +1780,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 pass
 
+        acknowledge = Mock(wraps=service.activities.ack_completed_output)
+        persist_activity = service.activities._persist_activity
+
+        def fail_terminal_write(activity, *, phase):
+            if phase != TERMINAL_SNAPSHOT_PHASE:
+                return persist_activity(activity, phase=phase)
+            raise RuntimeError("terminal activity store unavailable")
+
         with (
             patch("core.message_dispatcher.persist_agent_message", return_value=None),
             patch("core.message_dispatcher.agent_message_exists", return_value=False),
@@ -1755,12 +1795,17 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 service.activities,
                 "_persist_activity",
-                side_effect=RuntimeError("terminal activity store unavailable"),
+                side_effect=fail_terminal_write,
             ),
             patch.object(
                 service.activities,
                 "_delete_activity",
                 side_effect=RuntimeError("activity delete unavailable"),
+            ),
+            patch.object(
+                service.activities,
+                "ack_completed_output",
+                acknowledge,
             ),
         ):
             self.assertFalse(
@@ -1771,6 +1816,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(client.sent, ["Background verification finished"])
+        acknowledge.assert_not_called()
         self.assertTrue(service.activities.has_completed_output("claude", composite_key))
         self.assertIsNone(
             service.activities.claim_completed_output("claude", composite_key)
@@ -1998,7 +2044,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(
             platform_specific={"agent_session_id": "sess-batched-flush"},
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         for activity_id in ("task-build", "task-rebuild"):
             service.activities.start(
@@ -2229,7 +2275,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
 
         should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
@@ -2276,9 +2322,22 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        agent.emit_result_message = AsyncMock(
-            side_effect=[None, "delivered-message-id"],
-        )
+        emit_attempts = 0
+
+        async def emit_result(*_args, **kwargs):
+            nonlocal emit_attempts
+            emit_attempts += 1
+            if emit_attempts == 1:
+                return None
+            self.assertTrue(
+                service.activities.settle_completed_output_batch(
+                    kwargs["output"],
+                    accepted_message_exists=True,
+                )
+            )
+            return "delivered-message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=emit_result)
         agent._remove_result_pending_reaction = AsyncMock()
 
         with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
@@ -2345,9 +2404,22 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             output_activities=[activity],
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent.emit_result_message = AsyncMock(
-            side_effect=[None, "delivered-message-id"],
-        )
+        emit_attempts = 0
+
+        async def emit_result(*_args, **kwargs):
+            nonlocal emit_attempts
+            emit_attempts += 1
+            if emit_attempts == 1:
+                return None
+            self.assertTrue(
+                service.activities.settle_completed_output_batch(
+                    kwargs["output"],
+                    accepted_message_exists=True,
+                )
+            )
+            return "delivered-message-id"
+
+        agent.emit_result_message = AsyncMock(side_effect=emit_result)
         agent._remove_result_pending_reaction = AsyncMock()
         result_processed = asyncio.Event()
         release_receiver = asyncio.Event()
@@ -2550,7 +2622,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-690",
             },
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
         service.activities.start(
             backend="claude",
             runtime_key=composite_key,
@@ -2617,7 +2689,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
         agent._native_session_ids[composite_key] = "claude-native-session"
         agent._maybe_backfill_session_title = Mock(
             side_effect=RuntimeError("title store unavailable")
@@ -2659,7 +2731,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-contended",
             },
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
         service.activities.start(
             backend="claude",
             runtime_key=composite_key,
@@ -2748,7 +2820,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 "agent_session_id": "sess-wakeup",
             },
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = _dispatcher_owned_emit(service)
         try:
             await agent._receive_messages(
                 _one_result_client(),
