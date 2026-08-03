@@ -3108,6 +3108,11 @@ def _drain_service(tmp_path: Path, controller, sqlite, requests):
     # service built without ``__init__`` still needs the handle the dispatcher keys its
     # single-flight check on.
     service._notice_drain_task = None
+    # The tick also observes cancellations requested against work THIS process runs, and
+    # that pass reads the in-flight registry first. Empty here: this service never claims
+    # a request, so the pass is a no-op — but the attribute has to exist, because an
+    # AttributeError inside the tick aborts every LATER pass in it.
+    service._inflight_executions = {}
     service.controller = controller
     service._owns_service_instance = lambda: True
     service.validate_platform = lambda platform: None
@@ -10126,8 +10131,9 @@ def test_the_last_success_read_is_one_bounded_indexed_seek(tmp_path: Path) -> No
     )
     assert "DEFINITION_ID = ?" in normalized, f"the definition is an equality term: {statement}"
     assert "STATUS IN" in normalized, f"the verdict filter is a SQL term: {statement}"
-    assert "RUN_TYPE !=" in normalized, (
-        f"the watch-supervisor exclusion is a SQL term too: {statement}"
+    assert "RUN_TYPE NOT IN" in normalized, (
+        "the non-verdict exclusion (watch supervisor, escalation turn) is a SQL term too: "
+        f"{statement}"
     )
 
     # And the answer is the real one: the newest succeeded row in the history above.
@@ -12363,6 +12369,61 @@ def test_an_argv_command_notice_renders_the_shell_joined_argv(tmp_path: Path) ->
         f"the argv preview must be shell-joined, not a Python list: {body}"
     )
     assert "['/bin/sh'" not in body, f"and never a repr: {body}"
+
+
+def test_a_notice_names_the_command_the_run_actually_executed(tmp_path: Path) -> None:
+    """SCT-019 -- the command copy comes from the RUN, not from the live definition.
+
+    The notice drain is asynchronous and the definition is editable: between the fire
+    settling and the notice going out, the user can rewrite the command or delete the
+    task. Composing the line from ``get_task`` therefore reported the REPLACEMENT
+    command as the thing that failed -- and after a delete, dropped the line entirely --
+    while the run row itself kept only output and an exit code and could not say what
+    had run. Either way the user debugs the wrong command, or none.
+
+    So the fire snapshots its own command onto the run, and every later reader uses the
+    snapshot. The live definition stays the fallback for rows written before the
+    snapshot existed.
+    """
+
+    from types import SimpleNamespace
+
+    sqlite, requests = _store(tmp_path)
+    # The definition as it is NOW: already rewritten since the fire.
+    _command_task(sqlite, "task-edited", shell_command="./scripts/backup-v2.sh --fast")
+
+    service = _real_translator(
+        _drain_service(tmp_path, SimpleNamespace(), sqlite, requests), "en"
+    )
+    body = service._failure_notice_body(
+        _command_run(
+            "task-edited",
+            metadata={"command": {"shell": "./scripts/backup.sh", "argv": []}},
+        ),
+        {"failure_id": "run-cmd", "interrupt_reason": None},
+    )
+
+    assert "./scripts/backup.sh" in body, (
+        f"the notice must name the command the run actually executed: {body}"
+    )
+    assert "backup-v2" not in body, (
+        f"and never the replacement the user has since configured: {body}"
+    )
+
+    # And the harder half of the same defect: once the definition is DELETED,
+    # ``get_task`` has no answer at all, so the command line vanished from exactly the
+    # notice that needs it most -- a task the user can no longer inspect.
+    deleted = service._failure_notice_body(
+        _command_run(
+            "task-gone",
+            metadata={"command": {"shell": None, "argv": ["/bin/sh", "-c", "echo hi there"]}},
+        ),
+        {"failure_id": "run-cmd", "interrupt_reason": None},
+    )
+
+    assert "/bin/sh -c 'echo hi there'" in deleted, (
+        f"a removed definition's run still names its command, shell-joined: {deleted}"
+    )
 
 
 def test_a_command_that_never_spawned_carries_no_exit_code_line(tmp_path: Path) -> None:

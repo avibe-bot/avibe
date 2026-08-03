@@ -2877,6 +2877,7 @@
       "timeout": "Timeout",
       "timeoutSeconds": "{{seconds}}s",
       "timeoutNone": "No timeout",
+      "timeoutDefault": "{{duration}} (default)",
       "lastExitCode": "Last exit code"
     },
     "taskKind": {

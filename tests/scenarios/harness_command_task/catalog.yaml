@@ -97,3 +97,63 @@ scenarios:
     layer: unit
     backend: shared
     test: tests/test_harness_definition_lifecycle.py::test_searching_tasks_looks_at_what_a_command_task_actually_runs
+  - id: SCT-012
+    name: a long command fire never holds its conversation's turn lock
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_running_command_fire_does_not_hold_its_conversations_turn_lock
+  - id: SCT-013
+    name: cancelling a running command run actually stops the process
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceling_a_running_command_run_actually_stops_the_command
+  - id: SCT-014
+    name: an escalation turn is not a health verdict on the command that queued it
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_harness_definition_lifecycle.py::test_an_escalation_turn_is_not_a_verdict_on_the_command_that_queued_it
+  - id: SCT-015
+    name: a capped output stream retains the tail, where the cause usually is
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_command_runner.py::test_output_cap_keeps_the_tail_where_the_cause_usually_is
+  - id: SCT-016
+    name: an argv command renders with its word boundaries intact in the UI
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/harnessLifecycle.test.ts::taskCommandPreview quotes argv the way the shell would read it back
+  - id: SCT-017
+    name: a fire that produced no exit code clears the one the last fire left
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_command_task_integration.py::test_a_fire_with_no_exit_code_clears_the_one_the_last_fire_left
+  - id: SCT-018
+    name: the task pane states the timeout in force even when the row stores none
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task states the timeout that actually applies when the row stores none
+  - id: SCT-019
+    name: a notice and a run detail name the command the run actually executed
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_notice_names_the_command_the_run_actually_executed
+    # The write side (a real fire stamps the snapshot onto its run row) and the
+    # Workbench read side:
+    # tests/test_scheduled_command_task_integration.py::test_cli_created_command_task_records_a_nonzero_exit
+    # ui/src/components/workbench/HarnessPage.test.tsx::RunDetail command run

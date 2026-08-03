@@ -535,8 +535,24 @@ describe('TaskDetail command task', () => {
     const html = detail(task({ shell_command: 'make test' }));
 
     expect(html).toContain(`>${i18n.t('harness.onFailure.none')}<`);
-    // No timeout column at all when the server did not send one.
-    expect(html).not.toContain(`>${i18n.t('harness.detail.timeout')}<`);
+  });
+
+  it('states the timeout that actually applies when the row stores none', () => {
+    // SCT-018. A null ``timeout_seconds`` is not "unlimited" and not "unknown": the
+    // executor applies COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS, so a six-hour limit is
+    // in force. Hiding the field left the pane silent about the one number that
+    // decides whether a long backup is killed mid-run, right next to a policy field
+    // that DOES state its default — so the omission read as "no limit".
+    const html = detail(task({ shell_command: 'make test' }));
+
+    expect(html).toContain(`>${i18n.t('harness.detail.timeout')}<`);
+    expect(html).toContain(i18n.t('harness.detail.timeoutDefault', { duration: '6h' }));
+    expect(html).not.toContain(i18n.t('harness.detail.timeoutNone'));
+
+    // A stored limit is the user's own number, and carries no default marker.
+    const stored = detail(task({ shell_command: 'make test', timeout_seconds: 900 }));
+    expect(stored).toContain('900s');
+    expect(stored).not.toContain(i18n.t('harness.detail.timeoutDefault', { duration: '6h' }));
   });
 
   it('colours a zero exit code as neutral and a non-zero one as a failure', () => {
@@ -578,6 +594,7 @@ describe('RunDetail command run', () => {
           definition_name: 'Nightly backup',
           definition_kind: 'task',
           definition_id: 'def-9',
+          metadata: { command: { shell: null, argv: ['pg_dump', 'my db'] } },
         })}
       />,
     );
@@ -588,6 +605,10 @@ describe('RunDetail command run', () => {
     expect(html).toContain('pg_dump: connection refused');
     // Command runs reuse the existing scheduled run-type label; no new key.
     expect(html).toContain(i18n.t('harness.runType.scheduled'));
+    // SCT-019: what ran comes off the RUN's own snapshot, shell-joined, so a
+    // definition edited or deleted after the fire cannot rewrite this pane's answer.
+    expect(html).toContain(`>${i18n.t('harness.detail.command')}<`);
+    expect(html).toContain("pg_dump &#x27;my db&#x27;");
   });
 });
 

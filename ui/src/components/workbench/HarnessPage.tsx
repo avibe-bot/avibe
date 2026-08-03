@@ -68,14 +68,17 @@ import {
   definitionRowTitle,
   definitionStatusCount,
   definitionSurvivesToggle,
+  formatCommandLine,
   formatWallTime,
   humanizeCron,
   humanizeTime,
   isWallClockTimestamp,
   lifecycleLabel,
+  runCommandSnapshotLine,
   taskCommandPreview,
   taskIsCommand,
   taskOnFailure,
+  taskTimeout,
   waiterExpectedAlive,
 } from './harnessLifecycle';
 import type {
@@ -105,6 +108,23 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
     return humanizeTime(task.run_at, t);
   }
   return task.schedule_type || t('harness.unknownSchedule');
+}
+
+// The limit a command definition's next fire runs under, in one phrase. Three
+// distinct states, and none of them may be rendered as another: a stored positive
+// value is the user's own number, a stored 0 is no limit at all, and no stored value
+// means the executor's default applies — which is a real limit, so it is named and
+// marked as the default rather than left out.
+function formatTimeout(
+  task: HarnessTask,
+  t: (k: string, opts?: Record<string, unknown>) => string,
+): string {
+  const { seconds, isDefault } = taskTimeout(task);
+  if (seconds <= 0) return t('harness.detail.timeoutNone');
+  if (isDefault) {
+    return t('harness.detail.timeoutDefault', { duration: formatElapsed(seconds, t) });
+  }
+  return t('harness.detail.timeoutSeconds', { seconds });
 }
 
 // Status segments per tab. Definitions filter by what they are doing; runs by
@@ -1222,7 +1242,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
       {isCommand && (
         <DetailField label={t('harness.detail.command')}>
           <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
-            {task.shell_command || (Array.isArray(task.command) ? task.command.map(String).join(' ') : '') || '—'}
+            {formatCommandLine(task.shell_command, task.command) || '—'}
           </pre>
         </DetailField>
       )}
@@ -1277,17 +1297,16 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           <DetailField label={t('harness.detail.onFailure')}>
             <span className="text-[12px] text-foreground">{t(`harness.onFailure.${taskOnFailure(task)}`)}</span>
           </DetailField>
-          {task.timeout_seconds != null && (
-            <DetailField label={t('harness.detail.timeout')}>
-              {/* 0 means "no limit" server-side. Printing "0s" would read as an
-                  instant kill — the opposite of what it configures. */}
-              <span className="font-mono text-[11px] text-muted">
-                {task.timeout_seconds > 0
-                  ? t('harness.detail.timeoutSeconds', { seconds: task.timeout_seconds })
-                  : t('harness.detail.timeoutNone')}
-              </span>
-            </DetailField>
-          )}
+          <DetailField label={t('harness.detail.timeout')}>
+            {/* Always rendered, because a limit is always in force: a row with no
+                stored timeout is run under the six-hour default, and hiding the
+                field read as "no limit". A stored 0 IS "no limit" server-side, and
+                printing "0s" would read as an instant kill — the opposite. The
+                default is shown in duration words ("6h") because it is a policy
+                constant nobody typed; a stored value is echoed in the seconds the
+                user actually set. */}
+            <span className="font-mono text-[11px] text-muted">{formatTimeout(task, t)}</span>
+          </DetailField>
         </div>
       )}
       {task.last_run_at && (
@@ -1393,7 +1412,7 @@ interface WatchDetailProps {
 
 export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
-  const cmd = watch.shell_command || (Array.isArray(watch.command) ? watch.command.join(' ') : '') || '—';
+  const cmd = formatCommandLine(watch.shell_command, watch.command) || '—';
   const title = definitionRowTitle(watch, t('harness.kind.watch'));
   const showRuntime =
     watch.process_alive === true || (watch.process_alive === false && waiterExpectedAlive(watch));
@@ -1642,6 +1661,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const { t } = useTranslation();
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
+  const runCommandLine = runCommandSnapshotLine(run);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-start gap-2">
@@ -1744,6 +1764,16 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
               {run.callback_error}
             </div>
           )}
+        </DetailField>
+      )}
+      {/* What this run actually executed, read off the run's own snapshot. The
+          definition it came from is editable and deletable, so it cannot answer for a
+          past execution — only the run can. */}
+      {runCommandLine && (
+        <DetailField label={t('harness.detail.command')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+            {runCommandLine}
+          </pre>
         </DetailField>
       )}
       {(run.message || run.prompt) && (

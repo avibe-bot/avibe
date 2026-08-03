@@ -11,6 +11,7 @@ import pytest
 
 from core import watch_worker
 from core.command_runner import (
+    STREAM_TRUNCATION_MARKER,
     SupervisedCommandResult,
     SupervisedCommandStartupError,
     run_supervised_command,
@@ -273,6 +274,57 @@ async def test_output_cap_truncates_but_keeps_draining(tmp_path: Path) -> None:
     assert len(result.stdout.encode("utf-8")) <= 65536
     assert result.stdout_truncated is True
     assert result.stderr_truncated is False
+
+
+async def test_output_cap_keeps_the_tail_where_the_cause_usually_is(tmp_path: Path) -> None:
+    """SCT-015 -- a capped stream must retain its END, not only its beginning.
+
+    Every consumer of a failed command's output reads the tail: the notice and the CLI
+    list show ``_last_nonempty_line`` of stderr, because a failure's explanation is the
+    last thing written (a traceback's exception line, a shell's "command not found").
+    A head-only cap makes that read a lie -- it reports the last line of the first 64 KiB
+    of a chatty command and drops the sentence that says why the run failed, with no
+    sign that the real ending was ever there.
+
+    Head is kept too: the first error in a build log is at the top. The gap between them
+    is marked, and the tail starts on a line boundary, so no consumer can mistake a
+    spliced fragment for a line the command actually printed.
+    """
+
+    result = await run_supervised_command(
+        command=[
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "sys.stderr.write('noise line\\n' * 40000)\n"
+                "sys.stderr.write('FINAL: the cause of the failure\\n')\n"
+            ),
+        ],
+        cwd=str(tmp_path),
+        timeout_seconds=20,
+        label="test cap tail",
+        max_output_bytes=65536,
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr_truncated is True
+    assert len(result.stderr.encode("utf-8")) <= 65536, (
+        "the cap stays a hard cap on the returned bytes, marker included"
+    )
+    lines = [line for line in result.stderr.splitlines() if line.strip()]
+    assert lines[-1] == "FINAL: the cause of the failure", (
+        f"the real last line is what the notice reads: {lines[-3:]}"
+    )
+    assert lines[0] == "noise line", f"the head is retained as whole lines too: {lines[:2]}"
+    assert STREAM_TRUNCATION_MARKER.decode().strip() in result.stderr, (
+        "the dropped middle has to be visible, not a silent splice"
+    )
+    assert set(lines) <= {
+        "noise line",
+        "FINAL: the cause of the failure",
+        STREAM_TRUNCATION_MARKER.decode().strip(),
+    }, "no spliced fragment may appear as a line the command never printed"
 
 
 async def test_output_cap_leaves_small_output_untruncated(tmp_path: Path) -> None:

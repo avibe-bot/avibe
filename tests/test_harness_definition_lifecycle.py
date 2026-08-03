@@ -868,6 +868,62 @@ def test_searching_tasks_looks_at_what_a_command_task_actually_runs(store) -> No
     assert store.count_scheduled_tasks(query="sync.sh")["total"] == 1
 
 
+def test_an_escalation_turn_is_not_a_verdict_on_the_command_that_queued_it(store) -> None:
+    """SCT-014 -- the Agent turn REPORTING a failure must not report it as a success.
+
+    A ``--on-failure agent`` escalation is an ``agent_runs`` row carrying the failing
+    definition's own ``definition_id`` -- which is what links the turn to the task -- and
+    it settles ``succeeded`` whenever the Agent answers, because answering is all it was
+    asked to do. Read as one of the definition's verdicts it is the newest row in the
+    window, so the health badge went green on the strength of the very turn that exists
+    to say the command broke, "last succeeded" pointed at that turn, and a success
+    between two failures closed the failure streak.
+
+    Exactly the ``watch_runtime`` shape (a row sharing a definition's id that is not
+    that definition's outcome), so it takes the same exclusion.
+    """
+
+    settled = datetime.now(timezone.utc)
+    fresh = (settled - timedelta(minutes=5)).isoformat()
+    later = settled.isoformat()
+
+    _task(store, "backup", name="nightly backup", shell_command="./scripts/backup.sh")
+    for index in range(2):
+        _run(
+            store,
+            f"fire-{index}",
+            "backup",
+            request_type="scheduled",
+            run_type="scheduled",
+            status="failed",
+            error="command exited with status 2",
+            created_at=fresh,
+            completed_at=fresh,
+        )
+    # The turn the second failure queued, and it answered.
+    _run(
+        store,
+        "escalation-1",
+        "backup",
+        request_type="task_escalation",
+        run_type="task_escalation",
+        status="succeeded",
+        parent_run_id="fire-1",
+        created_at=later,
+        completed_at=later,
+    )
+
+    health = store.definition_health("backup")
+    assert health["health"] == "failing", (
+        "the escalation turn reporting the failure was counted as the task succeeding: "
+        f"{health}"
+    )
+    assert health["consecutive_failures"] == 2
+    assert store.last_success_settled_at("backup") is None, (
+        "the definition has never succeeded, but the escalation turn claimed it did"
+    )
+
+
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
     """Only the cycle that changes enabled -> disabled owns retirement state."""
     from core.watches import ManagedWatchStore

@@ -20,6 +20,7 @@ import {
   statusMeta,
   triggerFiredSessionIds,
 } from '../../lib/agentGraph';
+import { formatCommandLine } from './harnessLifecycle';
 
 // While a trigger detail panel is open, re-fetch its definition AND recent runs
 // on this cadence so a watch's runtime (running/pid) tracks WatchSupervisor's
@@ -242,10 +243,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
   // pre-load fallback.
   const scheduleText =
     task?.cron || task?.run_at || task?.schedule_type || trigger.schedule_label?.trim() || '—';
-  const commandText =
-    watch?.shell_command?.trim() ||
-    (Array.isArray(watch?.command) ? (watch?.command as unknown[]).join(' ') : '') ||
-    '—';
+  const commandText = formatCommandLine(watch?.shell_command, watch?.command) || '—';
   const runtimeText = watch?.runtime?.running
     ? watch.runtime.pid != null
       ? t('agents.graph.triggerDetail.runningPid', { pid: watch.runtime.pid })

@@ -21,9 +21,11 @@ import {
   LIFECYCLE_DETAILS,
   lifecycleLabel,
   TASK_ON_FAILURE_VALUES,
+  COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS,
   taskCommandPreview,
   taskIsCommand,
   taskOnFailure,
+  taskTimeout,
 } from './harnessLifecycle';
 
 // Translation-free stand-in: proves a mapper picked the right key without
@@ -399,6 +401,23 @@ describe('taskCommandPreview', () => {
     expect(taskCommandPreview({ command: ['python3', '-m', 'pytest', '-q'] })).toBe('python3 -m pytest -q');
   });
 
+  it('quotes an argv part that would otherwise lose its boundary', () => {
+    // SCT-016. Mirrors the backend's ``shlex.join``, which is what the CLI list and
+    // the failure notice show for the same row. A plain space join renders
+    // ``['bash', '-lc', 'echo hi there']`` as ``bash -lc echo hi there`` — a
+    // DIFFERENT command, and the one the user would copy out of this pane to
+    // reproduce a failure. Ordinary parts stay unquoted so the common case reads
+    // like a command and not like an escape exercise.
+    expect(taskCommandPreview({ command: ['bash', '-lc', 'echo hi there'] })).toBe(
+      "bash -lc 'echo hi there'",
+    );
+    expect(taskCommandPreview({ command: ['grep', "it's", '/var/log/app.log'] })).toBe(
+      "grep 'it'\"'\"'s' /var/log/app.log",
+    );
+    expect(taskCommandPreview({ command: ['./run.sh', ''] })).toBe("./run.sh ''");
+    expect(taskCommandPreview({ command: ['a;rm -rf /'] })).toBe("'a;rm -rf /'");
+  });
+
   it('trims, and returns empty for a row with no command at all', () => {
     expect(taskCommandPreview({ shell_command: '  make test \n' })).toBe('make test');
     expect(taskCommandPreview({})).toBe('');
@@ -422,6 +441,24 @@ describe('taskCommandPreview', () => {
 
   it('honours a caller-supplied budget', () => {
     expect(taskCommandPreview({ shell_command: 'make test' }, 6)).toBe('make…');
+  });
+});
+
+describe('taskTimeout', () => {
+  it('separates a stored limit from the default a null row actually runs under', () => {
+    expect(taskTimeout({ timeout_seconds: 900 })).toEqual({ seconds: 900, isDefault: false });
+    // A stored 0 is "no limit" server-side, not "unset" — it must not be overwritten
+    // by the default.
+    expect(taskTimeout({ timeout_seconds: 0 })).toEqual({ seconds: 0, isDefault: false });
+    // MIRROR of ``COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS``. If the backend constant
+    // changes and this does not, the pane names a limit nobody enforces.
+    expect(COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS).toBe(6 * 3600);
+    for (const row of [{}, { timeout_seconds: null }]) {
+      expect(taskTimeout(row)).toEqual({
+        seconds: COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS,
+        isDefault: true,
+      });
+    }
   });
 });
 

@@ -394,21 +394,76 @@ export function taskIsCommand(row: HarnessDefinitionFacts): boolean {
   return Array.isArray(row.command) && row.command.length > 0;
 }
 
+// Exactly Python's ``shlex._find_unsafe`` complement: a part made only of these
+// characters survives a shell unquoted, so quoting it would be noise.
+const SHELL_SAFE_PART = /^[\w@%+=:,./-]+$/;
+
+// One argv part as a shell would need it written. MIRROR of ``shlex.quote``,
+// including its single-quote escape (``'"'"'``), because the same row's command is
+// rendered by ``shlex.join`` in ``vibe task list`` and in a failure notice, and the
+// two must not disagree about what the command is.
+function shellQuotePart(value: string): string {
+  if (value === '') return "''";
+  if (SHELL_SAFE_PART.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+// An argv list as ONE readable line. Boundaries are preserved by quoting, never
+// implied by spaces: ``['bash', '-lc', 'echo hi there']`` joined bare reads as five
+// arguments, so every surface that showed it was showing a command the definition
+// does not run — and the pane it is shown in is the one a user copies from when a
+// fire fails.
+export function formatCommandLine(shellCommand: unknown, argv: unknown): string {
+  if (typeof shellCommand === 'string' && shellCommand.trim()) return shellCommand;
+  if (!Array.isArray(argv)) return '';
+  return argv.map((part) => shellQuotePart(String(part))).join(' ');
+}
+
+// What a command run RECORDED that it executed, from the snapshot the fire wrote onto
+// its own metadata (``COMMAND_SNAPSHOT_METADATA_KEY`` in ``core/scheduled_tasks.py``).
+// Empty for an Agent run, and for a command run written before the snapshot existed —
+// there is nothing trustworthy to show for those, and the definition cannot stand in:
+// it is editable and deletable, so it answers about the command configured NOW.
+export function runCommandSnapshotLine(run: { metadata?: unknown } | null | undefined): string {
+  const metadata = run?.metadata;
+  if (!metadata || typeof metadata !== 'object') return '';
+  const snapshot = (metadata as Record<string, unknown>).command;
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const { shell, argv } = snapshot as { shell?: unknown; argv?: unknown };
+  return formatCommandLine(shell, argv);
+}
+
 // The command in one line, for a row title or a chip. Mirrors the CLI's
 // ``_watch_command_preview``: ``shell_command`` verbatim when present, else the
-// argv joined by spaces, trimmed, and cut with an ellipsis rather than a hard
+// argv shell-joined, trimmed, and cut with an ellipsis rather than a hard
 // slice so the reader can see that something was dropped. The full text always
 // stays available (detail pane, ``title`` attribute) — this is the scannable form.
 export function taskCommandPreview(row: HarnessDefinitionFacts, maxChars = 120): string {
-  const raw =
-    typeof row.shell_command === 'string' && row.shell_command.trim()
-      ? row.shell_command
-      : Array.isArray(row.command)
-        ? row.command.map((part) => String(part)).join(' ')
-        : '';
-  const preview = raw.trim();
+  const preview = formatCommandLine(row.shell_command, row.command).trim();
   if (preview.length <= maxChars) return preview;
   return `${preview.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+// MIRROR of ``COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS`` in ``core/scheduled_tasks.py``:
+// six hours, applied by the executor to any command definition that stores no
+// timeout of its own. Keep the two in step — a client that shows a limit the
+// executor does not enforce is worse than showing none.
+export const COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600;
+
+// How long a fire of this definition is actually allowed to take, and whether that
+// number is the user's or the default. A null ``timeout_seconds`` is neither
+// "unlimited" nor "unknown": the executor substitutes the default, so the limit is
+// real and the pane owes the user the number. A stored ``0`` IS unlimited and stays
+// distinguishable — the caller renders it as such rather than as "0s".
+export function taskTimeout(row: HarnessDefinitionFacts): {
+  seconds: number;
+  isDefault: boolean;
+} {
+  const stored = row.timeout_seconds;
+  if (typeof stored === 'number' && Number.isFinite(stored)) {
+    return { seconds: stored, isDefault: false };
+  }
+  return { seconds: COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS, isDefault: true };
 }
 
 export const TASK_ON_FAILURE_VALUES = ['none', 'agent'] as const;

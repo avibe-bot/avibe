@@ -2877,6 +2877,7 @@
       "timeout": "超时",
       "timeoutSeconds": "{{seconds}} 秒",
       "timeoutNone": "不限时",
+      "timeoutDefault": "{{duration}}（默认）",
       "lastExitCode": "最近退出码"
     },
     "taskKind": {

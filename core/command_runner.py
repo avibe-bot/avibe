@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -35,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 TIMEOUT_EXIT_CODE = 124
 _READ_CHUNK_BYTES = 64 * 1024
+
+#: What a capped stream puts where its dropped middle was. Plain ASCII on purpose: this
+#: module is a leaf with no localization, and the marker is part of the captured bytes
+#: rather than user-facing chrome. Its own length is charged to the cap, so the returned
+#: output never exceeds ``max_output_bytes``.
+STREAM_TRUNCATION_MARKER = b"[avibe: output truncated]\n"
 
 
 @dataclass(frozen=True)
@@ -65,34 +72,84 @@ class SupervisedCommandStartupError(RuntimeError):
 
 
 async def _read_capped_stream(stream: object, max_bytes: int) -> tuple[bytes, bool]:
-    """Drain ``stream`` to EOF while retaining only its first ``max_bytes`` bytes.
+    """Drain ``stream`` to EOF, retaining a bounded HEAD *and* TAIL of it.
 
     Draining must continue past the cap: a reader that stops consuming would
     block the child once the pipe buffer fills, and the run would look like a
     timeout instead of a large output.
+
+    Both ends are kept because both ends are read. The head holds the first error a
+    build or migration printed; the tail holds the sentence that explains the exit
+    status, and the tail is what every failure surface actually shows -- the notice
+    and the CLI list report the LAST non-empty line of stderr. A head-only cap made
+    that read a confident lie: it named the last line of the first ``max_bytes`` and
+    silently dropped the real ending, on exactly the runs whose ending matters.
+
+    The budget is split evenly between the ends, with ``STREAM_TRUNCATION_MARKER``
+    charged to it, so the retained bytes never exceed ``max_bytes``. Both ends are
+    moved to a line boundary -- the head back to its last newline, the tail forward
+    past its first -- so no half line survives to be mistaken for a line the command
+    printed, which is the same mistake a head-only cap made one level up. A
+    ``max_bytes`` too small to hold the marker degrades to a head-only cap rather
+    than returning nothing but chrome.
     """
 
     if stream is None:
         return b"", False
-    retained: list[bytes] = []
-    retained_bytes = 0
-    truncated = False
+    # One extra byte for the newline a head with no line boundary of its own needs
+    # before the marker.
+    budget = max_bytes - len(STREAM_TRUNCATION_MARKER) - 1
+    head_max = max(budget // 2, 0)
+    tail_max = budget - head_max if budget > 0 else 0
+    if tail_max <= 0:
+        head_max = max_bytes
+    head: list[bytes] = []
+    head_bytes = 0
+    # Rolling window over the end of the stream: every chunk that did not fit the head
+    # enters here and the oldest bytes are dropped, so the last ``tail_max`` bytes seen
+    # are always the ones being held.
+    tail: deque[bytes] = deque()
+    tail_bytes = 0
+    total_bytes = 0
     while True:
         chunk = await stream.read(_READ_CHUNK_BYTES)  # type: ignore[attr-defined]
         if not chunk:
             break
-        allowed = max_bytes - retained_bytes
-        if allowed <= 0:
-            truncated = True
+        total_bytes += len(chunk)
+        if head_bytes < head_max:
+            take = min(head_max - head_bytes, len(chunk))
+            head.append(chunk[:take])
+            head_bytes += take
+            chunk = chunk[take:]
+            if not chunk:
+                continue
+        if tail_max <= 0:
             continue
-        if len(chunk) > allowed:
-            retained.append(chunk[:allowed])
-            retained_bytes += allowed
-            truncated = True
-            continue
-        retained.append(chunk)
-        retained_bytes += len(chunk)
-    return b"".join(retained), truncated
+        tail.append(chunk)
+        tail_bytes += len(chunk)
+        while tail_bytes > tail_max:
+            oldest = tail.popleft()
+            drop = min(len(oldest), tail_bytes - tail_max)
+            if drop < len(oldest):
+                tail.appendleft(oldest[drop:])
+            tail_bytes -= drop
+    if tail_max <= 0:
+        # No room for a marked tail: a head-only cap, and no marker either, because the
+        # cap is a hard cap and the marker would be most of what fits.
+        return b"".join(head), total_bytes > head_bytes
+    if total_bytes <= head_bytes + tail_bytes:
+        return b"".join(head) + b"".join(tail), False
+    retained_head = b"".join(head)
+    boundary = retained_head.rfind(b"\n")
+    if boundary != -1:
+        retained_head = retained_head[: boundary + 1]
+    elif retained_head:
+        retained_head += b"\n"
+    retained_tail = b"".join(tail)
+    boundary = retained_tail.find(b"\n")
+    if boundary != -1:
+        retained_tail = retained_tail[boundary + 1 :]
+    return retained_head + STREAM_TRUNCATION_MARKER + retained_tail, True
 
 
 async def _cancel_readers(tasks: list[asyncio.Task]) -> None:

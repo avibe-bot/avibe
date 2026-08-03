@@ -198,6 +198,70 @@ def test_cli_created_command_task_records_a_nonzero_exit(
     assert "boom" in (run["stderr"] or ""), f"stderr was not persisted: {run['stderr']!r}"
     assert calls == [], "a failing pure command task must still not dispatch an Agent turn"
     assert _store(tmp_path).get_task(task.id).last_exit_code == 7
+    # SCT-019: the run records WHAT it ran. The definition is editable and deletable,
+    # so a reader that goes back to it can be told about a command that never ran.
+    assert run["metadata"]["command"] == {"shell": "echo boom >&2; exit 7", "argv": []}, (
+        f"the run row carries no command snapshot: {run['metadata']!r}"
+    )
+
+
+def test_a_fire_with_no_exit_code_clears_the_one_the_last_fire_left(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """SCT-017 -- ``last_exit_code`` must describe THIS fire or nothing.
+
+    Some fires never reach a process: a working directory that no longer exists, a
+    supervisor that dies during startup. They have no exit code at all, and the notice
+    is careful never to invent one. The definition row was not: the stamp only wrote
+    ``last_exit_code`` when it had a value, so the code from the LAST fire stayed on
+    the row and the Harness pane and ``vibe task list`` showed "exited 7" beside a
+    failure that never ran a command -- a fabricated fact, and a misleading one,
+    because 7 was a real status the same definition really produced once.
+
+    A message task is the reason the write is not unconditional: it has no exit code
+    to report and must not blank a command fire's. So the command fire's own stamp is
+    the one authorised to clear it.
+    """
+
+    _isolate(tmp_path, monkeypatch)
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    _add_via_cli(
+        tmp_path,
+        [
+            "--cron",
+            "0 3 * * *",
+            "--shell",
+            "exit 7",
+            "--cwd",
+            str(workdir),
+            "--timeout",
+            "30",
+        ],
+    )
+    capsys.readouterr()
+
+    task = _store(tmp_path).list_tasks()[0]
+    first = _fire(_service(tmp_path, []), task)
+    assert first["exit_code"] == 7
+    assert _store(tmp_path).get_task(task.id).last_exit_code == 7
+
+    # The directory disappears between fires: the next fire cannot spawn, so it has no
+    # status of its own to report.
+    workdir.rmdir()
+    second = _fire(_service(tmp_path, []), task)
+
+    assert second["status"] == "failed"
+    assert "working directory does not exist" in (second["error"] or "")
+    assert second["exit_code"] is None, (
+        f"a fire that never spawned must not carry an exit code: {second['exit_code']!r}"
+    )
+    stored = _store(tmp_path).get_task(task.id)
+    assert stored.last_exit_code is None, (
+        "the definition kept the previous fire's exit code beside a failure that "
+        f"never ran a command: {stored.last_exit_code!r}"
+    )
+    assert stored.last_error and "working directory does not exist" in stored.last_error
 
 
 def test_cli_created_argv_command_task_runs(

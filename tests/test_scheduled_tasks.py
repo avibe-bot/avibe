@@ -14158,6 +14158,146 @@ def test_an_escalating_command_runs_in_its_bound_sessions_workdir(
     assert _escalation_runs(store) == [], "a succeeded fire must not escalate"
 
 
+def test_a_running_command_fire_does_not_hold_its_conversations_turn_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-012 -- a six-hour backup command must not mute the conversation for six hours.
+
+    The per-session lock exists to stop TWO AGENT TURNS running in one conversation at
+    once. A command fire is not a turn: it talks to no Agent, writes no message, and
+    holds no native session. But it is bound to a Session (``--on-failure agent`` needs
+    one), so it inherited that Session's lock key -- and with ``--timeout`` defaulting
+    to six hours, one long command left every queued turn in the conversation skipped as
+    ``session_busy`` for as long as it ran.
+
+    The escalation it may queue is the part that IS a turn, and it is a separate run
+    that takes the lock in the ordinary way. So the fire keys on the definition instead:
+    still serialized against itself, no longer against the user.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_lock")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="sleep 3600", session_id=session_id
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    fire = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert fire is not None
+    fire_lock = service._execution_lock_key(fire)
+    session_lock = service._canonical_session_lock(session_id, None)
+    assert fire_lock == f"task:{task.id}", (
+        "the command fire took a lock keyed on something other than its own definition"
+    )
+    assert fire_lock != session_lock, "the fire is holding the conversation's turn lock"
+
+    # And the consequence, through the real drain: the escalation turn this very
+    # definition would queue has to be dispatchable while the command is still running.
+    service._inflight_sessions.add(fire_lock)
+    escalation = service.request_store.enqueue_hook_send(
+        session_key="",
+        session_id=session_id,
+        prompt="the report",
+        run_type="task_escalation",
+        definition_id=task.id,
+        source_kind="scheduler",
+    )
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        service, "_spawn_execution", lambda request, lock_key: dispatched.append(request.id)
+    )
+
+    asyncio.run(service._drain_requests())
+
+    assert dispatched == [escalation.id], (
+        "the escalation was held behind the command fire: "
+        f"{service.request_store.get_run(escalation.id)['metadata']}"
+    )
+
+
+def test_canceling_a_running_command_run_actually_stops_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-013 -- ``vibe runs cancel`` has to mean the work stops, not just the row.
+
+    For every other run type cancellation reaches the work: a turn is interrupted, a
+    queued claim is terminalized at the door. A command fire had NOTHING watching the
+    flag, so ``cancel_requested`` was only read at settlement -- which for a command
+    that hangs is up to ``--timeout`` (six hours by default) away. Until then the child
+    kept running, holding whatever it was holding, and the row the user was shown said
+    the run was already canceled.
+
+    The runner already owns the kill: cancelling the awaiting coroutine tears down the
+    process tree. What was missing was somebody to observe the flag and pull it, so the
+    scheduler tick does -- the same ``_inflight_cancellation_causes`` + ``task.cancel()``
+    pair service shutdown uses, only with the user named as the cause.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="avibe_task_cancel")
+    started = tmp_path / "command-started"
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        # Announces itself, then hangs for far longer than this test may wait.
+        shell_command=f"touch {started.name}; sleep 3600",
+        session_id=session_id,
+    )
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    async def _cancel_it_mid_flight() -> None:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        service._spawn_execution(request, service._execution_lock_key(request))
+        execution = service._inflight_executions[request.id]
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the command never started, so nothing was cancelled"
+
+        service.request_store.cancel_run(request.id)
+        service._propagate_requested_cancellations()
+        # Ten seconds, against a command that sleeps for an hour: the point of the
+        # assertion is that the wait ends because the command was killed.
+        await asyncio.wait_for(
+            asyncio.gather(execution, return_exceptions=True), timeout=10
+        )
+
+    try:
+        asyncio.run(_cancel_it_mid_flight())
+    except asyncio.TimeoutError:  # pragma: no cover - the defect this test reproduces
+        pytest.fail("cancelling the run left the command running")
+
+    run = next(
+        row
+        for row in store._sqlite.list_runs()
+        if row["run_type"] not in {"task_escalation"}
+    )
+    assert run["status"] == "canceled", f"a cancelled fire settled as {run['status']!r}"
+    assert _escalation_runs(store) == [], (
+        "a fire the user cancelled escalated to an Agent as though the command had failed"
+    )
+    stored = ScheduledTaskStore().get_task(task.id)
+    # The stop landed before the result stamp, which is what keeps the definition free
+    # of a fabricated outcome: a command killed mid-flight has no exit status, and the
+    # cancellation is recorded as the stop it was (``last_error``), not as a command that
+    # reported one.
+    assert stored is not None and stored.last_exit_code is None, (
+        "a cancelled fire stamped an exit code the command never produced"
+    )
+
+
 def test_a_failed_one_shot_command_task_is_disabled_and_escalates_together(
     tmp_path: Path, monkeypatch
 ) -> None:

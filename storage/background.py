@@ -277,6 +277,17 @@ _TIMEOUT_EXIT_CODE = 124
 # read as "running" and leave "waiting" unreachable. Waiter liveness is a
 # separate field (``process_alive``), not a state.
 _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+# The Agent turn a ``--on-failure agent`` command fire queues to REPORT its failure.
+# It carries the failing definition's own ``definition_id`` -- that link is how the
+# Harness shows the turn beside the task -- and it settles ``succeeded`` whenever the
+# Agent answers, because answering is all it was asked to do.
+_TASK_ESCALATION_RUN_TYPE = "task_escalation"
+# Rows that carry a definition's id but are NOT a verdict on that definition. Both
+# members present as the newest row for the definition and both settle ``succeeded``
+# on their own schedule, so counted as verdicts they make a broken definition read
+# healthy: the watch heartbeat on every service restart, the escalation turn on the
+# very failure it exists to report.
+_NON_VERDICT_RUN_TYPES = (_WATCH_RUNTIME_RUN_TYPE, _TASK_ESCALATION_RUN_TYPE)
 # SQLite caps how many parameters one statement may bind (999 on builds before
 # 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
 # every row in the store at once, so batch resolvers chunk their id lists: a few
@@ -1266,6 +1277,21 @@ def _not_an_out_of_band_interruption() -> Any:
 
     reason = literal_column(INTERRUPT_REASON_SQL)
     return or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS)))
+
+
+def _is_a_definition_verdict() -> Any:
+    """SQL for "this row's outcome is an outcome OF the definition it names".
+
+    Shared by name across the health window, the streak scope and the last-success
+    read, because those three answer one question -- how is this definition doing --
+    and a row class excluded from one but not the others gives the same definition two
+    different answers on two surfaces. See ``_NON_VERDICT_RUN_TYPES`` for the members.
+    """
+
+    return or_(
+        agent_runs.c.run_type.is_(None),
+        agent_runs.c.run_type.notin_(_NON_VERDICT_RUN_TYPES),
+    )
 
 #: Derived health, per definition. No new state: both counters come from one
 #: indexed query over ``agent_runs``, so nothing has to be kept in sync or
@@ -5097,7 +5123,9 @@ class SQLiteBackgroundTaskStore:
         ``succeeded`` on every write, and a ``succeeded`` row bearing the watch's
         ``definition_id`` sitting between two failures CLOSES the streak, so every
         watch failure would read as a first failure and notify. Fixing only the
-        deferral predicate would trade a permanent silence for daily spam.
+        deferral predicate would trade a permanent silence for daily spam. An
+        escalation turn is the same shape one definition type along: it settles
+        ``succeeded`` between two failed fires of the command that queued it.
 
         Interruptions are dropped HERE, in SQL, rather than while classifying: they
         are transparent to a streak — neither joining one nor closing one — so a row
@@ -5109,12 +5137,7 @@ class SQLiteBackgroundTaskStore:
         return (
             select(*columns)
             .where(agent_runs.c.definition_id == definition_id)
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(_not_an_out_of_band_interruption())
         )
 
@@ -5479,10 +5502,12 @@ class SQLiteBackgroundTaskStore:
     # because the ``LIMIT`` is applied to whatever the predicates let through —
     # anything the classifier would ignore must never reach it:
     #
-    # 1. the watch supervisor heartbeat (``run_type = watch_runtime``), which shares
-    #    the watch's ``definition_id``, is refreshed to the waiter's ``started_at``
-    #    on every restart, and flips its predecessor to ``succeeded`` — so it both
-    #    presents as the newest "run" and closes a failure streak;
+    # 1. rows that carry a definition's id without being a verdict on it
+    #    (``_NON_VERDICT_RUN_TYPES``): the watch supervisor heartbeat, refreshed to the
+    #    waiter's ``started_at`` on every restart and flipping its predecessor to
+    #    ``succeeded``; and the ``--on-failure agent`` escalation turn, which settles
+    #    ``succeeded`` when the Agent answers — on the very failure it was queued to
+    #    report. Both present as the newest "run" AND close a failure streak;
     # 2. nonterminal executions: a failing recurring definition's next fire is the
     #    newest row for the definition and is not an outcome, so reading "the latest
     #    run failed" off it reports an actively failing definition as healthy for the
@@ -5523,21 +5548,20 @@ class SQLiteBackgroundTaskStore:
         batch with one value, so without the secondary key "the last success" is whichever
         row SQLite happens to return first).
 
-        ``watch_runtime`` is excluded for the same reason the health window excludes it:
-        the supervisor heartbeat is not the definition succeeding, and it flips to
-        ``succeeded`` on every restart — so without this term a permanently broken watch
-        would report a fresh "last succeeded" instant on every service restart.
+        NON-VERDICT ROW CLASSES ARE EXCLUDED for the same reason the health window
+        excludes them (``_NON_VERDICT_RUN_TYPES``), and this read is where the damage is
+        most direct, because the instant it returns is printed in the notice as the last
+        time the thing WORKED: the supervisor heartbeat is not the watch succeeding and
+        flips to ``succeeded`` on every restart, so a permanently broken watch would
+        report a fresh instant per restart; and a ``--on-failure agent`` escalation is
+        not the command succeeding — it succeeds by REPORTING that the command failed —
+        so the notice would date the outage from the report of the outage.
         """
 
         statement = (
             select(_SETTLED_AT)
             .where(agent_runs.c.definition_id == str(definition_id))
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(agent_runs.c.status.in_(_status_query_values("succeeded")))
             .order_by(_SETTLED_AT.desc(), agent_runs.c.id.desc())
             .limit(1)
@@ -5614,12 +5638,7 @@ class SQLiteBackgroundTaskStore:
             # Correlated to the id currently being iterated, which is what makes the
             # LIMIT below per-definition rather than per-batch.
             .where(agent_runs.c.definition_id == id_list.c.value)
-            .where(
-                or_(
-                    agent_runs.c.run_type.is_(None),
-                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
-                )
-            )
+            .where(_is_a_definition_verdict())
             .where(agent_runs.c.status.in_(verdicts))
             .where(settled_at >= cutoff)
             # The same expression the streak read excludes interruptions with, shared

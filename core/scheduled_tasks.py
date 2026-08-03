@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -568,6 +568,66 @@ COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600.0
 #: the child past the cap, so a chatty command is truncated in the run row rather
 #: than deadlocked on a full pipe.
 COMMAND_TASK_OUTPUT_CAP_BYTES = 64 * 1024
+
+#: Where a command run records WHAT IT RAN, inside the run's own ``metadata``.
+#: Entry: ``{"shell": str | None, "argv": list[str]}``.
+#:
+#: A run row carried an exit code and output but never the command, so every reader
+#: -- the failure notice, ``vibe runs show``, the Workbench run detail -- had to go
+#: back to the definition for the copy. The definition is mutable and deletable, and
+#: the notice drain is asynchronous, so by the time a reader asked, the answer could
+#: be a command that never ran (the user rewrote it after the fire) or no answer at
+#: all (the user deleted the task). A run is an immutable record of one execution;
+#: what it executed belongs ON it.
+COMMAND_SNAPSHOT_METADATA_KEY = "command"
+
+
+def command_snapshot(task: Any) -> Optional[dict[str, Any]]:
+    """The ``{"shell", "argv"}`` record of what a command definition would run.
+
+    ``None`` for a definition that has no command, so a caller can merge the result
+    unconditionally without stamping an empty key onto every Agent run's metadata.
+    """
+
+    if not getattr(task, "has_command", False):
+        return None
+    shell_command = getattr(task, "shell_command", None)
+    argv = getattr(task, "command", None)
+    return {
+        "shell": shell_command or None,
+        "argv": [str(part) for part in (argv or [])],
+    }
+
+
+def command_snapshot_of_run(run: Any) -> Optional[SimpleNamespace]:
+    """The snapshot a run carries, shaped like the definition readers already accept.
+
+    Returns an object exposing ``has_command`` / ``shell_command`` / ``command`` so
+    the preview helpers take it and a ``ScheduledTask`` through the same code path.
+    ``None`` when the run predates the snapshot or is not a command run at all -- the
+    callers fall back to the live definition there, which is the best (and, for those
+    rows, the only) answer available.
+    """
+
+    if not isinstance(run, dict):
+        return None
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(COMMAND_SNAPSHOT_METADATA_KEY)
+    if not isinstance(snapshot, dict):
+        return None
+    shell_command = snapshot.get("shell")
+    raw_argv = snapshot.get("argv")
+    argv = [str(part) for part in raw_argv] if isinstance(raw_argv, (list, tuple)) else []
+    shell_command = str(shell_command) if isinstance(shell_command, str) else None
+    if not shell_command and not argv:
+        return None
+    return SimpleNamespace(
+        has_command=True,
+        shell_command=shell_command,
+        command=argv,
+    )
 
 #: What a fire reports when its terminal stamp was REFUSED by the guarded
 #: full-row write (HFR-261/HFR-264). Plain text, like every other value that
@@ -1641,6 +1701,7 @@ class ScheduledTaskStore:
         disable_one_shot: bool = True,
         expected_binding: Optional[tuple[Optional[str], str, str]] = None,
         exit_code: Optional[int] = None,
+        records_command_outcome: bool = False,
         queued_run: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Stamp a fire's outcome; ``False`` means the store refused the write.
@@ -1650,6 +1711,10 @@ class ScheduledTaskStore:
         ONE transaction (HFR-269): both land or neither does, so no teardown can commit
         between them and a failed one-shot ``at`` task cannot be disabled while losing
         the report that explains why.
+
+        ``records_command_outcome`` marks the ONE stamp that is a command fire's own
+        result, and it is what makes ``exit_code`` authoritative in both directions --
+        see the write below.
         """
 
         self.maybe_reload()
@@ -1665,10 +1730,19 @@ class ScheduledTaskStore:
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
-        if exit_code is not None:
-            # Only a command fire has an exit code to report. ``None`` means "this
-            # fire had none", not "clear it": a message task must never blank the
-            # last exit code a command fire of the same definition recorded.
+        if records_command_outcome:
+            # A COMMAND FIRE'S OWN STAMP OWNS THIS COLUMN, ``None`` included. A fire
+            # that never reached a process -- a working directory that vanished, a
+            # supervisor that died during startup -- has no status of its own, and
+            # leaving the previous fire's code on the row made every surface report
+            # "exited 7" beside a failure that ran no command. The notice already
+            # refuses to print an exit code it does not have; the row must refuse to
+            # keep one it no longer has.
+            task.last_exit_code = int(exit_code) if exit_code is not None else None
+        elif exit_code is not None:
+            # A stamp from any other lane reports the code only when it has one: a
+            # message task has none and must never blank what a command fire of the
+            # same definition recorded.
             task.last_exit_code = int(exit_code)
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
@@ -1899,6 +1973,13 @@ class TaskExecutionStore:
                     source_kind=source_kind,
                 )
             )
+        metadata = dict(task.metadata or {})
+        snapshot = command_snapshot(task)
+        if snapshot is not None:
+            # Taken HERE, where the run row is created, because this is the last moment
+            # at which the definition and the work about to run are the same thing. The
+            # definition is editable and deletable from this instant on; the run is not.
+            metadata[COMMAND_SNAPSHOT_METADATA_KEY] = snapshot
         return self.enqueue_definition_run(
             definition_id=task.id,
             run_type="scheduled",
@@ -1910,7 +1991,7 @@ class TaskExecutionStore:
             prompt=task.prompt,
             agent_name=task.agent_name,
             session_policy=task.session_policy,
-            metadata=task.metadata,
+            metadata=metadata,
         )
 
     def enqueue_definition_run(
@@ -3171,6 +3252,66 @@ class ScheduledTaskService:
             return SETTLED_BY_STOPPED
         return SETTLED_BY_RESTARTED
 
+    def _is_command_execution(self, request: TaskExecutionRequest) -> bool:
+        """Is this in-flight request a command fire rather than an Agent turn?"""
+
+        if request.request_type not in {"task_run", "scheduled"} or not request.task_id:
+            return False
+        task = self.store.get_task(request.task_id)
+        return bool(task is not None and task.has_command)
+
+    def _propagate_requested_cancellations(self) -> None:
+        """Pull the trigger on in-flight COMMAND fires the user has cancelled.
+
+        ``cancel_run`` sets a flag; for a command fire nothing was reading it while the
+        work was in flight. The flag was honoured only at settlement, and for a command
+        that hangs that is up to ``--timeout`` away -- six hours by default -- so the
+        child kept running, kept holding whatever it held, and the row the user had just
+        cancelled reported a run that was over. Every other lane already closes this
+        loop: a queued claim is terminalized at the door by ``claim_pending_run``, and a
+        turn is interrupted by the turn lane.
+
+        The kill itself needs nothing new. ``run_supervised_command`` turns a cancelled
+        await into a process-tree teardown, and ``_execute_claimed_request`` settles the
+        row from its ``CancelledError`` handler -- before the result stamp, so a
+        cancelled fire also queues no escalation and stamps no failure on the definition.
+        What was missing was somebody to observe the flag, which is this: the same
+        ``_inflight_cancellation_causes`` + ``task.cancel()`` pair service shutdown uses,
+        with the user named as the cause so the run reads ``stopped`` rather than
+        ``interrupted``.
+
+        COMMAND FIRES ONLY, deliberately. For an Agent turn cancelling this coroutine
+        would abandon work that is still streaming into a conversation, and stopping a
+        turn coherently -- interrupting the backend, closing the transcript -- belongs to
+        the lane that owns it. A command's coroutine cancel IS the complete stop.
+        """
+
+        if not self._inflight_executions:
+            return
+        for request_id, execution in list(self._inflight_executions.items()):
+            if execution.done() or request_id in self._inflight_cancellation_causes:
+                continue
+            request = self._inflight_requests.get(request_id)
+            if request is None or not self._is_command_execution(request):
+                continue
+            try:
+                run = self.request_store.get_run(request_id)
+            except Exception:
+                logger.exception(
+                    "Failed to read Run %s while checking for a requested cancellation",
+                    request_id,
+                )
+                continue
+            if not run or not bool(run.get("cancel_requested")):
+                continue
+            if str(run.get("status") or "") in TERMINAL_RUN_STATUSES:
+                continue
+            logger.info(
+                "Stopping in-flight command Run %s: cancellation requested", request_id
+            )
+            self._inflight_cancellation_causes[request_id] = SETTLED_BY_STOPPED
+            execution.cancel()
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -3269,6 +3410,11 @@ class ScheduledTaskService:
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
                 await self._drain_vault_callbacks()
+                # A cancellation requested against work THIS process is running emits no
+                # store change either — the flag is written by the CLI or the UI — so
+                # only a periodic pass can act on it. No-ops unless a command fire is
+                # actually in flight.
+                self._propagate_requested_cancellations()
                 # Same reason, one layer down: a run whose owner vanished emits no
                 # store change either, so only a periodic pass can find it. Self
                 # rate-limited, so riding this tick is cheap.
@@ -4742,14 +4888,22 @@ class ScheduledTaskService:
         # gate is deliberate: an interrupted command run is a fact about the SERVICE
         # (restart, eviction) and not about the command, so that lane keeps the generic
         # copy the headline already explains.
+        #
+        # The command copy is read off the RUN's own snapshot, falling back to the live
+        # definition only for rows written before the snapshot existed. This notice is
+        # drained asynchronously, so the definition can have been rewritten -- or
+        # deleted -- between the fire and this call; either way ``get_task`` answers
+        # about the wrong execution, or not at all.
+        executed = command_snapshot_of_run(run)
+        command_source = executed if executed is not None else task
         is_command_failure = (
             not failure_notices.is_interruption(notice)
-            and task is not None
-            and task.has_command
+            and command_source is not None
+            and command_source.has_command
         )
         lines = [headline]
         if is_command_failure:
-            command_preview = self._notice_command_preview(task)
+            command_preview = self._notice_command_preview(command_source)
             if command_preview:
                 lines.append(self._t("harness.notice.commandLine", command=command_preview))
         lines.append(self._t("harness.notice.error", error=error))
@@ -5187,6 +5341,16 @@ class ScheduledTaskService:
 
         Returns ``None`` for ``create_per_run`` (fresh session each time) and
         unkeyable requests.
+
+        A COMMAND FIRE IS NOT A TURN, so it never takes a conversation's key. The lock
+        exists to stop two Agent turns running in one conversation at once; a command
+        talks to no Agent and holds no native session, yet it is bound to one (an
+        ``--on-failure agent`` definition must be), and ``--timeout`` defaults to six
+        hours -- so inheriting that key let one long backup command leave every queued
+        turn in the conversation skipped as ``session_busy`` for as long as it ran. Its
+        escalation IS a turn, and that is a separate run which takes the lock in the
+        ordinary way. Keyed on the definition rather than dropped to ``None`` so a fire
+        is still serialized against itself.
         """
         session_policy = request.session_policy
         session_id = request.session_id
@@ -5195,6 +5359,8 @@ class ScheduledTaskService:
         if request.request_type in {"task_run", "scheduled"} and task_id:
             task = self.store.get_task(task_id)
             if task is not None:
+                if task.has_command:
+                    return f"task:{task_id}"
                 session_policy = task.session_policy or session_policy
                 session_id = task.session_id or session_id
                 session_key = task.session_key or session_key
@@ -5690,13 +5856,13 @@ class ScheduledTaskService:
         to the definition and the run row.
 
         No pid registry and no ``on_spawn`` callback, deliberately. The runner is the
-        only thing that ever kills this child: a timeout kills it from inside, and a
-        service stop cancels the awaiting coroutine, which the runner turns into a tree
-        teardown. ``vibe runs cancel`` is not a kill path at all -- it sets
-        ``cancel_requested``, and ``settle_run_terminal`` reads that flag in the same
-        transaction that settles the row, so the run lands ``canceled``. The run row's
-        ``pid`` column keeps its existing meaning (the SERVICE pid, written by
-        ``mark_execution_started`` for the recovery gate) and must not be repurposed.
+        only thing that ever kills this child, and every stop reaches it the same way:
+        a timeout kills the tree from inside, while a service stop and a
+        ``vibe runs cancel`` both cancel the awaiting coroutine, which the runner turns
+        into a tree teardown (see ``_propagate_requested_cancellations`` for how the
+        cancel flag becomes that cancellation). The run row's ``pid`` column keeps its
+        existing meaning (the SERVICE pid, written by ``mark_execution_started`` for the
+        recovery gate) and must not be repurposed.
         """
 
         error: Optional[str] = None
@@ -5798,6 +5964,10 @@ class ScheduledTaskService:
             error=error,
             disable_one_shot=disable_one_shot,
             exit_code=exit_code,
+            # This IS the command fire's own result, so its ``exit_code`` -- including
+            # ``None`` for a fire that never spawned -- is the whole truth about the
+            # definition's last status.
+            records_command_outcome=True,
             # THE BINDING THIS FIRE STARTED AGAINST, and only when a turn is being
             # authorised. ``mark_task_result`` reloads the mirror and derives its
             # compare-and-set expectation from the RELOADED row, so a ``/new`` reclaim
