@@ -276,31 +276,42 @@ evidence, and restart recovery. First determine what remains.
    re-arm those exact Runs. Queued or stalled work ages. Do not derive this from
    `session_last_activity`, generic `agent_runs.updated_at`, or progress from an
    unrelated Run sharing the session.
-3. On expiry, atomically record `metadata.interrupt_reason=lifetime_timeout`
-   before cancellation. First handle a Run with no Delivery under the same
-   guarded ordering boundary used by `reserve_delivery`: retire its queued or
-   bare-claimed request ownership, CAS the Run to failed with
-   `lifetime_timeout`, release its pending-fire coalescing slot, and emit the
-   durable notice without claiming that execution was interrupted. If this CAS
-   loses to Delivery creation, reload and consume `DELIVERY_STATE_MATRIX` for
-   **every** Delivery state; do not branch only on queued versus accepted. A
-   `run_cancel=retire` state may retire only work the policy proves unwritten. A
-   `run_cancel=turn_owner` state routes through its exact Turn owner's cause-aware
-   cancellation/reconciliation; if no Turn exists, preserve the Delivery's
-   possible/unknown native-effect evidence and reconcile it as an infrastructure
-   failure without replay or an “unwritten” claim. The previously recorded
-   timeout cause deliberately overrides normal restart's one-time unknown-start
-   replay. A terminal `run_cancel=complete` Delivery is not automatically a
-   no-op: cancel its linked nonterminal Turn, reconcile from its linked terminal
-   Turn, or fail an inconsistent ownerless projection durably. Every resulting
-   failure settles visibly through the notice path.
+3. On expiry, first claim timeout ownership with one guarded transition that
+   verifies the Run is nonterminal, its observed stale `last_progress_at` has not
+   advanced, and no terminal or cancellation owner already won. That same CAS
+   records `metadata.interrupt_reason=lifetime_timeout`; every terminal writer
+   must honor the claimed owner. If the CAS loses, reload and do not write a
+   timeout cause or cancel anything. Thus a natural result or user Stop that wins
+   first remains authoritative, while one arriving after the timeout claim
+   cannot independently stamp success with timeout metadata.
+
+   Only the timeout owner proceeds to cancellation. First handle a Run with no
+   Delivery under the same guarded ordering boundary used by
+   `reserve_delivery`: retire its queued or bare-claimed request ownership,
+   terminalize the Run as failed, release its pending-fire coalescing slot, and
+   emit the durable notice without claiming that execution was interrupted. If
+   this transition loses to Delivery creation, reload and consume
+   `DELIVERY_STATE_MATRIX` for **every** Delivery state; do not branch only on
+   queued versus accepted. A `run_cancel=retire` state may retire only work the
+   policy proves unwritten. A `run_cancel=turn_owner` state routes through its
+   exact Turn owner's cause-aware cancellation/reconciliation; if no Turn exists,
+   preserve the Delivery's possible/unknown native-effect evidence and reconcile
+   it as an infrastructure failure without replay or an “unwritten” claim. The
+   winning timeout cause deliberately overrides normal restart's one-time
+   unknown-start replay. A terminal `run_cancel=complete` Delivery is not
+   automatically a no-op: cancel its linked nonterminal Turn, reconcile from its
+   linked terminal Turn, or fail an inconsistent ownerless projection durably.
+   Every resulting failure settles visibly through the notice path.
 4. Cover delivery-less queued and bare-claimed requests, including a race with
    `reserve_delivery`; cover `claimed`, `pending_steer`, `steering`,
    `interrupt_waiting`, `reconciling_steer`, and `accepted`, with `accepted` in
-   both nonterminal and terminal linked-Turn cases. Each must reach its exact
-   owner or a durable terminal ambiguity outcome, release its request claim,
-   coalescing slot, or ordering fence as applicable, and never replay work with
-   possible/unknown native effects.
+   both nonterminal and terminal linked-Turn cases. Race fresh progress, natural
+   completion, and user Stop immediately before and after the timeout ownership
+   CAS: exactly one cause wins, and a succeeded Run never retains
+   `lifetime_timeout`. Each state must reach its exact owner or a durable terminal
+   ambiguity outcome, release its request claim, coalescing slot, or ordering
+   fence as applicable, and never replay work with possible/unknown native
+   effects.
 5. Reuse `run_definitions.lifetime_timeout_seconds` as the per-task override and
    store a 1,800-second global inactivity default in `config/v2_config.py`. For
    a recurring cron Run, snapshot at enqueue:
