@@ -42,7 +42,6 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
-from core.session_ownership import SessionOwnershipSnapshot, resolve_ownership_snapshot
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
@@ -53,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from modules.agents.model_hub import ModelHubLaunch
+    from core.session_ownership import SessionOwnershipSnapshot
 
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
 CLAUDE_REMOTE_DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
@@ -1598,13 +1598,22 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
-    async def _resolve_session_ownership(self) -> SessionOwnershipSnapshot:
-        """Read the durable owner union, failing closed for this sweep."""
+    async def _resolve_session_ownership(self) -> "SessionOwnershipSnapshot":
+        """Read the durable owner union, failing closed for this sweep.
+
+        Imported here, not at module scope: the owner union is read out of the
+        state database, so ``core.session_ownership`` pulls ``storage`` and with
+        it ``sqlite3``. This module is on the lightweight import path that
+        ``tests/test_native_session_providers.py`` guards against exactly that,
+        and eviction is the only caller -- nothing on the light path needs it.
+        """
+
+        from core.session_ownership import resolve_ownership_snapshot
 
         return await resolve_ownership_snapshot(self.controller)
 
     @staticmethod
-    def _ownership_pin(ownership: SessionOwnershipSnapshot, composite_key: str) -> bool:
+    def _ownership_pin(ownership: "SessionOwnershipSnapshot", composite_key: str) -> bool:
         """Whether a durable owner holds this runtime right now (unbounded).
 
         Scoped to ``claude``: this runtime key is only a projection of durable work
