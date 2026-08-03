@@ -255,6 +255,43 @@ def test_hfr_149_periodic_session_scan_finds_every_unresolved_owner(
     engine.dispose()
 
 
+def test_hfr_151_session_scan_advances_with_a_bounded_keyset_cursor(
+    tmp_path: Path,
+) -> None:
+    """HFR-151: Session recovery pages by its stable partition key."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        for index in range(1, 7):
+            session_id = f"ses-{index}"
+            _session(conn, session_id)
+            _delivery(conn, f"delivery-{index}", session_id, state="reserved")
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    first, first_has_more = manager.scan_runtime_delivery_recovery(
+        limit=4,
+        occupied=frozenset(),
+        cursor=None,
+    )
+    second, second_has_more = manager.scan_runtime_delivery_recovery(
+        limit=4,
+        occupied=frozenset(),
+        cursor=first[-1].session_id,
+    )
+
+    assert [item.session_id for item in first] == [
+        "ses-1",
+        "ses-2",
+        "ses-3",
+        "ses-4",
+    ]
+    assert first_has_more
+    assert [item.session_id for item in second] == ["ses-5", "ses-6"]
+    assert not second_has_more
+    engine.dispose()
+
+
 @pytest.mark.anyio
 async def test_hfr_134_hfr_149_waiting_recovery_freezes_terminal_winner(
     tmp_path: Path,
@@ -437,5 +474,49 @@ async def test_hfr_149_periodic_requests_lane_requeues_only_pre_execution_claim(
         assert rows["run-started"]["pid"] == 321
         assert rows["run-unknown-type"]["status"] == "running"
         assert rows["run-unknown-type"]["pid"] is None
+    finally:
+        store.close()
+
+
+def test_hfr_151_fallback_scan_advances_with_a_bounded_keyset_cursor(
+    tmp_path: Path,
+) -> None:
+    """HFR-151: fallback recovery pages by its stable partition key."""
+
+    store = SQLiteBackgroundTaskStore(tmp_path / "fallback-cursor.sqlite")
+    try:
+        for index in range(1, 7):
+            store.enqueue_run(
+                {
+                    "id": f"run-{index}",
+                    "run_type": "scheduled",
+                    "status": "processing",
+                    "agent_name": "codex",
+                    "agent_backend": "codex",
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                }
+            )
+
+        first, first_has_more = store.scan_claimed_pre_execution_runs(
+            limit=4,
+            occupied=frozenset(),
+            cursor=None,
+        )
+        second, second_has_more = store.scan_claimed_pre_execution_runs(
+            limit=4,
+            occupied=frozenset(),
+            cursor=str(first[-1]["id"]),
+        )
+
+        assert [row["id"] for row in first] == [
+            "run-1",
+            "run-2",
+            "run-3",
+            "run-4",
+        ]
+        assert first_has_more
+        assert [row["id"] for row in second] == ["run-5", "run-6"]
+        assert not second_has_more
     finally:
         store.close()

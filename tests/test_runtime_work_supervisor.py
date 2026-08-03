@@ -21,8 +21,19 @@ class _Handler(RuntimeWorkHandler):
     started: list[str]
     release: asyncio.Event
 
-    def scan(self, *, limit: int, occupied: frozenset[str]):
-        available = [item for item in self.items if item.partition_key not in occupied]
+    def scan(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ):
+        available = [
+            item
+            for item in self.items
+            if item.partition_key not in occupied
+            and (cursor is None or item.partition_key > cursor)
+        ]
         return available[:limit], len(available) > limit
 
     async def process(self, item: RuntimeWorkItem) -> None:
@@ -34,8 +45,16 @@ class _Handler(RuntimeWorkHandler):
 class _RetryHandler(RuntimeWorkHandler):
     attempts: int = 0
 
-    def scan(self, *, limit: int, occupied: frozenset[str]):
+    def scan(
+        self,
+        *,
+        limit: int,
+        occupied: frozenset[str],
+        cursor: str | None,
+    ):
         if "session-a" in occupied:
+            return [], False
+        if cursor is not None:
             return [], False
         return [RuntimeWorkItem("session-a", {})], False
 
@@ -93,6 +112,58 @@ async def test_hfr_151_guarded_noop_uses_partition_backoff() -> None:
     await asyncio.sleep(0.03)
     assert handler.attempts == 1
     await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_151_stale_first_page_does_not_starve_later_partition() -> None:
+    """HFR-151: the bounded scan cursor advances past stale partitions."""
+
+    class _StalePageHandler(RuntimeWorkHandler):
+        def __init__(self) -> None:
+            self.items = [
+                RuntimeWorkItem(f"session-{index}", {})
+                for index in range(1, 7)
+            ]
+            self.started: list[str] = []
+            self.scan_limits: list[int] = []
+            self.later_partition_started = asyncio.Event()
+
+        def scan(
+            self,
+            *,
+            limit: int,
+            occupied: frozenset[str],
+            cursor: str | None,
+        ):
+            self.scan_limits.append(limit)
+            available = [
+                item
+                for item in self.items
+                if item.partition_key not in occupied
+                and (cursor is None or item.partition_key > cursor)
+            ]
+            return available[:limit], len(available) > limit
+
+        async def process(self, item: RuntimeWorkItem) -> bool:
+            self.started.append(item.partition_key)
+            if item.partition_key == "session-5":
+                self.later_partition_started.set()
+            return False
+
+    handler = _StalePageHandler()
+    supervisor = RuntimeWorkSupervisor(
+        reconcile_interval=3600,
+        lane_capacity=4,
+        scan_page_size=4,
+        retry_backoff=0.01,
+    )
+    supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
+    await supervisor.activate()
+    await asyncio.wait_for(handler.later_partition_started.wait(), timeout=1)
+    await supervisor.stop()
+
+    assert "session-5" in handler.started
+    assert max(handler.scan_limits) == 4
 
 
 @pytest.mark.anyio
@@ -159,4 +230,46 @@ async def test_hfr_154_replacing_live_registration_requires_generation_handoff()
     await supervisor.unregister(token)
     replacement = supervisor.register(RuntimeWorkLane.REQUESTS, second)
     assert replacement.generation > token.generation
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_hfr_154_begin_unregister_invalidates_before_async_join() -> None:
+    """HFR-154: stop invalidates before an in-flight scan can admit work."""
+
+    class _BlockingScanHandler(RuntimeWorkHandler):
+        def __init__(self) -> None:
+            self.scan_started = threading.Event()
+            self.release_scan = threading.Event()
+            self.scans = 0
+            self.processed: list[str] = []
+
+        def scan(
+            self,
+            *,
+            limit: int,
+            occupied: frozenset[str],
+            cursor: str | None,
+        ):
+            self.scans += 1
+            self.scan_started.set()
+            assert self.release_scan.wait(timeout=1)
+            return [RuntimeWorkItem("session-a", {})], False
+
+        async def process(self, item: RuntimeWorkItem) -> None:
+            self.processed.append(item.partition_key)
+
+    handler = _BlockingScanHandler()
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    token = supervisor.register(RuntimeWorkLane.SESSION_DELIVERIES, handler)
+    await supervisor.activate()
+    assert await asyncio.to_thread(handler.scan_started.wait, 1)
+
+    unregister = supervisor.begin_unregister(token)
+    handler.release_scan.set()
+    await unregister
+    supervisor.notify(RuntimeWorkLane.SESSION_DELIVERIES)
+
+    assert handler.scans == 1
+    assert handler.processed == []
     await supervisor.stop()

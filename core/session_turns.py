@@ -4056,8 +4056,9 @@ class SessionTurnManager:
         *,
         limit: int,
         occupied: frozenset[str],
+        cursor: str | None = None,
     ) -> tuple[list[RuntimeDeliveryObservation], bool]:
-        """Return bounded exact Session owners for passive PR3 recovery."""
+        """Return a bounded keyset page of exact Session recovery owners."""
 
         page_limit = max(1, int(limit))
         with self._sqlite_engine().connect() as conn:
@@ -4107,9 +4108,15 @@ class SessionTurnManager:
                     agent_sessions.c.queue_hold_state == "open",
                     ~live_turn,
                 )
-                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .order_by(
+                    agent_sessions.c.id,
+                    delivery_rows.c.submitted_at,
+                    delivery_rows.c.id,
+                )
                 .limit(page_limit + 1)
             )
+            if cursor:
+                open_query = open_query.where(agent_sessions.c.id > cursor)
             if occupied:
                 open_query = open_query.where(~agent_sessions.c.id.in_(occupied))
             open_rows = [dict(row) for row in conn.execute(open_query).mappings()]
@@ -4203,11 +4210,16 @@ class SessionTurnManager:
                     )
                 )
                 .order_by(
+                    session_turn_rows.c.session_id,
                     session_turn_rows.c.created_at,
                     session_turn_rows.c.id,
                 )
                 .limit(page_limit + 1)
             )
+            if cursor:
+                turn_candidates = turn_candidates.where(
+                    session_turn_rows.c.session_id > cursor
+                )
             if occupied:
                 turn_candidates = turn_candidates.where(
                     ~session_turn_rows.c.session_id.in_(occupied)
@@ -4242,9 +4254,17 @@ class SessionTurnManager:
                     )
                 )
                 .where(delivery_rows.c.state.in_(delivery_store.FENCE_STATES))
-                .order_by(delivery_rows.c.submitted_at, delivery_rows.c.id)
+                .order_by(
+                    delivery_rows.c.session_id,
+                    delivery_rows.c.submitted_at,
+                    delivery_rows.c.id,
+                )
                 .limit(page_limit + 1)
             )
+            if cursor:
+                fence_candidates = fence_candidates.where(
+                    delivery_rows.c.session_id > cursor
+                )
             if occupied:
                 fence_candidates = fence_candidates.where(
                     ~delivery_rows.c.session_id.in_(occupied)
@@ -4265,7 +4285,10 @@ class SessionTurnManager:
                 and current.get("turn_state") != "waiting"
             ):
                 by_session[session_id] = row
-        selected = list(by_session.values())[:page_limit]
+        selected = [
+            by_session[session_id]
+            for session_id in sorted(by_session)[:page_limit]
+        ]
         observations = [
             RuntimeDeliveryObservation(
                 session_id=str(row["session_id"]),

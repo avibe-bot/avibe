@@ -39,13 +39,18 @@ class RuntimeWorkItem:
 
 
 class RuntimeWorkHandler(Protocol):
-    """A lane re-reader and its existing guarded owner entry point."""
+    """A lane re-reader and its existing guarded owner entry point.
+
+    ``scan`` returns a bounded page ordered by stable partition key, strictly
+    after the exclusive cursor when one is supplied.
+    """
 
     def scan(
         self,
         *,
         limit: int,
         occupied: frozenset[str],
+        cursor: str | None,
     ) -> tuple[list[RuntimeWorkItem], bool]: ...
 
     async def process(self, item: RuntimeWorkItem) -> bool | None: ...
@@ -64,6 +69,8 @@ class _Registration:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     coordinator: asyncio.Task[None] | None = None
     workers: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    scan_cursor: str | None = None
+    unregister_task: asyncio.Task[None] | None = None
     live: bool = True
 
 
@@ -118,21 +125,38 @@ class RuntimeWorkSupervisor:
         return token
 
     async def unregister(self, token: RuntimeWorkRegistrationToken) -> None:
+        await self.begin_unregister(token)
+
+    def begin_unregister(
+        self,
+        token: RuntimeWorkRegistrationToken,
+    ) -> asyncio.Task[None]:
+        """Invalidate a registration synchronously, then join it asynchronously."""
+
         registration = self._registrations.get(token.lane)
         if registration is None or registration.token != token:
-            return
+            return asyncio.create_task(asyncio.sleep(0))
+        if registration.unregister_task is not None:
+            return registration.unregister_task
         # Invalidate the generation before joining it. Worker completion can no
         # longer re-arm this lane or a later replacement registration.
         registration.live = False
         registration.event.set()
+        registration.unregister_task = asyncio.create_task(
+            self._finish_unregister(registration),
+            name=f"runtime-work-unregister:{token.lane.value}",
+        )
+        return registration.unregister_task
+
+    async def _finish_unregister(self, registration: _Registration) -> None:
         coordinator = registration.coordinator
         if coordinator is not None:
             await asyncio.gather(coordinator, return_exceptions=True)
         workers = tuple(registration.workers.values())
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
-        if self._registrations.get(token.lane) is registration:
-            self._registrations.pop(token.lane, None)
+        if self._registrations.get(registration.token.lane) is registration:
+            self._registrations.pop(registration.token.lane, None)
 
     async def activate(self) -> None:
         if self._active:
@@ -248,6 +272,7 @@ class RuntimeWorkSupervisor:
                     registration.handler.scan,
                     limit=min(capacity, self._scan_page_size),
                     occupied=occupied,
+                    cursor=registration.scan_cursor,
                 )
             except Exception:
                 logger.exception(
@@ -258,6 +283,15 @@ class RuntimeWorkSupervisor:
                 continue
             if not registration.live or self._stopping or not self._owns_service_instance():
                 continue
+            if items:
+                last_partition = str(items[-1].partition_key or "").strip()
+                if last_partition:
+                    registration.scan_cursor = last_partition
+            elif registration.scan_cursor is not None:
+                # The durable keyset reached its end. Wrap exactly once so old
+                # stale observations can be retried without pinning later keys.
+                registration.scan_cursor = None
+                registration.event.set()
             for item in items:
                 partition = str(item.partition_key or "").strip()
                 if not partition or partition in registration.workers:

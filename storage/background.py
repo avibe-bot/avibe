@@ -3534,8 +3534,9 @@ class SQLiteBackgroundTaskStore:
         *,
         limit: int,
         occupied: frozenset[str],
+        cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Read a bounded page of fallback claims that crossed no PID boundary."""
+        """Read a keyset page of fallback claims before the PID boundary."""
 
         page_limit = max(1, int(limit))
         query = (
@@ -3550,9 +3551,11 @@ class SQLiteBackgroundTaskStore:
             .where(agent_runs.c.pid.is_(None))
             .where(agent_runs.c.delivery_id.is_(None))
             .where(agent_runs.c.run_type.in_(EXECUTION_RUN_TYPES))
-            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .order_by(agent_runs.c.id)
             .limit(page_limit + 1)
         )
+        if cursor:
+            query = query.where(agent_runs.c.id > cursor)
         if occupied:
             query = query.where(~agent_runs.c.id.in_(occupied))
         with self.engine.connect() as conn:

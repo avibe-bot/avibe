@@ -20,10 +20,12 @@ class SessionDeliveryRecoveryHandler:
         *,
         limit: int,
         occupied: frozenset[str],
+        cursor: str | None = None,
     ) -> tuple[list[RuntimeWorkItem], bool]:
         observations, has_more = self.manager.scan_runtime_delivery_recovery(
             limit=limit,
             occupied=occupied,
+            cursor=cursor,
         )
         return [
             RuntimeWorkItem(observation.session_id, observation)
@@ -47,10 +49,12 @@ class FallbackRequestRecoveryHandler:
         *,
         limit: int,
         occupied: frozenset[str],
+        cursor: str | None = None,
     ) -> tuple[list[RuntimeWorkItem], bool]:
         rows, has_more = self.store.scan_claimed_pre_execution_runs(
             limit=limit,
             occupied=occupied,
+            cursor=cursor,
         )
         return [
             RuntimeWorkItem(str(row["id"]), row)
