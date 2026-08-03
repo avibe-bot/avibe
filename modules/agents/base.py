@@ -14,6 +14,7 @@ from modules.im.base import FileAttachment
 from core.agent_session_context import resolve_context_agent_session_target
 from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
+from core.runtime_activation import RuntimeActivationIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,12 @@ class BaseAgent(ABC):
 
         return lambda: self.backend_alive(context)
 
-    def mark_runtime_turn_started(self, context: Any) -> None:
+    def mark_runtime_turn_started(
+        self,
+        context: Any,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         """Mark the current gated turn as accepted by the backend runtime.
 
         AgentService uses this to distinguish a startup-window stop (backend has
@@ -163,7 +169,20 @@ class BaseAgent(ABC):
         service = getattr(self.controller, "agent_service", None)
         mark_started = getattr(service, "mark_runtime_turn_started", None)
         if callable(mark_started):
-            mark_started(context)
+            mark_started(context, activation_identity=activation_identity)
+
+    def runtime_activation_identity_for_request(
+        self,
+        request: Any,
+    ) -> RuntimeActivationIdentity | None:
+        """Return the live disposable resource generation serving ``request``.
+
+        A missing identity means this request has no runtime resource yet. The
+        adapter that creates the resource must pass its attached identity at
+        native acceptance.
+        """
+
+        return None
 
     def record_runtime_turn_start(
         self,

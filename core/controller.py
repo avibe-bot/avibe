@@ -30,6 +30,7 @@ from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
+from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeOwnershipProvider
 from core.runtime_recovery import (
     FallbackRequestRecoveryHandler,
@@ -229,6 +230,7 @@ class Controller:
         # dispatcher, and scheduler all share this one owner's in_flight + flush state.
         from core.session_turns import SessionTurnManager
 
+        self.runtime_activation = RuntimeActivationRegistry()
         self.session_turns = SessionTurnManager(self)
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
@@ -753,7 +755,11 @@ class Controller:
         activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
         self.agent_service = AgentService(
             self,
-            activities=SessionActivityRegistry(activity_store),
+            activities=SessionActivityRegistry(
+                activity_store,
+                activation_registry=self.runtime_activation,
+            ),
+            activation_registry=self.runtime_activation,
         )
         self.agent_service.register(ClaudeAgent(self))
         if self.config.codex:

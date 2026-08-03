@@ -34,6 +34,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from core.resource_governance import governor_from_controller
+from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
     RuntimeSessionBinding,
@@ -720,6 +721,39 @@ class CodexAgent(BaseAgent):
             snapshots.append(snapshot)
         return tuple(snapshots)
 
+    @staticmethod
+    def _transport_activation_identity(
+        transport: CodexTransport | None,
+    ) -> RuntimeActivationIdentity | None:
+        identity = getattr(transport, "_vibe_runtime_activation_identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
+
+    def _attach_transport_activation(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+    ) -> RuntimeActivationIdentity | None:
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        if registry is None:
+            return None
+        existing = self._transport_activation_identity(transport)
+        if existing is not None and registry.is_current(existing):
+            return existing
+        identity = registry.attach(self.name, cwd)
+        setattr(transport, "_vibe_runtime_activation_identity", identity)
+        return identity
+
+    def runtime_activation_identity_for_request(
+        self,
+        request: Any,
+    ) -> RuntimeActivationIdentity | None:
+        cwd = str(getattr(request, "working_path", "") or "").strip()
+        if not cwd:
+            metadata = getattr(request, "metadata", None)
+            if isinstance(metadata, dict):
+                cwd = str(metadata.get("session_workdir") or "").strip()
+        return self._transport_activation_identity(self._transports.get(cwd)) if cwd else None
+
     def record_runtime_turn_start(
         self,
         *,
@@ -1053,6 +1087,7 @@ class CodexAgent(BaseAgent):
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
                     if not stale_cwd and not runtime_changed:
+                        self._attach_transport_activation(cwd, existing)
                         self._touch_transport_activity(cwd)
                         return existing
                     if runtime_changed and self._has_active_turns_for_cwd(cwd):
@@ -1125,6 +1160,7 @@ class CodexAgent(BaseAgent):
                         getattr(transport, "pid", None),
                         label="codex app-server",
                     )
+                    self._attach_transport_activation(cwd, transport)
                     self._transports[cwd] = transport
                     self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
                     self._touch_transport_activity(cwd)
@@ -1896,7 +1932,10 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
-        self._mark_runtime_turn_started(getattr(request, "context", None))
+        self._mark_runtime_turn_started(
+            getattr(request, "context", None),
+            activation_identity=self._transport_activation_identity(transport),
+        )
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
             bind_generated_image_snapshot(thread_id, turn_id, request.base_session_id)
@@ -1909,11 +1948,16 @@ class CodexAgent(BaseAgent):
         )
         return thread_id
 
-    def _mark_runtime_turn_started(self, context: Any) -> None:
+    def _mark_runtime_turn_started(
+        self,
+        context: Any,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         service = getattr(getattr(self, "controller", None), "agent_service", None)
         mark_started = getattr(service, "mark_runtime_turn_started", None)
         if callable(mark_started):
-            mark_started(context)
+            mark_started(context, activation_identity=activation_identity)
 
     # ------------------------------------------------------------------
     # Input building

@@ -42,6 +42,7 @@ from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
+from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
     RuntimeSessionBinding,
@@ -162,6 +163,7 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_runtime_session_key", composite_key)
         setattr(client, "_vibe_runtime_workdir", working_path)
         setattr(client, "_vibe_runtime_fallback_session_key", fallback_session_key)
+        self._attach_claude_runtime_activation(client, composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
         register_claude_owned_process(
@@ -169,6 +171,31 @@ class SessionHandler(BaseHandler):
             native_session_id=native_session_id,
             owner=AVIBE_CLAUDE_SESSION_OWNER,
         )
+
+    def _runtime_activation_registry(self):
+        return getattr(self.controller, "runtime_activation", None)
+
+    @staticmethod
+    def _claude_runtime_activation_identity(
+        client: ClaudeSDKClient | None,
+    ) -> RuntimeActivationIdentity | None:
+        identity = getattr(client, "_vibe_runtime_activation_identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
+
+    def _attach_claude_runtime_activation(
+        self,
+        client: ClaudeSDKClient,
+        composite_key: str,
+    ) -> RuntimeActivationIdentity | None:
+        registry = self._runtime_activation_registry()
+        if registry is None:
+            return None
+        existing = self._claude_runtime_activation_identity(client)
+        if existing is not None and registry.is_current(existing):
+            return existing
+        identity = registry.attach("claude", composite_key)
+        setattr(client, "_vibe_runtime_activation_identity", identity)
+        return identity
 
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
@@ -1285,7 +1312,6 @@ class SessionHandler(BaseHandler):
                 ) from exc
             raise
 
-        self.claude_sessions[composite_key] = client
         self.claude_system_prompts[composite_key] = final_system_prompt
         setattr(client, "_vibe_current_model", effective_model)
         self.bind_claude_runtime_session(
@@ -1296,6 +1322,7 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             fallback_session_key=session_key,
         )
+        self.claude_sessions[composite_key] = client
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 

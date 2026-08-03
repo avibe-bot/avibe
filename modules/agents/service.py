@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 
 from core.session_activities import SessionActivityRegistry
 from core.message_output import terminal_output_for, terminal_turn_output
+from core.runtime_activation import RuntimeActivationIdentity, RuntimeActivationRegistry
 
 from .base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -35,12 +36,18 @@ class AgentService:
         controller,
         *,
         activities: SessionActivityRegistry | None = None,
+        activation_registry: RuntimeActivationRegistry | None = None,
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
+        self.activation_registry = activation_registry or getattr(
+            controller,
+            "runtime_activation",
+            None,
+        )
         set_output_settled_callback = getattr(
             self.activities,
             "set_output_settled_callback",
@@ -69,6 +76,24 @@ class AgentService:
 
     async def wait_backend_ready(self, backend: str) -> None:
         await self._backend_ready_event(backend).wait()
+
+    def runtime_activation_identity_for_request(
+        self,
+        backend: str,
+        request: Any,
+    ) -> RuntimeActivationIdentity | None:
+        agent = self.agents.get(str(backend or ""))
+        resolve = getattr(agent, "runtime_activation_identity_for_request", None)
+        if not callable(resolve):
+            return None
+        try:
+            return resolve(request)
+        except Exception:
+            logger.exception(
+                "Failed to resolve runtime activation identity for backend=%s",
+                backend,
+            )
+            return None
 
     async def prepare_backend_restart(self, backend: str) -> None:
         agent = self.agents.get(backend)
@@ -400,7 +425,12 @@ class AgentService:
             self.release_runtime_turn_key(runtime_key, gate.token)
         return handled
 
-    def mark_runtime_turn_started(self, context: Any) -> None:
+    def mark_runtime_turn_started(
+        self,
+        context: Any,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
         runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
@@ -411,23 +441,46 @@ class AgentService:
             return
         if gate.runtime_started:
             return
-        gate.runtime_started = True
-        gate.liveness_probe = self._capture_backend_liveness(gate, context)
-        self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
-        manager = getattr(self.controller, "session_turns", None)
-        bind_native = getattr(manager, "on_native_start", None)
-        if callable(bind_native):
-            bind_native(
-                context,
-                backend=str(gate.backend or ""),
+
+        def commit_native_start() -> None:
+            current_gate = self._turn_gates.get(runtime_key)
+            if current_gate is not gate or gate.token != runtime_token or gate.runtime_started:
+                return
+            gate.runtime_started = True
+            gate.activation_identity = activation_identity
+            gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            self._start_runtime_liveness_monitor(runtime_key, gate, runtime_token)
+            manager = getattr(self.controller, "session_turns", None)
+            bind_native = getattr(manager, "on_native_start", None)
+            if callable(bind_native):
+                bind_native(
+                    context,
+                    backend=str(gate.backend or ""),
+                    runtime_key=runtime_key,
+                    runtime_turn_id=runtime_token,
+                )
+            self._record_runtime_turn_start(
+                gate,
                 runtime_key=runtime_key,
-                runtime_turn_id=runtime_token,
+                runtime_token=runtime_token,
             )
-        self._record_runtime_turn_start(
-            gate,
-            runtime_key=runtime_key,
-            runtime_token=runtime_token,
+
+        activation_registry = self.activation_registry
+        if activation_registry is None or activation_identity is None:
+            commit_native_start()
+            return
+        committed = activation_registry.commit_if_current(
+            activation_identity,
+            commit_native_start,
         )
+        if not committed.admitted:
+            logger.info(
+                "Ignoring native start from retired runtime generation: "
+                "backend=%s resource=%s generation=%s",
+                activation_identity.backend,
+                activation_identity.resource_key,
+                activation_identity.generation,
+            )
 
     @staticmethod
     def _record_runtime_turn_start(
@@ -626,7 +679,12 @@ class AgentService:
         return any(not w.cancelled() for w in waiters)
 
     async def begin_agent_initiated_turn(
-        self, agent_name: str, context: Any, runtime_key: str
+        self,
+        agent_name: str,
+        context: Any,
+        runtime_key: str,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
     ) -> Optional[str]:
         """Open a runtime-gate turn for backend output Avibe did NOT initiate.
 
@@ -663,49 +721,58 @@ class AgentService:
         if gate.lock.locked() or self._lock_has_live_waiters(gate.lock):
             return None
         await gate.lock.acquire()
-        gate.token = uuid.uuid4().hex
-        gate.backend = agent_name
-        gate.agent = self.agents.get(agent_name)
-        gate.runtime_progress_token = ""
-        gate.context = context
-        gate.request = None
-        # The backend already produced output, so the turn is unambiguously
-        # running — there is no queued-startup window to distinguish (unlike a
-        # user turn waiting on the gate), so mark it started immediately.
-        gate.runtime_started = True
-        if context.platform_specific is None:
-            context.platform_specific = {}
-        context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
-        context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
-        gate.liveness_probe = self._capture_backend_liveness(gate, context)
-        self._start_runtime_liveness_monitor(runtime_key, gate, gate.token)
-        # Fresh streaming token too: the previous turn's SSE sink is already gone,
-        # and a leftover ``turn_token`` would only confuse ``mark_turn_complete``
-        # (which no-ops anyway with no live sink for this session).
-        context.platform_specific[AGENT_TURN_TOKEN] = gate.token
-        # INBOUND status chokepoint (mirrors ``handle_message``): mark the avibe
-        # session ``running`` so the sidebar dot reflects the agent-initiated work,
-        # and register the turn with the FSM so the Workbench Stop button works and
-        # the browser sees turn.start/turn.end. Non-avibe contexts resolve to no
-        # session id and are skipped (no-op).
-        manager = getattr(self.controller, "session_turns", None)
-        if manager is not None:
-            try:
-                manager.on_running(context)
-            except Exception:
-                logger.debug("on_running failed for agent-initiated turn", exc_info=True)
-            register = getattr(manager, "register_agent_initiated_turn", None)
-            if callable(register):
+        opened_token: str | None = None
+
+        def open_turn() -> None:
+            nonlocal opened_token
+            gate.token = uuid.uuid4().hex
+            gate.backend = agent_name
+            gate.agent = self.agents.get(agent_name)
+            gate.runtime_progress_token = ""
+            gate.context = context
+            gate.request = None
+            # The backend already produced output, so the turn is unambiguously
+            # running; there is no queued-startup window.
+            gate.runtime_started = True
+            gate.activation_identity = activation_identity
+            if context.platform_specific is None:
+                context.platform_specific = {}
+            context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+            context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
+            gate.liveness_probe = self._capture_backend_liveness(gate, context)
+            self._start_runtime_liveness_monitor(runtime_key, gate, gate.token)
+            context.platform_specific[AGENT_TURN_TOKEN] = gate.token
+            manager = getattr(self.controller, "session_turns", None)
+            if manager is not None:
                 try:
-                    register(context)
+                    manager.on_running(context)
                 except Exception:
-                    logger.debug("register_agent_initiated_turn failed", exc_info=True)
-        self._record_runtime_turn_start(
-            gate,
-            runtime_key=runtime_key,
-            runtime_token=gate.token,
-        )
-        return gate.token
+                    logger.debug("on_running failed for agent-initiated turn", exc_info=True)
+                register = getattr(manager, "register_agent_initiated_turn", None)
+                if callable(register):
+                    try:
+                        register(context)
+                    except Exception:
+                        logger.debug("register_agent_initiated_turn failed", exc_info=True)
+            self._record_runtime_turn_start(
+                gate,
+                runtime_key=runtime_key,
+                runtime_token=gate.token,
+            )
+            opened_token = gate.token
+
+        activation_registry = self.activation_registry
+        if activation_registry is None or activation_identity is None:
+            open_turn()
+        else:
+            committed = activation_registry.commit_if_current(
+                activation_identity,
+                open_turn,
+            )
+            if not committed.admitted:
+                gate.lock.release()
+                return None
+        return opened_token
 
     def release_runtime_turn(self, context: Any) -> None:
         payload = getattr(context, "platform_specific", None) or {}
@@ -748,6 +815,7 @@ class AgentService:
         gate.task = None
         gate.context = None
         gate.request = None
+        gate.activation_identity = None
         gate.liveness_probe = None
         if liveness_task is not None and not liveness_task.done():
             try:
@@ -950,6 +1018,7 @@ class _RuntimeTurnGate:
     task: asyncio.Task | None = None
     context: Any = None
     request: AgentRequest | None = None
+    activation_identity: RuntimeActivationIdentity | None = None
     liveness_probe: Callable[[], Optional[bool]] | None = None
     cancel_tidy_task: asyncio.Task | None = None
     liveness_task: asyncio.Task | None = None
