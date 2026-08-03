@@ -148,3 +148,26 @@ observations:
       - let only an empty pid retire the record, before the kill and after an unconfirmed one
       - never signal a pid whose identity could not be read, since that is the coin flip the identity check exists to refuse
       - keep the bounded retry as the cap, so a probe that never recovers cannot hold a run running for the life of the install
+  - id: OBS-HARNESS-COMMAND-TASK-012
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-032
+    summary: >-
+      The reap asked whether the supervisor pid was occupied and treated a free one as
+      a reaped tree.
+    previous_assumption: >-
+      The supervisor is the tree's only handle, so an empty pid means everything under
+      it is gone too.
+    observed_behavior: >-
+      A worker spawned with start_new_session LEADS the group pgid == pid, and on POSIX
+      that group outlives its leader: kill the supervisor alone -- the OOM killer
+      picking the parent, a fault in its own code -- and the command keeps running in a
+      group nothing else names. Clearing command_worker there let recover_processing
+      settle the row, so the survivor ran to completion unowned and the next fire
+      started a second one beside it. The watch lane already walked the surviving group;
+      the command lane stopped at the pid.
+    required_updates:
+      - after the leader is gone, walk the group it led before calling the tree dead
+      - own that walk (leader, then group) in core/process_isolation.py so both worker lanes answer it the same way, rather than copying the watch lane's inline logic
+      - keep the record when the group exists but its members cannot be identified, since refusing to signal is not proof of absence
+      - retire the record only for a mismatched group, which is a recycled pgid rather than the tracked tree

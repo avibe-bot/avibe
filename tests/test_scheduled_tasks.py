@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import os
 import sqlite3
+import subprocess
 import sys
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +27,7 @@ from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_mirror import mirror_harness_inbound
 from core.message_output import MessageOutput, stop_output_for
+import core.process_isolation as process_isolation
 from core.process_isolation import fingerprint_process_marker
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
@@ -14984,9 +14988,9 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
         assert started.exists(), "the command never started, so nothing was orphaned"
         assert _worker_record(), "the fire recorded no worker"
 
-        real_terminate = scheduled_tasks.terminate_process_tree_by_pid
+        real_terminate = process_isolation.terminate_process_tree_by_pid
         monkeypatch.setattr(
-            scheduled_tasks, "terminate_process_tree_by_pid", _refuse_to_confirm
+            process_isolation, "terminate_process_tree_by_pid", _refuse_to_confirm
         )
         cap = ScheduledTaskService._MAX_COMMAND_WORKER_REAP_ATTEMPTS
         # Every start before the cap: the kill is attempted, comes back unconfirmed,
@@ -15023,7 +15027,7 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
         # teardown writing to the user's live ``~/.avibe`` is exactly what
         # ``_command_task_env`` exists to prevent.
         monkeypatch.setattr(
-            scheduled_tasks, "terminate_process_tree_by_pid", real_terminate
+            process_isolation, "terminate_process_tree_by_pid", real_terminate
         )
         execution = service._inflight_executions[request.id]
         execution.cancel()
@@ -15035,6 +15039,105 @@ def test_a_worker_that_survives_the_reap_is_kept_for_the_next_start(
         asyncio.run(_restart_until_it_gives_up())
     except asyncio.TimeoutError:  # pragma: no cover - cleanup only
         pytest.fail("the cancelled command was left running")
+
+
+_SUPERVISOR_KILLED_MID_COMMAND = (
+    "import os, subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'])\n"
+    "sys.stdout.write(f'{child.pid}\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(0.5)\n"
+    "os._exit(0)\n"
+)
+
+
+def test_a_restart_reaps_the_group_a_dead_supervisor_left_behind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-032 -- an empty supervisor pid is not an empty tree.
+
+    The worker is spawned into its own session, so it LEADS the process group
+    ``pgid == pid``, and on POSIX that group outlives it. Kill the supervisor alone --
+    the OOM killer picking the parent, a fault in the supervisor's own code -- and the
+    backup or migration underneath keeps running in a group nothing else names.
+
+    Reading the free pid as proof the tree was reaped is the whole defect: the reap
+    stopped there, cleared ``command_worker``, and let ``recover_processing`` settle
+    the row moments later, so the survivor ran to completion unowned and the next
+    cron fire started a second one beside it. The watch lane already walked the
+    surviving group; this asserts the command lane does too, on a real one.
+    """
+
+    if os.name == "nt":
+        pytest.skip("a process group outliving its leader is POSIX-specific")
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    request = service.request_store.claim(
+        service.request_store.enqueue_task_run(
+            task.id, source_kind="scheduler", task=task
+        ).id
+    )
+    assert request is not None
+
+    marker = process_isolation.new_process_identity_marker()
+    leader = subprocess.Popen(  # noqa: S603 - fixed argv, test-owned
+        [os.path.abspath(sys.executable), "-c", _SUPERVISOR_KILLED_MID_COMMAND],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=process_isolation.process_identity_subprocess_env(marker),
+        **process_isolation.isolated_subprocess_kwargs(),
+    )
+    child_pid: Optional[int] = None
+    try:
+        identity = process_isolation.capture_spawned_process_identity(leader.pid, marker)
+        assert identity is not None
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline().strip())
+        assert leader.wait(timeout=15) == 0, "the supervisor did not die on its own"
+        assert process_isolation.probe_process_liveness(leader.pid) == "gone"
+        assert os.getpgid(child_pid) == leader.pid, (
+            "the command did not inherit the supervisor's process group, so this is "
+            "not the state the defect needs"
+        )
+
+        assert service.request_store.record_command_worker(
+            request.id, process_isolation.serialize_process_identity(identity)
+        )
+        assert service.request_store.list_running_command_workers(), (
+            "the fixture did not leave the run in the state the startup reap scans"
+        )
+
+        # The restart. Its ``__init__`` reaps before ``recover_processing`` settles
+        # the row the identity is stored on.
+        _scheduled_service_with_ledger(tmp_path, store, [])
+
+        deadline = 15.0
+        while deadline > 0 and process_isolation.probe_process_liveness(child_pid) != "gone":
+            time.sleep(0.1)
+            deadline -= 0.1
+        assert process_isolation.probe_process_liveness(child_pid) == "gone", (
+            "the restart read the dead supervisor as a reaped tree and left the "
+            "command running, unowned, with nothing on disk naming it"
+        )
+        assert not service.request_store.list_running_command_workers(), (
+            "a proven death must retire the record; keeping it would pin the run "
+            "``running`` and retry a kill on a pid that is free"
+        )
+        row = service.request_store.get_run(request.id)
+        assert row is not None and row["status"] != "running"
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, process_isolation.KILL_SIGNAL)
+        with suppress(Exception):
+            leader.kill()
+        with suppress(Exception):
+            leader.wait(timeout=5)
+        if leader.stdout is not None:
+            leader.stdout.close()
 
 
 def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
@@ -15088,9 +15191,11 @@ def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
         signalled.append(pid)
         return True
 
-    monkeypatch.setattr(scheduled_tasks, "probe_process_liveness", lambda _pid: "unknown")
     monkeypatch.setattr(
-        scheduled_tasks, "terminate_process_tree_by_pid", _record_kill
+        process_isolation, "probe_process_liveness", lambda _pid: "unknown"
+    )
+    monkeypatch.setattr(
+        process_isolation, "terminate_process_tree_by_pid", _record_kill
     )
 
     def _worker_record() -> Optional[dict[str, Any]]:

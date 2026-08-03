@@ -261,3 +261,15 @@ scenarios:
     # The primitive underneath, which is where the two answers are actually told
     # apart -- an empty pid is "gone", an unreadable one is "unknown":
     # tests/test_process_isolation.py::test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read
+  - id: SCT-032
+    name: a restart reaps the process group a dead command supervisor left behind
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_restart_reaps_the_group_a_dead_supervisor_left_behind
+    # Real group, real leader exit: the supervisor leads ``pgid == pid`` and that group
+    # outlives it on POSIX, so a free pid is not a reaped tree. The shared primitive
+    # that owns the walk, and its refusal to signal a group it cannot vouch for:
+    # tests/test_process_isolation.py::test_reaping_an_orphan_follows_the_group_its_leader_left_behind
+    # tests/test_process_isolation.py::test_reaping_an_orphan_keeps_a_group_it_cannot_identify

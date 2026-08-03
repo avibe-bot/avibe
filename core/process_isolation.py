@@ -26,6 +26,10 @@ DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS = 3.0
 #: durable handle on that process has stopped being worth keeping.
 ProcessLivenessStatus = Literal["alive", "gone", "unknown"]
 
+#: What a recovery reap established about a managed tree: this pass stopped it, it
+#: was already gone, or neither could be shown. Only the last one keeps the record.
+ProcessReapOutcome = Literal["reaped", "gone", "unconfirmed"]
+
 
 @dataclass(frozen=True)
 class ProcessIdentity:
@@ -651,6 +655,90 @@ def terminate_process_tree_by_pid(
         return True
     logger.error("%s process group pgid=%s survived forced termination", label, pgid)
     return False
+
+
+def reap_orphaned_process_tree(
+    logger: logging.Logger,
+    label: str,
+    *,
+    expected_identity: PersistedProcessIdentity,
+) -> ProcessReapOutcome:
+    """Kill whatever is left of a managed tree whose owner died, by identity.
+
+    Recovery asks one question -- "may I stop tracking this process now?" -- and it
+    has three answers, not two. ``gone`` and ``reaped`` retire the durable record
+    that names the tree; ``unconfirmed`` must keep it, because the record is
+    typically the only place the identity is written and discarding it makes the
+    survivor unfindable by every later pass, not just this one.
+
+    THE LEADER IS NOT THE TREE. A supervisor spawned with ``start_new_session``
+    leads the group ``pgid == pid``, and on POSIX that group outlives it: if the
+    supervisor is killed (an OOM kill, a crash in its own code) while the backup or
+    migration under it keeps running, the pid is free while the work continues in a
+    group nothing else names. So an empty pid only starts the question -- the group
+    is checked next, and only a group with no members, or one whose members carry
+    another tree's marker, means our tree is really gone.
+
+    Identity throughout, never a bare pid or pgid: ``terminate_process_tree_by_pid``
+    re-reads the leader's start time and ``AVIBE_PROCESS_IDENTITY`` marker, and
+    ``terminate_process_group_by_pgid`` requires a surviving member to carry that
+    marker, so a recycled number cannot make this signal a stranger's process.
+    """
+
+    if not isinstance(expected_identity, PersistedProcessIdentity):
+        return "gone"
+    pid = expected_identity.pid
+    liveness = probe_process_liveness(pid)
+    if liveness == "unknown":
+        # The probe could not read the process table; that says nothing about the
+        # process, so it cannot be the reason a handle on it is dropped.
+        return "unconfirmed"
+    if liveness == "alive":
+        try:
+            if terminate_process_tree_by_pid(
+                pid,
+                logger,
+                label,
+                expected_identity=expected_identity,
+            ):
+                return "reaped"
+        except Exception:
+            logger.exception("Unexpected error terminating %s pid=%s", label, pid)
+        if probe_process_liveness(pid) != "gone":
+            return "unconfirmed"
+        # The leader went away without confirming; its children may not have.
+
+    if not process_group_exists(pid, logger, label):
+        return "gone"
+    status = process_group_identity_status(pid, expected_identity, logger, label)
+    if status == "mismatch":
+        # Members, but every one of them carries some other tree's marker: this pgid
+        # was recycled and ours has exited.
+        return "gone"
+    if status != "match":
+        logger.warning(
+            "Could not verify what still occupies %s process group pgid=%s; leaving it "
+            "tracked for a later pass",
+            label,
+            pid,
+        )
+        return "unconfirmed"
+    logger.warning(
+        "Reaping %s process group pgid=%s after its leader exited",
+        label,
+        pid,
+    )
+    try:
+        if terminate_process_group_by_pgid(
+            pid,
+            logger,
+            label,
+            expected_identity=expected_identity,
+        ):
+            return "reaped"
+    except Exception:
+        logger.exception("Unexpected error terminating %s process group pgid=%s", label, pid)
+    return "unconfirmed"
 
 
 async def terminate_process_tree(
