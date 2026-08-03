@@ -46,6 +46,7 @@ jobs:
         run: |
           npm ci
           npm run validate:theme
+          npm run lint
           npm test
           npm run build
 
@@ -111,7 +112,7 @@ jobs:
             uv.lock
 
       - name: Install package and test deps
-        run: uv pip install --system -e . pytest jsonschema
+        run: uv pip install --system -e . --group dev
 
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
         run: bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"

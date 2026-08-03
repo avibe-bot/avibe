@@ -3215,10 +3215,15 @@ def test_sessions_store_save_prunes_stale_processed_claim_rows(tmp_path: Path) -
         service.close()
 
 
-def test_sessions_store_hot_path_prunes_processed_claim_rows(tmp_path: Path) -> None:
+def test_sessions_store_hot_path_prunes_processed_claim_rows(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
     try:
+        monkeypatch.setattr(
+            sessions_service_module,
+            "_utc_now_iso",
+            lambda: "2026-08-03T00:00:00+00:00",
+        )
         for index in range(205):
             assert service.try_record_processed_message("C123", "171717.123", f"msg-{index:03d}") is True
 

@@ -8,6 +8,7 @@ import { Select } from '@/components/ui/select';
 import { useApi } from '@/context/ApiContext';
 import type { BackendAuthTestResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 type Backend = 'claude' | 'codex';
 
@@ -103,8 +104,8 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
       } else {
         showToast(failureSentence(result), 'error');
       }
-    } catch (err: any) {
-      const fallback = { ok: false, error: err?.message || 'test_failed' } as BackendAuthTestResult;
+    } catch (err) {
+      const fallback = { ok: false, error: errorMessage(err) || 'test_failed' } as BackendAuthTestResult;
       setLastResult(fallback);
       showToast(t('settings.backends.testConnectionFailedToast', { detail: fallback.error }), 'error');
     } finally {

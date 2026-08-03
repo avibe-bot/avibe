@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import Connection, and_, case, func, or_, select, update
+from sqlalchemy import Connection, and_, case, func, literal_column, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -52,6 +52,9 @@ from storage.session_reclaim import (
 )
 from storage.settings_service import make_scope_id, upsert_scope
 from storage import message_deliveries as delivery_store
+
+
+_RUNTIME_RECORD_ROWID = literal_column("runtime_records.rowid")
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -1959,7 +1962,7 @@ class SQLiteSessionsService:
         rows = conn.execute(
             select(runtime_records.c.payload_json)
             .where(runtime_records.c.record_type == "processed_message")
-            .order_by(runtime_records.c.created_at)
+            .order_by(runtime_records.c.created_at, _RUNTIME_RECORD_ROWID)
         )
         result: dict[str, dict[str, list[str]]] = {}
         for (payload_json,) in rows:
@@ -2517,7 +2520,7 @@ def _prune_processed_message_records(
         select(runtime_records.c.record_key)
         .where(runtime_records.c.record_type == "processed_message")
         .where(runtime_records.c.record_key.like(prefix_pattern, escape="\\"))
-        .order_by(runtime_records.c.created_at.desc())
+        .order_by(runtime_records.c.created_at.desc(), _RUNTIME_RECORD_ROWID.desc())
         .offset(200)
     ).all()
     old_record_keys = [row[0] for row in rows]

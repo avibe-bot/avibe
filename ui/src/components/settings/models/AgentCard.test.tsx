@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { ToastProvider } from '@/context/ToastContext';
+import { ToastProvider } from '@/context/ToastProvider';
 import { AgentCard } from './AgentCard';
 import { modelChainKey, type ModelChainIndex } from './modelRows';
 import type { AgentChain, AgentSupply, Source } from './types';

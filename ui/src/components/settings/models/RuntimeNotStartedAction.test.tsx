@@ -8,12 +8,8 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { describe, expect, it, vi } from 'vitest';
 
 import zh from '../../../i18n/zh.json';
-import {
-  ModelsPageActions,
-  pollRuntimeStatus,
-  RuntimeNotStartedAction,
-  startRuntimeWithStatusRefresh,
-} from './SettingsModelsPage';
+import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { ModelsPageActions, RuntimeNotStartedAction } from './SettingsModelsPage';
 import type { RuntimeDependency } from './types';
 
 const i18n = createInstance();

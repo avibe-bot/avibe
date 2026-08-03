@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 
 /**
  * Bridges the chat composer (mounted only inside ChatPage) to components that
@@ -21,15 +21,7 @@ type ComposerBridge = {
   setTarget: (target: ComposerInsertTarget | null) => void;
 };
 
-const ComposerBridgeContext = createContext<ComposerBridge | null>(null);
-
-export const ComposerBridgeProvider = ({ children }: { children: ReactNode }) => {
-  const [target, setTarget] = useState<ComposerInsertTarget | null>(null);
-  // Stable value identity (setTarget is a stable setState fn) so the value only
-  // changes when the active composer target does — not on unrelated re-renders.
-  const value = useMemo(() => ({ target, setTarget }), [target]);
-  return <ComposerBridgeContext.Provider value={value}>{children}</ComposerBridgeContext.Provider>;
-};
+export const ComposerBridgeContext = createContext<ComposerBridge | null>(null);
 
 /** Consumer side (sidebar session menu): the active composer target, or null. */
 export const useComposerInsertTarget = (): ComposerInsertTarget | null =>

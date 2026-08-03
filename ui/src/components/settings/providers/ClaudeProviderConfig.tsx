@@ -28,6 +28,7 @@ import { useOAuthFlowLock } from '../shared/useOAuthFlowLock';
 import { useApi } from '@/context/ApiContext';
 import type { ClaudeAuthMode, ClaudeAuthState } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 const BACKEND_ID = 'claude';
 const DEFAULT_CLI = 'claude';
@@ -157,9 +158,9 @@ export const ClaudeProviderConfig: React.FC<{
       } else {
         showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
       }
-    } catch (err: any) {
+    } catch (err) {
       showToast(
-        t('settings.backends.claudeApiKeyRemoveFailed', { detail: err?.message || 'unknown' }),
+        t('settings.backends.claudeApiKeyRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
         'error',
       );
     } finally {
@@ -204,8 +205,8 @@ export const ClaudeProviderConfig: React.FC<{
       } else {
         showToast(t('settings.backends.claudeSaveSuccess'), 'success');
       }
-    } catch (err: any) {
-      showToast(err?.message || t('settings.backends.claudeSaveFailed'), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) || t('settings.backends.claudeSaveFailed'), 'error');
     } finally {
       setAuthSaving(false);
     }

@@ -15,6 +15,7 @@ import {
   resetTerminalFontSize,
   subscribeTerminalFontSize,
 } from '../../lib/terminalFontSize';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
 // backend): client sends raw stdin as BINARY frames and JSON control as TEXT
@@ -148,8 +149,7 @@ export const TerminalView: React.FC<{
   // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
   // badge reflects reality — tmux-backed = persistent, plain-shell fallback = not. Held in a ref so
   // the WS effect (which doesn't depend on the prop) always calls the latest callback.
-  const onPersistentRef = useRef(onPersistent);
-  onPersistentRef.current = onPersistent;
+  const onPersistentRef = useLatestRef(onPersistent);
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
@@ -164,8 +164,7 @@ export const TerminalView: React.FC<{
 
   // Surface connection status to the parent (tab bar). The standalone status row inside the
   // body was removed — only the terminating states render an in-body overlay (below).
-  const onStatusRef = useRef(onStatus);
-  onStatusRef.current = onStatus;
+  const onStatusRef = useLatestRef(onStatus);
   useEffect(() => {
     onStatusRef.current?.(status, exitCode);
   }, [status, exitCode]);

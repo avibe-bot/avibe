@@ -8,6 +8,7 @@ import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthF
 import { useApi } from '@/context/ApiContext';
 import type { OAuthWebState } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 type Backend = 'claude' | 'codex' | 'opencode';
 
@@ -177,8 +178,8 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         return;
       }
       scheduleNextPoll(currentFlowId);
-    } catch (err: any) {
-      setError(err?.message || 'poll_failed');
+    } catch (err) {
+      setError(errorMessage(err) || 'poll_failed');
       setState('failed');
       stopPolling();
     }
@@ -204,8 +205,8 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       setState(result.state || 'starting');
       pollDeadlineRef.current = Date.now() + POLL_DEADLINE_MS;
       scheduleNextPoll(result.flow_id);
-    } catch (err: any) {
-      setError(err?.message || 'start_failed');
+    } catch (err) {
+      setError(errorMessage(err) || 'start_failed');
       setState('failed');
     } finally {
       setStarting(false);
@@ -220,7 +221,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     stopPolling();
     try {
       await api.cancelOAuthWeb(backend, flowId);
-    } catch (err) {
+    } catch {
       // Swallow — even if the cancel rountrip failed, the UI should still
       // return to the idle state so the user can retry without a stuck
       // panel. The server-side flow times out on its own at 900s.
@@ -248,8 +249,8 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       // so the UI hides the code input immediately rather than waiting for
       // the next poll tick.
       setState('verifying');
-    } catch (err: any) {
-      setError(err?.message || 'submit_failed');
+    } catch (err) {
+      setError(errorMessage(err) || 'submit_failed');
     } finally {
       setSubmitting(false);
     }
@@ -295,9 +296,9 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         showToast(t('settings.backends.oauthRemoved'), 'success');
       }
       onSuccessRef.current?.();
-    } catch (err: any) {
+    } catch (err) {
       showToast(
-        t('settings.backends.oauthRemoveFailed', { detail: err?.message || 'unknown' }),
+        t('settings.backends.oauthRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
         'error',
       );
     } finally {

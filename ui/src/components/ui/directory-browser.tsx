@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface DirectoryBrowserProps {
   /** Initial path to show when opening */
@@ -188,9 +189,9 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
         }
         setError(result.error ?? 'Unknown error');
         return null;
-      } catch (e: any) {
+      } catch (e) {
         if (!mountedRef.current || reqIdRef.current !== id) return null;
-        setError(e.message ?? String(e));
+        setError(errorMessage(e) ?? String(e));
         return null;
       } finally {
         if (mountedRef.current && reqIdRef.current === id) {
@@ -296,8 +297,8 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
       setCreating(false);
       setNewFolderName('');
       await fetchPath(currentPath);
-    } catch (err: any) {
-      const message: string = err?.message ?? String(err);
+    } catch (err) {
+      const message: string = errorMessage(err) ?? String(err);
       if (/exists/i.test(message)) {
         setCreateError(t('directoryBrowser.newFolderExists'));
       } else {

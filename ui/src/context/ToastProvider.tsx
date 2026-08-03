@@ -1,9 +1,8 @@
-import React, { createContext, useContext, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import { AlertTriangle, CheckCircle, XCircle, X } from 'lucide-react';
 
+import { ToastContext, type ToastType } from './ToastContext';
 import { shouldCoalesceToast, type ToastAction } from './toastCoalesce';
-
-type ToastType = 'success' | 'error' | 'warning';
 
 interface Toast {
   id: number;
@@ -16,12 +15,6 @@ interface Toast {
   repeats: number;
   action?: ToastAction;
 }
-
-interface ToastContextType {
-  showToast: (message: string, type?: ToastType, action?: ToastAction) => void;
-}
-
-const ToastContext = createContext<ToastContextType | null>(null);
 
 let toastId = 0;
 
@@ -130,12 +123,4 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       </div>
     </ToastContext.Provider>
   );
-};
-
-export const useToast = () => {
-  const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error('useToast must be used within a ToastProvider');
-  }
-  return context;
 };

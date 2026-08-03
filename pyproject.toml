@@ -151,4 +151,5 @@ markers = [
 dev = [
     "jsonschema>=4.26.0",
     "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
 ]

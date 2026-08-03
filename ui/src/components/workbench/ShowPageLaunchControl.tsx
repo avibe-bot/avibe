@@ -9,7 +9,8 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { showPagePrivatePath } from '../../apps/showPageAvatar';
-import { showDockId, useDock } from '../../context/DockContext';
+import { useDock } from '../../context/DockContext';
+import { showDockId } from '../../context/dockDoc';
 import { useShowPageDrag } from '../../context/showPageDrag';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import {
