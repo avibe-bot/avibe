@@ -12,14 +12,9 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { MigrationDialog } from './MigrationDialog';
-import { modelsApi } from './modelsApi';
+import { scanMigrationWhenEnabled } from './migrationScan';
 import type { MigrationItem } from './types';
 import { useModelHubCapability } from './useModelHubCapability';
-
-export const scanMigrationWhenEnabled = async (
-  enabled: boolean,
-  scan: typeof modelsApi.scanMigration = modelsApi.scanMigration,
-) => (enabled ? scan() : null);
 
 export const MigrationBanner: React.FC<{
   /** Bubble the applied count so a host page can refresh sources/agents. */

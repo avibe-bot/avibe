@@ -1023,7 +1023,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       counts[p] = { total, active };
     }
     return counts;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config, platform, channels, configs, allChannelsByPlatform, allConfigsByPlatform]);
 
   const allTabCounts = useMemo(() => {
@@ -2156,7 +2155,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               if (isWizardMultiPlatform) {
                 // Merge configs from all visited platforms
                 const allConfigs = { ...wizardConfigsMap, [wizardActivePlatform]: configs };
-                onNext && onNext({
+                onNext?.({
                   channelConfigsByPlatform: {
                     ...(data.channelConfigsByPlatform || {}),
                     ...allConfigs,
@@ -2164,7 +2163,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   ...(getEnabledPlatforms(data).includes('discord') ? { discordGuildAllowlist } : {}),
                 });
               } else {
-                onNext && onNext({
+                onNext?.({
                   channelConfigsByPlatform: {
                     ...(data.channelConfigsByPlatform || {}),
                     [platform]: configs,

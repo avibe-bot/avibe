@@ -1,18 +1,6 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../lib/apiFetch';
-
-interface RuntimeStatus {
-  state?: string;
-  last_action?: string;
-  [key: string]: any;
-}
-
-interface StatusContextType {
-  status: RuntimeStatus;
-  health: boolean;
-  refreshStatus: () => Promise<RuntimeStatus | null>;
-  control: (action: string, payload?: any) => Promise<any>;
-}
+import { StatusContext, type RuntimeStatus } from './StatusContext';
 
 // Polling cadence for GET /status. The probe is cheap server-side (it reads a
 // small state file plus a process-liveness check), so the steady-state interval
@@ -32,16 +20,6 @@ const RESTARTING_POLL_MS = 2_000;
 // The supervisor's start step has a 30s timeout, so 45s comfortably covers a
 // slow-but-successful restart before we fall back to the idle cadence.
 const RESTARTING_FAST_WINDOW_MS = 45_000;
-
-const StatusContext = createContext<StatusContextType | undefined>(undefined);
-
-export const useStatus = () => {
-  const context = useContext(StatusContext);
-  if (!context) {
-    throw new Error('useStatus must be used within a StatusProvider');
-  }
-  return context;
-};
 
 export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [status, setStatus] = useState<RuntimeStatus>({});

@@ -87,14 +87,21 @@ def _spawn_fake_orphan(workspace_root: str) -> subprocess.Popen:
     argv = [
         sys.executable,
         "-c",
-        "import time; time.sleep(120)",
+        "import sys, time; sys.stdout.buffer.write(b'1'); sys.stdout.buffer.flush(); time.sleep(120)",
         "cli.js",
         "--workspace-root",
         workspace_root,
         "--fallback-delay-seconds",
         "8",
     ]
-    return subprocess.Popen(argv, start_new_session=True)
+    proc = subprocess.Popen(argv, start_new_session=True, stdout=subprocess.PIPE)
+    assert proc.stdout is not None
+    ready = proc.stdout.read(1)
+    proc.stdout.close()
+    if ready != b"1":
+        _reap(proc)
+        raise AssertionError("fake orphan did not reach its executed child process")
+    return proc
 
 
 def _gone(pid: int, timeout: float = 5.0) -> bool:

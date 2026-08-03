@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import core.scheduled_tasks as scheduled_tasks
 from config import paths
 from config.v2_settings import make_thread_native_id
 from core.controller import Controller
@@ -1109,8 +1110,17 @@ def test_request_store_enqueue_claim_and_complete(tmp_path: Path) -> None:
     assert not (store.processing_dir / f"{request.id}.json").exists()
 
 
-def test_request_store_file_backend_reload_detects_queue_changes(tmp_path: Path) -> None:
+def test_request_store_file_backend_reload_detects_queue_changes(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "task_requests"
+    state_dirs = {root / "pending", root / "processing", root / "completed"}
+    path_signature = scheduled_tasks._path_signature
+
+    def fixed_directory_signature(path: Path):
+        if path in state_dirs:
+            return (1, 1, 1)
+        return path_signature(path)
+
+    monkeypatch.setattr(scheduled_tasks, "_path_signature", fixed_directory_signature)
     reader = TaskExecutionStore(root)
     writer = TaskExecutionStore(root)
 

@@ -32,6 +32,7 @@ import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 const LinkButton: React.FC<{ url: string; label: string }> = ({ url, label }) => (
   <Button variant="brand" size="sm" onClick={() => window.open(url, '_blank')} disabled={!url}>
@@ -150,8 +151,8 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
           setWsStatus('error');
         }
       }
-    } catch (err: any) {
-      setAuthResult({ ok: false, error: err?.message || 'Request failed' });
+    } catch (err) {
+      setAuthResult({ ok: false, error: errorMessage(err) || 'Request failed' });
     } finally {
       setChecking(false);
     }

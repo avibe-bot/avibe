@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 
 import { APP_REGISTRY, type AppId } from '../../apps/registry';
 import { dockIndexFromShortcut } from '../../apps/dockShortcuts';
-import { dockIdToSession, useDock } from '../../context/DockContext';
+import { useDock } from '../../context/DockContext';
+import { dockIdToSession } from '../../context/dockDoc';
 import { useApi } from '../../context/ApiContext';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
 import { useShowPageInventory } from '../useShowPages';

@@ -2,12 +2,7 @@ import * as React from 'react';
 import { Navigate } from 'react-router-dom';
 
 import { useModelHubCapability } from './useModelHubCapability';
-
-export const MODEL_HUB_SETTINGS_PATH = '/admin/settings/models';
-export const MODEL_HUB_DISABLED_REDIRECT = '/admin/settings/backends';
-
-export const modelHubRouteTarget = (requestedPath: string, enabled: boolean): string =>
-  enabled ? requestedPath : MODEL_HUB_DISABLED_REDIRECT;
+import { MODEL_HUB_DISABLED_REDIRECT, MODEL_HUB_SETTINGS_PATH, modelHubRouteTarget } from './modelHubRoutes';
 
 export const ModelHubRenderBoundary: React.FC<{
   enabled: boolean | null;
