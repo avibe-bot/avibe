@@ -62,15 +62,6 @@ describe('memoryRequestSettled', () => {
     });
   });
 
-  it('increments the accepted-payload revision while failures preserve it', () => {
-    const first = succeeded(POLLED);
-    const refreshed = succeeded(POLLED, first, ['b']);
-
-    expect(first.revision).toBe(1);
-    expect(refreshed.revision).toBe(2);
-    expect(failed(MANUAL, refreshed).revision).toBe(2);
-  });
-
   it('keeps the last good payload behind a polled failure', () => {
     expect(failed(POLLED, succeeded(POLLED)).data).toEqual({ items: ['a'] });
   });

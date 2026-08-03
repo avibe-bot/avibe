@@ -45,10 +45,6 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 # ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
-# The report path has a nested 180s child LLM deadline, a 185s private-sidecar
-# deadline, and a 190s module operation deadline. The UI-facing client must stay
-# outside all of them so a retry cannot overlap an active report generation.
-MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS = 195.0
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
@@ -365,78 +361,6 @@ async def memory_profile(
         socket_path=socket_path,
         timeout=timeout,
     )
-
-
-async def memory_profile_report(
-    language: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_PROFILE_REPORT_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request(
-        "POST",
-        "/internal/memory/profile/report",
-        payload={"language": language},
-        headers=_memory_user_key_headers(
-            "POST",
-            "/internal/memory/profile/report",
-            user_key,
-        ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_profile_report_current(
-    language: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/profile/report"
-    return await _memory_request(
-        "GET",
-        f"{path}?language={language}",
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_profile_report_asset(
-    language: str,
-    artifact_id: str,
-    asset_name: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = (
-        "/internal/memory/profile/report/view/"
-        f"{language}/{artifact_id}/{asset_name}"
-    )
-    target = await _verified_socket_path_async(socket_path)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
-    try:
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://localhost",
-            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
-        ) as client:
-            response = await client.get(
-                path,
-                headers=_memory_user_key_headers("GET", path, user_key),
-            )
-    except _SOCKET_ERRORS as exc:
-        raise InternalServerUnavailable(str(exc)) from exc
-    return {
-        "status_code": response.status_code,
-        "body": response.content,
-        "content_type": response.headers.get("content-type"),
-    }
 
 
 async def memory_search(

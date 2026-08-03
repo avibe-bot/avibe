@@ -43,11 +43,10 @@ from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from core.memory.types import OperationFailed
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -845,105 +844,6 @@ def create_app(
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
-
-    @app.post("/internal/memory/profile/report")
-    async def _memory_profile_report(request: Request) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        payload = await _safe_json(request)
-        language = payload.get("language") if isinstance(payload, dict) and set(payload) == {"language"} else None
-        if language not in {"en", "zh"}:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        try:
-            return await runtime.profile_report_payload(principal_id, project_id, language)
-        except Exception:
-            logger.warning("internal memory profile report failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
-
-    @app.get("/internal/memory/profile/report")
-    async def _memory_profile_report_current(request: Request) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        if set(request.query_params) != {"language"} or len(request.query_params.getlist("language")) != 1:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        language = request.query_params.get("language")
-        if language not in {"en", "zh"}:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        try:
-            return await runtime.profile_page_current_payload(principal_id, project_id, language)
-        except Exception:
-            logger.warning("internal memory profile page read failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
-
-    @app.get(
-        "/internal/memory/profile/report/view/{language}/{artifact_id}/{asset_name}"
-    )
-    async def _memory_profile_report_asset(
-        request: Request,
-        language: str,
-        artifact_id: str,
-        asset_name: str,
-    ) -> Any:
-        try:
-            scope = _memory_read_scope(request)
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        if scope is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        if (
-            language not in {"en", "zh"}
-            or len(artifact_id) != 32
-            or any(character not in "0123456789abcdef" for character in artifact_id)
-            or asset_name not in {"index.html", "styles.css"}
-        ):
-            return JSONResponse(status_code=404, content={"status": "failed", "error": "memory_invalid_input"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        try:
-            result = await runtime.profile_page_asset(
-                principal_id,
-                project_id,
-                language,
-                artifact_id,
-                asset_name,
-            )
-        except Exception:
-            logger.warning("internal memory profile page asset read failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
-        if isinstance(result, OperationFailed):
-            status_code = 403 if result.error == "memory_access_denied" else 503
-            return JSONResponse(status_code=status_code, content={"status": result.status, "error": result.error})
-        if result is None:
-            return JSONResponse(status_code=404, content={"status": "failed", "error": "memory_invalid_input"})
-        media_type = "text/html; charset=utf-8" if asset_name == "index.html" else "text/css; charset=utf-8"
-        return Response(content=result, status_code=200, media_type=media_type)
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:

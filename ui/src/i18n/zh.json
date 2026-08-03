@@ -3548,28 +3548,9 @@
       "refresh": "刷新",
       "summary": "概览",
       "explicitInfo": "明确信息",
-      "implicitTraits": "偏好与模式",
-      "basis": "依据",
-      "evidence": "证据",
-      "generatePage": "生成画像页面",
-      "generatingPage": "正在生成页面…",
-      "pageTitle": "画像页面",
-      "pageLoadFailed": "无法恢复已保存的画像页面。",
-      "pageGenerationFailed": "无法生成你的画像页面。",
-      "noPage": "还没有生成画像页面。",
-      "openPage": "打开画像页面",
-      "loadingPage": "正在加载已保存的画像页面…",
-      "generatedAt": "生成于",
-      "sourceUpdatedAt": "画像来源更新于",
-      "pageFreshness": {
-        "current": "当前版本",
-        "stale": "画像已更新",
-        "unknown": "时效未知"
-      },
-      "reportWarning": {
-        "empty": "目前没有可生成页面的画像。",
-        "unstructured": "该提供方画像暂时无法生成页面。"
-      },
+      "implicitTraits": "推断特征",
+      "basis": "推断依据",
+      "evidence": "相关证据",
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
@@ -3625,11 +3606,10 @@
     "clear": {
       "button": "清除全部",
       "confirmTitle": "清除全部本地记忆数据？",
-      "confirmDescription": "这会移除你的画像、已生成的画像页面、事件、事实，以及本机上任何尚未处理的排队文本。",
+      "confirmDescription": "这会移除你的画像、事件、事实，以及本机上任何尚未处理的排队文本。",
       "removesTitle": "将会移除：",
       "removes": [
         "你可见的画像",
-        "已生成的记忆画像页面",
         "用于构建画像的隐藏本地缓冲区和索引",
         "本地处理队列中待处理和已完成的条目"
       ],

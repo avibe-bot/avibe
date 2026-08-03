@@ -107,13 +107,8 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         calls.append(("clear", user_key))
         return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
 
-    async def report(language: str, *, user_key: str):
-        calls.append(("report", f"{language}:{user_key}"))
-        return {"status_code": 200, "body": {"status": "ok", "report": "A report"}}
-
     monkeypatch.setattr(internal_client, "memory_profile", profile)
     monkeypatch.setattr(internal_client, "memory_clear", clear)
-    monkeypatch.setattr(internal_client, "memory_profile_report", report)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -141,22 +136,13 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         base_url="https://alex.avibe.bot",
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
-    report_response = client.post(
-        "/api/memory/profile/report",
-        json={"language": "zh"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base={"REMOTE_ADDR": "203.0.113.10"},
-    )
 
     assert settings_response.status_code == 200
     assert profile_response.status_code == 200
     assert clear_response.status_code == 200
-    assert report_response.status_code == 200
     assert calls == [
         ("profile", "avibe:remote:user-1"),
         ("clear", "avibe:remote:user-1"),
-        ("report", "zh:avibe:remote:user-1"),
     ]
 
 
@@ -248,127 +234,6 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
     assert response.get_json()["items"][0]["kind"] == "delivery_abandoned"
     assert response.headers["cache-control"] == "no-store"
     assert forwarded.status_code == 403
-
-
-def test_memory_profile_report_requires_csrf_and_only_forwards_closed_language(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    calls: list[tuple[str, str]] = []
-
-    async def report(language: str, *, user_key: str):
-        calls.append((language, user_key))
-        return {
-            "status_code": 200,
-            "body": {"status": "failed", "error": "memory_sidecar_unavailable"},
-        }
-
-    monkeypatch.setattr(internal_client, "memory_profile_report", report)
-    client = app.test_client()
-    base_url = "http://127.0.0.1:15131"
-    environ = {"REMOTE_ADDR": "127.0.0.1"}
-
-    missing_csrf = client.post(
-        "/api/memory/profile/report",
-        json={"language": "en"},
-        headers=_local_headers(),
-        base_url=base_url,
-        environ_base=environ,
-    )
-    invalid_language = client.post(
-        "/api/memory/profile/report",
-        json={"language": "fr"},
-        headers=csrf_headers(client, base_url),
-        base_url=base_url,
-        environ_base=environ,
-    )
-    extra_field = client.post(
-        "/api/memory/profile/report",
-        json={"language": "zh", "extra": True},
-        headers=csrf_headers(client, base_url),
-        base_url=base_url,
-        environ_base=environ,
-    )
-    accepted = client.post(
-        "/api/memory/profile/report",
-        json={"language": "zh"},
-        headers=csrf_headers(client, base_url),
-        base_url=base_url,
-        environ_base=environ,
-    )
-
-    assert missing_csrf.status_code == 403
-    assert [invalid_language.status_code, extra_field.status_code] == [400, 400]
-    assert accepted.status_code == 200
-    assert accepted.headers["cache-control"] == "no-store"
-    assert accepted.get_json() == {"status": "failed", "error": "memory_sidecar_unavailable"}
-    assert calls == [("zh", "avibe:local")]
-
-
-def test_memory_profile_page_restores_and_serves_sandboxable_private_assets(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    artifact_id = "a" * 32
-    calls: list[tuple[str, str]] = []
-
-    async def current(language: str, *, user_key: str):
-        calls.append(("current", f"{language}:{user_key}"))
-        return {
-            "status_code": 200,
-            "body": {
-                "status": "ok",
-                "page": {
-                    "artifact_id": artifact_id,
-                    "language": language,
-                    "view_url": f"/api/memory/profile/report/view/{language}/{artifact_id}/index.html",
-                },
-            },
-        }
-
-    async def asset(language: str, selected_id: str, asset_name: str, *, user_key: str):
-        calls.append(("asset", f"{language}:{selected_id}:{asset_name}:{user_key}"))
-        body = b"<!doctype html><title>Profile</title>" if asset_name == "index.html" else b"body{}"
-        return {"status_code": 200, "body": body, "content_type": "text/plain"}
-
-    monkeypatch.setattr(internal_client, "memory_profile_report_current", current)
-    monkeypatch.setattr(internal_client, "memory_profile_report_asset", asset)
-    client = app.test_client()
-    base_url = "http://127.0.0.1:15131"
-    headers = _local_headers()
-    environ = {"REMOTE_ADDR": "127.0.0.1"}
-
-    descriptor = client.get(
-        "/api/memory/profile/report?language=en",
-        headers=headers,
-        base_url=base_url,
-        environ_base=environ,
-    )
-    html = client.get(
-        f"/api/memory/profile/report/view/en/{artifact_id}/index.html",
-        headers=headers,
-        base_url=base_url,
-        environ_base=environ,
-    )
-    css = client.get(
-        f"/api/memory/profile/report/view/en/{artifact_id}/styles.css",
-        headers=headers,
-        base_url=base_url,
-        environ_base=environ,
-    )
-
-    assert descriptor.status_code == 200
-    assert descriptor.get_json()["page"]["artifact_id"] == artifact_id
-    assert html.status_code == 200
-    assert html.headers["content-type"].startswith("text/html")
-    assert html.headers["cache-control"] == "no-store, private"
-    assert html.headers["x-content-type-options"] == "nosniff"
-    assert "sandbox" in html.headers["content-security-policy"]
-    assert "script-src 'none'" in html.headers["content-security-policy"]
-    assert css.headers["content-type"].startswith("text/css")
-    assert calls == [
-        ("current", "en:avibe:local"),
-        ("asset", f"en:{artifact_id}:index.html:avibe:local"),
-        ("asset", f"en:{artifact_id}:styles.css:avibe:local"),
-    ]
 
 
 def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypatch, tmp_path) -> None:

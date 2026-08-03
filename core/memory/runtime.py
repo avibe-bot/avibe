@@ -27,7 +27,6 @@ from core.memory.artifact import (
 )
 from core.memory.everos import EverOSPort
 from core.memory.module import MemoryModule
-from core.memory.profile_page import MemoryProfilePageStore
 from core.memory.process import (
     EverOSProcess,
     EverOSProcessFactory,
@@ -40,14 +39,10 @@ from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import (
     ClearCompleted,
     MemoryItems,
-    MemoryProfileReport,
-    MemoryProfileReportResult,
     MemoryResult,
     MemoryStatus,
     OperationFailed,
     memory_item_payload,
-    memory_profile_page_payload,
-    memory_profile_snapshot_id,
 )
 from core.memory.worker import ProcessingEvent
 
@@ -162,9 +157,6 @@ class MemoryRuntime:
                 artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
                 compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
                 processing_event=self._processing_event,
-                profile_page_store=MemoryProfilePageStore(
-                    self._effective_home / "state" / "memory" / "profile-pages"
-                ),
             )
         except Exception as exc:
             self._store_error = exc
@@ -299,10 +291,6 @@ class MemoryRuntime:
         resume_claims_on_failure: bool = True,
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
-
-        if not await self.module._cancel_profile_reports():
-            self._runtime_error = "memory_sidecar_unavailable"
-            return {"ok": False, "error": self._runtime_error}
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -475,68 +463,10 @@ class MemoryRuntime:
         # provider let a concurrent read for another principal decide what this
         # caller was told.
         empty = isinstance(result, MemoryItems) and not result.items
-        payload = {
+        return {
             **_result_payload(result),
             "profile_warning": "empty" if empty else None,
         }
-        if isinstance(result, MemoryItems):
-            structured = next(
-                (item.profile for item in result.items if item.kind == "profile" and item.profile is not None),
-                None,
-            )
-            if structured is not None:
-                payload["profile_snapshot_id"] = memory_profile_snapshot_id(structured)
-        return payload
-
-    async def profile_report_payload(
-        self,
-        principal_id: str,
-        project_id: str,
-        language: str,
-    ) -> dict[str, Any]:
-        if not self.available:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return _profile_report_payload(
-            await self.module.profile_report(
-                principal_id=principal_id,
-                project_id=project_id,
-                language=language,
-            )
-        )
-
-    async def profile_page_current_payload(
-        self,
-        principal_id: str,
-        project_id: str,
-        language: str,
-    ) -> dict[str, Any]:
-        if not self.available:
-            return {"status": "failed", "error": "memory_store_unavailable"}
-        return _profile_report_payload(
-            await self.module.profile_page_current(
-                principal_id=principal_id,
-                project_id=project_id,
-                language=language,
-            )
-        )
-
-    async def profile_page_asset(
-        self,
-        principal_id: str,
-        project_id: str,
-        language: str,
-        artifact_id: str,
-        asset_name: str,
-    ) -> bytes | None | OperationFailed:
-        if not self.available:
-            return OperationFailed(error="memory_store_unavailable")
-        return await self.module.profile_page_asset(
-            principal_id=principal_id,
-            project_id=project_id,
-            language=language,
-            artifact_id=artifact_id,
-            asset_name=asset_name,
-        )
 
     async def search_payload(
         self,
@@ -601,13 +531,6 @@ class MemoryRuntime:
                 }
             if supervisor is not None:
                 async with self.module._lifecycle_lock:
-                    if not await self.module._cancel_profile_reports():
-                        self._runtime_error = "memory_sidecar_unavailable"
-                        return {
-                            "ok": False,
-                            "reason": self._runtime_error,
-                            "download_error": None,
-                        }
                     try:
                         claims_paused = await self.module._worker.pause_and_wait()
                     except Exception:
@@ -658,14 +581,10 @@ class MemoryRuntime:
     async def close(self) -> None:
         if not self.available:
             return
-        async with self.module._lifecycle_lock:
-            if not await self.module._cancel_profile_reports():
-                logger.warning("Memory profile report cancellation did not drain during shutdown")
-                return
-            await self._stop_worker()
-            if self._process is not None:
-                await self._process.stop()
-                self._process = None
+        await self._stop_worker()
+        if self._process is not None:
+            await self._process.stop()
+            self._process = None
         self._artifact_manager.set_activation_coordinator(None)
 
     async def _apply_active_artifact_metadata(self) -> None:
@@ -771,8 +690,6 @@ class MemoryRuntime:
                 meta = None
                 sentinel_rewritten = False
                 try:
-                    if not await self.module._cancel_profile_reports():
-                        raise MemoryRuntimeActivationError("profile report cancellation did not drain")
                     if not await self.module._worker.pause_and_wait():
                         raise MemoryRuntimeActivationError("memory worker could not pause")
                     await self._stop_worker()
@@ -826,8 +743,6 @@ class MemoryRuntime:
                     raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
     async def _stop_sidecar_for_clear(self) -> None:
-        if not await self.module._cancel_profile_reports():
-            raise MemoryRuntimeActivationError("profile report cancellation did not drain")
         await self._stop_worker()
         if self._process is not None:
             await self._process.stop()
@@ -1029,32 +944,6 @@ def _result_payload(result: MemoryResult) -> dict[str, Any]:
             "status": result.status,
             "items": [memory_item_payload(item) for item in result.items],
             "warnings": list(result.warnings),
-        }
-    return {"status": "failed", "error": "memory_processing_failed"}
-
-
-def _profile_report_payload(result: MemoryProfileReportResult) -> dict[str, Any]:
-    if isinstance(result, OperationFailed):
-        return {"status": result.status, "error": result.error}
-    if isinstance(result, MemoryProfileReport):
-        if result.report_warning is not None:
-            return {
-                "status": result.status,
-                "page": None,
-                "report_warning": result.report_warning,
-            }
-        if result.page is None:
-            return {"status": result.status, "page": None}
-        page = memory_profile_page_payload(result.page)
-        return {
-            "status": result.status,
-            "page": {
-                **page,
-                "view_url": (
-                    "/api/memory/profile/report/view/"
-                    f"{result.page.language}/{result.page.artifact_id}/index.html"
-                ),
-            },
         }
     return {"status": "failed", "error": "memory_processing_failed"}
 

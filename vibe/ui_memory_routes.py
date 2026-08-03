@@ -43,30 +43,6 @@ def _memory_response(payload: dict, *, status_code: int = 200) -> Response:
     return response
 
 
-_PROFILE_PAGE_CSP = (
-    "sandbox; default-src 'none'; style-src 'self'; img-src data:; "
-    "script-src 'none'; connect-src 'none'; font-src 'none'; frame-src 'none'; "
-    "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
-)
-
-
-def _memory_profile_asset_response(payload: bytes, *, asset_name: str) -> Response:
-    response = Response(
-        payload,
-        status_code=200,
-        media_type=(
-            "text/html; charset=utf-8"
-            if asset_name == "index.html"
-            else "text/css; charset=utf-8"
-        ),
-    )
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    if asset_name == "index.html":
-        response.headers["Content-Security-Policy"] = _PROFILE_PAGE_CSP
-    return response
-
-
 def _memory_forbidden_response() -> Response:
     return _memory_response({"status": "failed", "error": "memory_disabled"}, status_code=403)
 
@@ -318,91 +294,6 @@ def register_memory_routes(app) -> None:
             return await _memory_internal_response(
                 lambda: internal_client.memory_profile(user_key=user_key)
             )
-
-        return await app.dispatch_native_request(starlette_request, handler)
-
-    @app.post("/api/memory/profile/report", include_in_schema=False)
-    async def memory_profile_report_post(starlette_request: FastAPIRequest):
-        async def handler():
-            user_key = _memory_ui_user_key()
-            if user_key is None:
-                return _memory_forbidden_response()
-            try:
-                payload = await starlette_request.json()
-            except Exception:
-                payload = None
-            language = payload.get("language") if isinstance(payload, dict) and set(payload) == {"language"} else None
-            if language not in {"en", "zh"}:
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from vibe import internal_client
-
-            return await _memory_internal_response(
-                lambda: internal_client.memory_profile_report(language, user_key=user_key)
-            )
-
-        return await app.dispatch_native_request(starlette_request, handler)
-
-    @app.get("/api/memory/profile/report", include_in_schema=False)
-    async def memory_profile_report_get(starlette_request: FastAPIRequest):
-        async def handler():
-            user_key = _memory_ui_user_key()
-            if user_key is None:
-                return _memory_forbidden_response()
-            query = starlette_request.query_params
-            if set(query) != {"language"} or len(query.getlist("language")) != 1:
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            language = query.get("language")
-            if language not in {"en", "zh"}:
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            from vibe import internal_client
-
-            return await _memory_internal_response(
-                lambda: internal_client.memory_profile_report_current(language, user_key=user_key)
-            )
-
-        return await app.dispatch_native_request(starlette_request, handler)
-
-    @app.get(
-        "/api/memory/profile/report/view/{language}/{artifact_id}/{asset_name}",
-        include_in_schema=False,
-    )
-    async def memory_profile_report_view_get(
-        starlette_request: FastAPIRequest,
-        language: str,
-        artifact_id: str,
-        asset_name: str,
-    ):
-        async def handler():
-            user_key = _memory_ui_user_key()
-            if user_key is None:
-                return _memory_forbidden_response()
-            if (
-                language not in {"en", "zh"}
-                or len(artifact_id) != 32
-                or any(character not in "0123456789abcdef" for character in artifact_id)
-                or asset_name not in {"index.html", "styles.css"}
-            ):
-                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=404)
-            from vibe import internal_client
-
-            try:
-                result = await internal_client.memory_profile_report_asset(
-                    language,
-                    artifact_id,
-                    asset_name,
-                    user_key=user_key,
-                )
-            except internal_client.InternalServerUnavailable:
-                return _memory_response(
-                    {"status": "failed", "error": "memory_sidecar_unavailable"},
-                    status_code=503,
-                )
-            if result.get("status_code") != 200 or not isinstance(result.get("body"), bytes):
-                return _memory_response(
-                    {"status": "failed", "error": "memory_invalid_input"},
-                    status_code=result.get("status_code", 404),
-                )
-            return _memory_profile_asset_response(result["body"], asset_name=asset_name)
 
         return await app.dispatch_native_request(starlette_request, handler)
 

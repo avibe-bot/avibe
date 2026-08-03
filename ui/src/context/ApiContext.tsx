@@ -452,8 +452,6 @@ export type ApiContextType = {
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
-  getMemoryProfilePage: (language: MemoryProfileReportLanguage) => Promise<MemoryProfileReportResult>;
-  generateMemoryProfilePage: (language: MemoryProfileReportLanguage) => Promise<MemoryProfileReportResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
@@ -1720,35 +1718,7 @@ export type MemoryItem = {
 };
 
 export type MemoryItemsResult =
-  | {
-      status: 'ok';
-      items: MemoryItem[];
-      warnings: string[];
-      profile_warning?: 'empty' | null;
-      profile_snapshot_id?: string;
-    }
-  | MemoryFailure;
-
-export type MemoryProfileReportLanguage = 'en' | 'zh';
-
-export type MemoryProfilePageDescriptor = {
-  artifact_id: string;
-  language: MemoryProfileReportLanguage;
-  generated_at: string;
-  published_at: string;
-  source_profile_updated_at: string | null;
-  source_profile_snapshot_id: string;
-  prompt_contract_version: number;
-  content_sha256: string;
-  view_url: string;
-};
-
-export type MemoryProfileReportResult =
-  | {
-      status: 'ok';
-      page: MemoryProfilePageDescriptor | null;
-      report_warning?: 'empty' | 'unstructured';
-    }
+  | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
   | MemoryFailure;
 
 export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
@@ -2789,10 +2759,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
-    getMemoryProfilePage: (language) =>
-      getJson(`/api/memory/profile/report?language=${encodeURIComponent(language)}`, { handleError: false }),
-    generateMemoryProfilePage: (language) =>
-      postJson('/api/memory/profile/report', { language }, { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),

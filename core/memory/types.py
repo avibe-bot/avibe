@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
@@ -190,28 +189,6 @@ class MemoryProfile:
 
 
 @dataclass(frozen=True)
-class MemoryProfilePageSource:
-    """The two fixed source assets authored by the Memory-configured LLM."""
-
-    index_html: str
-    styles_css: str
-
-
-@dataclass(frozen=True)
-class MemoryProfilePageDescriptor:
-    """Opaque metadata for one validated, locally published profile page."""
-
-    artifact_id: str
-    language: Literal["en", "zh"]
-    generated_at: str
-    published_at: str
-    source_profile_updated_at: str | None
-    source_profile_snapshot_id: str
-    prompt_contract_version: int
-    content_sha256: str
-
-
-@dataclass(frozen=True)
 class MemoryItem:
     kind: MemoryKind
     text: str
@@ -245,33 +222,6 @@ def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
     }
 
 
-def memory_profile_snapshot_id(profile: MemoryProfile) -> str:
-    """Return a stable opaque identity for one bounded structured profile."""
-
-    payload = json.dumps(
-        memory_profile_payload(profile),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
-
-
-def memory_profile_page_payload(page: MemoryProfilePageDescriptor) -> dict[str, Any]:
-    """Project an artifact descriptor into its closed JSON representation."""
-
-    return {
-        "artifact_id": page.artifact_id,
-        "language": page.language,
-        "generated_at": page.generated_at,
-        "published_at": page.published_at,
-        "source_profile_updated_at": page.source_profile_updated_at,
-        "source_profile_snapshot_id": page.source_profile_snapshot_id,
-        "prompt_contract_version": page.prompt_contract_version,
-        "content_sha256": page.content_sha256,
-    }
-
-
 def memory_item_payload(item: MemoryItem) -> dict[str, Any]:
     """Serialize one item without widening legacy item payloads with nulls."""
 
@@ -293,18 +243,6 @@ class MemoryItems:
 
 
 MemoryResult: TypeAlias = MemoryItems | OperationFailed
-
-
-@dataclass(frozen=True)
-class MemoryProfileReport:
-    """The current durable profile page, or a closed no-page warning."""
-
-    page: MemoryProfilePageDescriptor | None
-    report_warning: Literal["empty", "unstructured"] | None = None
-    status: Literal["ok"] = "ok"
-
-
-MemoryProfileReportResult: TypeAlias = MemoryProfileReport | OperationFailed
 
 
 @dataclass(frozen=True)

@@ -18,12 +18,7 @@ from core.memory.everos import (
     ProviderAttachment,
     ProviderCapture,
 )
-from core.memory.types import (
-    MemoryProfile,
-    MemoryProfileExplicitInfo,
-    MemoryProfilePageSource,
-    MemoryProfileTrait,
-)
+from core.memory.types import MemoryProfile, MemoryProfileExplicitInfo, MemoryProfileTrait
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -406,9 +401,6 @@ def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> No
     with _sidecar_transport(handler):
         items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
 
-    assert items == (
-        items[0],
-    )
     assert items[0].date == "1970-01-01"
     assert items[0].profile == MemoryProfile(
         summary="Prefers concise technical discussions.",
@@ -487,80 +479,6 @@ def test_profile_rejects_wrong_shaped_known_collections() -> None:
 
     with _sidecar_transport(handler):
         asyncio.run(run())
-
-
-def test_profile_report_uses_only_the_private_sidecar_route_and_closed_errors() -> None:
-    received: dict[str, object] = {}
-    profile = MemoryProfile(
-        summary="Prefers concise technical updates.",
-        explicit_info=(MemoryProfileExplicitInfo(description="Uses Python."),),
-        updated_at="2026-08-02T10:30:00Z",
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        received["path"] = request.url.path
-        received["payload"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={
-                "status": "ok",
-                "source": {
-                    "index_html": "<!doctype html><html><head></head><body></body></html>",
-                    "styles_css": "body { margin: 0; }",
-                },
-            },
-        )
-
-    with _sidecar_transport(handler):
-        source = asyncio.run(
-            EverOSPort(Path("/tmp/everos.sock")).generate_profile_page(
-                profile,
-                "zh",
-                "2026-08-03T05:12:30Z",
-            )
-        )
-
-    assert source == MemoryProfilePageSource(
-        index_html="<!doctype html><html><head></head><body></body></html>",
-        styles_css="body { margin: 0; }",
-    )
-    assert received == {
-        "path": "/avibe/v1/profile-report",
-        "payload": {
-            "language": "zh",
-            "generated_at": "2026-08-03T05:12:30Z",
-            "profile": {
-                "summary": "Prefers concise technical updates.",
-                "explicit_info": [
-                    {"description": "Uses Python.", "category": None, "evidence": None}
-                ],
-                "implicit_traits": [],
-                "updated_at": "2026-08-02T10:30:00Z",
-            },
-        },
-    }
-    assert "api_key" not in json.dumps(received["payload"])
-
-    def unavailable(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("sidecar disappeared", request=request)
-
-    async def _expect_unavailable() -> None:
-        with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).generate_profile_page(
-                profile,
-                "en",
-                "2026-08-03T05:12:30Z",
-            )
-        assert raised.value.error == "memory_sidecar_unavailable"
-
-    with _sidecar_transport(unavailable):
-        asyncio.run(_expect_unavailable())
-
-    def timed_out(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("sidecar deadline elapsed", request=request)
-
-    with _sidecar_transport(timed_out):
-        asyncio.run(_expect_unavailable())
 
 
 def test_invalid_search_envelope_is_closed_failure() -> None:
