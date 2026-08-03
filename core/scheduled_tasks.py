@@ -39,7 +39,10 @@ from core.message_context import (
 )
 from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
-from core.runtime_activation import RuntimeActivationIdentity
+from core.runtime_activation import (
+    RuntimeActivationIdentity,
+    RuntimeActivationResolution,
+)
 from core.runtime_recovery import FallbackRequestRecoveryHandler
 from core.runtime_work import (
     RuntimeWorkLane,
@@ -5205,12 +5208,12 @@ class ScheduledTaskService:
             return agent_name
         return ""
 
-    def _activation_identity_for_request(
+    def _activation_resolution_for_request(
         self,
         request: TaskExecutionRequest,
         *,
         backend: str = "",
-    ) -> RuntimeActivationIdentity | None:
+    ) -> RuntimeActivationResolution | None:
         service = getattr(self.controller, "agent_service", None)
         identity_for_request = getattr(
             service,
@@ -5235,10 +5238,25 @@ class ScheduledTaskService:
         candidates: list[RuntimeActivationIdentity] = []
         backends = [backend] if backend else list(getattr(service, "agents", {}) or {})
         for candidate_backend in backends:
-            identity = identity_for_request(candidate_backend, request_view)
+            result = identity_for_request(candidate_backend, request_view)
+            if isinstance(result, RuntimeActivationResolution):
+                if not result.authoritative:
+                    return result
+                identity = result.identity
+            elif isinstance(result, RuntimeActivationIdentity):
+                identity = result
+            elif result is None:
+                identity = None
+            else:
+                return RuntimeActivationResolution(authoritative=False)
             if isinstance(identity, RuntimeActivationIdentity) and identity not in candidates:
                 candidates.append(identity)
-        return candidates[0] if len(candidates) == 1 else None
+        if len(candidates) > 1:
+            return RuntimeActivationResolution(authoritative=False)
+        return RuntimeActivationResolution(
+            authoritative=True,
+            identity=candidates[0] if candidates else None,
+        )
 
     def _runtime_activation_registry(self) -> Any:
         service = getattr(self.controller, "agent_service", None)
@@ -5252,7 +5270,13 @@ class ScheduledTaskService:
         pending: TaskExecutionRequest,
     ) -> TaskExecutionRequest | None:
         backend = self._claimed_request_backend(pending)
-        identity = self._activation_identity_for_request(pending, backend=backend)
+        resolution = self._activation_resolution_for_request(
+            pending,
+            backend=backend,
+        )
+        if resolution is not None and not resolution.authoritative:
+            return None
+        identity = resolution.identity if resolution is not None else None
         registry = self._runtime_activation_registry()
         if registry is None or identity is None:
             return self.request_store.claim(pending.id)
@@ -5278,9 +5302,15 @@ class ScheduledTaskService:
         service = getattr(self.controller, "agent_service", None)
         activation_identity = request.observed_activation_identity
         if activation_identity is None:
-            activation_identity = self._activation_identity_for_request(
+            resolution = self._activation_resolution_for_request(
                 request,
                 backend=backend,
+            )
+            if resolution is not None and not resolution.authoritative:
+                self.request_store.requeue(request.id)
+                return request, False
+            activation_identity = (
+                resolution.identity if resolution is not None else None
             )
         if not backend and activation_identity is not None:
             backend = activation_identity.backend

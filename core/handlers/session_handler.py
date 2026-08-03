@@ -43,12 +43,6 @@ from core.caller_context import caller_env_for_platform_payload
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
-from core.runtime_ownership import (
-    RuntimeResourceTarget,
-    RuntimeSessionBinding,
-    SessionRuntimeDisposition,
-    wake_runtime_ownership,
-)
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from vibe import backend_model_catalog
@@ -58,6 +52,7 @@ from .base import BaseHandler
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from core.runtime_ownership import RuntimeResourceTarget
     from modules.agents.model_hub import ModelHubLaunch
 
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
@@ -1773,7 +1768,12 @@ class SessionHandler(BaseHandler):
         self,
         composite_key: str,
         client: ClaudeSDKClient,
-    ) -> RuntimeResourceTarget | None:
+    ) -> "RuntimeResourceTarget | None":
+        from core.runtime_ownership import (
+            RuntimeResourceTarget,
+            RuntimeSessionBinding,
+        )
+
         base_session_id = str(
             getattr(client, "_vibe_runtime_base_session_id", "") or ""
         ).strip()
@@ -1849,6 +1849,8 @@ class SessionHandler(BaseHandler):
         composite_key: str,
         client: ClaudeSDKClient,
     ):
+        from core.runtime_ownership import wake_runtime_ownership
+
         target = self._claude_runtime_ownership_target(composite_key, client)
         provider = getattr(self.controller, "runtime_ownership", None)
         snapshot = getattr(provider, "snapshot", None)
@@ -1898,6 +1900,8 @@ class SessionHandler(BaseHandler):
         longer than the cap is indistinguishable from a stuck session and would
         be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
         """
+        from core.runtime_ownership import SessionRuntimeDisposition
+
         if idle_timeout <= 0:
             return 0
 

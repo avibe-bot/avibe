@@ -3898,6 +3898,9 @@ def test_agent_run_send_now_cancel_race_never_becomes_failed(monkeypatch, tmp_pa
         delivery_intent="send_now",
     )
     controller = _build_controller_double()
+    controller.agent_service.runtime_activation_identity_for_request = Mock(
+        return_value=None
+    )
     controller.platform_settings_managers = {}
     controller.im_clients = {"avibe": SimpleNamespace()}
     controller.get_im_client_for_context = lambda _context: SimpleNamespace(

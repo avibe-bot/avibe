@@ -78,6 +78,7 @@ class RuntimeResourceTarget:
     bindings: tuple[RuntimeSessionBinding, ...] = ()
     known_activity_runtime_keys: tuple[str, ...] = ()
     known_fallback_route_keys: tuple[str, ...] = ()
+    durable_session_workdir: str | None = None
     include_all_backend_sessions: bool = False
     maps_all_backend_activities: bool = False
     maps_all_backend_fallback_runs: bool = False
@@ -284,6 +285,19 @@ class RuntimeOwnershipProvider:
                     for row in connection.execute(
                         select(agent_sessions)
                         .where(agent_sessions.c.agent_backend == backend)
+                        .order_by(agent_sessions.c.id)
+                    ).mappings()
+                ]
+            elif target.durable_session_workdir is not None:
+                session_rows = [
+                    dict(row)
+                    for row in connection.execute(
+                        select(agent_sessions)
+                        .where(agent_sessions.c.agent_backend == backend)
+                        .where(
+                            agent_sessions.c.workdir
+                            == target.durable_session_workdir
+                        )
                         .order_by(agent_sessions.c.id)
                     ).mappings()
                 ]
@@ -582,9 +596,13 @@ class RuntimeOwnershipProvider:
                 target_facts.append(SessionRuntimeDisposition.UNKNOWN)
                 target_reasons.append(f"activity:{activity_id}:unmapped")
                 continue
-            if runtime_key not in target_activity_keys and not target.maps_all_backend_activities:
-                continue
             session_id = str(activity.get("session_id") or "")
+            if (
+                runtime_key not in target_activity_keys
+                and not target.maps_all_backend_activities
+                and session_id not in facts
+            ):
+                continue
             if session_id:
                 if session_id not in facts:
                     target_facts.append(SessionRuntimeDisposition.UNKNOWN)

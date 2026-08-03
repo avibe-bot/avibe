@@ -85,19 +85,32 @@ class AgentService:
         self,
         backend: str,
         request: Any,
-    ) -> RuntimeActivationIdentity | None:
+    ) -> RuntimeActivationResolution:
         agent = self.agents.get(str(backend or ""))
         resolve = getattr(agent, "runtime_activation_identity_for_request", None)
         if not callable(resolve):
-            return None
+            return RuntimeActivationResolution(authoritative=True)
         try:
-            return resolve(request)
+            identity = resolve(request)
         except Exception:
             logger.exception(
                 "Failed to resolve runtime activation identity for backend=%s",
                 backend,
             )
-            return None
+            return RuntimeActivationResolution(authoritative=False)
+        if identity is not None and not isinstance(
+            identity,
+            RuntimeActivationIdentity,
+        ):
+            logger.error(
+                "Invalid runtime activation identity for backend=%s",
+                backend,
+            )
+            return RuntimeActivationResolution(authoritative=False)
+        return RuntimeActivationResolution(
+            authoritative=True,
+            identity=identity,
+        )
 
     def runtime_activation_identity_for_session_binding(
         self,

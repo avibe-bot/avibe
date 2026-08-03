@@ -2506,7 +2506,7 @@ scenarios:
     backend: shared
     test: tests/test_runtime_recovery.py::test_hfr_149_session_lane_recovers_only_current_exact_observation
   - id: HFR-150
-    name: Session-less fallback Runs map by exact route and backend identity
+    name: fallback Runs survive exact route mapping and archived Session reuse
     status: covered
     kind: safety
     layer: contract

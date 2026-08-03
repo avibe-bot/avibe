@@ -486,6 +486,7 @@ def _target(
     runtime_key: str | None = None,
     route_key: str = "route:base",
     known_route_keys: tuple[str, ...] | None = None,
+    durable_session_workdir: str | None = None,
 ) -> RuntimeResourceTarget:
     activity_key = runtime_key or f"{anchor}:{workdir}"
     return RuntimeResourceTarget(
@@ -502,6 +503,7 @@ def _target(
         ),
         known_activity_runtime_keys=(activity_key,),
         known_fallback_route_keys=known_route_keys or (route_key,),
+        durable_session_workdir=durable_session_workdir,
     )
 
 
@@ -1159,6 +1161,75 @@ def test_hfr_150_legacy_blank_backend_uses_its_durable_session(tmp_path: Path) -
     snapshot = RuntimeOwnershipProvider(engine).snapshot(_target())
     assert snapshot.disposition is SessionRuntimeDisposition.TRANSITIONING
     assert snapshot.sessions[0].fallback_run_ids == ("run-a",)
+    engine.dispose()
+
+
+def test_hfr_150_reused_route_keeps_archived_same_backend_run_visible(
+    tmp_path: Path,
+) -> None:
+    """HFR-150: route reuse cannot hide an archived Session's live Run."""
+
+    engine = _engine(tmp_path, "archived-route-reuse.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-old", anchor="archived:old", workdir="/work")
+        _session(conn, "ses-new", anchor="base", workdir="/work")
+        _run(
+            conn,
+            "run-old",
+            status="running",
+            session_id="ses-old",
+            legacy_session_key="route:base",
+            pid=123,
+        )
+
+    snapshot = RuntimeOwnershipProvider(engine).snapshot(
+        _target(
+            session_id="ses-new",
+            durable_session_workdir="/work",
+        )
+    )
+
+    assert snapshot.disposition is SessionRuntimeDisposition.ACTIVE
+    old_snapshot = next(
+        item for item in snapshot.sessions if item.session_id == "ses-old"
+    )
+    assert old_snapshot.fallback_run_ids == ("run-old",)
+    assert old_snapshot.reasons == ("run:run-old:active",)
+    engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_hfr_150_reused_route_run_blocks_codex_cwd_reclamation(
+    tmp_path: Path,
+) -> None:
+    """HFR-150: replacement bindings cannot reclaim an old live cwd owner."""
+
+    engine = _engine(tmp_path, "archived-route-reclaim.sqlite")
+    with engine.begin() as conn:
+        _session(conn, "ses-old", anchor="archived:old", workdir="/work")
+        _session(conn, "ses-new", anchor="base", workdir="/work")
+        _run(
+            conn,
+            "run-old",
+            status="running",
+            session_id="ses-old",
+            legacy_session_key="route:base",
+            pid=123,
+        )
+
+    agent, _manager, stopped, _wakes = _codex_reclaimer(
+        engine,
+        [("ses-new", "base", "/work", "route:base")],
+    )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "modules.agents.codex.agent.time.monotonic",
+            lambda: 1000.0,
+        )
+        assert await agent.evict_idle_transports(600) == 0
+
+    assert stopped == []
+    assert "/work" in agent._transports
     engine.dispose()
 
 

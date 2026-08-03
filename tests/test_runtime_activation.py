@@ -4,6 +4,7 @@ import asyncio
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -239,6 +240,101 @@ def test_session_binding_lookup_failure_is_not_resource_absence() -> None:
     )
 
     assert resolution == RuntimeActivationResolution(authoritative=False)
+
+
+def test_request_lookup_failure_is_not_resource_absence() -> None:
+    service = object.__new__(AgentService)
+    service.agents = {
+        "codex": SimpleNamespace(
+            runtime_activation_identity_for_request=lambda _request: (
+                (_ for _ in ()).throw(ValueError("ambiguous route"))
+            )
+        )
+    }
+
+    resolution = service.runtime_activation_identity_for_request(
+        "codex",
+        SimpleNamespace(session_key="route:base"),
+    )
+
+    assert resolution == RuntimeActivationResolution(authoritative=False)
+
+
+def test_backend_without_activation_contract_has_no_runtime_resource() -> None:
+    service = object.__new__(AgentService)
+    service.agents = {"legacy": SimpleNamespace()}
+
+    resolution = service.runtime_activation_identity_for_request(
+        "legacy",
+        SimpleNamespace(session_key="route:base"),
+    )
+
+    assert resolution == RuntimeActivationResolution(
+        authoritative=True,
+        identity=None,
+    )
+
+
+def test_fallback_claim_fails_closed_when_runtime_lookup_is_ambiguous() -> None:
+    registry = RuntimeActivationRegistry()
+    pending = TaskExecutionRequest(
+        id="run-ambiguous",
+        request_type="agent_run",
+        agent_backend="codex",
+        session_key="route:base",
+    )
+    request_store = SimpleNamespace(claim=Mock())
+    service = object.__new__(ScheduledTaskService)
+    service.controller = SimpleNamespace(
+        agent_service=SimpleNamespace(
+            agents={"codex": object()},
+            activation_registry=registry,
+            runtime_activation_identity_for_request=lambda _backend, _request: (
+                RuntimeActivationResolution(authoritative=False)
+            ),
+        ),
+        runtime_activation=registry,
+    )
+    service.request_store = request_store
+
+    assert service._claim_pending_request(pending) is None
+    request_store.claim.assert_not_called()
+
+
+def test_hfr_137_codex_session_key_claim_observes_retired_generation() -> None:
+    """HFR-137: legacy routes cannot bypass the exact Codex generation."""
+
+    registry = RuntimeActivationRegistry()
+    identity = registry.attach("codex", "/work")
+    transport = SimpleNamespace(_vibe_runtime_activation_identity=identity)
+    codex = object.__new__(CodexAgent)
+    codex._transports = {"/work": transport}
+    codex._session_mgr = SimpleNamespace(
+        get_sessions_by_session_key=lambda _route: ["base"],
+        get_cwd=lambda _base: "/work",
+    )
+    controller = SimpleNamespace(runtime_activation=registry)
+    codex.controller = controller
+    agent_service = AgentService(
+        controller,
+        activation_registry=registry,
+    )
+    agent_service.agents = {"codex": codex}
+    controller.agent_service = agent_service
+    request_store = SimpleNamespace(claim=Mock())
+    scheduled = object.__new__(ScheduledTaskService)
+    scheduled.controller = controller
+    scheduled.request_store = request_store
+    pending = TaskExecutionRequest(
+        id="run-route",
+        request_type="agent_run",
+        agent_backend="codex",
+        session_key="route:base",
+    )
+    assert registry.retire_if_current(identity, lambda: True)
+
+    assert scheduled._claim_pending_request(pending) is None
+    request_store.claim.assert_not_called()
 
 
 class _ActivityStore:

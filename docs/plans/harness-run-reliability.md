@@ -846,9 +846,11 @@ keeping a backend process alive forever.
   another item; the fallback Run recovery is live in PR3 before PR4 broadens the
   lane;
 - `HFR-150`: Session-less IM/CLI fallback Runs map from persisted route and
-  backend identity to the exact runtime target; queued, pre-execution claimed,
-  and PID-started rows derive `runnable`, `transitioning`, and `active`, while an
-  unmappable nonterminal row fails closed instead of disappearing;
+  backend identity to the exact runtime target; archived Session-bound Runs
+  remain visible through the resource's durable Session membership even after
+  an admission anchor is reused. Queued, pre-execution claimed, and PID-started
+  rows derive `runnable`, `transitioning`, and `active`, while an unmappable
+  nonterminal row fails closed instead of disappearing;
 - `HFR-139`: unrelated sessions are not pinned;
 - `HFR-140`: one positively missing binding fails open, while a per-binding
   lookup exception or provider failure aborts the cycle;

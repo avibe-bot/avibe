@@ -22,7 +22,7 @@ _DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class RuntimeWorkLane(str, Enum):
-    SESSION_DELIVERIES = "session_deliveries"
+    SESSION_DELIVERIES = "delivery_queue_recovery"
     TASK_DEFINITIONS = "task_definitions"
     WATCH_DEFINITIONS = "watch_definitions"
     REQUESTS = "requests"
