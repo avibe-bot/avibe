@@ -97,18 +97,65 @@ def normalize_workdir(value: Any) -> str:
     return os.path.abspath(os.path.expanduser(text))
 
 
-def split_runtime_key(runtime_key: str) -> tuple[str, str]:
-    """Split ``f"{base_session_id}:{workdir}"`` into its two parts.
+def runtime_key_matches_target(runtime_key: str, anchor: str, workdir: str) -> bool:
+    """Whether a backend would compose this runtime key for ``(anchor, workdir)``.
 
-    A subagent base itself contains a colon (``{platform}_{thread}:{agent}``) and
-    a workdir is an absolute path with none, so the split is on the LAST colon —
-    the same rule ``core/services/running_agents.py`` uses.
+    Matched anchor-first rather than by splitting the key. A Claude runtime key is
+    ``f"{base_session_id}:{workdir}"`` with neither part escaped, so a workdir that
+    itself contains a colon — ``C:\\repo`` on native Windows, or a POSIX directory
+    named ``a:b`` — cannot be recovered by splitting on the last colon: that reads
+    the drive letter as part of the base and yields a workdir of ``\\repo``, so
+    both halves mismatch and the pin is lost. It is lost exactly where nothing
+    compensates, because a queued Delivery or a pre-start Turn has no observed
+    ``session_turns.runtime_key`` to fall back on.
+
+    The anchor is known from the durable side, so the remainder after it is
+    unambiguously "optional subagent suffix + workdir" however many colons the
+    workdir holds.
     """
 
-    base, sep, workdir = str(runtime_key or "").rpartition(":")
-    if not sep:
-        return str(runtime_key or ""), ""
-    return base, workdir
+    key = str(runtime_key or "")
+    if not anchor or not key:
+        return False
+    if key == anchor:
+        # No workdir component at all: the anchor alone identifies the session.
+        return True
+    prefix = f"{anchor}:"
+    if not key.startswith(prefix):
+        return False
+    remainder = key[len(prefix) :]
+    if not workdir or not remainder:
+        # Nothing to disambiguate against, so an anchor match is the only
+        # evidence there is and it has to fail closed.
+        return True
+    if normalize_workdir(remainder) == workdir:
+        return True
+    # A subagent runs under its parent session's anchor as
+    # ``{anchor}:{agent_name}:{workdir}``, so a live parent turn pins it too.
+    _agent, sep, rest = remainder.partition(":")
+    return bool(sep) and bool(rest) and normalize_workdir(rest) == workdir
+
+
+def runtime_key_workdir_candidates(runtime_key: str) -> frozenset[str]:
+    """Every suffix of ``runtime_key`` that could be its workdir component.
+
+    Used for the reverse question — "does this key sit at this workdir?" — where
+    no anchor is in hand. Since the workdir is always the key's suffix, trying
+    every colon position is exact for a membership test: the real workdir is
+    among the candidates, and an extra candidate can only widen a pin, which is
+    the direction this provider must fail in.
+    """
+
+    key = str(runtime_key or "")
+    candidates: set[str] = set()
+    index = key.find(":")
+    while index != -1:
+        suffix = key[index + 1 :]
+        if suffix:
+            candidates.add(normalize_workdir(suffix))
+        index = key.find(":", index + 1)
+    candidates.discard("")
+    return frozenset(candidates)
 
 
 @dataclass(frozen=True)
@@ -172,14 +219,8 @@ class SessionOwnershipSnapshot:
         matched: set[str] = set()
         for session_id in self._runtime_key_owners.get(runtime_key, ()):
             matched.add(session_id)
-        base, workdir = split_runtime_key(runtime_key)
-        normalized = normalize_workdir(workdir)
         for anchor, session_workdir, session_id in self.pinned_targets:
-            if session_workdir and normalized and session_workdir != normalized:
-                continue
-            # A subagent runs under its parent session's anchor with an
-            # ``:{agent_name}`` suffix, so a live parent turn pins it too.
-            if base == anchor or base.startswith(f"{anchor}:"):
+            if runtime_key_matches_target(runtime_key, anchor, session_workdir):
                 matched.add(session_id)
         return frozenset(
             session_id for session_id in matched if self.backend_owns(session_id, backend)
@@ -207,7 +248,7 @@ class SessionOwnershipSnapshot:
             if session_workdir == normalized
         }
         for runtime_key, owners in self._runtime_key_owners.items():
-            if normalize_workdir(split_runtime_key(runtime_key)[1]) != normalized:
+            if normalized not in runtime_key_workdir_candidates(runtime_key):
                 continue
             matched |= set(owners)
         return frozenset(
@@ -232,8 +273,10 @@ class SessionOwnershipSnapshot:
         Only a POSITIVE mismatch drops the pin. A caller that names no backend, or
         a session whose backends cannot be established, keeps it: an
         unattributable runtime must still fail closed. The session's backends are
-        the union of ``agent_sessions.agent_backend`` and the backend of each of
-        its nonterminal Turns, so a session caught mid-switch pins both runtimes.
+        the union of ``agent_sessions.agent_backend``, the backend of each of its
+        nonterminal Turns, and the backend each nonterminal Run captured at
+        request time — so a session caught mid-switch pins both runtimes, and work
+        queued for the backend it is switching away from keeps its own pin.
         """
 
         requested = str(backend or "").strip().lower()
@@ -352,6 +395,7 @@ class DurableSessionOwnershipProvider:
                 agent_runs.c.run_type,
                 agent_runs.c.status,
                 agent_runs.c.delivery_id,
+                agent_runs.c.agent_backend,
             )
             .where(agent_runs.c.session_id.is_not(None))
             .where(agent_runs.c.status.notin_(TERMINAL_RUN_STATUS_VALUES))
@@ -360,6 +404,17 @@ class DurableSessionOwnershipProvider:
             if not self._run_bears_execution(run_type):
                 continue
             session_id = str(row["session_id"] or "")
+            # A Run captures its own routing identity, and ``MessageHandler`` gives
+            # that explicit request identity precedence over the session's stored
+            # target when it dispatches. So a Run queued before the user switched
+            # the session's backend still lands on the backend recorded here, and
+            # that is the runtime it has to pin -- the session row's new backend
+            # alone would pin the wrong one and leave the real one evictable.
+            # Recorded before the delivery-represented skip below: the Delivery
+            # standing in for this Run dispatches to the same captured backend.
+            run_backend = str(row["agent_backend"] or "").strip().lower()
+            if run_backend:
+                backends_by_session.setdefault(session_id, set()).add(run_backend)
             delivery_id = str(row["delivery_id"] or "").strip()
             # Exact ownership already represented by a Delivery in THIS snapshot
             # needs no second binding. Because both reads share one snapshot, a
@@ -396,9 +451,8 @@ class DurableSessionOwnershipProvider:
                 runtime_key_owners.setdefault(runtime_key, set()).add(session_id)
 
         pinned_workdirs = {workdir for _anchor, workdir, _session_id in pinned_targets if workdir}
-        pinned_workdirs |= {
-            normalize_workdir(split_runtime_key(key)[1]) for key in runtime_key_owners
-        }
+        for key in runtime_key_owners:
+            pinned_workdirs |= runtime_key_workdir_candidates(key)
         pinned_workdirs.discard("")
 
         session_backends: dict[str, frozenset[str]] = {}

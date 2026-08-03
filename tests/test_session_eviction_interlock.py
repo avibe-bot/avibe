@@ -13,7 +13,7 @@ These tests drive the two real eviction entry points --
 -- against REAL durable rows in the isolated state database, so what is asserted
 is the join between the two keyspaces, not a stub's opinion of it.
 
-Scenarios: HFR-130 … HFR-151 (tests/scenarios/harness_failure_recovery/catalog.yaml).
+Scenarios: HFR-130 … HFR-153 (tests/scenarios/harness_failure_recovery/catalog.yaml).
 """
 
 from __future__ import annotations
@@ -300,6 +300,7 @@ def _seed_run(
     status: str = "running",
     delivery_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    agent_backend: Optional[str] = None,
 ) -> str:
     from storage.models import agent_runs
 
@@ -311,6 +312,7 @@ def _seed_run(
                 run_type=run_type,
                 status=status,
                 session_id=session_id,
+                agent_backend=agent_backend,
                 delivery_id=delivery_id,
                 cancel_requested=0,
                 created_at=NOW,
@@ -1223,3 +1225,72 @@ def test_claude_admission_during_teardown_costs_a_restart_not_the_work(
     assert composite_key not in handler.claude_sessions
     assert composite_key not in controller.claude_sessions
     assert composite_key not in handler.session_last_activity
+
+
+# ---------------------------------------------------------------------------
+# HFR-152 … HFR-153: the keyspace join must survive real-world identifiers
+# ---------------------------------------------------------------------------
+
+
+def test_a_workdir_containing_a_colon_still_pins_its_claude_runtime(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-152: a colon inside the workdir must not dissolve the pin.
+
+    The Claude runtime key is ``f"{base_session_id}:{workdir}"`` with neither part
+    escaped, so recovering the workdir by splitting on the LAST colon is wrong for
+    any workdir that contains one -- ``C:\\repo`` on native Windows, or the POSIX
+    directory used here. The split then reads part of the path as the base and the
+    tail as the whole workdir, both halves mismatch the durable target, and the pin
+    vanishes. It vanishes exactly where nothing compensates: this session has a
+    ``queued`` Delivery and no turn, so there is no observed
+    ``session_turns.runtime_key`` to match exactly.
+
+    RED against the previous head: the colon-workdir runtime is torn down too
+    (``evicted == 2``).
+    """
+
+    _state_db()
+    handler, _controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+
+    colon_workdir = tmp_path / "proj:v2"
+    colon_workdir.mkdir()
+    owned_session_id = "sescolonwd001"
+    owned_anchor = "slack_C555"
+    _seed_session(owned_session_id, anchor=owned_anchor, workdir=str(colon_workdir))
+    _seed_delivery(owned_session_id, "queued", delivery_id="dlv-colon-workdir")
+    colon_key = f"{owned_anchor}:{colon_workdir}"
+    _add_second_runtime(handler, colon_key, captured)
+
+    # Only the runtime at ``tmp_path`` is unowned, so only it may be evicted.
+    assert _sweep(handler) == 1
+    assert colon_key in handler.claude_sessions
+    assert captured.get(colon_key) is None
+    assert composite_key not in handler.claude_sessions
+
+
+def test_a_run_pins_the_backend_it_captured_not_the_switched_session_backend(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-153: a Run queued before a backend switch pins the backend it recorded.
+
+    A Run captures its own routing identity (``agent_backend``), and
+    ``MessageHandler`` gives that explicit request identity precedence over the
+    session's stored target when it dispatches. So when the user switches a
+    session's backend while a Run is still queued, that Run will land on the
+    backend it captured -- and attributing it only through the session row's NEW
+    backend pins the wrong runtime while leaving the real one evictable.
+
+    RED against the previous head: the session's backends resolve to ``{codex}``
+    alone, the Claude pin is dropped as a cross-backend match, and the runtime the
+    Run is about to be dispatched into is torn down (``evicted == 1``).
+    """
+
+    _state_db()
+    handler, _controller, composite_key, captured = _claude_handler(monkeypatch, tmp_path)
+    _seed_session(BASE_SESSION_ID, anchor=ANCHOR, workdir=str(tmp_path), backend="codex")
+    _seed_run(BASE_SESSION_ID, agent_backend="claude")
+
+    assert _sweep(handler) == 0
+    assert composite_key in handler.claude_sessions
+    assert captured["disconnects"] == 0
