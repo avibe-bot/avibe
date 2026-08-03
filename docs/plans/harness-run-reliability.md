@@ -62,11 +62,12 @@ Every remaining change must preserve these rules:
    projections and notices.
 5. **Absence of a receipt is not proof of non-delivery.** Any timeout around an
    outbound send must use durable delivery evidence before retrying.
-6. **Waiting is not activity.** A real inbound message or exact Turn start may
-   establish a session baseline; after that only observable assistant/tool
-   progress refreshes it. Run inactivity is stricter and re-arms only from its
-   exact owning Turn. A claim, queue wait, gate wait, or unrelated Run in the
-   same session must not keep stuck work alive.
+6. **Waiting is not activity.** A real inbound message may establish a session
+   baseline, and every exact Turn start establishes a fresh one even when the
+   work came from a long-idle scheduled/watch queue; after that only observable
+   assistant/tool progress refreshes it. Run inactivity is stricter and re-arms
+   only from its exact owning Turn. A claim, queue wait, gate wait, or unrelated
+   Run in the same session must not keep stuck work alive.
 7. **No turn-duration timeout.** A healthy turn may run for hours. Bounds may
    apply to inactivity and post-turn delivery, never to productive execution.
 8. **Failures remain visible.** Reconcile paths must use #1072's durable notice
@@ -732,16 +733,19 @@ keeping a backend process alive forever.
      fails closed for the eviction cycle, because missing safety data is not
      evidence that eviction is safe.
 6. Bound exact active/transitioning ownership with the existing real-progress
-   inactivity clock and
-   stuck-active threshold. A newly admitted pin does not restart that clock.
-   Beyond the bound, use the #1140 teardown path to settle exact running
-   ownership and preserve queued/unstarted work.
+   inactivity clock and stuck-active threshold. Merely observing a newly
+   admitted pin does not restart that clock, but the authoritative exact Turn
+   start establishes a fresh baseline for every source, including scheduled,
+   watch, and agent-initiated work admitted after a long queue wait. Beyond the
+   bound, use the #1140 teardown path to settle exact running ownership and
+   preserve queued/unstarted work.
 7. Inventory every `session_last_activity` writer. Do not touch it on claim,
    enqueue, gate wait, output wait, polling/protocol frames, wake, provider
-   lookup, or unrelated Session progress. Real inbound/Turn-start baselines and
-   subsequently attributable assistant/tool/active-Activity progress are the
-   only liveness signals. Shared Codex transport activity cannot refresh another
-   Session's progress clock.
+   lookup, or unrelated Session progress. A real inbound message may establish
+   a baseline; the exact Turn-start boundary must establish a fresh baseline
+   before the new execution can be judged stuck. Subsequently attributable
+   assistant/tool/active-Activity progress is the only refresh signal. Shared
+   Codex transport activity cannot refresh another Session's progress clock.
 8. Keep activation asynchronous. The reclaimer emits only the coalescing wake;
    `SessionTurnManager` remains the claimant and Turn creator. A wake must never
    select a different queue head, bypass hold, or mutate Delivery/Run state.
@@ -797,8 +801,13 @@ keeping a backend process alive forever.
   lookup exception or provider failure aborts the cycle;
 - `HFR-141`: repeated queued followers do not refresh progress or make a held Session
   immortal; teardown settles only exact running ownership;
-- `HFR-142`: a claimed or gate-waiting request does not refresh activity;
-- `HFR-143`: a long turn with observable progress is not evicted;
+- `HFR-142`: a claimed or gate-waiting request does not refresh activity, while
+  the exact Turn start after an arbitrarily long queue or gate wait establishes
+  one fresh baseline before reclamation may judge the execution stuck;
+- `HFR-143`: scheduled, watch, and agent-initiated Turns admitted into a
+  long-idle Session are not immediately evicted after exact Turn start, and a
+  long Turn with attributable observable progress remains live while unrelated
+  shared-transport activity does not refresh it;
 - `HFR-144`: the stuck threshold settles only the exact active owner through
   #1140 and never replays it;
 - `HFR-145`: every enabled backend eviction path either honors the provider or proves queued
