@@ -62,11 +62,12 @@ Every remaining change must preserve these rules:
    projections and notices.
 5. **Absence of a receipt is not proof of non-delivery.** Any timeout around an
    outbound send must use durable delivery evidence before retrying.
-6. **Waiting is not activity.** A real inbound message or exact Turn start may
-   establish a session baseline; after that only observable assistant/tool
-   progress refreshes it. Run inactivity is stricter and re-arms only from its
-   exact owning Turn. A claim, queue wait, gate wait, or unrelated Run in the
-   same session must not keep stuck work alive.
+6. **Waiting is not activity.** A real inbound message may establish a session
+   baseline, and every exact Turn start establishes a fresh one even when the
+   work came from a long-idle scheduled/watch queue; after that only observable
+   assistant/tool progress refreshes it. Run inactivity is stricter and re-arms
+   only from its exact owning Turn. A claim, queue wait, gate wait, or unrelated
+   Run in the same session must not keep stuck work alive.
 7. **No turn-duration timeout.** A healthy turn may run for hours. Bounds may
    apply to inactivity and post-turn delivery, never to productive execution.
 8. **Failures remain visible.** Reconcile paths must use #1072's durable notice
@@ -117,6 +118,15 @@ This separates two existing loops that must not become one larger loop:
 The reclaimer never executes queued work and the work supervisor never decides
 that a durable Session row should be deleted. They share one read-only runtime
 ownership provider and one wake interface, not one coroutine.
+
+They also share one **runtime activation boundary** per exact backend resource
+target and generation. This is an in-process mutation interlock, not a durable
+owner: every transition that can change the target from
+`runnable|waiting|reclaimable` to `transitioning|active` enters it before the
+authoritative commit, and reclamation enters it before the final snapshot. The
+boundary is defined by the disposition change rather than by an enumerated
+caller list, so a new admission path cannot bypass it merely because it creates
+a Run instead of a Turn or Activity.
 
 ### 3.2 Derived session disposition
 
@@ -203,14 +213,15 @@ The exact classification is:
 
 | Durable fact | Derived disposition | Runtime effect |
 |---|---|---|
-| `starting|active` Turn, Turn-owned Delivery, persisted active Activity, or exact in-process backend operation | `active` | forbid ordinary idle reclamation |
-| unresolved Delivery fence, waiting successor, or an ownership handoff that cannot yet be classified | `transitioning` | fail closed; reconcile the exact owner |
+| `starting|active` Turn with its exact owned Delivery, persisted active Activity, or exact in-process backend operation | `active` | forbid ordinary idle reclamation |
+| exact linked `waiting` Turn plus its initial `interrupt_waiting` Delivery | `transitioning` | fail closed for this pass and reconcile that exact predecessor/successor owner |
+| unresolved Delivery fence or an ownership handoff that cannot yet be classified | `transitioning` | fail closed; reconcile the exact owner |
 | open-hold ownerless FIFO head or queued execution-bearing fallback Run not yet represented by a Delivery | `runnable` | wake its delivery/request lane; it does not itself pin backend resources |
 | claimed fallback Run in normalized `running` / legacy `processing` with no persisted execution-start marker (`pid IS NULL` or absent) | `transitioning` | preserve the pre-execution handoff until exact recovery requeues or starts it |
 | fallback Run in normalized `running` / legacy `processing` with the persisted execution-start marker (`pid IS NOT NULL`) | `active` | preserve its runtime until #1140's exact terminal/teardown settlement |
 | held FIFO backlog with no live Turn/fence | `waiting` | preserve durable work but allow disposable backend runtime reclamation |
 | terminal Delivery/Turn history and terminal Runs only | `reclaimable` | no pin |
-| read failure, unknown Delivery state, or unknown execution-bearing Run type | `unknown` | fail closed for this cycle and log the reason |
+| read failure, unknown Delivery state or execution-bearing Run type, or an unpaired/mismatched `waiting`/`interrupt_waiting` half | `unknown` | fail closed for this cycle and log the reason |
 
 `queued` therefore does not mean "keep a backend process alive forever". An
 open queue head means "activate it now"; a held queue means "keep it durable but
@@ -219,8 +230,19 @@ contradiction between an idle runtime and durable queued input without inventing
 fake activity.
 
 The provider consumes `DELIVERY_STATE_MATRIX` and the current Turn-state
-contract. It may add a derived policy helper beside that matrix, but it may not
-retype Delivery state names in cleanup callers. `watch_runtime` is supervisor
+contract as related facts, not as independent liveness enums. The exact
+`waiting` Turn / `interrupt_waiting` initial-Delivery pair is the specific
+exception to the matrix's general `turn_owned` ordering role: it has not crossed
+native start and is `transitioning`, not `active`. A `starting|active` Turn with
+its exact owned Delivery is active; a lone or mismatched half is `unknown`. The
+pair's wake is not permission to call `activate_waiting_successor()` directly.
+Activation must re-read the exact predecessor Turn, prove its
+`control_successor_turn_id`/`control_successor_delivery_id` linkage, and consume
+the predecessor's immutable terminal winner through the existing terminal-
+resume path. Before that terminal proof, targeted recovery may reconcile only
+the predecessor control attempt and must leave the successor waiting.
+The provider may add a derived policy helper beside the matrix, but it may not retype
+Delivery state names in cleanup callers. `watch_runtime` is supervisor
 bookkeeping and never an execution owner. An Activity persisted in `active`
 phase pins its exact runtime; `awaiting_output` and terminal Activity snapshots
 are settlement-only and do not pin backend resources. Unknown Run or Activity
@@ -231,17 +253,40 @@ types fail closed until the shared classification deliberately names them.
 Every reclaimer pass follows one order:
 
 1. Read the exact ownership snapshot.
-2. For a runnable Delivery, emit a coalescing `session_deliveries` wake. A
-   fallback queued Run emits `requests` instead. A transitioning Delivery/Turn
-   owner wakes `session_deliveries`; a pre-execution fallback Run wakes
-   `requests`. The row is durable work, not a runtime pin.
+2. Derive wakes from the raw member facts before target aggregation. For a
+   runnable Delivery, emit a coalescing `session_deliveries` wake. A fallback
+   queued Run emits `requests` instead. A transitioning Delivery/Turn owner,
+   including every exact waiting-successor pair, wakes `session_deliveries` even
+   when its active predecessor makes the aggregate disposition `active`; a pre-
+   execution fallback Run wakes `requests`. The row is durable work, not a
+   runtime pin.
 3. For `active`, `transitioning`, or `unknown`, skip reclamation.
 4. For `runnable`, `waiting`, or `reclaimable`, apply the existing idle grace
    rule without mutating Session, hold, queue, Delivery, or Run.
-5. Acquire the same backend runtime-generation mutation lock used by Turn start,
-   then read the snapshot again immediately before cleanup. A new exact owner or
-   replaced generation wins; a still-runnable row may outlive the reclaimed
-   runtime and later recreate it safely.
+5. Acquire the exact target/generation runtime activation boundary, then read
+   the snapshot again immediately before cleanup. A new exact owner or replaced
+   generation wins; a still-runnable row may outlive the reclaimed runtime and
+   later recreate it safely.
+
+Every path that crosses the disposition boundary participates. This includes
+Turn start, a fallback Run claim from queued to normalized running/legacy
+processing, the fallback Run PID execution-start transition, and
+`SessionActivityRegistry.start()` or a progress upsert that can recreate an
+active row. The adapter maps the durable route or Activity runtime key to the
+disposable resource target before acquiring the boundary. The admission path
+revalidates the observed generation and holds the boundary through its
+authoritative commit. No call may split claim and generation validation across
+an unlocked window.
+
+If admission wins first, the reclaimer's locked snapshot observes the new
+`transitioning|active` owner. If cleanup wins first, it marks or detaches that
+exact generation while holding the boundary. A delayed old-generation Activity
+event may not create an active row; it follows the existing exact backend/Run
+settlement path when it has an owner, otherwise it is ignored as stale
+telemetry. A queued fallback Run remains queued or is recovered through its
+existing exact Run CAS, then may activate against the current/new generation;
+it is never marked execution-started against the retired generation. This adds
+no Run or Activity state, durable fence, or terminal writer.
 
 The reclaimer does not wait for the request to finish. The wake is a hint; the
 `session_deliveries` lane later claims the exact FIFO head under the existing guarded
@@ -257,10 +302,15 @@ bounded indexed eligibility queries: open-hold Session ids with a queued head
 and no live Turn, and unresolved Delivery/Turn fences, starting owners, or
 waiting successors that require exact reconciliation. It invokes a narrow
 `SessionTurnManager` claim/recovery entry for the exact Session plus observed
-Delivery/Turn/attempt identity. The `requests` lane likewise includes claimed
-pre-execution fallback Runs. Losing or stale identities no-op after their guarded
-re-read. Queue events, startup, and periodic reconciliation are the primary
-triggers; the reclaimer's wake closes only the admission-versus-cleanup race.
+predecessor Turn/control attempt, successor Turn, Delivery, and native identity.
+The manager must re-prove the predecessor's exact successor linkage and terminal
+snapshot before its existing terminal-resume writer may activate the successor;
+the low-level successor CAS is never a standalone recovery entry. A wake that
+arrives while the predecessor is still nonterminal no-ops after any exact control
+reconciliation. The `requests` lane likewise includes claimed pre-execution
+fallback Runs. Losing or stale identities no-op after their guarded re-read.
+Queue events, startup, and periodic reconciliation are the primary triggers; the
+reclaimer's wake closes only the admission-versus-cleanup race.
 The full global `recover_durable_delivery_state()` remains startup-only after
 backend identity restoration.
 
@@ -325,17 +375,27 @@ Callers that require a synchronous result observe the persisted Run outcome
 rather than taking execution ownership from the lane.
 
 Likewise, every completed Activity output batch, whether produced during a live
-Turn or found after restart, is persisted and wakes `activity_outputs`. Before
-claiming a batch, both the context-sensitive live flush and restart recovery
-enter the same supervisor partition keyed by exact `(backend, runtime_key)`.
-The live path may use its existing in-memory Turn/context while it owns that
-partition. Its existing expected-Turn selection may scan past unrelated
-unbound output to choose the causally matching batch; the supervisor does not
-replace that #1139 rule with a global row-order policy. The partition lease spans
-claim, emit, and settle/requeue, so no second live or recovery worker can claim
-or send another batch for that runtime while the selected batch owns the
-boundary. After release, the registry again chooses by its existing causal/FIFO
-contract. Neither path carries payload or receipt authority in the wake.
+Turn or found after restart, is persisted and wakes `activity_outputs`. A wake
+does not make a newly unbound completion immediately claimable. Preserve
+Claude's existing `ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS` coalescing window: the
+first unbound completion establishes the eligibility deadline from its
+persisted `completed_at`, and later matching completions inside that window do
+not extend it. A restart recomputes the remaining window from durable
+timestamps. An already bound batch or local-settlement-only retry is complete
+evidence and is eligible immediately. No new durable deadline or batch owner is
+added.
+
+Once due, both the context-sensitive live flush and restart recovery enter the
+same supervisor partition keyed by exact `(backend, runtime_key)` before
+claiming. The live path may use its existing in-memory Turn/context while it
+owns that partition. Its existing expected-Turn selection may scan past
+unrelated unbound output to choose the causally matching batch; the supervisor
+does not replace that #1139 rule with a global row-order policy. The partition
+lease spans claim, emit, and settle/requeue, so no second live or recovery
+worker can claim or send another batch for that runtime while the selected
+batch owns the boundary. After release, the registry again chooses by its
+existing causal/FIFO contract. Neither the wake nor the grace timer carries
+payload, membership, or receipt authority.
 
 Each lane owns one coordinator event/task plus a bounded map of item workers by
 partition key. The coordinator alone queries eligibility and never awaits item
@@ -357,21 +417,41 @@ from the beginning. Durable FIFO within each partition is unchanged.
 Partition keys are not invented tenant labels; they are the existing FIFO or
 serialization owner key. They are Session id for Delivery activation; request
 execution-lock key (or standalone Run id) for Run admission; callback target
-Session for Run/Vault callbacks; exact `(backend, runtime_key)` output queue for
-recovered Activities; and notice destination/Run for failure notices. One
-selected Activity batch is indivisible and owns that runtime partition through
-settlement or requeue. Selection order remains the existing #1139 registry
-contract, including expected-Turn causal matching; the supervisor forbids
-overlap but does not replace that policy with a second queue.
+Session for Run/Vault callbacks; and exact `(backend, runtime_key)` output queue
+for recovered Activities. Ordinary suppressible failure notices with a
+definition use `("failure_streak", definition_id)` as their conservative
+partition because the existing policy derives one canonical consecutive-
+failure streak from that definition's Run history. Suppression-bypass notices
+(interruptions and binding changes) and definitionless failures retain their
+existing durable `failure_id`/Run identity. A destination is routing, never a
+notice serialization key. Definition-level serialization may conservatively
+span two already-closed streaks; it preserves correctness without adding a
+streak field or moving streak derivation out of `failure_streak_decision()`.
+One selected Activity batch is indivisible and owns that runtime partition
+through settlement or requeue. Selection order remains the existing #1139
+registry contract, including expected-Turn causal matching; the supervisor
+forbids overlap but does not replace that policy with a second queue.
 `task_definitions`, `watch_definitions`, and `stale_runs` each retain one bounded
 coordinator because their owner operations mutate shared local store/scheduler
-state. In particular, every `ManagedWatchStore` reload, reconcile, cycle marker,
-and runtime-state write stays behind the one `watch_definitions` single-flight
-store boundary: its mutable full-store mirror is not safe for concurrent
-watch-id writers. Long-running waiter processes/tasks remain outside that
-maintenance worker. The supervisor moves the single writer off the controller
-loop and tracks its real future; it does not invent row-level concurrency or a
-second mirror owner.
+state. In particular, every blocking `ManagedWatchStore` reload, cycle marker,
+and runtime-state storage write stays behind the one `watch_definitions`
+single-flight store boundary: its mutable full-store mirror is not safe for
+concurrent watch-id writers. The store phase returns an immutable snapshot or
+guarded write result. `ManagedWatchService.reconcile_watches()` and all
+`_active_tasks` creation, cancellation, done-callback, and runtime projection
+assembly remain on the controller event loop. Only the assembled projection's
+blocking persistence enters the tracked store worker. Long-running waiter
+processes/tasks remain outside that maintenance worker. This preserves one
+store writer and one loop-owned lifecycle without creating a second mirror
+owner.
+
+That prepare/apply split is the general execution-placement rule. Blocking,
+side-effect-free reads and serialized store commits run in tracked synchronous
+workers. Asyncio task/timer mutation and in-memory lifecycle application run on
+their owning event loop after the worker returns. Existing domain claim and
+settlement APIs remain the semantic owners under the lane partition. Moving a
+blocking call off-loop never authorizes moving its caller's event-loop state
+machine into the executor.
 Every lane has a small internal maximum greater than one
 where item workers are supported; the limit is injectable in tests and is not a
 public product setting. One hung tenant therefore consumes one partition/slot
@@ -645,20 +725,38 @@ keeping a backend process alive forever.
    runnable members have been woken and the locked recheck still finds no live
    owner. Claude composite keys must be mapped by persisted anchor/workdir
    identity, not string-prefix guesses.
+   Inventory every path that can change a target from
+   `runnable|waiting|reclaimable` to `transitioning|active`, including backend
+   receivers and standalone fallback Run claim/execution start. It must enter
+   the exact resource-target/generation activation boundary before the owning
+   commit and revalidate the observed generation. Direct registry or Run-store
+   transitions that can race cleanup are forbidden.
 4. Add the controller-owned `RuntimeWorkSupervisor` contract and register
    `SessionTurnManager` as the sole `session_deliveries` handler. Consult the
    provider in both passes of `evict_idle_sessions`. On a runnable Delivery,
    notify that lane but do not turn durable unclaimed work into an unbounded
    runtime pin; a fallback queued Run not yet represented by Delivery notifies
-   `requests`. Recompute under the exact backend runtime-generation mutation
-   lock immediately before cleanup. A newly committed claim/Turn or replaced
-   generation wins; a still-runnable row survives runtime reclamation.
+   `requests`. Recompute under the exact target/generation runtime activation
+   boundary immediately before cleanup. A newly committed fallback Run claim or
+   execution start, Turn, active Activity, or replaced generation wins; a
+   still-runnable row survives runtime reclamation. The reclaimer keeps the
+   boundary through generation detach/cleanup initiation so no delayed
+   old-generation admission can become a new durable pin after the final
+   snapshot.
    The lane itself uses separate bounded indexed queries for open-hold queued
    Sessions without live Turns and for unresolved Delivery/Turn fences,
    starting owners, and waiting successors. It invokes a manager entry guarded
    by the observed Session, Delivery, Turn, attempt, and native identity; stale
-   observations no-op. The `requests` lane applies the equivalent exact recovery
-   to claimed pre-execution fallback Runs. Neither lane hides a full global
+   observations no-op. The exact linked `waiting` Turn / `interrupt_waiting`
+   initial-Delivery pair is `transitioning` even though the Delivery matrix calls
+   it `turn_owned`; the pair emits its recovery wake even while its active
+   predecessor keeps the aggregate runtime active. A mismatched half fails
+   closed. Recovery also revalidates the predecessor Turn's exact
+   `control_successor_*` linkage and immutable terminal winner; it may activate
+   the successor only through the existing terminal-resume writer. A wake before
+   predecessor terminalization cannot call the low-level successor CAS and
+   leaves the pair waiting. The `requests` lane applies the equivalent exact
+   recovery to claimed pre-execution fallback Runs. Neither lane hides a full global
    `recover_durable_delivery_state()` call inside cleanup; that global pass
    remains startup-only after backend restoration.
    PR3 registers this fallback-only `requests` recovery handler together with
@@ -671,16 +769,19 @@ keeping a backend process alive forever.
      fails closed for the eviction cycle, because missing safety data is not
      evidence that eviction is safe.
 6. Bound exact active/transitioning ownership with the existing real-progress
-   inactivity clock and
-   stuck-active threshold. A newly admitted pin does not restart that clock.
-   Beyond the bound, use the #1140 teardown path to settle exact running
-   ownership and preserve queued/unstarted work.
+   inactivity clock and stuck-active threshold. Merely observing a newly
+   admitted pin does not restart that clock, but the authoritative exact Turn
+   start establishes a fresh baseline for every source, including scheduled,
+   watch, and agent-initiated work admitted after a long queue wait. Beyond the
+   bound, use the #1140 teardown path to settle exact running ownership and
+   preserve queued/unstarted work.
 7. Inventory every `session_last_activity` writer. Do not touch it on claim,
    enqueue, gate wait, output wait, polling/protocol frames, wake, provider
-   lookup, or unrelated Session progress. Real inbound/Turn-start baselines and
-   subsequently attributable assistant/tool/active-Activity progress are the
-   only liveness signals. Shared Codex transport activity cannot refresh another
-   Session's progress clock.
+   lookup, or unrelated Session progress. A real inbound message may establish
+   a baseline; the exact Turn-start boundary must establish a fresh baseline
+   before the new execution can be judged stuck. Subsequently attributable
+   assistant/tool/active-Activity progress is the only refresh signal. Shared
+   Codex transport activity cannot refresh another Session's progress clock.
 8. Keep activation asynchronous. The reclaimer emits only the coalescing wake;
    `SessionTurnManager` remains the claimant and Turn creator. A wake must never
    select a different queue head, bypass hold, or mutate Delivery/Run state.
@@ -699,9 +800,16 @@ keeping a backend process alive forever.
   existing exact-head transaction;
 - `HFR-132`: a held FIFO backlog survives while its disposable backend runtime
   is reclaimed, then starts after the existing explicit hold release;
-- `HFR-133`: unresolved fence and Turn-owned Delivery states forbid cleanup;
-- `HFR-134`: active/starting/waiting Turns forbid cleanup while terminal Turn
-  and Delivery history alone do not;
+- `HFR-133`: unresolved fences and Deliveries owned by exact `starting|active`
+  Turns forbid cleanup;
+- `HFR-134`: an exact linked `waiting` Turn / `interrupt_waiting` initial-
+  Delivery pair is `transitioning` and emits one exact recovery wake even while
+  its active predecessor makes the aggregate `active`; a mismatched half is
+  `unknown`, and terminal Turn/Delivery history alone is reclaimable. Targeted
+  recovery re-proves the predecessor's exact `control_successor_*` linkage and
+  immutable terminal winner before the existing terminal-resume writer activates
+  that successor once. A wake before the predecessor terminal CAS is a no-op,
+  while a stale CAS cannot start it twice or claim another head;
 - `HFR-135`: active Activity rows pin their exact runtime, while `awaiting_output` and
   terminal Activity snapshots do not;
 - `HFR-147`: an active Activity with no Session id maps from its durable Activity
@@ -709,7 +817,14 @@ keeping a backend process alive forever.
   orphan; a missing map fails closed;
 - `HFR-136`: a `watch_runtime` heartbeat sharing the same definition/session does not pin,
   while an execution-bearing watch Run does;
-- `HFR-137`: a pin admitted between eviction passes wins;
+- `HFR-137`: every transition across the runtime activation boundary wins or
+  loses atomically against reclamation. Deterministic barriers cover both
+  interlock orderings for Turn start, Session-bound and Session-less Activity
+  admission, `claim_pending_run()`, and `mark_run_execution_started()`.
+  Admission-before-cleanup is visible in the locked snapshot. Cleanup-before-
+  admission prevents an old-generation Activity or execution-started Run from
+  becoming active, while preserving the queued/pre-execution Run for its
+  existing exact recovery path;
 - `HFR-138`: bare-Run to reserved-Delivery and Delivery to Turn ownership handoffs cannot
   disappear across a torn provider read;
 - `HFR-148`: fallback queued, pre-execution claimed, and execution-started Runs
@@ -717,9 +832,13 @@ keeping a backend process alive forever.
   persisted PID boundary;
 - `HFR-149`: periodic reconciliation finds a persisted Delivery/Turn fence,
   starting owner, waiting successor, or claimed pre-execution fallback Run after
-  its process disappears and invokes only its exact guarded recovery entry; a
-  stale observation neither pins the runtime forever nor recovers another item;
-  the fallback Run recovery is live in PR3 before PR4 broadens the lane;
+  its process disappears and invokes only its exact guarded recovery entry. The
+  active-predecessor/waiting-successor case still emits one coalesced recovery
+  wake before aggregate disposition is applied. Deterministic barriers prove a
+  wake after successor creation but before predecessor terminal proof cannot
+  activate it. A stale observation neither pins the runtime forever nor recovers
+  another item; the fallback Run recovery is live in PR3 before PR4 broadens the
+  lane;
 - `HFR-150`: Session-less IM/CLI fallback Runs map from persisted route and
   backend identity to the exact runtime target; queued, pre-execution claimed,
   and PID-started rows derive `runnable`, `transitioning`, and `active`, while an
@@ -729,8 +848,13 @@ keeping a backend process alive forever.
   lookup exception or provider failure aborts the cycle;
 - `HFR-141`: repeated queued followers do not refresh progress or make a held Session
   immortal; teardown settles only exact running ownership;
-- `HFR-142`: a claimed or gate-waiting request does not refresh activity;
-- `HFR-143`: a long turn with observable progress is not evicted;
+- `HFR-142`: a claimed or gate-waiting request does not refresh activity, while
+  the exact Turn start after an arbitrarily long queue or gate wait establishes
+  one fresh baseline before reclamation may judge the execution stuck;
+- `HFR-143`: scheduled, watch, and agent-initiated Turns admitted into a
+  long-idle Session are not immediately evicted after exact Turn start, and a
+  long Turn with attributable observable progress remains live while unrelated
+  shared-transport activity does not refresh it;
 - `HFR-144`: the stuck threshold settles only the exact active owner through
   #1140 and never replays it;
 - `HFR-145`: every enabled backend eviction path either honors the provider or proves queued
@@ -785,7 +909,51 @@ Activity-output owner.
    `call_soon_threadsafe`. A notifier exception is logged but never changes the
    producer's committed result.
    Preserve `notify_transport_ready()` as the direct non-commit `requests` wake
-   after an IM transport reconnects.
+   after an IM transport reconnects. The transport registry remains the sole
+   readiness owner and adds one synchronous final-decision guard per configured
+   platform. The current global `_ready_lock` continues to protect only brief
+   reads/mutations of the `_ready_platforms` set; it is never held across a
+   database call. The keyed guards serialize only one platform's readiness
+   transitions and stale settlement, so a slow Slack settlement cannot delay
+   Discord readiness. They are bounded in-memory capability locks, not work
+   owners.
+
+   The same readiness owner records an in-memory generation and injected UTC
+   `unready_since` for the current outage. Registering or hot-adding a configured
+   platform that is not ready starts a fresh generation before its child thread
+   or the stale lane can observe it; a ready transition closes it. Every later
+   ready-to-unready edge starts another generation under the exact platform
+   guard, whether that edge comes from explicit disconnect, the client runner's
+   `finally`, or hot removal. Repeated observations while the platform is
+   already unready do not refresh the generation or timestamp. A new process
+   conservatively starts a new generation for each configured but not-ready
+   platform, granting another bounded reconnect window rather than failing a
+   Run from unverifiable pre-restart history. This metadata describes the
+   current capability edge only. It is not a durable queue, Run fact, or
+   settlement owner, and no transition bulk rewrites queued Runs.
+
+   Candidate discovery happens outside the platform guard. For a queued row
+   carrying `transport_unavailable` evidence, the worker first reserves the
+   SQLite write transaction with `BEGIN IMMEDIATE` or the repository's
+   equivalent, then enters the exact platform guard, briefly reads readiness
+   plus the current outage generation under `_ready_lock`, releases that brief
+   set lock, and re-reads the Run evidence. If the platform is ready, the worker
+   uses the same exact queued/reason/timestamp CAS to clear the ended outage's
+   stale evidence and returns without terminalizing. If it is unready, the
+   effective outage start is the later of the persisted `last_skip_at` and the
+   current generation's `unready_since`; settlement is ineligible until that
+   effective start exceeds the reconnect TTL. The worker then commits only an
+   exact `status=queued` CAS with the observed reason/timestamp while still
+   holding the platform guard. Both ready and ready-to-unready transitions take
+   that same platform guard, mutate the readiness set and generation briefly
+   under `_ready_lock`, release both, and only then publish any wake; neither
+   transition performs database work while holding either lock. A reconnect
+   that wins first makes terminal settlement no-op and permits exact evidence
+   cleanup; a later disconnect rebases the effective age even when capacity
+   kept the old row stamp from being cleared; a settlement that wins first
+   commits before readiness publication; a request claim that already changed
+   the row to `running` makes the stale CAS lose. This is a final-decision
+   interlock, not a durable readiness state or a second Run owner.
    A scheduler fire or manual task run only enqueues and notifies; remove
    `_run_task`'s direct claim/spawn/await path so `requests` is the single durable
    Run admission consumer. Preserve the existing one queued follower behind an
@@ -797,22 +965,30 @@ Activity-output owner.
    path keeps #1139's context-sensitive expected-Turn selection inside that
    lease, including scanning past unrelated unbound output. The lease remains
    owned through emit and settle/requeue. No backend-local flush may race the
-   recovery lane as an independent claimant.
+   recovery lane as an independent claimant. Preserve the current live
+   coalescing grace before claiming an unbound batch. Compute its due time from
+   the first matching persisted `completed_at`, do not extend it for later
+   members, and preserve the remaining delay across restart. Bound batches and
+   local-settlement-only retries bypass the grace because their immutable
+   membership already exists.
 6. Run every lane as bounded work. Request, Run-callback, and Vault-callback
    queries use explicit page limits. A page that reaches its limit or reports
    another eligible item re-arms the same lane. A temporarily skipped item uses
    existing durable eligibility/backoff when present; do not hot-spin on an
    in-memory event.
-7. Move synchronous `maybe_reload`, eligibility, and stale-run storage work off
-   the controller event loop. `watch_definitions` is the single writer for
-   managed-watch stale-worker recovery retry, store reload,
-   `reconcile_watches`, cycle markers, and runtime-state projection. Per-watch
-   guarded store calls currently made by `_run_watch` enter that same serialized
-   tracked worker because `ManagedWatchStore` owns one mutable full-store mirror.
-   The long-running waiter process/task remains under the existing managed-watch
-   lifecycle and is never subjected to a maintenance-lane timeout. Track the
-   underlying executor future as its lane owner through timeout/cancellation as
-   §3.6 requires. Never start a replacement until that exact future exits.
+7. Move synchronous `maybe_reload`, eligibility, stale-run, cycle-marker, and
+   runtime-state persistence work off the controller event loop.
+   `watch_definitions` is the single store worker for managed-watch stale-worker
+   recovery retry, reload, guarded per-watch writes, and persistence of an
+   already assembled runtime projection. It returns immutable snapshots/results
+   to the controller loop. Keep `reconcile_watches()`, `_active_tasks`, task
+   creation/cancellation, done callbacks, timer state, and projection assembly
+   on that loop; never call `asyncio.create_task()` or mutate those maps from an
+   executor thread. The long-running waiter process/task remains under the
+   existing managed-watch lifecycle and is never subjected to a maintenance-
+   lane timeout. Track each underlying store future as its lane owner through
+   timeout/cancellation as §3.6 requires. Never start a replacement store call
+   until that exact future exits.
 8. Keep one independent supervisor task that reports the exact overdue lane,
    partition, and service generation. It observes worker timestamps only and
    cannot query the stores or write terminal state. Repeated service start/stop
@@ -875,7 +1051,10 @@ membership, create a second receipt, or infer resend safety from timeout alone.
 - `HFR-158`: a hung request admission, callback delivery, vault callback, or
   recovered-output send for one partition does not delay another partition in
   the same lane, the other lanes, or stale-run sweeps; more than one full page of
-  followers for the occupied partition cannot hide a later actionable partition;
+  followers for the occupied partition cannot hide a later actionable
+  partition. A blocked ordinary failure notice for definition A does not delay
+  definition B, while two ordinary failures of A targeting different Sessions
+  never overlap and the later decision observes the first canonical result;
 - `HFR-159`: a contended task/watch reload probe or stale-run store operation
   does not block the event loop, suppress independent drain progress, or
   serialize unrelated partitions;
@@ -897,7 +1076,10 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   pre-effect cancellation, and exception completion each re-arm remaining
   eligible work with backoff, while shutdown cancellation does not re-arm;
 - `HFR-163`: each lane enforces its configured global worker bound and only one
-  item worker per partition while allowing a different partition to progress;
+  item worker per partition while allowing a different partition to progress.
+  Ordinary notices for one definition share its conservative failure-streak
+  partition; interruptions, binding changes, and definitionless failures retain
+  their existing per-failure identities and do not collapse into that streak;
 - `HFR-164`: routine scheduled-task or managed-watch service stop/restart
   unregisters and joins only its owned Harness lane registrations and watchdog
   state; the controller-owned supervisor and `session_deliveries` lane remain
@@ -906,12 +1088,16 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   current Harness registration generation and no stale overdue-drain logs;
 - `HFR-166`: complete multi-Activity batches preserve persisted order, one stable
   receipt per batch, and each complete Run union while delayed, restarted, or
-  locally retried; one selected batch for exact `(backend, runtime_key)` owns the
-  partition through emit and settle/requeue so another batch cannot overlap it;
-  after release, the registry preserves #1139's expected-Turn causal selection,
-  including scanning past unrelated unbound output, and loss of live context
-  falls back to persisted Activity/Turn/Run settlement without a competing
-  claimant;
+  locally retried. Two same-Turn unbound completions inside the injected live
+  grace produce one batch, receipt, and user-visible message; the first wake
+  cannot claim early, a second completion does not extend the deadline, and a
+  restart midway waits only the durable remaining grace. Bound and local-only
+  retry batches are immediately eligible. One selected batch for exact
+  `(backend, runtime_key)` owns the partition through emit and settle/requeue so
+  another batch cannot overlap it; after release, the registry preserves
+  #1139's expected-Turn causal selection, including scanning past unrelated
+  unbound output, and loss of live context falls back to persisted
+  Activity/Turn/Run settlement without a competing claimant;
 - `HFR-167`: an accepted Message or persisted Activity-batch
   local-settlement-only marker suppresses transport replay, including after
   restart; graceful shutdown after remote acceptance but before local receipt
@@ -938,7 +1124,20 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   including `session_deliveries`, before the old process can query or claim, and
   no old-generation completion can re-arm work;
 - `HFR-177`: IM transport readiness directly wakes `requests` and a skipped Run
-  resumes without waiting for slow reconciliation;
+  resumes without waiting for slow reconciliation. Deterministic barriers cover
+  reconnect winning the final readiness guard (no failure notice; one request
+  claim), stale settlement winning and committing before readiness publication
+  (one terminal failure; zero claim), and a queued-to-running request claim
+  making the stale exact CAS lose. They also keep an expired stamp queued when
+  the platform reconnects and drops again before any worker clears that stamp:
+  the second outage receives its own full TTL from the injected readiness clock,
+  then permits exactly one terminal settlement after that TTL. They prove that
+  exact evidence cleanup may win before the second disconnect, that repeated
+  disconnect observations do not extend one outage, and that every disconnect
+  producer uses the same edge owner. Process startup gives a configured but
+  not-ready platform the same fresh bounded window. A blocked Slack
+  final-decision guard does not block Discord readiness mutation,
+  outage-generation changes, or its `requests` wake;
 - `HFR-178`: a real signal while the controller loop is running requests
   nonblocking async shutdown; a synchronous lane outliving shutdown grace
   retains the service-instance lock and exact dependencies until its worker or
@@ -947,10 +1146,13 @@ membership, create a second receipt, or infer resend safety from timeout alone.
   startup follows the same ownership decision;
 - `HFR-179`: contended managed-watch store reconciliation and per-watch guarded
   store writes stay single-flight, keep the SQLite row and full-store mirror
-  consistent, and cannot wrongly restart a completed one-shot watch; they do not
-  block the controller loop or another lane, while a legitimately long-running
-  waiter is not canceled by the maintenance timeout and remains owned by the
-  managed-watch lifecycle.
+  consistent, and cannot wrongly restart a completed one-shot watch. Blocking
+  store phases run in the tracked worker, while `reconcile_watches()`,
+  `asyncio.create_task()`, `_active_tasks`, cancellation, callbacks, and runtime
+  projection assembly are asserted to run on the controller loop. Store
+  contention does not block that loop or another lane, while a legitimately
+  long-running waiter is not canceled by the maintenance timeout and remains
+  owned by the managed-watch lifecycle.
 
 Exit criterion: normal work is event-woken, missed hints are recovered, a hung
 lane cannot block another lane or the controller event loop, lifecycle teardown

@@ -100,6 +100,8 @@ describe('nodeDisplayTitle', () => {
 describe('statusMeta / isBackground', () => {
   it('maps status to tone + glyph', () => {
     expect(statusMeta('active').glyph).toBe('dot');
+    expect(statusMeta('active').dotClass).toBe('bg-mint');
+    expect(statusMeta('idle')).toMatchObject({ tone: 'muted', dotClass: 'bg-muted', glyph: 'dot' });
     expect(statusMeta('succeeded').glyph).toBe('check');
     expect(statusMeta('failed').glyph).toBe('cross');
     expect(statusMeta('failed').tone).toBe('destructive');
