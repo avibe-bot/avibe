@@ -1364,8 +1364,11 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         class _ActivityStore:
             def __init__(self):
                 self.records = {}
+                self.fail_cleanup = False
 
             def upsert_activity(self, activity, *, phase):
+                if self.fail_cleanup and phase == "terminal":
+                    raise RuntimeError("terminal Activity storage unavailable")
                 self.records[activity["id"]] = {
                     "activity": dict(activity),
                     "phase": phase,
@@ -1376,6 +1379,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                     self.upsert_activity(activity, phase=phase)
 
             def delete_activity(self, *, activity_id, **_kwargs):
+                if self.fail_cleanup:
+                    raise RuntimeError("Activity deletion unavailable")
                 self.records.pop(activity_id, None)
 
             def list_activities(self):
@@ -1407,6 +1412,11 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         original.claim_completed_output_batch("claude", "runtime-silent-batch")
 
         recovered = SessionActivityRegistry(activity_store)
+        released = []
+        recovered.set_output_settled_callback(
+            lambda activity: released.append(activity.id)
+        )
+        activity_store.fail_cleanup = True
         deferred = []
         settled = []
 
@@ -1437,10 +1447,15 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(deferred), 2)
         self.assertCountEqual(settled, ["run-a", "run-b"])
         self.assertEqual(len(settled), 2)
+        self.assertCountEqual(released, ["activity-a", "activity-b"])
+        self.assertEqual(len(released), 2)
         self.assertFalse(
             recovered.has_completed_output("claude", "runtime-silent-batch")
         )
-        self.assertEqual(activity_store.list_activities(), [])
+        self.assertEqual(
+            {record["phase"] for record in activity_store.list_activities()},
+            {"awaiting_output"},
+        )
 
     async def test_legacy_recovered_receipt_uses_accepted_message_without_resend(self):
         from core.scheduled_tasks import ScheduledTaskService
@@ -1514,6 +1529,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             "metadata": {
                 "activity_ids": ["activity-legacy"],
                 "run_ids": ["run-legacy"],
+                "output_id": (
+                    "claude-task:runtime-legacy:activity-legacy:completion"
+                ),
             },
         }
 
@@ -1521,8 +1539,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             def get_run(self, _run_id):
                 return {"status": "running"}
 
-            def record_run_output(self, run_id, **_kwargs):
-                run_settlements.append(run_id)
+            def record_run_output(self, run_id, **kwargs):
+                run_settlements.append((run_id, kwargs["output_id"]))
 
             def close(self):
                 pass
@@ -1557,7 +1575,15 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.sent, [])
         persist.assert_not_called()
         self.assertEqual(looked_up[-1], legacy_native_id)
-        self.assertEqual(run_settlements, ["run-legacy"])
+        self.assertEqual(
+            run_settlements,
+            [
+                (
+                    "run-legacy",
+                    "claude-task:runtime-legacy:activity-legacy:completion",
+                )
+            ],
+        )
         self.assertFalse(
             recovered.has_completed_output("claude", "runtime-legacy")
         )

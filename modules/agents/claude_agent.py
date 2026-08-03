@@ -2689,11 +2689,20 @@ class ClaudeAgent(BaseAgent):
                 activities=activities,
             )
         except ActivityOutputDeliveryError as err:
-            if not err.delivered or err.durable:
+            if not err.delivered:
                 registry = self._activity_registry()
                 if registry is not None:
                     self._requeue_activities(registry, activities)
                 raise
+            if err.durable:
+                registry = self._activity_registry()
+                if registry is not None:
+                    self._requeue_activities(registry, activities)
+                self._schedule_completed_activity_flush(
+                    composite_key,
+                    context,
+                )
+                return
             logger.error(
                 "Delivered Claude Activity batch remains fail-closed after incomplete "
                 "local settlement (runtime=%s error=%s)",

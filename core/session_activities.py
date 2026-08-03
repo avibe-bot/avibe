@@ -1364,6 +1364,7 @@ class SessionActivityRegistry:
         accepted_message_exists: bool,
         terminal_activity: SessionActivity | None = None,
         settle_terminal: Callable[[SessionActivity], bool] | None = None,
+        visible_output: bool = True,
     ) -> bool:
         """Single-member adapter for non-batched Registry callers."""
 
@@ -1382,14 +1383,25 @@ class SessionActivityRegistry:
             ),
             settle_terminal=settle_terminal,
             terminal_activities=(terminal_activity,) if terminal_activity else None,
+            visible_output=visible_output,
         )
 
     def ack_completed_output(self, activity: SessionActivity) -> bool:
-        """Settle a delivered completion when no durable Message is known here."""
+        """Settle a recovered completion after its recovery owner handled it."""
+
+        with self._lock:
+            claimed = self._claimed_completed_outputs.get(
+                self._activity_key(activity)
+            )
+            recovered = bool(claimed and claimed.recovered)
 
         return self.settle_completed_output_delivery(
             activity,
             accepted_message_exists=False,
+            # Visible recovery is consumed by the dispatcher before this legacy
+            # adapter runs. A still-claimed recovered output was settled without
+            # transport by ScheduledTaskService and needs no delivery receipt.
+            visible_output=not recovered,
         )
 
     def has_completed_output(self, backend: str, runtime_key: str) -> bool:

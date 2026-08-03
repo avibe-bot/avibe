@@ -1240,8 +1240,10 @@ class ConsolidatedMessageDispatcher:
 
         activity_ids = identities("activity_ids")
         run_ids = identities("run_ids")
+        output_id = str(metadata.get("output_id") or "").strip()
         return replace(
             output_semantics,
+            idempotency_key=output_id or output_semantics.idempotency_key,
             activity_ids=activity_ids or output_semantics.activity_ids,
             run_ids=run_ids or output_semantics.run_ids,
         )

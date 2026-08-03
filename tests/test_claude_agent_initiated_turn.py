@@ -2194,6 +2194,55 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed.id, "task-690")
 
+    async def test_detached_durable_settlement_error_stays_out_of_receiver_failure(self):
+        agent, service = _build_agent()
+        composite_key = "session-detached-durable-retry:/tmp/work"
+        context = SimpleNamespace(
+            platform_specific={"agent_session_id": "sess-detached-durable-retry"}
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="sess-detached-durable-retry",
+            activity_id="task-detached-durable-retry",
+            kind="local_agent",
+            run_id="run-detached-durable-retry",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=composite_key,
+            activity_id="task-detached-durable-retry",
+            status="completed",
+            metadata={"summary": "Background verification finished"},
+            expects_output=True,
+        )
+        activity = service.activities.claim_completed_output(
+            "claude",
+            composite_key,
+        )
+        self.assertIsNotNone(activity)
+        agent._detached_activity_outputs[composite_key] = [activity]
+        agent._detached_assistant_text[composite_key] = "Full background result"
+        agent._emit_activity_result = AsyncMock(
+            side_effect=ActivityOutputDeliveryError(
+                "durable output needs local settlement",
+                delivered=True,
+                durable=True,
+                message_id="accepted-message",
+            )
+        )
+
+        with patch.object(agent, "_schedule_completed_activity_flush") as schedule:
+            await agent._flush_detached_activity_output(composite_key, context)
+
+        schedule.assert_called_once_with(composite_key, context)
+        reclaimed = service.activities.claim_completed_output(
+            "claude",
+            composite_key,
+        )
+        self.assertIsNotNone(reclaimed)
+        self.assertEqual(reclaimed.id, "task-detached-durable-retry")
+
     async def test_requeued_request_activity_restores_terminal_turn_policy(self):
         agent, service = _build_agent()
         composite_key = "session-requeued-policy:/tmp/work"
