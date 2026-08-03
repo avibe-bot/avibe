@@ -1861,15 +1861,16 @@ class TaskExecutionStore:
         interruption_error: Optional[str] = None,
         interrupt_reason: str = SETTLED_BY_RESTARTED,
         cancellation_error: Optional[str] = None,
-        skip_run_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Settle the fires a dead service left ``running``.
 
-        ``skip_run_ids`` are the fires whose command worker is STILL ALIVE because
-        this start could not kill it. Settling one would clear the last record of
-        that process (``list_running_command_workers`` reads ``running`` rows only)
-        and leave a backup or deployment running with nothing able to find it, so
-        those rows are left for the next start to retry.
+        A fire that still carries a ``command_worker`` record is left ``running``:
+        that record is the last name anyone has for a process this start could not
+        prove dead, and it is readable only while the row is ``running``. Settling it
+        would leave a backup or deployment running with nothing able to find it, so
+        the row waits for the next start to retry -- bounded by
+        ``_retain_unreaped_command_worker``, which stops re-stamping after
+        ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS``.
         """
 
         interruption_error = interruption_error or i18n_t(
@@ -1885,13 +1886,10 @@ class TaskExecutionStore:
                 interruption_error=interruption_error,
                 interrupt_reason=interrupt_reason,
                 cancellation_error=cancellation_error,
-                skip_run_ids=skip_run_ids,
             )
             return
         self._ensure_dirs()
         for path in self.processing_dir.glob("*.json"):
-            if path.stem in skip_run_ids:
-                continue
             pending_path = self.pending_dir / path.name
             completed_path = self.completed_dir / path.name
             if pending_path.exists():
@@ -1904,6 +1902,15 @@ class TaskExecutionStore:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 payload = {}
+            stored_metadata = payload.get("metadata") if isinstance(payload, dict) else None
+            if isinstance(stored_metadata, dict) and stored_metadata.get(
+                COMMAND_WORKER_METADATA_KEY
+            ):
+                # Same rule as the SQLite pass: a surviving worker record means a
+                # process this start could not prove dead, and this file is the only
+                # place its identity is written. Requeuing is no safer than settling --
+                # it would run the command again alongside the one still running.
+                continue
             if not isinstance(payload, dict) or not payload.get("pid"):
                 path.replace(pending_path)
                 continue
@@ -3128,12 +3135,14 @@ class ScheduledTaskService:
         self._recover_activity_lifecycle()
         # BEFORE ``recover_processing``, which nulls ``pid`` and settles these rows:
         # the run is the only place the orphan's identity is recorded, so once it is
-        # terminal the child can never be found again. Whatever it could not kill it
-        # names here, and those rows stay ``running`` so the NEXT start can try again.
+        # terminal the child can never be found again. This pass decides each record by
+        # WRITING it -- cleared once the process is proven dead, re-stamped while it may
+        # still be running -- and ``recover_processing`` then leaves exactly the rows
+        # whose record survived, so the NEXT start can try again.
+        self._reap_orphaned_command_workers()
         self.request_store.recover_processing(
             interruption_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_RESTARTED]),
             cancellation_error=self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
-            skip_run_ids=self._reap_orphaned_command_workers(),
         )
 
     def _t(self, key: str, **kwargs: Any) -> str:
@@ -3208,7 +3217,7 @@ class ScheduledTaskService:
                 "failed to record executed command for %s", execution_id, exc_info=True
             )
 
-    def _reap_orphaned_command_workers(self) -> frozenset[str]:
+    def _reap_orphaned_command_workers(self) -> None:
         """Kill command workers this host left running when the service died.
 
         Identity, not pid: between the crash and this pass the OS is free to reuse
@@ -3225,25 +3234,33 @@ class ScheduledTaskService:
         walk (the leader, then the group it left behind) so both worker lanes answer
         it the same way.
 
-        RETURNS THE RUNS THIS PASS COULD NOT PROVE DEAD, and that is the whole reason
-        this returns anything. Only a proven death retires the record; every maybe
-        keeps it. Clearing on a maybe throws away the ONLY durable handle on a backup
-        or deployment that is still writing, and it is unrecoverable: this row is
-        where the identity lives, so no later start can find that process even in
-        principle.
+        THE PASS COMMUNICATES BY WRITING, and that is why it returns nothing. Only a
+        proven death retires the record; every maybe keeps it, and ``recover_processing``
+        -- which runs next -- leaves any fire still carrying one ``running``. Clearing
+        on a maybe throws away the ONLY durable handle on a backup or deployment that is
+        still writing, and it is unrecoverable: that row is where the identity lives, so
+        no later start can find the process even in principle.
 
-        ``list_running_command_workers`` reads ``running`` rows, so the caller leaves
-        these unsettled: the record survives, the next start tries again, and
-        ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` stops that from becoming a run that is
-        ``running`` forever.
+        So EVERY FAILURE HERE MUST LEAVE THE RECORD ALONE, including a failure to look.
+        Returning a "nothing to protect" answer on a read error was the same category
+        mistake one layer up: it licensed the settle pass to strip every live worker's
+        name. A row unexamined for any reason keeps its record, hence its ``running``
+        status, and ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` stops the retries from
+        becoming a run that is ``running`` forever.
         """
 
         try:
             workers = self.request_store.list_running_command_workers()
         except Exception:
-            logger.debug("failed to list command workers for recovery", exc_info=True)
-            return frozenset()
-        unreaped: set[str] = set()
+            # Warning, not debug: nothing was killed and nothing was cleared, so any
+            # orphan from the last life survives this start untouched -- worth a line in
+            # the log, and safe, because the unread records keep their rows ``running``.
+            logger.warning(
+                "failed to list command workers for recovery; leaving their records "
+                "in place for the next start",
+                exc_info=True,
+            )
+            return
         for worker in workers:
             run_id = str(worker.get("run_id") or "")
             payload = worker.get("identity")
@@ -3256,21 +3273,31 @@ class ScheduledTaskService:
             # An untrusted payload counts as gone: every kill path refuses a record it
             # cannot fully trust, on this pass and on every future one, so keeping it
             # would pin the run ``running`` without ever buying a kill.
-            outcome = (
-                reap_orphaned_process_tree(
-                    logger,
-                    f"scheduled command worker {run_id}",
-                    expected_identity=expected,
+            try:
+                outcome = (
+                    reap_orphaned_process_tree(
+                        logger,
+                        f"scheduled command worker {run_id}",
+                        expected_identity=expected,
+                    )
+                    if expected is not None
+                    else "gone"
                 )
-                if expected is not None
-                else "gone"
-            )
+            except Exception:
+                # One row's inspection blowing up must not abort the loop: the rows
+                # after it would go unexamined AND the settle pass would never run, so
+                # every other interrupted run of every other type would stay ``running``.
+                logger.warning(
+                    "failed to inspect command worker from run %s; treating it as "
+                    "possibly alive",
+                    run_id,
+                    exc_info=True,
+                )
+                outcome = "unconfirmed"
             if outcome == "unconfirmed" and run_id and self._retain_unreaped_command_worker(run_id, payload):
-                unreaped.add(run_id)
                 continue
             if run_id:
                 self._record_command_worker(run_id, None)
-        return frozenset(unreaped)
 
     def _retain_unreaped_command_worker(
         self,

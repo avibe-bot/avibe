@@ -3702,7 +3702,9 @@ class SQLiteBackgroundTaskStore:
 
         Called at startup BEFORE ``recover_processing_runs`` settles these rows, which
         is the only moment the association between a run and its orphaned child is
-        still on disk.
+        still on disk. A failure here is not a licence to settle them: the caller
+        leaves the records untouched, and ``recover_processing_runs`` reads the record
+        off each row rather than trusting this list.
         """
 
         with self.engine.connect() as conn:
@@ -4620,14 +4622,22 @@ class SQLiteBackgroundTaskStore:
         interruption_error: str,
         interrupt_reason: str,
         cancellation_error: str,
-        skip_run_ids: frozenset[str] = frozenset(),
     ) -> None:
-        """Settle every run a dead service left ``running``, minus ``skip_run_ids``.
+        """Settle every run a dead service left ``running``, except live workers.
 
-        A skipped run is one whose command worker outlived this start's attempt to
-        kill it: its ``command_worker`` record is readable only while the row is
-        ``running``, so settling it here would strip the orphan's only durable name.
-        The caller bounds the retries -- see ``_reap_orphaned_command_workers``.
+        A run that STILL CARRIES a ``command_worker`` record is left alone: that
+        record is readable only while the row is ``running``, so settling it here
+        would strip a surviving orphan's only durable name, and no later start could
+        find that process even in principle.
+
+        THE ROW ITSELF IS THE PREDICATE, not a set passed in by the caller. The
+        recovery pass runs after ``_reap_orphaned_command_workers``, which decides
+        each worker's fate by WRITING it -- cleared once the process is proven dead
+        or the retries are spent, re-stamped while it may still be running -- so the
+        surviving record is already the answer, read here inside the very transaction
+        that would otherwise settle the row. Asking a separate query instead made a
+        momentary read failure ("I could not enumerate") mean "there is nothing to
+        protect", which is the one mistake whose damage cannot be undone.
         """
 
         with run_update_event_transaction(self.engine) as conn:
@@ -4649,7 +4659,10 @@ class SQLiteBackgroundTaskStore:
                 ):
                     continue
                 run_id = str(row["id"])
-                if run_id in skip_run_ids:
+                row_metadata = _json_loads(row["metadata_json"], {})
+                if isinstance(row_metadata, dict) and row_metadata.get(
+                    COMMAND_WORKER_METADATA_KEY
+                ):
                     continue
                 if row["pid"] is None:
                     requeued_ids.append(run_id)

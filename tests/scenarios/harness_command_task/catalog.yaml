@@ -296,3 +296,28 @@ scenarios:
     # turn lane does not watch, so the stopped job would launch an Agent anyway. The
     # claim asks the parent fire itself, inside the transaction that would start the
     # work, which is what makes the ordering between the two lanes irrelevant.
+  - id: SCT-035
+    name: an unexpected error after the spawn still reaps the command
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_command_runner.py::test_an_unexpected_error_after_the_spawn_still_reaps_the_command
+    # Cancellation (SCT-014) and timeout (SCT-006) were the only exits that reaped the
+    # tree. Anything else -- an OSError draining a capped pipe, one reader dying while
+    # its twin still reads -- escaped with the supervisor alive, and the caller clears
+    # ``command_worker`` in its own ``finally`` the moment the runner raises, so the
+    # orphan was left with nothing on disk naming it.
+  - id: SCT-036
+    name: an enumeration that fails leaves the worker records it could not read
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_enumeration_that_fails_leaves_the_records_it_could_not_read
+    # SCT-031 one layer up: there the unreadable thing is a process, here it is the whole
+    # list. A failed ``list_running_command_workers`` used to answer with an empty skip
+    # set, which licensed the very next line to settle EVERY running command fire and
+    # unname every live worker on the host at once. The settle pass now reads the record
+    # off the row it is about to settle instead of trusting a set handed to it, and the
+    # negative half of the same test keeps a fire with no record settling normally.

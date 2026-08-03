@@ -216,3 +216,45 @@ observations:
       - hold the writer before those reads, because the claim now decides on a row another connection writes
       - leave a shutdown-interrupted fire's escalation claimable, because there the report is still owed
       - keep the retraction as the other half rather than replacing it, so a row that is never claimed is settled rather than left queued
+  - id: OBS-HARNESS-COMMAND-TASK-015
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-036
+    summary: >-
+      The startup reap reported "I could not enumerate the workers" as "there are no
+      workers to protect".
+    previous_assumption: >-
+      Returning an empty skip set when the enumeration fails is a safe degradation,
+      because the pass simply killed nothing that start.
+    observed_behavior: >-
+      The empty set is not read as "nothing was killed", it is read as "settle
+      everything": recover_processing runs on the very next line, and because
+      command_worker is readable only while a row is running, one momentary read failure
+      terminalizes every live backup and deployment's row and unnames all of them
+      permanently -- OBS-011's category error one layer up, with the whole host in scope.
+    required_updates:
+      - make the settle pass read the record off the row it is about to settle, inside the same transaction, rather than trusting a set computed by a separate query
+      - let the reap communicate by writing: cleared once a process is proven dead or the retries are spent, left in place on every maybe, including the maybe where it never looked
+      - do not fail startup and do not skip the settle pass, since both strand every other interrupted run type as running
+      - charge nothing against the attempt cap for a start that never attempted a kill
+      - tolerate a single row's inspection raising, so the rows after it are still examined and the settle pass still runs
+  - id: OBS-HARNESS-COMMAND-TASK-016
+    source: code_review_diagnosis
+    related_scenarios:
+      - SCT-035
+    summary: >-
+      The runner reaped its process tree on the two failures it named and on no others.
+    previous_assumption: >-
+      Cancellation and timeout are the ways a supervised command ends badly, so handling
+      those two covers teardown.
+    observed_behavior: >-
+      Any other exception after the spawn -- an OSError draining a capped stream, a
+      reader failing while its twin still runs, a fault between the handshake and the
+      collector -- propagated with the supervisor and the command under it still running.
+      The scheduled-task caller then catches it as a failed fire and clears
+      command_worker in its own finally, on the documented assumption that the runner
+      already reaped the tree, so the survivor became an orphan nothing can name.
+    required_updates:
+      - add a catch-all that cancels the readers and reaps the tree before re-raising, so no exit from the post-spawn block leaves the tree alive
+      - skip the reap when the supervisor is already collected, because a second consumer on those streams is its own defect
+      - never let a failing teardown replace the original exception, which is the failure worth reporting

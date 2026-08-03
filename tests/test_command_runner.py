@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from core import watch_worker
+from core import command_runner, watch_worker
 from core.command_runner import (
     STREAM_TRUNCATION_MARKER,
     SupervisedCommandResult,
@@ -201,6 +201,54 @@ async def test_cancellation_propagates_and_kills_the_child(tmp_path: Path) -> No
             break
         await asyncio.sleep(0.05)
     assert not _pid_alive(pid)
+
+
+async def test_an_unexpected_error_after_the_spawn_still_reaps_the_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-035 -- cancellation and timeout are not the only ways out of a run.
+
+    Those two ways out reap the tree; every other exception left it running. An
+    ``OSError`` draining a capped pipe, one reader dying while its twin still reads,
+    an unexpected fault anywhere between the spawn and the collector -- the exception
+    propagated with the supervisor and the backup or migration under it untouched.
+
+    That is the unrecoverable case, not merely an untidy one: ``on_spawn`` has already
+    handed the caller the worker's identity, and the scheduled-task caller clears it in
+    its own ``finally`` the moment this raises, on the documented assumption that the
+    runner has reaped the tree by then. So the orphan is left with nothing on disk
+    naming it, and the next fire runs a second copy beside it.
+    """
+
+    spawned: list[int] = []
+
+    async def _explode(*_args, **_kwargs):
+        raise OSError("the pipe went away")
+
+    monkeypatch.setattr(command_runner, "_read_capped_stream", _explode)
+
+    with pytest.raises(OSError, match="the pipe went away"):
+        await run_supervised_command(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=str(tmp_path),
+            timeout_seconds=0,
+            label="test unexpected failure",
+            on_spawn=lambda pid, _identity: spawned.append(pid),
+            # The capped path, because that is where the readers -- and the realistic
+            # unexpected failure -- live.
+            max_output_bytes=65536,
+        )
+
+    assert spawned, "the supervisor never spawned, so nothing could be orphaned"
+    pid = spawned[0]
+    for _ in range(100):
+        if not _pid_alive(pid):
+            break
+        await asyncio.sleep(0.05)
+    assert not _pid_alive(pid), (
+        "an unexpected runner error left the supervisor and its command running while "
+        "the caller was clearing the only record of them"
+    )
 
 
 async def test_startup_pipe_break_raises_startup_error_with_raw_detail(tmp_path: Path, monkeypatch) -> None:

@@ -15393,6 +15393,93 @@ def test_a_probe_that_cannot_read_the_process_keeps_its_identity(
     )
 
 
+def test_an_enumeration_that_fails_leaves_the_records_it_could_not_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """SCT-036 -- "I could not enumerate" is not "there is nothing to protect".
+
+    SCT-031 fixed that category error one layer down, on a single process. The same
+    mistake sat one layer up, on the whole set: the startup reap answered a failed
+    ``list_running_command_workers`` with an empty skip set, and the ``recover_processing``
+    on the very next line then settled EVERY ``running`` command fire -- because only
+    ``running`` rows carry ``command_worker``, one momentary read failure permanently
+    unnamed every live backup and deployment on the host, and the next fire ran beside
+    them.
+
+    So the settle pass no longer trusts a set handed to it. It reads the record off the
+    row it is about to settle, inside the same transaction, and the reap communicates by
+    WRITING that record: cleared once the process is proven dead or the retries are
+    spent, left in place on every maybe -- including the maybe where it never looked.
+    """
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="sleep 3600", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+
+    def _claimed_fire() -> str:
+        request = service.request_store.claim(
+            service.request_store.enqueue_task_run(
+                task.id, source_kind="scheduler", task=task
+            ).id
+        )
+        assert request is not None
+        return request.id
+
+    # Two interrupted fires, differing only in whether a worker record survived: one
+    # whose process is unaccounted for, and one the last life already proved dead.
+    with_worker = _claimed_fire()
+    without_worker = _claimed_fire()
+    assert service.request_store.record_command_worker(
+        with_worker,
+        {
+            "pid": 424242,
+            "create_time": 1.0,
+            "worker_fingerprint": fingerprint_process_marker("orphaned-worker"),
+        },
+    )
+
+    real_list = type(service.request_store).list_running_command_workers
+
+    def _cannot_read(_self):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(
+        type(service.request_store), "list_running_command_workers", _cannot_read
+    )
+
+    # The restart, with the enumeration failing exactly as a momentary lock would.
+    _scheduled_service_with_ledger(tmp_path, store, [])
+
+    monkeypatch.setattr(
+        type(service.request_store), "list_running_command_workers", real_list
+    )
+
+    workers = {
+        worker["run_id"]: worker["identity"]
+        for worker in service.request_store.list_running_command_workers()
+    }
+    assert with_worker in workers, (
+        "a start that could not enumerate the workers settled the run anyway, and the "
+        "identity lives on that row -- no later start can find that process again"
+    )
+    assert workers[with_worker].get("reap_attempts") is None, (
+        "no kill was attempted, so nothing may be charged against the attempt cap"
+    )
+    row = service.request_store.get_run(with_worker)
+    assert row is not None and row["status"] == "running", (
+        "the row must stay ``running`` for the next start's enumeration to see it"
+    )
+
+    # The other half: preservation keys on the surviving record, not on the run type,
+    # so a fire with no worker to protect is settled like any other interrupted run.
+    row = service.request_store.get_run(without_worker)
+    assert row is not None and row["status"] != "running", (
+        "a fire carrying no worker record was held open by a read failure that had "
+        "nothing to do with it"
+    )
+
+
 def test_an_interrupted_command_fire_clears_the_previous_exit_code(
     tmp_path: Path, monkeypatch
 ) -> None:

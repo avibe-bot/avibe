@@ -330,6 +330,31 @@ async def run_supervised_command(
             stderr=stderr.decode("utf-8", errors="replace"),
             timed_out=True,
         )
+    except BaseException:
+        # EVERY OTHER WAY OUT OF THIS BLOCK, because the two above are not the only
+        # ones: an ``OSError`` draining a capped pipe, one reader dying while its twin
+        # still runs, a ``KeyboardInterrupt`` between the spawn and the collector. The
+        # supervisor and the command under it are still running, and ``on_spawn`` has
+        # already handed the caller the only durable record of them -- which the
+        # scheduled-task caller clears in its own ``finally`` the moment this raises,
+        # on the documented assumption that "by the time control is here the runner has
+        # reaped the tree". Leaving without reaping breaks that assumption and orphans
+        # a live process tree that nothing can ever name again, so the tree does not
+        # outlive this frame even on a failure nobody predicted.
+        await _cancel_readers(reader_tasks)
+        if process.returncode is None:
+            # Skipped when the supervisor is already collected -- the stdin-handshake
+            # paths above ``communicate()`` first, and a second consumer on those
+            # streams is exactly what ``_timed_out_keeping_retained_output`` warns of.
+            try:
+                await terminate_and_communicate(process, logger, label)
+            except Exception:
+                # The original failure is the one worth propagating; a teardown that
+                # cannot complete must not replace it.
+                logger.debug(
+                    "failed to reap %s after an unexpected runner error", label, exc_info=True
+                )
+        raise
 
     return SupervisedCommandResult(
         exit_code=process.returncode if process.returncode is not None else 0,
