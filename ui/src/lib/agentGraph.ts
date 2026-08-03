@@ -191,7 +191,7 @@ export type StatusMeta = {
 const STATUS_META: Record<AgentGraphStatus, StatusMeta> = {
   active: { tone: 'mint', dotClass: 'bg-mint', labelKey: 'agents.graph.status.active', dim: false, glyph: 'dot' },
   queued: { tone: 'gold', dotClass: 'bg-gold', labelKey: 'agents.graph.status.queued', dim: false, glyph: 'dot' },
-  idle: { tone: 'cyan', dotClass: 'bg-cyan', labelKey: 'agents.graph.status.idle', dim: false, glyph: 'dot' },
+  idle: { tone: 'muted', dotClass: 'bg-muted', labelKey: 'agents.graph.status.idle', dim: false, glyph: 'dot' },
   orphan: { tone: 'gold', dotClass: 'bg-amber-500', labelKey: 'agents.graph.status.orphan', dim: false, glyph: 'dot' },
   succeeded: { tone: 'muted', dotClass: 'bg-muted', labelKey: 'agents.graph.status.succeeded', dim: true, glyph: 'check' },
   failed: { tone: 'destructive', dotClass: 'bg-destructive', labelKey: 'agents.graph.status.failed', dim: true, glyph: 'cross' },
