@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import sqlite3
 import sys
@@ -33,7 +34,9 @@ from core.run_settlement import (
     SETTLEMENT_I18N_KEYS,
     SETTLEMENT_TERMINAL_STATUS,
     SETTLEMENTS_WITHOUT_RESULT,
-    TEARDOWN_SETTLEMENT_SURFACE_OWNERS,
+    TEARDOWN_SETTLEMENT_ENTRY_POINTS,
+    TEARDOWN_SETTLEMENT_MATRIX,
+    TEARDOWN_SETTLEMENT_SURFACES,
 )
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
@@ -1823,6 +1826,71 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
     assert not (request_store.completed_dir / f"{request.id}.json").exists()
 
 
+def test_service_stop_preserves_non_durable_user_stop_cause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-106: user Stop wins when graceful shutdown cancels the same Run."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="stop before shutdown",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+    )
+    started = asyncio.Event()
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        started.set()
+        await asyncio.Event().wait()
+
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(
+            get_user=lambda *_args, **_kwargs: None,
+        )
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(
+            platform_settings_managers={"slack": settings_manager},
+            message_handler=SimpleNamespace(
+                handle_scheduled_message=_handle_scheduled_message,
+            ),
+        ),
+        store=store,
+        request_store=request_store,
+    )
+
+    async def _stop_after_user() -> None:
+        await service._drain_requests()
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert request_store.cancel_run(request.id)
+        await service.stop()
+
+    asyncio.run(_stop_after_user())
+
+    settled = request_store.get_run(request.id)
+    projected = ScheduledTaskStore().get_task(task.id)
+    assert settled is not None
+    assert settled["status"] == "canceled"
+    assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
+    assert settled["error"] == service._t(
+        SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]
+    )
+    assert projected is not None
+    assert projected.enabled is True
+    assert projected.last_error == settled["error"]
+    assert request_store.sqlite_backend is not None
+    assert request_store.sqlite_backend.owed_failure_notice(request.id) is None
+
+
 def test_service_stop_keeps_claim_cancelled_before_execution_starts_queued(
     tmp_path: Path,
     monkeypatch,
@@ -1951,22 +2019,34 @@ def test_canceled_task_execution_projects_every_result_and_only_retires_schedule
     assert (task.id in service.scheduler.jobs) is expected_enabled
 
 
+@pytest.mark.parametrize("shutdown_entrypoint", ["stop", "lease_loss"])
 @pytest.mark.parametrize("user_stopped", [False, True])
-def test_service_stop_terminalizes_transferred_durable_turn_without_draining_held_queue(
+def test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue(
     tmp_path: Path,
     monkeypatch,
+    shutdown_entrypoint: str,
     user_stopped: bool,
 ) -> None:
-    """HFR-103: shutdown settles the exact durable Turn, Delivery, and linked Run."""
+    """HFR-103: every service teardown settles the transferred scheduled Run."""
     from storage.background import attach_agent_run_delivery_in_connection
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _make_avibe_session(monkeypatch, tmp_path, agent_backend="codex")
-    request_store = TaskExecutionStore()
-    run_id = request_store.enqueue_agent_run(
+    definition_store = ScheduledTaskStore()
+    definition = definition_store.add_task(
+        session_key="",
         session_id=session_id,
-        message="durable prompt interrupted by shutdown",
-        agent_name="codex",
+        session_policy="existing",
+        prompt="durable prompt interrupted by shutdown",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request_store = TaskExecutionStore()
+    run_id = request_store.enqueue_task_run(
+        definition.id,
+        source_kind="scheduler",
+        task=definition,
     ).id
     _force_run_columns(
         request_store,
@@ -2132,9 +2212,10 @@ def test_service_stop_terminalizes_transferred_durable_turn_without_draining_hel
     )
     service = ScheduledTaskService(
         controller=controller,
-        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        store=definition_store,
         request_store=request_store,
     )
+    service.scheduler = _StubScheduler()
     manager = SessionTurnManager(controller)
     manager._engine = engine
     controller.session_turns = manager
@@ -2145,7 +2226,8 @@ def test_service_stop_terminalizes_transferred_durable_turn_without_draining_hel
         platform="avibe",
         platform_specific={
             "task_execution_id": run_id,
-            "task_trigger_kind": "agent_run",
+            "task_definition_id": definition.id,
+            "task_trigger_kind": "scheduled",
             "accepted_agent_run_ids": [run_id],
             "agent_session_target": {"agent_backend": "codex"},
         },
@@ -2162,7 +2244,23 @@ def test_service_stop_terminalizes_transferred_durable_turn_without_draining_hel
             durable_preallocated=True,
         )
         await asyncio.wait_for(dispatch_started.wait(), timeout=1)
+        if shutdown_entrypoint == "stop":
+            await service.stop()
+            return
+        service._running = True
+        service._requires_service_lease = True
+        monkeypatch.setattr(
+            "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+            lambda: False,
+        )
+        assert service._owns_service_instance() is False
+        teardown = service._service_teardown_task
+        assert teardown is not None
+        assert service._owns_service_instance() is False
+        assert service._service_teardown_task is teardown
+        await teardown
         await service.stop()
+        assert service._service_teardown_task is teardown
 
     asyncio.run(_stop())
 
@@ -2172,6 +2270,11 @@ def test_service_stop_terminalizes_transferred_durable_turn_without_draining_hel
     expected_reason = SETTLED_BY_STOPPED if user_stopped else SETTLED_BY_RESTARTED
     assert settled["status"] == expected_status
     assert settled["metadata"]["interrupt_reason"] == expected_reason
+    projected_definition = ScheduledTaskStore().get_task(definition.id)
+    assert projected_definition is not None
+    assert projected_definition.enabled is True
+    assert projected_definition.last_run_at is not None
+    assert projected_definition.last_error == settled["error"]
     with engine.connect() as conn:
         terminal_turn = message_deliveries.get_turn(conn, turn_id)
         accepted = message_deliveries.get_delivery(conn, delivery_id)
@@ -2427,20 +2530,48 @@ def test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners(
         assert definition.last_error
 
 
-def test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere() -> None:
-    """HFR-105: every settlement surface is reached or explicitly owned elsewhere."""
-    assert TEARDOWN_SETTLEMENT_SURFACE_OWNERS == {
-        "run_row": "claimed_request",
-        "definition_projection": "claimed_request",
-        "durable_turn": "session_turn_manager",
-        "delivery_binding": "session_turn_manager",
-        "session_projection_and_queue": "session_turn_manager",
-        "scheduler_runtime_ownership": "scheduled_task_service",
-        "backend_runtime": "backend_runtime_cleanup",
-        "callback_and_failure_notice": "terminal_run_projection",
-        "restart_recovery": "startup_recovery",
-        "runtime_registries": "existing_runtime_owners",
-    }
+_TEARDOWN_SETTLEMENT_CELLS = [
+    (entry_point, surface, TEARDOWN_SETTLEMENT_MATRIX[entry_point][surface])
+    for entry_point in TEARDOWN_SETTLEMENT_ENTRY_POINTS
+    for surface in TEARDOWN_SETTLEMENT_SURFACES
+]
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "surface", "proof"),
+    _TEARDOWN_SETTLEMENT_CELLS,
+    ids=[
+        f"{entry_point}-{surface}"
+        for entry_point, surface, _proof in _TEARDOWN_SETTLEMENT_CELLS
+    ],
+)
+def test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere(
+    entry_point: str,
+    surface: str,
+    proof: tuple[str, str],
+) -> None:
+    """HFR-105: every entry point x surface cell has durable evidence or an owner."""
+    assert set(TEARDOWN_SETTLEMENT_MATRIX) == set(
+        TEARDOWN_SETTLEMENT_ENTRY_POINTS
+    )
+    assert set(TEARDOWN_SETTLEMENT_MATRIX[entry_point]) == set(
+        TEARDOWN_SETTLEMENT_SURFACES
+    )
+    proof_kind, detail = proof
+    assert proof_kind in {"covered", "N/A"}
+    assert detail.strip()
+    if proof_kind == "covered":
+        test_path, *node_parts = detail.split("::")
+        assert test_path.startswith("tests/")
+        assert node_parts
+        test_name = node_parts[-1]
+        tree = ast.parse(Path(test_path).read_text(encoding="utf-8"))
+        assert any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == test_name
+            for node in ast.walk(tree)
+        ), detail
+
     assert set(SETTLEMENTS_WITHOUT_RESULT) == set(SETTLEMENT_I18N_KEYS)
     assert set(SETTLEMENTS_WITHOUT_RESULT) == set(SETTLEMENT_TERMINAL_STATUS)
     assert SETTLED_BY_RESTARTED in RUN_INTERRUPTION_REASONS

@@ -1478,10 +1478,23 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
-    def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
+    def mark_task_result(
+        self,
+        task_id: str,
+        *,
+        error: Optional[str],
+        disable_one_shot: bool = True,
+        expected_binding: Optional[tuple[Optional[str], str, str]] = None,
+    ) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
+            return False
+        if expected_binding is not None and (
+            task.session_id,
+            task.session_key,
+            task.schedule_type,
+        ) != expected_binding:
             return False
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
@@ -2598,6 +2611,7 @@ class ScheduledTaskService:
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
+        self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
@@ -2676,6 +2690,11 @@ class ScheduledTaskService:
                 task.id,
                 error=error,
                 disable_one_shot=retire_one_shot,
+                expected_binding=(
+                    task.session_id,
+                    task.session_key,
+                    task.schedule_type,
+                ),
             )
         except Exception:
             logger.exception(
@@ -2942,6 +2961,43 @@ class ScheduledTaskService:
         except RuntimeError:
             return None
 
+    async def _settle_service_teardown_owners(self) -> None:
+        manager = getattr(self.controller, "session_turns", None)
+        release_durable = getattr(manager, "release_for_service_shutdown", None)
+        if not callable(release_durable):
+            return
+        try:
+            await release_durable()
+        except Exception:
+            logger.exception(
+                "Failed to settle durable Session Turns during service shutdown",
+            )
+
+    def _ensure_service_teardown_task(self) -> Optional["asyncio.Task[None]"]:
+        if self._service_teardown_task is not None:
+            return self._service_teardown_task
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        self._service_teardown_task = loop.create_task(
+            self._settle_service_teardown_owners()
+        )
+        return self._service_teardown_task
+
+    def _shutdown_interruption_for(self, request_id: str) -> str:
+        try:
+            run = self.request_store.get_run(request_id)
+        except Exception:
+            logger.exception(
+                "Failed to read Run %s before service shutdown cancellation",
+                request_id,
+            )
+            return SETTLED_BY_RESTARTED
+        if run is not None and bool(run.get("cancel_requested")):
+            return SETTLED_BY_STOPPED
+        return SETTLED_BY_RESTARTED
+
     def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
         current_task = self._current_asyncio_task()
@@ -2955,12 +3011,15 @@ class ScheduledTaskService:
             self._notice_drain_task.cancel()
         for request_id, task in list(self._inflight_executions.items()):
             if task is not current_task:
-                self._inflight_cancellation_causes[request_id] = SETTLED_BY_RESTARTED
+                self._inflight_cancellation_causes[request_id] = (
+                    self._shutdown_interruption_for(request_id)
+                )
                 task.cancel()
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
             logger.debug("Failed to shut down scheduler", exc_info=True)
+        self._ensure_service_teardown_task()
 
     def _owns_service_instance(self) -> bool:
         if not self._requires_service_lease:
@@ -3000,15 +3059,9 @@ class ScheduledTaskService:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-        manager = getattr(self.controller, "session_turns", None)
-        release_durable = getattr(manager, "release_for_service_shutdown", None)
-        if callable(release_durable):
-            try:
-                await release_durable()
-            except Exception:
-                logger.exception(
-                    "Failed to settle durable Session Turns during service shutdown",
-                )
+        teardown = self._ensure_service_teardown_task()
+        if teardown is not None:
+            await teardown
         self._inflight_executions.clear()
         self._inflight_requests.clear()
         self._inflight_cancellation_causes.clear()
@@ -5659,7 +5712,12 @@ class ScheduledTaskService:
         error_text = self._t(
             SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
         )
-        if not self._settle_agent_run_without_result(execution_id, settled_by=settled_by, error=error_text):
+        supported, _settled = self._settle_agent_run_without_result(
+            execution_id,
+            settled_by=settled_by,
+            error=error_text,
+        )
+        if not supported:
             # Legacy file store: no guarded writer exists, so fall back to the
             # ``finally`` completion path rather than leave the run open.
             return AgentRunExecutionResult(error=error_text, complete_on_return=True)
@@ -5695,10 +5753,20 @@ class ScheduledTaskService:
             execution_id = str(raw_execution_id or "").strip()
             if not execution_id:
                 continue
-            if self._settle_agent_run_without_result(
-                execution_id, settled_by=settled_by, error=error_text
-            ):
-                settled_any = True
+            run = self.request_store.get_run(execution_id)
+            _supported, settled = self._settle_agent_run_without_result(
+                execution_id,
+                settled_by=settled_by,
+                error=error_text,
+            )
+            if settled is None:
+                continue
+            settled_any = True
+            self._project_transferred_definition_result(
+                run,
+                execution_id=execution_id,
+                settled_by=settled_by,
+            )
         if settled_any:
             self._drain_dirty = True
 
@@ -5795,13 +5863,54 @@ class ScheduledTaskService:
         if settled_any:
             self._drain_dirty = True
 
+    def _project_transferred_definition_result(
+        self,
+        run: Optional[dict[str, Any]],
+        *,
+        execution_id: str,
+        settled_by: str,
+    ) -> None:
+        if run is None:
+            return
+        definition_id = str(
+            run.get("definition_id") or run.get("task_id") or ""
+        ).strip()
+        if not definition_id:
+            return
+        self.store.maybe_reload()
+        task = self.store.get_task(definition_id)
+        if task is None:
+            return
+        run_session_id = str(run.get("session_id") or "").strip()
+        task_session_id = str(task.session_id or "").strip()
+        run_session_key = str(
+            run.get("legacy_session_key") or run.get("session_key") or ""
+        ).strip()
+        task_session_key = str(task.session_key or "").strip()
+        if (
+            run_session_id != task_session_id
+            or run_session_key != task_session_key
+        ):
+            logger.warning(
+                "Run %s no longer matches scheduled definition %s; skipping result projection",
+                execution_id,
+                definition_id,
+            )
+            return
+        self._record_interrupted_task_result(
+            task,
+            execution_id=execution_id,
+            disable_one_shot=str(run.get("source_kind") or "") == "scheduler",
+            interruption=settled_by,
+        )
+
     def _settle_agent_run_without_result(
         self,
         execution_id: str,
         *,
         settled_by: str,
         error: str,
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """Terminalize a run whose turn ended without a terminal result.
 
         Deliberately NOT routed through ``_execute_claimed_request``'s ``finally``:
@@ -5813,13 +5922,13 @@ class ScheduledTaskService:
         The terminal status comes from ``SETTLEMENT_TERMINAL_STATUS``: an explicit
         user stop is ``canceled``, an infrastructure fault is ``failed``.
 
-        Returns ``True`` when this store owns the terminal write (whether or not this
-        call is the one that performed it — an already-terminal row is settled too),
-        and ``False`` only when the store has no guarded writer at all.
+        Returns whether the guarded writer exists and the status written by this
+        exact terminal compare-and-set. An already-terminal row returns a supported
+        writer with no status, so callers cannot project a result they did not settle.
         """
 
         if not self.request_store.supports_guarded_settlement():
-            return False
+            return False, None
         settled = self.request_store.settle_without_result(
             execution_id,
             terminal_status=SETTLEMENT_TERMINAL_STATUS.get(settled_by, "failed"),
@@ -5839,7 +5948,7 @@ class ScheduledTaskService:
                 settled,
                 settled_by,
             )
-        return True
+        return True, settled
 
     # --- pinned session binding recovery -------------------------------------
     #

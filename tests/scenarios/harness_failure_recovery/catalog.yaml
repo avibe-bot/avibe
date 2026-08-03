@@ -2338,12 +2338,12 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_canceled_task_execution_projects_every_result_and_only_retires_scheduler_one_shots
   - id: HFR-103
-    name: service shutdown settles the durable Turn without draining held work
+    name: every service teardown settles the transferred scheduled Turn without draining held work
     status: covered
     kind: cancellation
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_service_stop_terminalizes_transferred_durable_turn_without_draining_held_queue
+    test: tests/test_scheduled_tasks.py::test_service_teardown_terminalizes_transferred_durable_turn_without_draining_held_queue
   - id: HFR-104
     name: restart recovery fails executed Runs and preserves separately owned rows
     status: covered
@@ -2352,12 +2352,19 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners
   - id: HFR-105
-    name: every teardown settlement surface is reached or explicitly owned elsewhere
+    name: every teardown entry point and state surface cell has evidence or an explicit owner
     status: covered
     kind: safety
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_every_teardown_settlement_surface_is_reached_or_explicitly_owned_elsewhere
+  - id: HFR-106
+    name: user Stop cause wins when graceful shutdown cancels the same non-durable Run
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_service_stop_preserves_non_durable_user_stop_cause
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered
